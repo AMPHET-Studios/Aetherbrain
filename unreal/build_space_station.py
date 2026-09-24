@@ -2,9 +2,9 @@
 Lunco - Space Station on the Crater
 ===================================
 
-Imports CRATER.GLB from D:\\Lunco into the level you have open, then drops every
-placeable object from the Content Drawer onto the crater floor, arranged as a
-space station.
+Imports CRATER.GLB (from F:\\CONCEPTFORGE, or the D:\\Lunco backup) into the
+level you have open, then drops every placeable object from the Content Drawer
+onto the crater floor, arranged as a space station.
 
 Needs PythonScriptPlugin + EditorScriptingUtilities (both already enabled in
 Lunco.uproject).
@@ -13,7 +13,7 @@ Run it
 ------
 1. Open the level you want the station in.
 2. Tools > Execute Python Script...  and pick this file.
-   (Or: Output Log > switch "Cmd" to "Python" > py "D:/Lunco/build_space_station.py")
+   (Or: Output Log > switch "Cmd" to "Python" > py "F:/CONCEPTFORGE/build_space_station.py")
 3. Ctrl+Z undoes the whole build in one step. Running it again rebuilds the
    station from scratch (the previous station is removed first; the crater stays).
 
@@ -22,8 +22,9 @@ What it does
 1. Finds the crater, in this order:
    a) an actor already in the level whose label or mesh contains "crater"
    b) a crater mesh already in the Content Drawer (spawned at the world origin)
-   c) D:/Lunco/CRATER.GLB, imported into /Game/Crater and spawned at the origin
-      (falls back to searching the D: drive for crater*.glb)
+   c) F:/CONCEPTFORGE/CRATER.GLB (or the D:/Lunco backup), imported into
+      /Game/Crater and spawned at the origin (falls back to searching those
+      folders, then the D: drive, for crater*.glb)
 2. Collects every Static Mesh, Skeletal Mesh and actor Blueprint under /Game,
    minus StarterContent and the crater itself (see EXCLUDE_FOLDERS).
 3. Sorts them into station roles by name, then by size:
@@ -56,11 +57,12 @@ except ImportError:  # lets the layout planner run (and be tested) outside the e
 # The first path that exists wins. If none do, the search roots are walked
 # (CRATER_SEARCH_DEPTH folders deep) for any crater*.glb / crater*.gltf.
 CRATER_GLB_CANDIDATES = [
-    "D:/Lunco/CRATER.GLB",
+    "F:/CONCEPTFORGE/CRATER.GLB",
+    "D:/Lunco/CRATER.GLB",          # backup copy
     "D:/Lunco/Content/CRATER.GLB",
     "D:/CRATER.GLB",
 ]
-CRATER_SEARCH_ROOTS = ["D:/Lunco", "D:/"]
+CRATER_SEARCH_ROOTS = ["F:/CONCEPTFORGE", "D:/Lunco", "D:/"]
 CRATER_SEARCH_DEPTH = 4
 CRATER_NAME_HINT = "crater"
 CRATER_IMPORT_FOLDER = "/Game/Crater"
@@ -799,7 +801,8 @@ def build():
             glb = find_crater_glb()
             if not glb:
                 unreal.log_error("[SpaceStation] No crater in the level or Content Drawer, and no crater*.glb "
-                                 "found on D:. Put the path in CRATER_GLB_CANDIDATES at the top of this script.")
+                                 "found in F:/CONCEPTFORGE or on D:. Put the path in CRATER_GLB_CANDIDATES "
+                                 "at the top of this script.")
                 return
             crater_meshes = import_crater_glb(glb)
             if not crater_meshes:
