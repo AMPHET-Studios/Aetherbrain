@@ -8,6 +8,8 @@ const r = (p: string) => fileURLToPath(new URL(p, import.meta.url))
 /** Renderer build. The main process is compiled separately with tsc (tsconfig.main.json). */
 export default defineConfig({
   root: r('./src/renderer'),
+  // .env.development / .env.production live next to this file, not under the renderer root.
+  envDir: r('.'),
   base: './',
   plugins: [react(), tailwindcss()],
   resolve: {

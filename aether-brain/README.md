@@ -10,6 +10,24 @@ pnpm dev            # browser build with the bundled demo vault → http://local
 pnpm dev:desktop    # Electron: pick any folder of markdown on your disk
 ```
 
+## Desktop app (.exe / .dmg / .AppImage)
+
+Two ways to get a double-clickable build:
+
+1. **Download from GitHub Actions** — open the repo's *Actions* tab → *Desktop builds* → *Run workflow*, wait ~5 minutes, then download the `aether-brain-windows` artifact. It contains `AetherBrain-Setup-<version>-x64.exe` (installer with Start-menu + desktop shortcuts) and `AetherBrain-Portable-<version>-x64.exe` (single file, no install — just run it). Pushing a tag like `v0.1.0` also attaches the same files to a GitHub Release.
+2. **Build it yourself** on the target OS:
+
+```
+pnpm install
+pnpm --filter @aether/desktop dist:win     # → apps/desktop/release/*.exe   (Windows)
+pnpm --filter @aether/desktop dist:mac     # → apps/desktop/release/*.dmg   (macOS)
+pnpm --filter @aether/desktop dist:linux   # → apps/desktop/release/*.AppImage, *.deb
+```
+
+Build on the OS you are targeting: Windows installers need `wine` when built from Linux/macOS (the CI workflow uses a Windows runner, so it never hits this), and macOS builds only run on macOS.
+
+Builds are unsigned, so Windows SmartScreen will show "Windows protected your PC" the first time — click *More info → Run anyway*. The app never talks to the network; it only reads and writes the vault folder you pick. On first launch it asks for a folder (or opens the bundled demo vault); it remembers your choice, and `AetherBrain.exe C:\path\to\notes` opens a vault directly.
+
 ## What it does
 
 | Loop step    | How                                                                                                                                |

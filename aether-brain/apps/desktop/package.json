@@ -1,8 +1,16 @@
 {
   "name": "@aether/desktop",
+  "productName": "Aether Brain",
   "version": "0.1.0",
   "private": true,
   "description": "Aether Brain desktop shell (Electron): pick a vault folder, watch it, render the 3D brain.",
+  "author": "Aether Brain contributors",
+  "homepage": "https://github.com/YEASTINFECTIONCHEESE/desktop-tutorial",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/YEASTINFECTIONCHEESE/desktop-tutorial.git",
+    "directory": "aether-brain/apps/desktop"
+  },
   "type": "module",
   "main": "dist/main/main.js",
   "scripts": {
@@ -11,22 +19,28 @@
     "build:renderer": "vite build",
     "build": "pnpm build:main && pnpm build:renderer",
     "start": "pnpm build:main && electron .",
-    "typecheck:main": "tsc -p tsconfig.main.json --noEmit"
+    "typecheck:main": "tsc -p tsconfig.main.json --noEmit",
+    "pack": "pnpm build && electron-builder --config electron-builder.config.cjs --dir --publish never",
+    "dist": "pnpm build && electron-builder --config electron-builder.config.cjs --publish never",
+    "dist:win": "pnpm build && electron-builder --config electron-builder.config.cjs --win --publish never",
+    "dist:mac": "pnpm build && electron-builder --config electron-builder.config.cjs --mac --publish never",
+    "dist:linux": "pnpm build && electron-builder --config electron-builder.config.cjs --linux --publish never"
   },
   "dependencies": {
+    "chokidar": "^5.0.0"
+  },
+  "devDependencies": {
     "@aether/core": "workspace:*",
     "@aether/graph": "workspace:*",
     "@aether/ui": "workspace:*",
-    "chokidar": "^5.0.0",
-    "react": "^19.3.0",
-    "react-dom": "^19.3.0"
-  },
-  "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.1.1",
     "electron": "^44.4.5",
+    "electron-builder": "^26.15.3",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
     "tailwindcss": "^4.3.3",
     "vite": "^8.3.1"
   }
