@@ -37,7 +37,7 @@ export function useKeyboard(): void {
       if (e.key === 'Escape') {
         if (s.helpOpen) return s.setHelp(false)
         if (s.paletteOpen) return s.setPalette(false)
-        if (s.view === 'capture' || s.view === 'review') return s.setView('graph')
+        if (s.view === 'capture' || s.view === 'review' || s.view === 'projects') return s.setView('graph')
         if (s.editorId && s.view === 'editor') return s.closeEditor()
         if (isTyping(e)) {
           ;(e.target as HTMLElement).blur()
@@ -74,6 +74,10 @@ export function useKeyboard(): void {
         case '5':
         case 'r':
           s.setView('review')
+          return
+        case '6':
+        case 'p':
+          s.setView('projects')
           return
         case 'e':
         case 'Enter':

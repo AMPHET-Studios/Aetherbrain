@@ -26,6 +26,8 @@ New captures land in `Inbox/`, daily logs in `Daily/`, and finished or abandoned
 > Ship the vertical slice, finish the portfolio, and let the brain grow alongside both.
 
 ### Projects
+- [[PORTALz]] — the portal game as one board: pillars, to-dos, team
+- [[ConceptForge]] — the concept-art trainer for the pen display, with a grader that keeps score
 - [[Portal Game Vertical Slice]] — ancient high-tech ruins in a rainforest, one playable portal
 - [[Monolith Generator Asset]] — the hero prop that powers the gate
 - [[Concept Art Portfolio 2026]] — twelve strong pieces, reviewed monthly

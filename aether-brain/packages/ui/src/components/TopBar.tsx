@@ -7,6 +7,7 @@ const VIEWS: { id: View; label: string; key: string }[] = [
   { id: 'capture', label: 'Capture', key: '3' },
   { id: 'search', label: 'Search', key: '4' },
   { id: 'review', label: 'Review', key: '5' },
+  { id: 'projects', label: 'Projects', key: '6' },
 ]
 
 export function TopBar({ onPickVault }: { onPickVault?: (() => void) | undefined }) {

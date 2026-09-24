@@ -98,6 +98,16 @@ export const COMMANDS: Command[] = [
   { id: 'view-capture', title: 'View: Capture', keys: '3', group: 'view', run: (s) => s.setView('capture') },
   { id: 'view-search', title: 'View: Search', keys: '4 · /', group: 'view', run: (s) => s.setPalette(true) },
   { id: 'view-review', title: 'View: Review', keys: '5 · r', group: 'view', run: (s) => s.setView('review') },
+  { id: 'view-projects', title: 'View: Projects board (to-dos)', keys: '6 · p', group: 'view', run: (s) => s.setView('projects') },
+  {
+    id: 'new-project',
+    title: 'New project…',
+    group: 'note',
+    run: (s) => {
+      const name = window.prompt('Project name (becomes Projects/<name>.md):')
+      if (name?.trim()) void s.createProject(name).then(() => s.setView('projects'))
+    },
+  },
   { id: 'layout', title: 'Toggle layout: constellation ↔ orbit (time)', keys: 't', group: 'view', run: (s) => s.toggleLayout() },
   { id: 'color', title: 'Cycle color mode: area → type → tag → age', keys: 'm', group: 'view', run: (s) => s.cycleColorMode() },
   { id: 'bloom', title: 'Toggle bloom', keys: 'b', group: 'view', run: (s) => s.setSettings({ bloom: !s.settings.bloom }) },

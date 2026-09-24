@@ -3,6 +3,7 @@ import ReactMarkdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { LinkResolver, remarkWikilink, splitFrontmatter, type NoteId } from '@aether/core'
 import { useAether } from '../store'
+import { cx } from '../util'
 
 interface Props {
   /** Full raw markdown (frontmatter is stripped for display). */
@@ -24,9 +25,15 @@ export function MarkdownPreview({ source, selfId = null, depth = 0, className }:
   const openNote = useAether((s) => s.openNote)
   const createGhost = useAether((s) => s.createGhost)
   const toggleTag = useAether((s) => s.toggleTag)
+  const toggleTask = useAether((s) => s.toggleTask)
 
   const resolver = useMemo(() => new LinkResolver(notes.values()), [notes, revision])
-  const body = useMemo(() => splitFrontmatter(source).body, [source])
+  const { body, fmLines } = useMemo(() => {
+    const split = splitFrontmatter(source)
+    // Lines the frontmatter block occupies, so preview line numbers map back to the raw file.
+    const fm = (source.slice(0, split.bodyOffset).match(/\n/g) ?? []).length
+    return { body: split.body, fmLines: fm }
+  }, [source])
   const plugins = useMemo(() => [remarkGfm, [remarkWikilink, { resolve: (t: string) => resolver.resolve(t) }]] as const, [resolver])
 
   const components = useMemo<Components>(
@@ -73,10 +80,32 @@ export function MarkdownPreview({ source, selfId = null, depth = 0, className }:
         )
       },
       p: ({ node: _node, children, ...rest }) => <p {...rest}>{tagify(children, toggleTag)}</p>,
-      li: ({ node: _node, children, ...rest }) => <li {...rest}>{tagify(children, toggleTag)}</li>,
-      input: ({ node: _node, ...rest }) => <input {...rest} readOnly />,
+      li: ({ node, children, ...rest }) => {
+        // Task-list items: a click on the checkbox writes `[x] … ✅ date` back
+        // into the note (the markdown file is the memory).
+        const bodyLine = node?.position?.start.line
+        const canToggle = !!selfId && bodyLine !== undefined && String(rest.className ?? '').includes('task-list-item')
+        return (
+          <li
+            {...rest}
+            onClick={
+              canToggle
+                ? (e) => {
+                    const t = e.target as HTMLElement
+                    if (t.tagName !== 'INPUT') return
+                    e.preventDefault()
+                    void toggleTask(selfId!, fmLines + bodyLine - 1, !(t as HTMLInputElement).checked)
+                  }
+                : undefined
+            }
+          >
+            {tagify(children, toggleTag)}
+          </li>
+        )
+      },
+      input: ({ node: _node, ...rest }) => <input {...rest} readOnly={!selfId} onChange={() => undefined} className={cx(selfId && 'cursor-pointer')} />,
     }),
-    [notes, depth, selfId, openNote, createGhost, toggleTag],
+    [notes, depth, selfId, openNote, createGhost, toggleTag, toggleTask, fmLines],
   )
 
   return (

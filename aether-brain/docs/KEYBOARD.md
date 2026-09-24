@@ -9,7 +9,8 @@ Every feature has a key. `⌘` is `Ctrl` on Windows/Linux. Single keys are ignor
 | `⌘ K` · `/`    | Search neurons & commands (palette)               |
 | `⌘ N` · `c`    | Quick capture → Inbox                             |
 | `d`            | Open (or create) today's daily note               |
-| `1` `2` `3` `4` `5` | Graph · Editor · Capture · Search · Review   |
+| `1` `2` `3` `4` `5` `6` | Graph · Editor · Capture · Search · Review · Projects |
+| `p`            | Projects board                                    |
 | `?`            | Keyboard cheatsheet                               |
 | `Esc`          | Close overlay → close editor → clear filters → deselect (first thing that applies) |
 | `Alt ←` / `Alt →` | History back / forward                         |
@@ -69,6 +70,20 @@ Preview: wikilinks open the note (ghost links create it), `#tags` filter the gra
 | `⌘ Enter`    | Save to Inbox       |
 | `⇧ ⌘ Enter`  | Save and open       |
 | `Esc`        | Cancel              |
+
+## Projects
+
+| Key        | Action                                                          |
+| ---------- | --------------------------------------------------------------- |
+| `j` / `k`  | Next / previous project                                         |
+| `n`        | Focus the new-task box (Enter writes `- [ ] …` under `## To do`) |
+| click ☐    | Tick a task — saved as `- [x] … ✅ YYYY-MM-DD`; untick removes the stamp |
+| `x`        | Show / hide the done list                                       |
+| `⇧ N`      | New project (creates `Projects/<name>.md` with a to-do section) |
+| `Enter` · `o` | Open the project note in the editor                          |
+| `Esc`      | Back to the graph                                               |
+
+Task checkboxes in any preview (editor split view, review) are clickable too and write back the same way.
 
 ## Review
 
