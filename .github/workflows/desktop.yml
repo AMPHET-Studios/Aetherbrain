@@ -2,10 +2,17 @@ name: Desktop builds
 
 # Builds the Aether Brain desktop app installers.
 #   - On pull requests touching the app: Windows build only, downloadable as a run artifact.
-#   - Manually: Actions → "Desktop builds" → Run workflow → all three platforms.
-#   - On a version tag (v0.1.0): also attaches the installers to a GitHub Release.
+#   - Manually (Actions → "Desktop builds" → Run workflow): all three platforms. Fill in the
+#     "tag" input (e.g. v0.1.0) to also create that tag on main and publish a GitHub Release
+#     with the installers attached.
+#   - On a pushed version tag (v0.1.0): builds all platforms and attaches them to a Release.
 on:
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Create this tag on main and publish a GitHub Release (e.g. v0.1.0). Leave empty to only build.'
+        required: false
+        default: ''
   pull_request:
     paths:
       - 'aether-brain/**'
@@ -16,16 +23,48 @@ on:
 permissions:
   contents: write
 
+env:
+  # The release tag for this run: the pushed tag, or the manual "tag" input, or empty.
+  RELEASE_TAG: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && github.ref_name) || github.event.inputs.tag || '' }}
+
 defaults:
   run:
     working-directory: aether-brain
 
 jobs:
+  tag:
+    name: Tag main as ${{ github.event.inputs.tag }}
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.tag != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Create and push tag
+        working-directory: .
+        env:
+          TAG: ${{ github.event.inputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists; reusing it."
+          else
+            git tag -a "$TAG" -m "Aether Brain $TAG"
+            git push origin "refs/tags/$TAG"
+            echo "Created $TAG at $(git rev-parse --short HEAD) on main."
+          fi
+
   windows:
     name: Windows (.exe installer + portable)
+    needs: [tag]
+    if: ${{ !cancelled() && needs.tag.result != 'failure' }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag && format('refs/tags/{0}', github.event.inputs.tag) || '' }}
       - uses: pnpm/action-setup@v4
         with:
           package_json_file: aether-brain/package.json
@@ -53,15 +92,17 @@ jobs:
           path: aether-brain/apps/desktop/release/*.exe
           if-no-files-found: error
       - name: Attach to release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: env.RELEASE_TAG != ''
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
           files: aether-brain/apps/desktop/release/*.exe
           generate_release_notes: true
 
   mac-linux:
     # PR builds stay Windows-only (the .exe is what people download).
-    if: github.event_name != 'pull_request'
+    needs: [tag]
+    if: ${{ !cancelled() && needs.tag.result != 'failure' && github.event_name != 'pull_request' }}
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -84,6 +125,8 @@ jobs:
               aether-brain/apps/desktop/release/*.deb
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag && format('refs/tags/{0}', github.event.inputs.tag) || '' }}
       - uses: pnpm/action-setup@v4
         with:
           package_json_file: aether-brain/package.json
@@ -110,8 +153,9 @@ jobs:
           path: ${{ matrix.files }}
           if-no-files-found: error
       - name: Attach to release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: env.RELEASE_TAG != ''
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
           files: ${{ matrix.files }}
           generate_release_notes: true
