@@ -14,7 +14,7 @@ pnpm dev:desktop    # Electron: pick any folder of markdown on your disk
 
 Two ways to get a double-clickable build:
 
-1. **Download from GitHub Actions** — open the repo's *Actions* tab → *Desktop builds* → *Run workflow*, wait ~5 minutes, then download the `aether-brain-windows` artifact. It contains `AetherBrain-Setup-<version>-x64.exe` (installer with Start-menu + desktop shortcuts) and `AetherBrain-Portable-<version>-x64.exe` (single file, no install — just run it). Pushing a tag like `v0.1.0` also attaches the same files to a GitHub Release.
+1. **Download a Release** — the [Releases page](https://github.com/YEASTINFECTIONCHEESE/desktop-tutorial/releases) has `AetherBrain-Setup-<version>-x64.exe` (installer with Start-menu + desktop shortcuts), `AetherBrain-Portable-<version>-x64.exe` (single file, no install — just run it), plus macOS `.dmg` and Linux `.AppImage`/`.deb`. To cut a new one: *Actions* → *Desktop builds* → *Run workflow*, type the tag (e.g. `v0.2.0`) in the `tag` box; CI tags `main`, builds all platforms and publishes the Release. Leaving `tag` empty just builds and uploads run artifacts. Every pull request also builds the Windows exe as an `aether-brain-windows` artifact.
 2. **Build it yourself** on the target OS:
 
 ```
