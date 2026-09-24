@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import {
   AREA_FOLDER,
   SearchIndex,
+  addTask as addTaskToNote,
   applyChanges,
   basenameOf,
   blankNote,
@@ -13,6 +14,8 @@ import {
   loadVault,
   neighborhood,
   normalizePath,
+  projectNote,
+  setTaskDone,
   todayIso,
   updateFrontmatter,
   type Area,
@@ -25,7 +28,7 @@ import {
 } from '@aether/core'
 import { BrainController, type ColorMode, type LayoutMode } from '@aether/graph'
 
-export type View = 'graph' | 'editor' | 'capture' | 'search' | 'review'
+export type View = 'graph' | 'editor' | 'capture' | 'search' | 'review' | 'projects'
 
 export interface Filters {
   areas: Set<Area>
@@ -147,6 +150,15 @@ export interface AetherState {
   dismissToast(id: number): void
   reviewMark(id: NoteId, outcome: ReviewOutcome): Promise<void>
   setFps(fps: number): void
+
+  /** Project selected on the Projects board (a note id). */
+  projectId: NoteId | null
+  selectProject(id: NoteId | null): void
+  /** Tick/untick the task on a raw-file line; writes `[x] … ✅ date` into the note. */
+  toggleTask(id: NoteId, line: number, done: boolean): Promise<void>
+  /** Append a task under `## To do` (created if missing). */
+  addTask(id: NoteId, text: string, section?: string): Promise<NoteId | null>
+  createProject(name: string, summary?: string): Promise<NoteId | null>
 }
 
 let toastSeq = 1
@@ -239,6 +251,7 @@ export const useAether = create<AetherState>()((set, get) => {
     toasts: [],
     review: loadJson<Record<NoteId, ReviewEntry>>(REVIEW_KEY, {}),
     fps: 0,
+    projectId: null,
 
     async openVault(adapter) {
       unwatch?.()
@@ -298,7 +311,7 @@ export const useAether = create<AetherState>()((set, get) => {
         selectedId: id,
         history: h.slice(-50),
         historyIndex: Math.min(h.length, 50) - 1,
-        view: opts?.view ?? (get().view === 'graph' ? 'editor' : get().view),
+        view: opts?.view ?? (get().view === 'review' ? 'review' : 'editor'),
       })
       controller.setSelected(id)
       if (opts?.fly !== false) controller.flyTo(id)
@@ -595,6 +608,64 @@ export const useAether = create<AetherState>()((set, get) => {
 
     setFps(fps) {
       set({ fps })
+    },
+
+    selectProject(id) {
+      set({ projectId: id })
+      if (id) get().select(id, { fly: true })
+    },
+
+    async toggleTask(id, line, done) {
+      const { adapter, editorId, dirty } = get()
+      if (!adapter) return
+      // A pending editor draft for this note is flushed first so line numbers agree.
+      if (editorId === id && dirty) await get().saveDraft()
+      const note = get().notes.get(id)
+      if (!note) return
+      let content = setTaskDone(note.raw, line, done)
+      if (content === note.raw) return
+      if (Object.prototype.hasOwnProperty.call(note.frontmatter, 'updated')) content = updateFrontmatter(content, { updated: todayIso() })
+      try {
+        await adapter.write(note.meta.path, content)
+        if (get().editorId === id) set({ draft: content, dirty: false })
+        get().applyExternal([{ kind: 'change', path: note.meta.path, content, mtime: Date.now() }])
+      } catch (err) {
+        get().toast(`Could not update task: ${err instanceof Error ? err.message : String(err)}`, 'error')
+      }
+    },
+
+    async addTask(id, text, section = 'To do') {
+      const { adapter, editorId, dirty } = get()
+      if (!adapter || !text.trim()) return null
+      if (editorId === id && dirty) await get().saveDraft()
+      const note = get().notes.get(id)
+      if (!note) return null
+      let content = addTaskToNote(note.raw, text, section)
+      if (content === note.raw) return null
+      if (Object.prototype.hasOwnProperty.call(note.frontmatter, 'updated')) content = updateFrontmatter(content, { updated: todayIso() })
+      try {
+        await adapter.write(note.meta.path, content)
+        if (get().editorId === id) set({ draft: content, dirty: false })
+        get().applyExternal([{ kind: 'change', path: note.meta.path, content, mtime: Date.now() }])
+        return id
+      } catch (err) {
+        get().toast(`Could not add task: ${err instanceof Error ? err.message : String(err)}`, 'error')
+        return null
+      }
+    },
+
+    async createProject(name, summary) {
+      const trimmed = name.trim()
+      if (!trimmed) return null
+      const p = projectNote(summary ? { name: trimmed, summary } : { name: trimmed })
+      if (get().notes.has(idFromPath(p.path))) {
+        get().toast(`A project called "${trimmed}" already exists`, 'error')
+        return idFromPath(p.path)
+      }
+      const id = await get().writeNote(p.path, p.content, { fly: true })
+      set({ projectId: id })
+      get().toast(`Created project "${trimmed}"`, 'success')
+      return id
     },
   }
 })

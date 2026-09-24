@@ -37,6 +37,7 @@ Builds are unsigned, so Windows SmartScreen will show "Windows protected your PC
 | **Connect**  | Editor with `[[` autocomplete, live preview, backlinks, and _unlinked mentions_ with a one-click "link it". Ghost neurons for links whose target doesn't exist yet — select one to create it. |
 | **Retrieve** | `⌘/Ctrl K` searches titles, headings, tags, body and paths (MiniSearch, fuzzy + prefix). `⌘Enter` turns the query into a graph filter that dims everything else. |
 | **Review**   | Orphans, stale notes (90+ days) and spaced-review items resurface in the queue. `1` keeps a note (interval doubles), `2` snoozes, `3` archives. |
+| **Projects** | `p` opens the board: one card per project note with a progress bar and its to-do list. Tick a task and the note gets `- [x] … ✅ 2026-09-24`; add one and it lands under `## To do`. Plain markdown checkboxes, so Obsidian and git see the same memory. |
 | **Wander**   | Drag to orbit, scroll to zoom, click to select, double-click to open, drag a neuron to pin it. `Tab` hops between neighbors. `t` switches to the **orbit** layout where rings are age. `m` cycles color by area / type / tag / age. |
 
 ## The 3D view

@@ -28,6 +28,7 @@ Fundamentals first, style later. This is the syllabus I keep coming back to when
 
 ## Applied
 - [[Concept Art Portfolio 2026]] — where all of this gets tested
+- [[ConceptForge]] — the trainer: drills, overlays, references and a grader
 - [[Creative Practice]] — the daily and weekly routine that feeds it
 
 ## The rule I forget most

@@ -8,7 +8,8 @@ const GROUPS: { title: string; rows: [string, string][] }[] = [
       [`${MOD} K · /`, 'Search neurons & commands'],
       [`${MOD} N · c`, 'Quick capture → Inbox'],
       ['d', "Today's daily note"],
-      ['1 2 3 4 5', 'Graph · Editor · Capture · Search · Review'],
+      ['1 2 3 4 5 6', 'Graph · Editor · Capture · Search · Review · Projects'],
+      ['p', 'Projects board'],
       ['?', 'This cheatsheet'],
       ['Esc', 'Close / clear filters / deselect'],
     ],
@@ -38,6 +39,17 @@ const GROUPS: { title: string; rows: [string, string][] }[] = [
       [`${MOD} E`, 'Edit ↔ split ↔ preview'],
       [`${MOD} Enter`, 'Save & back to graph'],
       ['Tab', 'Indent'],
+    ],
+  },
+  {
+    title: 'Projects',
+    rows: [
+      ['j k', 'Next / previous project'],
+      ['n', 'Add a task (written to ## To do)'],
+      ['click ☐', 'Tick — saved as [x] ✅ date'],
+      ['⇧N', 'New project note'],
+      ['x', 'Show / hide done list'],
+      ['Enter · o', 'Open the note'],
     ],
   },
   {

@@ -82,6 +82,7 @@ Graph (`buildGraph`): nodes (notes + ghosts, deterministic order), weighted edge
 - **Capture**: one box → `Inbox/<title>.md` with frontmatter (`type: inbox`, `status: unprocessed`).
 - **Search**: palette over title / aliases / headings / tags / body / path; `>` for commands; `⌘Enter` converts a query to a graph filter; `is:orphan`, `is:stale` pseudo-queries.
 - **Review**: queue = unprocessed inbox → orphans → spaced-review due → stale (>90 days). Actions move files between PARA folders and patch frontmatter; review intervals live in localStorage.
+- **Projects**: board of every project note (`type: project` or in `Projects/`) with progress from its markdown task list. Ticking writes `- [x] … ✅ YYYY-MM-DD` in place (Obsidian Tasks convention); adding appends under `## To do`; "New project" scaffolds `Projects/<name>.md`. The note is the memory — no side database.
 
 ## 6. Vault adapters
 

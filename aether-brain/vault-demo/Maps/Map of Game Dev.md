@@ -11,6 +11,7 @@ status: evergreen
 Everything feeding the portal game, from mood to materials. Back to [[Home]].
 
 ## The project
+- [[PORTALz]] — the umbrella board for the whole portal game
 - [[Portal Game Vertical Slice]] — scope, milestones, and the one level that has to sing
 - [[Monolith Generator Asset]] — the hero prop
 - [[Theo Lindqvist]] — tech art partner

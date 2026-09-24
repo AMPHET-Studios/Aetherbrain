@@ -9,6 +9,7 @@ import { Editor } from './components/Editor'
 import { CommandPalette } from './components/CommandPalette'
 import { Capture } from './components/Capture'
 import { Review } from './components/Review'
+import { ProjectsView } from './components/ProjectsView'
 import { Help } from './components/Help'
 import { Toasts } from './components/Toasts'
 import { Welcome, type VaultSource } from './components/Welcome'
@@ -101,7 +102,7 @@ export function AetherApp({ sources, onPickVault, autoOpen }: AetherAppProps) {
           </div>
           <div className="min-w-0 flex-1" />
           {/* Right: inspector */}
-          {status === 'ready' && selectedId && (
+          {status === 'ready' && selectedId && view !== 'projects' && (
             <div className="pointer-events-auto flex max-h-full items-start">
               <Inspector />
             </div>
@@ -116,6 +117,7 @@ export function AetherApp({ sources, onPickVault, autoOpen }: AetherAppProps) {
       <CommandPalette />
       <Capture />
       <Review />
+      <ProjectsView />
       <Help />
       <Toasts />
       <Welcome sources={sources} />
