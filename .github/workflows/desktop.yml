@@ -21,21 +21,53 @@ defaults:
     working-directory: aether-brain
 
 jobs:
-  build:
+  windows:
+    name: Windows (.exe installer + portable)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: aether-brain/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: aether-brain/pnpm-lock.yaml
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Test + typecheck
+        run: |
+          pnpm test
+          pnpm typecheck
+      - name: Package
+        run: pnpm --filter @aether/desktop dist:win
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      - name: List artifacts
+        shell: bash
+        run: ls -la apps/desktop/release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aether-brain-windows
+          path: aether-brain/apps/desktop/release/*.exe
+          if-no-files-found: error
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: aether-brain/apps/desktop/release/*.exe
+          generate_release_notes: true
+
+  mac-linux:
+    # PR builds stay Windows-only (the .exe is what people download).
+    if: github.event_name != 'pull_request'
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
-    # PR builds: Windows only (the .exe is what people download); dispatch/tags build everything.
-    if: github.event_name != 'pull_request' || matrix.os == 'windows-latest'
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: windows-latest
-            name: Windows (.exe installer + portable)
-            script: dist:win
-            artifact: aether-brain-windows
-            files: |
-              aether-brain/apps/desktop/release/*.exe
           - os: macos-latest
             name: macOS (.dmg)
             script: dist:mac
@@ -52,44 +84,34 @@ jobs:
               aether-brain/apps/desktop/release/*.deb
     steps:
       - uses: actions/checkout@v4
-
       - uses: pnpm/action-setup@v4
         with:
           package_json_file: aether-brain/package.json
-
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: pnpm
           cache-dependency-path: aether-brain/pnpm-lock.yaml
-
       - name: Install
         run: pnpm install --frozen-lockfile
-
       - name: Test + typecheck
         run: |
           pnpm test
           pnpm typecheck
-
       - name: Package (${{ matrix.script }})
         run: pnpm --filter @aether/desktop ${{ matrix.script }}
         env:
-          # Unsigned builds; no publishing from CI.
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
-
       - name: List artifacts
         run: ls -la apps/desktop/release
-
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.files }}
           if-no-files-found: error
-
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ matrix.files }}
-          draft: false
           generate_release_notes: true
