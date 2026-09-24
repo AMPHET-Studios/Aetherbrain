@@ -158,4 +158,5 @@ jobs:
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           files: ${{ matrix.files }}
-          generate_release_notes: true
+          # Release notes are generated once, by the Windows job; every job
+          # that passes generate_release_notes appends another copy.
