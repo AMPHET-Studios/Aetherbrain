@@ -1,0 +1,28 @@
+{
+  "name": "aether-brain",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Aether Brain — a local-first 3D second brain. Notes are neurons, wikilinks are synapses.",
+  "type": "module",
+  "packageManager": "pnpm@10.33.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "pnpm --filter @aether/web dev",
+    "dev:desktop": "pnpm --filter @aether/desktop dev",
+    "build": "pnpm --filter @aether/web build",
+    "build:desktop": "pnpm --filter @aether/desktop build",
+    "typecheck": "tsc -p tsconfig.json --noEmit && pnpm --filter @aether/desktop typecheck:main",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "check": "pnpm typecheck && pnpm test && pnpm build"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.0",
+    "playwright-core": "1.63.0",
+    "typescript": "~5.9.3",
+    "vite": "^8.3.1",
+    "vitest": "^5.0.1"
+  }
+}

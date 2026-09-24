@@ -1,0 +1,20 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "@aether/core": ["packages/core/src/index.ts"],
+      "@aether/graph": ["packages/graph/src/index.ts"],
+      "@aether/ui": ["packages/ui/src/index.ts"]
+    }
+  },
+  "include": [
+    "packages/core/src",
+    "packages/graph/src",
+    "packages/ui/src",
+    "apps/web/src",
+    "apps/desktop/src/renderer",
+    "apps/desktop/src/shared"
+  ]
+}

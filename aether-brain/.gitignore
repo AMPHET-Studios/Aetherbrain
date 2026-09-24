@@ -1,0 +1,14 @@
+node_modules/
+dist/
+dist-electron/
+out/
+.vite/
+*.log
+.DS_Store
+.env
+.env.*
+!.env.example
+coverage/
+test-results/
+playwright-report/
+.aether-user-settings.json
