@@ -151,6 +151,10 @@ export interface AetherState {
   reviewMark(id: NoteId, outcome: ReviewOutcome): Promise<void>
   setFps(fps: number): void
 
+  /** Live progress while a vault loads (listing, reading, parsing, indexing). */
+  loadProgress: { label: string; done: number; total: number } | null
+  setLoadProgress(p: { label: string; done: number; total: number } | null): void
+
   /** Project selected on the Projects board (a note id). */
   projectId: NoteId | null
   selectProject(id: NoteId | null): void
@@ -251,16 +255,23 @@ export const useAether = create<AetherState>()((set, get) => {
     toasts: [],
     review: loadJson<Record<NoteId, ReviewEntry>>(REVIEW_KEY, {}),
     fps: 0,
+    loadProgress: null,
+    setLoadProgress(p) {
+      if (get().status === 'loading') set({ loadProgress: p })
+    },
     projectId: null,
 
     async openVault(adapter) {
       unwatch?.()
       unwatch = null
-      set({ adapter, status: 'loading', error: null, selectedId: null, editorId: null, draft: null, dirty: false })
+      set({ adapter, status: 'loading', error: null, selectedId: null, editorId: null, draft: null, dirty: false, loadProgress: null })
       try {
         const search = new SearchIndex()
-        const loaded = await loadVault(adapter, search)
-        set({ search, status: 'ready' })
+        const loaded = await loadVault(adapter, search, (p) => {
+          if (p.phase === 'listing') return // the adapter reports its own listing progress
+          set({ loadProgress: { label: p.phase === 'parsing' ? 'Parsing notes' : 'Building the graph', done: p.done, total: p.total } })
+        })
+        set({ search, status: 'ready', loadProgress: null })
         setLoaded(loaded.notes, loaded.graph)
         unwatch = adapter.watch((changes) => get().applyExternal(changes))
       } catch (err) {

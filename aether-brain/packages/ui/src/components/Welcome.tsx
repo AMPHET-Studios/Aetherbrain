@@ -17,6 +17,7 @@ export interface VaultSource {
 export function Welcome({ sources }: { sources: VaultSource[] }) {
   const status = useAether((s) => s.status)
   const error = useAether((s) => s.error)
+  const progress = useAether((s) => s.loadProgress)
   if (status === 'ready') return null
   return (
     <div className="absolute inset-0 z-30 flex items-center justify-center">
@@ -33,8 +34,16 @@ export function Welcome({ sources }: { sources: VaultSource[] }) {
           constellations, tags are fields, time is an orbit. Markdown files on disk are the only source of truth.
         </p>
         {status === 'loading' && (
-          <div className="mb-4 flex items-center gap-2 text-[13px] text-dim">
-            <span className="spin inline-block h-3.5 w-3.5 rounded-full border-2 border-accent border-t-transparent" /> Reading vault…
+          <div className="mb-4" aria-live="polite">
+            <div className="flex items-center gap-2 text-[13px] text-dim">
+              <span className="spin inline-block h-3.5 w-3.5 rounded-full border-2 border-accent border-t-transparent" />
+              {progress ? `${progress.label}… ${progress.done.toLocaleString()}${progress.total ? ` / ${progress.total.toLocaleString()}` : ''}` : 'Reading vault…'}
+            </div>
+            {progress && progress.total > 0 && (
+              <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-white/10">
+                <div className="h-full rounded-full bg-gradient-to-r from-accent to-accent2 transition-[width] duration-150" style={{ width: `${Math.min(100, Math.round((progress.done / progress.total) * 100))}%` }} />
+              </div>
+            )}
           </div>
         )}
         {status === 'error' && <div className="mb-4 rounded-lg border border-danger/40 bg-danger/10 p-3 text-[12.5px] text-danger">{error}</div>}

@@ -26,7 +26,13 @@ pnpm --filter @aether/desktop dist:linux   # → apps/desktop/release/*.AppImage
 
 Build on the OS you are targeting: Windows installers need `wine` when built from Linux/macOS (the CI workflow uses a Windows runner, so it never hits this), and macOS builds only run on macOS.
 
-Builds are unsigned, so Windows SmartScreen will show "Windows protected your PC" the first time — click *More info → Run anyway*. The app never talks to the network; it only reads and writes the vault folder you pick. On first launch it asks for a folder (or opens the bundled demo vault); it remembers your choice, and `AetherBrain.exe C:\path\to\notes` opens a vault directly.
+Builds are unsigned, so Windows SmartScreen will show "Windows protected your PC" the first time — click *More info → Run anyway*.
+
+### Slow to start?
+
+- **Use the installer for a shortcut.** The Portable exe unpacks the whole app into a temp folder on every launch (10–30 s). `AetherBrain-Setup-*.exe` installs once and its Start-menu / desktop shortcut launches directly.
+- **Point it at your notes folder, not a whole project.** On launch the app re-opens the last vault and reads every markdown file under it. Build/engine folders (`node_modules`, `Intermediate`, `Saved`, `DerivedDataCache`, `Binaries`, `Library`, `dist`, …) are skipped automatically, but a folder with tens of thousands of other files still takes time to scan. Pick the folder that holds the notes (e.g. `F:\Lunco\Notes`), or start it with `AetherBrain.exe D:\notes`.
+- The window now appears immediately with a progress bar (folders scanned → notes read → parsed → graph built), so you can see what it is doing. The app never talks to the network; it only reads and writes the vault folder you pick. On first launch it asks for a folder (or opens the bundled demo vault); it remembers your choice, and `AetherBrain.exe C:\path\to\notes` opens a vault directly.
 
 ## What it does
 

@@ -16,6 +16,16 @@ export interface VaultChangeDto {
   mtime?: number
 }
 
+export interface VaultProgressDto {
+  phase: 'scanning' | 'reading' | 'done'
+  /** Files read so far. */
+  files: number
+  /** Markdown files found so far. */
+  found: number
+  dirs: number
+  done: boolean
+}
+
 export interface VaultInfo {
   /** Absolute path on disk. */
   root: string
@@ -35,6 +45,8 @@ export interface AetherBridge {
   renameFile(from: string, to: string): Promise<void>
   revealInFolder(path: string): Promise<void>
   onChanges(cb: (changes: VaultChangeDto[]) => void): () => void
+  /** Progress while the main process reads a vault (scan → read → done). */
+  onProgress(cb: (p: VaultProgressDto) => void): () => void
   /** process.platform of the main process ('darwin' | 'win32' | 'linux' | …). */
   platform: string
   version: string
@@ -51,6 +63,7 @@ export const IPC = {
   rename: 'vault:rename',
   reveal: 'vault:reveal',
   changes: 'vault:changes',
+  progress: 'vault:progress',
 } as const
 
 declare global {

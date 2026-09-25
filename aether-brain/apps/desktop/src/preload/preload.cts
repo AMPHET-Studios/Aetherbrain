@@ -4,7 +4,7 @@
  * (CommonJS on purpose — Electron preloads run in a sandbox that loads CJS.)
  */
 import { contextBridge, ipcRenderer } from 'electron'
-import type { AetherBridge, VaultChangeDto } from '../shared/ipc'
+import type { AetherBridge, VaultChangeDto, VaultProgressDto } from '../shared/ipc'
 
 const IPC = {
   pick: 'vault:pick',
@@ -17,6 +17,7 @@ const IPC = {
   rename: 'vault:rename',
   reveal: 'vault:reveal',
   changes: 'vault:changes',
+  progress: 'vault:progress',
 } as const
 
 const bridge: AetherBridge = {
@@ -33,6 +34,11 @@ const bridge: AetherBridge = {
     const handler = (_e: Electron.IpcRendererEvent, changes: VaultChangeDto[]) => cb(changes)
     ipcRenderer.on(IPC.changes, handler)
     return () => ipcRenderer.off(IPC.changes, handler)
+  },
+  onProgress: (cb) => {
+    const handler = (_e: Electron.IpcRendererEvent, p: VaultProgressDto) => cb(p)
+    ipcRenderer.on(IPC.progress, handler)
+    return () => ipcRenderer.off(IPC.progress, handler)
   },
   platform: process.platform,
   version: process.env['npm_package_version'] ?? '0.1.0',
