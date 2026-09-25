@@ -10,11 +10,27 @@ export interface LoadedVault {
   search: SearchIndex
 }
 
-/** Read + parse + index a whole vault. */
-export async function loadVault(adapter: VaultAdapter, search = new SearchIndex()): Promise<LoadedVault> {
+export interface LoadProgress {
+  phase: 'listing' | 'parsing' | 'indexing'
+  done: number
+  total: number
+}
+
+/**
+ * Read + parse + index a whole vault. Parsing yields to the event loop every
+ * batch so a big vault shows progress instead of freezing the window.
+ */
+export async function loadVault(
+  adapter: VaultAdapter,
+  search = new SearchIndex(),
+  onProgress?: (p: LoadProgress) => void,
+): Promise<LoadedVault> {
+  onProgress?.({ phase: 'listing', done: 0, total: 0 })
   const files = await adapter.list()
   const notes = new Map<NoteId, ParsedNote>()
-  for (const f of files) {
+  const BATCH = 150
+  for (let i = 0; i < files.length; i++) {
+    const f = files[i]!
     const p = normalizePath(f.path)
     if (!isMarkdownPath(p) || isIgnoredPath(p)) continue
     try {
@@ -23,7 +39,13 @@ export async function loadVault(adapter: VaultAdapter, search = new SearchIndex(
     } catch (err) {
       console.warn('[aether] failed to parse', p, err)
     }
+    if (i % BATCH === BATCH - 1) {
+      onProgress?.({ phase: 'parsing', done: i + 1, total: files.length })
+      await new Promise<void>((r) => setTimeout(r, 0))
+    }
   }
+  onProgress?.({ phase: 'indexing', done: files.length, total: files.length })
+  await new Promise<void>((r) => setTimeout(r, 0))
   const graph = buildGraph(notes)
   search.rebuild(notes.values())
   return { notes, graph, search }

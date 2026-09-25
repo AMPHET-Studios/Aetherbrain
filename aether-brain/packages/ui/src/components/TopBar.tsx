@@ -23,6 +23,7 @@ export function TopBar({ onPickVault }: { onPickVault?: (() => void) | undefined
   const setHelp = useAether((s) => s.setHelp)
   const fps = useAether((s) => s.fps)
   const dirty = useAether((s) => s.dirty)
+  const status = useAether((s) => s.status)
 
   const nodes = graph?.nodes.filter((n) => !n.ghost).length ?? 0
   const ghosts = (graph?.nodes.length ?? 0) - nodes
@@ -79,7 +80,7 @@ export function TopBar({ onPickVault }: { onPickVault?: (() => void) | undefined
           {adapter?.readOnly && <span className="text-inbox">·ro</span>}
         </button>
         <span title="Neurons / synapses / missing">
-          {nodes}n · {edges}s{ghosts ? ` · ${ghosts}?` : ''}
+          {status === 'ready' ? `${nodes}n · ${edges}s${ghosts ? ` · ${ghosts}?` : ''}` : status === 'loading' ? 'loading…' : ''}
         </span>
         <span className={cx('tabular-nums', fps && fps < 45 ? 'text-inbox' : '')} title="Frames per second">
           {fps ? `${fps} fps` : ''}

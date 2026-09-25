@@ -26,6 +26,15 @@ const sources: VaultSource[] = [
 ]
 
 async function boot() {
+  // Main-process progress (directory scan + file reads) feeds the welcome screen.
+  ElectronVaultAdapter.bridge()?.onProgress((p) => {
+    if (p.done) return
+    useAether.getState().setLoadProgress({
+      label: p.phase === 'scanning' ? `Scanning folders (${p.dirs.toLocaleString()})` : 'Reading notes',
+      done: p.files,
+      total: p.found,
+    })
+  })
   const root = createRoot(document.getElementById('root')!)
   root.render(
     <StrictMode>

@@ -13,7 +13,7 @@ import { watch, type FSWatcher } from 'chokidar'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { IPC, type VaultChangeDto, type VaultFileDto, type VaultInfo } from '../shared/ipc.js'
+import { IPC, type VaultChangeDto, type VaultFileDto, type VaultInfo, type VaultProgressDto } from '../shared/ipc.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const isDev = !!process.env['VITE_DEV_SERVER_URL']
@@ -77,35 +77,74 @@ class Vault {
     return path.relative(this.root, absPath).split(path.sep).join('/')
   }
 
+  /**
+   * Folders that never hold notes but routinely hold tens of thousands of
+   * files (build output, engine caches, dependency trees). Skipping them keeps
+   * startup fast even when the vault is a whole project folder.
+   */
+  static readonly HEAVY_DIRS = new Set([
+    'node_modules', '__macosx', '__pycache__', 'venv', 'env', 'dist', 'build', 'out', 'target', 'bin', 'obj',
+    // Unreal / Unity / game projects
+    'intermediate', 'saved', 'deriveddatacache', 'binaries', 'library', 'temp', 'logs',
+    // misc caches
+    'cache', 'caches', 'tmp', 'coverage', 'bower_components', 'vendor',
+  ])
+
   static isIgnored(rel: string): boolean {
-    return rel.split('/').some((seg) => seg.startsWith('.') || seg === 'node_modules' || seg === '__MACOSX')
+    return rel.split('/').some((seg) => seg.startsWith('.') || Vault.HEAVY_DIRS.has(seg.toLowerCase()))
   }
+
+  /** Called with running counts while list() walks the vault (for a progress UI). */
+  onProgress: ((p: VaultProgressDto) => void) | null = null
 
   async list(): Promise<VaultFileDto[]> {
     const out: VaultFileDto[] = []
-    const walk = async (dir: string): Promise<void> => {
+    const files: { full: string; rel: string }[] = []
+    let dirs = 0
+    let lastReport = 0
+    const report = (done: boolean) => {
+      const now = Date.now()
+      if (!done && now - lastReport < 120) return
+      lastReport = now
+      this.onProgress?.({ phase: done ? 'done' : files.length ? 'reading' : 'scanning', files: out.length, found: files.length, dirs, done })
+    }
+    // Pass 1: find every markdown file (directory walk, breadth first, no reads yet).
+    const queue: string[] = [this.root]
+    while (queue.length) {
+      const dir = queue.shift()!
       let entries: import('node:fs').Dirent[]
       try {
         entries = await fs.readdir(dir, { withFileTypes: true })
       } catch {
-        return
+        continue
       }
+      dirs++
       for (const e of entries) {
         const full = path.join(dir, e.name)
         const rel = this.rel(full)
         if (Vault.isIgnored(rel)) continue
-        if (e.isDirectory()) await walk(full)
-        else if (e.isFile() && /\.md$/i.test(e.name)) {
-          try {
-            const [content, st] = await Promise.all([fs.readFile(full, 'utf8'), fs.stat(full)])
-            out.push({ path: rel, content, mtime: st.mtimeMs })
-          } catch {
-            /* unreadable file: skip */
-          }
+        if (e.isDirectory()) queue.push(full)
+        else if (e.isFile() && /\.md$/i.test(e.name)) files.push({ full, rel })
+      }
+      if (dirs % 50 === 0) report(false)
+    }
+    // Pass 2: read with bounded concurrency (SSD-friendly, keeps the event loop responsive).
+    const CONCURRENCY = 32
+    let next = 0
+    const worker = async () => {
+      while (next < files.length) {
+        const f = files[next++]!
+        try {
+          const [content, st] = await Promise.all([fs.readFile(f.full, 'utf8'), fs.stat(f.full)])
+          out.push({ path: f.rel, content, mtime: st.mtimeMs })
+        } catch {
+          /* unreadable file: skip */
         }
+        if (out.length % 25 === 0) report(false)
       }
     }
-    await walk(this.root)
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, Math.max(1, files.length)) }, worker))
+    report(true)
     return out
   }
 
@@ -218,6 +257,7 @@ async function openVault(root: string): Promise<VaultInfo> {
   vault?.stopWatching()
   vault = new Vault(root)
   await fs.access(vault.root)
+  vault.onProgress = (p) => win?.webContents.send(IPC.progress, p)
   vault.startWatching((changes) => win?.webContents.send(IPC.changes, changes))
   await writeSettings({ lastVault: vault.root })
   return vault.info
@@ -268,7 +308,11 @@ function createWindow(): void {
       spellcheck: true,
     },
   })
-  win.once('ready-to-show', () => win?.show())
+  const reveal = () => {
+    if (win && !win.isVisible()) win.show()
+  }
+  win.once('ready-to-show', reveal)
+  setTimeout(reveal, 1200)
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:/.test(url)) void shell.openExternal(url)
     return { action: 'deny' }
