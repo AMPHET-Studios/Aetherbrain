@@ -192,7 +192,9 @@ describe('FsVault.scan', () => {
     await put('Notes/readme.txt')
     await put('LICENSE.md')
     await put('docs/CHANGELOG.md')
-    await put('docs/Changelog.md')
+    // A differently-cased twin lives in another folder: on Windows (case-insensitive
+    // file names) docs/Changelog.md and docs/CHANGELOG.md would be the same file.
+    await put('Notes/Changelog.md')
     await put('.obsidian/x.md')
     await put('node_modules/pkg/readme.md')
     await put('$RECYCLE.BIN/x.md')
@@ -201,7 +203,7 @@ describe('FsVault.scan', () => {
     const v = new FsVault([tmp])
     const progress: number[] = []
     const res = await v.scan((p) => progress.push(p.found))
-    expect(res.files.map((f) => f.path).sort()).toEqual(['Notes/b.MD', 'Notes/deep/c.md', 'a.md', 'docs/Changelog.md'])
+    expect(res.files.map((f) => f.path).sort()).toEqual(['Notes/Changelog.md', 'Notes/b.MD', 'Notes/deep/c.md', 'a.md'])
     for (const f of res.files) expect(f.abs).toBe(v.abs(f.path))
     expect([...res.folders].sort()).toEqual(['Empty', 'Notes', 'Notes/deep', 'docs'])
     expect(res.truncated).toBe(false)
