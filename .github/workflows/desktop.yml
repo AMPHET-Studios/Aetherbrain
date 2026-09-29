@@ -90,13 +90,18 @@ jobs:
         run: ls -la apps/desktop/release
       # The installers plus the Claude Desktop extension (aether-brain-<version>.mcpb, built by
       # dist:win). Only this job ships the .mcpb, so the release gets exactly one copy.
-      - uses: actions/upload-artifact@v4
+      - name: Upload run artifact
+        uses: actions/upload-artifact@v4
+        # The account's artifact storage can fill up (each build is ~220 MB). A full
+        # quota must not fail a good build: the release step below does not use it.
+        continue-on-error: true
         with:
           name: aether-brain-windows
           path: |
             aether-brain/apps/desktop/release/*.exe
             aether-brain/apps/desktop/release/*.mcpb
           if-no-files-found: error
+          retention-days: 7
       - name: Attach to release
         if: env.RELEASE_TAG != ''
         uses: softprops/action-gh-release@v2
@@ -156,11 +161,14 @@ jobs:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
       - name: List artifacts
         run: ls -la apps/desktop/release
-      - uses: actions/upload-artifact@v4
+      - name: Upload run artifact
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.files }}
           if-no-files-found: error
+          retention-days: 7
       - name: Attach to release
         if: env.RELEASE_TAG != ''
         uses: softprops/action-gh-release@v2
