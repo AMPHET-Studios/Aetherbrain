@@ -1,15 +1,20 @@
 import { useAether } from '../store'
 import { MOD } from '../util'
 
-const GROUPS: { title: string; rows: [string, string][] }[] = [
+interface HelpGroup {
+  title: string
+  rows: [string, string][]
+}
+
+const GROUPS: HelpGroup[] = [
   {
     title: 'Everywhere',
     rows: [
-      [`${MOD} K · /`, 'Search neurons & commands'],
+      [`${MOD} K · /`, 'Search neurons, folders & commands'],
       [`${MOD} N · c`, 'Quick capture → Inbox'],
       ['d', "Today's daily note"],
       ['1 2 3 4 5 6', 'Graph · Editor · Capture · Search · Review · Projects'],
-      ['p', 'Projects board'],
+      ['p', 'Projects board (a selected ★ star: its board)'],
       ['?', 'This cheatsheet'],
       ['Esc', 'Close / clear filters / deselect'],
     ],
@@ -17,18 +22,27 @@ const GROUPS: { title: string; rows: [string, string][] }[] = [
   {
     title: 'Graph',
     rows: [
-      ['click · dbl-click', 'Select · open'],
+      ['click · dbl-click', 'Select · open (a folder: expand)'],
       ['drag node', 'Pin it somewhere else'],
-      ['e · Enter', 'Open selected in editor'],
+      ['e · Enter', 'Open selected (a folder: expand)'],
       ['f', 'Fly to selected'],
-      ['Tab · ⇧Tab', 'Cycle neighbors'],
+      ['Tab · ⇧Tab', 'Cycle neighbors (a folder: parent + children)'],
       ['← → ↑ ↓', 'Orbit camera (⇧ = pan)'],
       ['+ −', 'Zoom'],
       ['Home · 0', 'Reset camera'],
-      ['t', 'Constellation ↔ Orbit (time)'],
+      ['t', 'Layout: constellation → orbit → system'],
       ['m', 'Color: area → type → tag → age'],
       ['b · l', 'Bloom · hub labels'],
       ['Alt ← →', 'History back / forward'],
+    ],
+  },
+  {
+    title: 'System layout',
+    rows: [
+      ['★ ● ·', 'Star = project or drive · planet = folder · moon = note'],
+      ['x', 'Expand / collapse the selected folder'],
+      ['[ ]', 'Show fewer / more folder levels'],
+      ['o', 'Orbits moving / paused'],
     ],
   },
   {
@@ -45,11 +59,16 @@ const GROUPS: { title: string; rows: [string, string][] }[] = [
     title: 'Projects',
     rows: [
       ['j k', 'Next / previous project'],
+      ['Enter · o', 'Open the note'],
+      ['e · s', 'Rename the project · cycle its status'],
+      ['f', 'Add a folder (planet) to the project'],
       ['n', 'Add a task (written to ## To do)'],
-      ['click ☐', 'Tick — saved as [x] ✅ date'],
+      ['click ☐ · Space', 'Tick — saved as [x] ✅ date'],
+      ['Enter · dbl-click', 'Edit the focused task'],
+      ['Alt ↑ ↓', 'Move the focused task'],
+      ['Del · u', 'Delete the focused task · undo'],
       ['⇧N', 'New project note'],
       ['x', 'Show / hide done list'],
-      ['Enter · o', 'Open the note'],
     ],
   },
   {
@@ -63,13 +82,48 @@ const GROUPS: { title: string; rows: [string, string][] }[] = [
   },
 ]
 
+/** Rows added by the host app (e.g. the desktop's `v` and `a` panels). */
+const extraGroups: HelpGroup[] = []
+
+/**
+ * Add cheatsheet rows from outside the package (desktop-only UI). Rows go
+ * into the group with that title (a new group when there is none); a row
+ * whose key is already listed in the group replaces it.
+ */
+export function registerHelpRows(group: string, rows: [string, string][]): void {
+  let g = extraGroups.find((x) => x.title === group)
+  if (!g) {
+    g = { title: group, rows: [] }
+    extraGroups.push(g)
+  }
+  for (const row of rows) {
+    const i = g.rows.findIndex(([k]) => k === row[0])
+    if (i >= 0) g.rows[i] = row
+    else g.rows.push(row)
+  }
+}
+
+/** Built-in groups with the registered rows merged in. */
+function helpGroups(): HelpGroup[] {
+  const out = GROUPS.map((g) => ({ title: g.title, rows: [...g.rows] }))
+  for (const x of extraGroups) {
+    const g = out.find((o) => o.title === x.title)
+    if (!g) {
+      out.push({ title: x.title, rows: [...x.rows] })
+      continue
+    }
+    for (const row of x.rows) if (!g.rows.some(([k]) => k === row[0])) g.rows.push(row)
+  }
+  return out
+}
+
 export function Help() {
   const open = useAether((s) => s.helpOpen)
   const setHelp = useAether((s) => s.setHelp)
   if (!open) return null
   return (
     <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/50" onMouseDown={(e) => e.target === e.currentTarget && setHelp(false)} role="dialog" aria-label="Keyboard shortcuts">
-      <div className="panel rise w-[760px] max-w-[94vw] p-5">
+      <div className="panel rise scroll max-h-[92vh] w-[800px] max-w-[94vw] p-5">
         <div className="mb-3 flex items-center">
           <div className="text-[15px] font-semibold text-white">Keyboard</div>
           <span className="ml-2 text-[12px] text-dim">every feature has a key</span>
@@ -79,12 +133,12 @@ export function Help() {
           </button>
         </div>
         <div className="grid grid-cols-2 gap-x-8 gap-y-4">
-          {GROUPS.map((g) => (
+          {helpGroups().map((g) => (
             <div key={g.title}>
               <div className="section-title mb-1.5">{g.title}</div>
               {g.rows.map(([k, d]) => (
                 <div key={k} className="flex items-baseline gap-3 py-[3px] text-[12.5px]">
-                  <span className="w-28 shrink-0 font-mono text-[11.5px] text-accent2">{k}</span>
+                  <span className="w-32 shrink-0 font-mono text-[11.5px] text-accent2">{k}</span>
                   <span className="text-dim">{d}</span>
                 </div>
               ))}

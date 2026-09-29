@@ -23,7 +23,46 @@ const processor = unified().use(remarkParse).use(remarkGfm)
 
 /** Parse markdown into an mdast tree (cached processor, no stringify). */
 export function parseMarkdown(body: string): Root {
-  return processor.parse(body) as Root
+  return processor.parse(tameNesting(body)) as Root
+}
+
+/** Deepest list / blockquote nesting kept for parsing; real notes stay far below it. */
+const MAX_NEST = 32
+
+/**
+ * micromark recurses once per container level, so a line like `- - - - …`
+ * thousands deep takes seconds and then overflows the stack. Blank the markers
+ * past MAX_NEST on such lines (same length, so every offset stays true); the
+ * rest of the line then parses as plain indented text.
+ */
+function tameNesting(body: string): string {
+  if (body.length < MAX_NEST * 2) return body
+  let lines: string[] | null = null
+  let start = 0
+  for (let n = 0; start <= body.length; n++) {
+    let end = body.indexOf('\n', start)
+    if (end < 0) end = body.length
+    let depth = 0
+    let cut = -1
+    for (let j = start; j < end; j++) {
+      const c = body.charCodeAt(j)
+      if (c === 32 || c === 9) continue
+      const next = body.charCodeAt(j + 1)
+      const marker = c === 62 || ((c === 45 || c === 42 || c === 43) && (next === 32 || next === 9))
+      if (!marker) break
+      if (++depth === MAX_NEST) cut = j + 1
+    }
+    if (cut > 0 && depth > MAX_NEST) {
+      lines ??= body.split('\n')
+      const line = lines[n] ?? ''
+      const at = cut - start
+      let k = at
+      while (k < line.length && /[\s>*+-]/.test(line[k] ?? '')) k++
+      lines[n] = line.slice(0, at) + ' '.repeat(k - at) + line.slice(k)
+    }
+    start = end + 1
+  }
+  return lines ? lines.join('\n') : body
 }
 
 export function slugifyHeading(text: string): string {
@@ -99,9 +138,10 @@ export function parseNote(file: VaultFile): ParsedNote {
   })
 
   // Plain text for search/mentions: strip wikilink syntax but keep the words.
+  // `[^[\]]` like WIKILINK_RE: a long run of `[[` must not make this quadratic.
   const plain = textChunks
     .join(' ')
-    .replace(/!?\[\[([^\]]+?)\]\]/g, (_m, inner: string) => {
+    .replace(/!?\[\[([^[\]]+?)\]\]/g, (_m, inner: string) => {
       const { target, alias } = splitRaw(inner)
       return alias ?? target
     })

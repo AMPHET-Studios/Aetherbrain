@@ -1,9 +1,24 @@
-import type { Area, GraphData, GraphEdge, GraphNode, Link, NoteId, ParsedNote } from '../types'
+import type { Area, FolderRole, FolderSelection, GraphData, GraphEdge, GraphNode, Link, NoteId, ParsedNote } from '../types'
 import { LinkResolver } from './resolve'
+import { asString } from '../markdown/frontmatter'
+import { isProjectNote, projectFolderOf } from '../markdown/projects'
+import { folderUniverse, selectFolders, type FolderSelectOptions } from '../vault/folders'
+import { ancestorsOf, areaFromFolder, folderDepth, folderKey, folderOf, normalizeFolderPath } from '../vault/paths'
+
+export interface FolderGraphOptions extends FolderSelectOptions {
+  /** Every folder known on disk (vault paths). */
+  all: Iterable<string>
+  /** Title of the root node (the vault name). */
+  rootTitle: string
+  /** Display labels for mounts, e.g. { D: 'D:\\' }. */
+  mountLabels?: Record<string, string>
+}
 
 export interface BuildGraphOptions {
   /** Include unresolved link targets as ghost nodes (default true). */
   ghosts?: boolean
+  /** Build folder nodes + structural parents (system layout). Omit/null for classic graphs. */
+  folders?: FolderGraphOptions | null
 }
 
 function toTs(iso: string | null): number | null {
@@ -16,8 +31,8 @@ function toTs(iso: string | null): number | null {
  * Resolve every link across the vault and build the graph.
  * Mutates `note.links[i].to/resolved` in place so the store has resolved links
  * without a second pass. Deterministic node order: notes sorted by id, then
- * ghosts sorted by id — stable order keeps the worker layout stable across
- * rebuilds.
+ * ghosts sorted by id, then (with `folders`) folder nodes sorted by path —
+ * stable order keeps the worker layout stable across rebuilds.
  */
 export function buildGraph(notes: Map<NoteId, ParsedNote>, opts: BuildGraphOptions = {}): GraphData {
   const ghosts = opts.ghosts ?? true
@@ -40,7 +55,9 @@ export function buildGraph(notes: Map<NoteId, ParsedNote>, opts: BuildGraphOptio
       area: n.meta.area,
       type: n.meta.type,
       tags: n.meta.tags,
+      kind: 'note',
       ghost: false,
+      parent: null,
       inDegree: 0,
       outDegree: 0,
       degree: 0,
@@ -101,7 +118,9 @@ export function buildGraph(notes: Map<NoteId, ParsedNote>, opts: BuildGraphOptio
         area: 'untagged',
         type: 'note',
         tags: [],
+        kind: 'ghost',
         ghost: true,
+        parent: null,
         inDegree: refs.size,
         outDegree: 0,
         degree: refs.size,
@@ -128,9 +147,137 @@ export function buildGraph(notes: Map<NoteId, ParsedNote>, opts: BuildGraphOptio
     node.degree = node.inDegree + node.outDegree
   }
 
-  const orphans = nodes.filter((n) => !n.ghost && n.degree === 0).map((n) => n.id)
+  const orphans = nodes.filter((n) => n.kind === 'note' && n.degree === 0).map((n) => n.id)
 
-  return { nodes, edges, index, backlinks, outlinks, unresolved, orphans, tagCounts, areaCounts }
+  const folderSelection = opts.folders ? addFolderSystem(notes, ids, nodes, index, unresolved, opts.folders) : null
+
+  return { nodes, edges, index, backlinks, outlinks, unresolved, orphans, tagCounts, areaCounts, folderSelection }
+}
+
+/**
+ * Append folder nodes and set every node's structural parent (the system
+ * layout). Folder nodes are pure structure: no edges, backlinks, outlinks,
+ * tag/area counts or orphans.
+ */
+function addFolderSystem(
+  notes: Map<NoteId, ParsedNote>,
+  ids: NoteId[],
+  nodes: GraphNode[],
+  index: Map<NoteId, number>,
+  unresolved: Map<NoteId, Set<NoteId>>,
+  opts: FolderGraphOptions,
+): FolderSelection {
+  // Folders known on disk: everything listed, every note folder, and their
+  // ancestors ('' included). Indexed once per folder Set, not on every rebuild.
+  const known = folderUniverse(opts.all, ids.map((id) => notes.get(id)!.meta.folder)).all
+
+  // Bind project notes to their home folders. A folder takes one project:
+  // an explicit `folder:` beats a folder note, which beats a sibling note;
+  // ties go to the first id. Folders that don't exist yet are not drawn.
+  const candidates: { id: NoteId; folder: string; rank: number }[] = []
+  for (const id of ids) {
+    const n = notes.get(id)!
+    if (!isProjectNote(n)) continue
+    const folder = projectFolderOf(n, known)
+    if (!folder || !known.has(folder)) continue
+    const explicit = normalizeFolderPath(asString(n.frontmatter['folder']) ?? '') !== ''
+    candidates.push({ id, folder, rank: explicit ? 0 : folder === n.meta.folder ? 1 : 2 })
+  }
+  candidates.sort((a, b) => a.rank - b.rank)
+  const projectAt = new Map<string, NoteId>()
+  const homeOf = new Map<NoteId, string>()
+  for (const c of candidates) {
+    if (projectAt.has(c.folder)) continue
+    projectAt.set(c.folder, c.id)
+    homeOf.set(c.id, c.folder)
+  }
+
+  const selection = selectFolders(
+    opts.all,
+    ids.map((id) => notes.get(id)!.meta.path),
+    {
+      multiRoot: opts.multiRoot,
+      maxDepth: opts.maxDepth,
+      maxFolders: opts.maxFolders,
+      // A project star always shows its planets (its direct subfolders), however
+      // deep the project folder sits on a drive (F/Lunco/PORTALz is depth 3).
+      expanded: [...(opts.expanded ?? []), ...projectAt.keys()],
+      pinned: [...(opts.pinned ?? []), ...projectAt.keys()],
+    },
+  )
+  const visible = selection.visible
+  const nearestVisible = (path: string): string => {
+    let cur = path
+    while (!visible.has(cur)) cur = folderOf(cur)
+    return cur
+  }
+
+  const direct = new Map<string, number>()
+  const total = new Map<string, number>()
+  for (const id of ids) {
+    const folder = notes.get(id)!.meta.folder
+    direct.set(folder, (direct.get(folder) ?? 0) + 1)
+    for (let cur = folder; ; cur = folderOf(cur)) {
+      total.set(cur, (total.get(cur) ?? 0) + 1)
+      if (cur === '') break
+    }
+  }
+
+  // Parents of notes and ghosts.
+  for (const node of nodes) {
+    if (node.kind === 'note') {
+      const home = homeOf.get(node.id)
+      node.parent = folderKey(home ?? nearestVisible(notes.get(node.id)!.meta.folder))
+    } else {
+      let first: NoteId | null = null
+      for (const ref of unresolved.get(node.id) ?? []) if (first === null || ref < first) first = ref
+      node.parent = first ?? folderKey('')
+    }
+  }
+
+  for (const path of visible) {
+    const depth = folderDepth(path)
+    const projectId = projectAt.get(path) ?? null
+    const role: FolderRole = path === '' ? 'root' : opts.multiRoot && depth === 1 ? 'mount' : projectId ? 'project' : 'folder'
+    const labels = opts.mountLabels
+    const title =
+      role === 'root'
+        ? opts.rootTitle
+        : role === 'mount'
+          ? ((labels && Object.hasOwn(labels, path) ? labels[path] : undefined) ?? path)
+          : path.slice(path.lastIndexOf('/') + 1)
+    const area: Area = projectId ? 'projects' : (areaFromFolder(`${path}/x`) ?? 'untagged')
+    const id = folderKey(path)
+    index.set(id, nodes.length)
+    nodes.push({
+      id,
+      title,
+      area,
+      type: projectId ? 'project' : 'moc',
+      tags: [],
+      kind: 'folder',
+      ghost: false,
+      parent: path === '' ? null : folderKey(nearestVisible(folderOf(path))),
+      folder: {
+        path,
+        role,
+        depth,
+        projectId,
+        inProject: ancestorsOf(path).some((a) => projectAt.has(a)),
+        childFolders: selection.childCount.get(path) ?? 0,
+        hiddenFolders: selection.hidden.get(path) ?? 0,
+        notes: direct.get(path) ?? 0,
+        totalNotes: total.get(path) ?? 0,
+      },
+      inDegree: 0,
+      outDegree: 0,
+      degree: 0,
+      created: null,
+      updated: null,
+      wordCount: 0,
+    })
+  }
+  return selection
 }
 
 export function ghostKey(target: string): NoteId {

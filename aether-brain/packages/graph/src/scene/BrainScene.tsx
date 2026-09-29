@@ -8,7 +8,9 @@ import {
   Color,
   DynamicDrawUsage,
   Float32BufferAttribute,
+  Group,
   InstancedBufferAttribute,
+  InstancedBufferGeometry,
   InstancedMesh,
   LineSegments,
   Matrix4,
@@ -25,8 +27,8 @@ import {
 } from 'three'
 import type { CameraControlsImpl } from '@react-three/drei'
 import type { GraphData, GraphNode, NoteId } from '@aether/core'
-import { BrainController } from '../BrainController'
-import { AREA_COLORS, GHOST_COLOR, nodeBaseColor, nodeRadius, tagColor } from '../theme'
+import { BrainController, DEFAULT_FAR, DEFAULT_MAX_DISTANCE, cameraRange } from '../BrainController'
+import { AREA_COLORS, GHOST_COLOR, STAR_COLOR, SUN_COLOR, nodeBaseColor, nodeRadius, planetColor, tagColor } from '../theme'
 import {
   NEBULA_COLORS,
   createEdgeMaterial,
@@ -34,8 +36,10 @@ import {
   createHaloMaterial,
   createNebulaMaterial,
   createNodeMaterial,
+  createRingMaterial,
   createStarMaterial,
 } from './materials'
+import { shiftTarget } from './follow'
 
 const HOME_POS: [number, number, number] = [0, 150, 460]
 const BG = '#04050d'
@@ -49,8 +53,9 @@ export interface BrainSceneProps {
 
 /**
  * The thought-space. One InstancedMesh for neuron cores, one for halos, one
- * LineSegments for every synapse, a starfield, selective bloom, a 2D label
- * overlay and screen-space picking. Nothing here allocates per frame.
+ * LineSegments for every synapse, one instanced LineSegments for every orbit
+ * ring (system layout), a starfield, selective bloom, a 2D label overlay and
+ * screen-space picking. Nothing here allocates per frame.
  */
 export function BrainScene({ controller, maxDpr = 1.5, className }: BrainSceneProps) {
   const overlayRef = useRef<HTMLCanvasElement | null>(null)
@@ -63,7 +68,7 @@ export function BrainScene({ controller, maxDpr = 1.5, className }: BrainScenePr
       <Canvas
         dpr={[1, maxDpr]}
         gl={{ antialias: false, powerPreference: 'high-performance', alpha: false, stencil: false }}
-        camera={{ fov: 55, near: 0.5, far: 4000, position: HOME_POS }}
+        camera={{ fov: 55, near: 1, far: DEFAULT_FAR, position: HOME_POS }}
         onCreated={({ gl }) => {
           gl.toneMapping = NoToneMapping
           gl.setClearColor(BG)
@@ -104,18 +109,35 @@ function CameraRig({ controller }: { controller: BrainController }) {
     const tgt = new Vector3()
     const shift = { value: 0 }
     const cam = camera as PerspectiveCamera
+    // Set here, not as a prop: `setRange` raises it for big scenes and a
+    // re-render must not put the default back.
+    c.maxDistance = DEFAULT_MAX_DISTANCE
     const applyShift = (smooth: boolean) => {
       const dist = c.distance
       const halfW = Math.tan((cam.fov * Math.PI) / 360) * dist * cam.aspect
       void c.setFocalOffset(-halfW * shift.value, 0, 0, smooth)
     }
     controller.registerCamera({
-      flyTo(x, y, z, distance, smooth = true) {
+      setRange(distance) {
+        const { far, maxDistance } = cameraRange(distance)
+        c.maxDistance = maxDistance
+        if (cam.far !== far) {
+          cam.far = far
+          cam.updateProjectionMatrix()
+        }
+      },
+      flyTo(x, y, z, distance, smooth = true, minElevation) {
         c.getPosition(pos, true)
         c.getTarget(tgt, true)
         const dir = pos.sub(tgt)
         if (dir.lengthSq() < 1e-3) dir.set(0, 0.35, 1)
-        dir.normalize().multiplyScalar(distance)
+        dir.normalize()
+        if (minElevation !== undefined && dir.y < Math.sin(minElevation)) {
+          const h = Math.hypot(dir.x, dir.z)
+          const k = h > 1e-6 ? Math.cos(minElevation) / h : 0
+          dir.set(h > 1e-6 ? dir.x * k : 0, Math.sin(minElevation), h > 1e-6 ? dir.z * k : Math.cos(minElevation))
+        }
+        dir.multiplyScalar(distance)
         void c.setLookAt(x + dir.x, y + dir.y, z + dir.z, x, y, z, smooth)
       },
       reset() {
@@ -158,7 +180,6 @@ function CameraRig({ controller }: { controller: BrainController }) {
       draggingSmoothTime={0.08}
       dollyToCursor
       minDistance={4}
-      maxDistance={1800}
       dollySpeed={0.6}
       truckSpeed={1.4}
     />
@@ -170,6 +191,8 @@ function CameraRig({ controller }: { controller: BrainController }) {
 /* ------------------------------------------------------------------ */
 
 function Backdrop() {
+  const camera = useThree((s) => s.camera)
+  const sky = useMemo(() => new Group(), [])
   const stars = useMemo(() => {
     const n = 2600
     const pos = new Float32Array(n * 3)
@@ -218,20 +241,33 @@ function Backdrop() {
     const mat = stars.material as ShaderMaterial
     mat.uniforms['uTime']!.value += dt
     stars.rotation.y += dt * 0.004
+    // The sky is infinitely far away: it travels with the camera (a solar
+    // system can be far larger than the star shell).
+    sky.position.copy(camera.position)
   })
   return (
-    <>
+    <primitive object={sky}>
       <primitive object={stars} />
       {nebulae.map((m, i) => (
         <primitive key={i} object={m} />
       ))}
-    </>
+    </primitive>
   )
 }
 
 /* ------------------------------------------------------------------ */
 /* The brain                                                          */
 /* ------------------------------------------------------------------ */
+
+/** Folder role codes per node (-1 for notes and ghosts). */
+const ROLE_ROOT = 0
+const ROLE_MOUNT = 1
+const ROLE_PROJECT = 2
+const ROLE_FOLDER = 3
+const ROLE_CODES = { root: ROLE_ROOT, mount: ROLE_MOUNT, project: ROLE_PROJECT, folder: ROLE_FOLDER } as const
+
+/** Segments of the unit circle every orbit ring is drawn from. */
+const RING_SEGMENTS = 96
 
 interface Buffers {
   graph: GraphData
@@ -250,6 +286,31 @@ interface Buffers {
   baseColors: Float32Array
   screen: Float32Array
   hubs: number[]
+  /** Structural parent index per node (-1: none). */
+  parentIdx: Int32Array
+  /** Children per node (CSR over `childList`), for the selected node's system. */
+  childStart: Int32Array
+  childList: Int32Array
+  /** Folder role code per node, -1 for notes and ghosts. */
+  role: Int8Array
+  /** Label text per node ('★ ' for project stars, ' +N' for collapsed folders). */
+  labels: string[]
+  /** Label color per node (depends on the color mode; set by recolor). */
+  labelColors: string[]
+  /** Root, mounts and project stars: always labelled. */
+  landmarks: number[]
+  /** Orbit rings: one instanced LineSegments. */
+  rings: LineSegments
+  ringGeo: InstancedBufferGeometry
+  ringCenter: InstancedBufferAttribute
+  ringRadius: InstancedBufferAttribute
+  ringQuat: InstancedBufferAttribute
+  ringColor: InstancedBufferAttribute
+  ringAlpha: InstancedBufferAttribute
+  ringParent: Int32Array
+  ringCount: number
+  /** engine.ringsVersion the ring attributes were built from (-1: never). */
+  ringsVersion: number
   ageOf: (n: GraphNode) => number
   dispose(): void
 }
@@ -258,7 +319,7 @@ function buildBuffers(graph: GraphData): Buffers {
   const count = graph.nodes.length
   const sphere = new SphereGeometry(1, 16, 12)
   const plane = new PlaneGeometry(1, 1)
-  const glow = new InstancedBufferAttribute(new Float32Array(count * 3), 3)
+  const glow = new InstancedBufferAttribute(new Float32Array(count * 4), 4)
   glow.setUsage(DynamicDrawUsage)
   const color = new InstancedBufferAttribute(new Float32Array(count * 3), 3)
   color.setUsage(DynamicDrawUsage)
@@ -316,6 +377,71 @@ function buildBuffers(graph: GraphData): Buffers {
     .slice(0, 28)
     .map((x) => x.i)
 
+  // Structure of the system layout: parents, children, roles, labels.
+  const parentIdx = new Int32Array(count).fill(-1)
+  const childStart = new Int32Array(count + 1)
+  const role = new Int8Array(count).fill(-1)
+  const labels: string[] = new Array<string>(count)
+  // Note label colors follow the color mode (recolor); folders keep their body color.
+  const labelColors: string[] = new Array<string>(count).fill('#e8ecff')
+  const landmarks: number[] = []
+  graph.nodes.forEach((n, i) => {
+    const p = n.parent === null ? -1 : (graph.index.get(n.parent) ?? -1)
+    parentIdx[i] = p
+    if (p >= 0) childStart[p + 1] = childStart[p + 1]! + 1
+    const f = n.folder
+    if (f) {
+      role[i] = ROLE_CODES[f.role] ?? ROLE_FOLDER
+      if (f.role !== 'folder') landmarks.push(i)
+      labelColors[i] = f.role === 'folder' ? planetColor(f.path) : f.role === 'project' ? STAR_COLOR : SUN_COLOR
+    }
+    let label = n.ghost ? `+ ${n.title}` : n.title
+    if (f?.role === 'project') label = `★ ${label}`
+    if (f && f.hiddenFolders > 0) label = `${label} +${f.hiddenFolders}`
+    labels[i] = label
+  })
+  for (let i = 0; i < count; i++) childStart[i + 1] = childStart[i + 1]! + childStart[i]!
+  const childList = new Int32Array(Math.max(1, childStart[count]!))
+  const fill = childStart.slice(0, count)
+  for (let i = 0; i < count; i++) {
+    const p = parentIdx[i]!
+    if (p < 0) continue
+    childList[fill[p]!] = i
+    fill[p] = fill[p]! + 1
+  }
+
+  // Orbit rings: a unit circle in XZ, instanced once per ring. Every ring has
+  // at least one child on it, so the node count bounds the ring count.
+  const circle = new Float32Array(RING_SEGMENTS * 6)
+  for (let k = 0; k < RING_SEGMENTS; k++) {
+    const a0 = (k / RING_SEGMENTS) * Math.PI * 2
+    const a1 = ((k + 1) / RING_SEGMENTS) * Math.PI * 2
+    circle.set([Math.cos(a0), 0, Math.sin(a0), Math.cos(a1), 0, Math.sin(a1)], k * 6)
+  }
+  const ringCap = Math.max(1, count)
+  const ringGeo = new InstancedBufferGeometry()
+  ringGeo.setAttribute('position', new Float32BufferAttribute(circle, 3))
+  const ringAttr = (size: number, dynamic: boolean) => {
+    const a = new InstancedBufferAttribute(new Float32Array(ringCap * size), size)
+    if (dynamic) a.setUsage(DynamicDrawUsage)
+    return a
+  }
+  const ringCenter = ringAttr(3, true)
+  const ringRadius = ringAttr(1, false)
+  const ringQuat = ringAttr(4, false)
+  const ringColor = ringAttr(3, false)
+  const ringAlpha = ringAttr(1, true)
+  ringGeo.setAttribute('iCenter', ringCenter)
+  ringGeo.setAttribute('iRadius', ringRadius)
+  ringGeo.setAttribute('iQuat', ringQuat)
+  ringGeo.setAttribute('iColor', ringColor)
+  ringGeo.setAttribute('iAlpha', ringAlpha)
+  ringGeo.instanceCount = 0
+  const rings = new LineSegments(ringGeo, createRingMaterial())
+  rings.frustumCulled = false
+  rings.visible = false
+  rings.renderOrder = 0
+
   return {
     graph,
     count,
@@ -333,11 +459,30 @@ function buildBuffers(graph: GraphData): Buffers {
     baseColors: new Float32Array(count * 3),
     screen: new Float32Array(count * 4),
     hubs,
+    parentIdx,
+    childStart,
+    childList,
+    role,
+    labels,
+    labelColors,
+    landmarks,
+    rings,
+    ringGeo,
+    ringCenter,
+    ringRadius,
+    ringQuat,
+    ringColor,
+    ringAlpha,
+    ringParent: new Int32Array(ringCap),
+    ringCount: 0,
+    ringsVersion: -1,
     ageOf,
     dispose() {
       sphere.dispose()
       plane.dispose()
       eg.dispose()
+      ringGeo.dispose()
+      ;(rings.material as { dispose(): void }).dispose()
       ;(nodes.material as { dispose(): void }).dispose()
       ;(halos.material as { dispose(): void }).dispose()
       ;(edges.material as { dispose(): void }).dispose()
@@ -370,6 +515,16 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
     time: 0,
     neighbors: new Set<number>(),
     labelSet: new Set<number>(),
+    /** Buffers the visual state was last computed for (new buffers force a recolor). */
+    buffers: null as Buffers | null,
+    /** Camera follow: node being followed and where it was on the last frame. */
+    followIndex: -1,
+    followPos: new Vector3(),
+    followTarget: new Vector3(),
+    followCur: new Vector3(),
+    /** Layout frame and buffers the follow step last ran for. */
+    followFrame: -1,
+    followBuffers: null as Buffers | null,
   })
 
   /* ---- pointer events (capture phase so node-drag can pre-empt orbit) ---- */
@@ -449,6 +604,7 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
     const plane = new Vector3()
     const nrm = new Vector3()
     const hit = new Vector3()
+    const rel = new Vector3()
     const dragTo = (index: number, id: NoteId, x: number, y: number) => {
       ndc.set((x / size.width) * 2 - 1, -(y / size.height) * 2 + 1)
       ray.setFromCamera(ndc, camera)
@@ -457,7 +613,7 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
       camera.getWorldDirection(nrm)
       const denom = nrm.dot(ray.ray.direction)
       if (Math.abs(denom) < 1e-6) return
-      const t = plane.clone().sub(ray.ray.origin).dot(nrm) / denom
+      const t = rel.copy(plane).sub(ray.ray.origin).dot(nrm) / denom
       hit.copy(ray.ray.origin).addScaledVector(ray.ray.direction, t)
       controller.engine.pin(id, hit.x, hit.y, hit.z)
     }
@@ -477,6 +633,44 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
     }
   }, [buffers, gl, camera, size, controller])
 
+  /* ---- camera follow ---- */
+  // While planets orbit, keep the selected node where it is on screen by
+  // moving the camera target with it, unless the user has looked away from it
+  // (reset view, panned to another system). Runs before drei's CameraControls
+  // update (priority -1), so the camera moves in the same frame as the node.
+  useFrame(() => {
+    const st = state.current
+    const eng = controller.engine
+    if (!buffers || eng.frame === st.followFrame) return
+    st.followFrame = eng.frame
+    if (st.followBuffers !== buffers) {
+      st.followBuffers = buffers
+      st.followIndex = -1
+    }
+    // The controller can be a graph ahead of the buffers for a moment: indices would not match.
+    if (controller.graph !== buffers.graph) return
+    const pos = eng.positions
+    const selI = controller.selected ? (buffers.graph.index.get(controller.selected) ?? -1) : -1
+    const on = controller.follow && controller.motion && controller.layoutMode === 'system'
+    if (!on || selI < 0 || selI * 3 + 2 >= pos.length || st.drag || !controls) {
+      st.followIndex = -1
+      return
+    }
+    const x = pos[selI * 3]!
+    const y = pos[selI * 3 + 1]!
+    const z = pos[selI * 3 + 2]!
+    if (st.followIndex === selI) {
+      const dx = x - st.followPos.x
+      const dy = y - st.followPos.y
+      const dz = z - st.followPos.z
+      const t = controls.getTarget(st.followTarget, true)
+      const near = Math.hypot(t.x - st.followPos.x, t.y - st.followPos.y, t.z - st.followPos.z) < Math.max(40, controls.distance * 0.6)
+      if (near && (dx !== 0 || dy !== 0 || dz !== 0)) shiftTarget(controls, dx, dy, dz, st.followCur, st.followTarget)
+    }
+    st.followIndex = selI
+    st.followPos.set(x, y, z)
+  }, -2)
+
   /* ---- per-frame: positions, visual state, projection, labels ---- */
   const m4 = useMemo(() => new Matrix4(), [])
   const v3 = useMemo(() => new Vector3(), [])
@@ -492,9 +686,10 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
     const pos = eng.positions
     if (pos.length < n * 3) return
 
-    for (const mat of [buffers.nodes.material, buffers.halos.material, buffers.edges.material, buffers.field.material]) {
-      ;(mat as ShaderMaterial).uniforms['uTime']!.value = st.time
-    }
+    ;(buffers.nodes.material as ShaderMaterial).uniforms['uTime']!.value = st.time
+    ;(buffers.halos.material as ShaderMaterial).uniforms['uTime']!.value = st.time
+    ;(buffers.edges.material as ShaderMaterial).uniforms['uTime']!.value = st.time
+    ;(buffers.field.material as ShaderMaterial).uniforms['uTime']!.value = st.time
 
     // Hover pick each frame (cheap; avoids doing it per pointermove event).
     let hoveredIndex = -1
@@ -522,12 +717,21 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
       gl.domElement.style.cursor = id ? 'pointer' : ''
     }
 
-    const versionChanged = controller.version !== st.lastVersion
-    const positionsChanged = eng.frame !== st.lastFrame
+    const fresh = st.buffers !== buffers
+    if (fresh) st.buffers = buffers
+    const versionChanged = fresh || controller.version !== st.lastVersion
+    const positionsChanged = fresh || eng.frame !== st.lastFrame
+    const ringsChanged = eng.ringsVersion !== buffers.ringsVersion
     st.lastVersion = controller.version
     st.lastFrame = eng.frame
 
     if (versionChanged) recolor(buffers, controller, st.neighbors, st.labelSet)
+    if (ringsChanged) {
+      syncRings(buffers, eng.rings)
+      buffers.ringsVersion = eng.ringsVersion
+    }
+    if (ringsChanged || versionChanged) styleRings(buffers, controller)
+    buffers.rings.visible = controller.layoutMode === 'system' && buffers.ringCount > 0
 
     const selI = controller.selected ? (g.index.get(controller.selected) ?? -1) : -1
     const hovI = st.hovered
@@ -565,6 +769,7 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
       // Tag field.
       updateField(buffers, controller)
     }
+    if ((positionsChanged || ringsChanged || versionChanged) && buffers.rings.visible) placeRings(buffers, pos)
 
     // Project to screen for picking + labels.
     camera.getWorldPosition(camPos)
@@ -594,6 +799,7 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
   if (!buffers) return null
   return (
     <>
+      <primitive object={buffers.rings} />
       <primitive object={buffers.edges} />
       <primitive object={buffers.nodes} />
       <primitive object={buffers.halos} />
@@ -610,6 +816,17 @@ const IDLE_GLOW = 1.35
 const NEIGHBOR_GLOW = 1.5
 const HOVER_GLOW = 1.7
 const SELECTED_GLOW = 1.9
+/** Folders by role: suns (root, mounts) and project stars bloom; planets read as solid bodies. */
+const SUN_GLOW = 2.2
+const STAR_GLOW = 2.4
+const PLANET_GLOW = 0.95
+/** Link edges fade in the system layout: structure is shown by the orbits there. */
+const EDGE_BASE = 0.36
+const EDGE_BASE_SYSTEM = 0.12
+const RING_ALPHA = 0.13
+const RING_ALPHA_DIMMED = 0.07
+const RING_ALPHA_SIBLINGS = 0.3
+const RING_ALPHA_SELECTED = 0.6
 
 function recolor(b: Buffers, c: BrainController, neighbors: Set<number>, labelSet: Set<number>): void {
   const g = b.graph
@@ -620,6 +837,7 @@ function recolor(b: Buffers, c: BrainController, neighbors: Set<number>, labelSe
   const selI = c.selected ? (g.index.get(c.selected) ?? -1) : -1
   const hovI = c.hovered ? (g.index.get(c.hovered) ?? -1) : -1
   const focusI = selI >= 0 ? selI : hovI
+  const system = c.layoutMode === 'system'
 
   neighbors.clear()
   if (focusI >= 0) {
@@ -632,6 +850,12 @@ function recolor(b: Buffers, c: BrainController, neighbors: Set<number>, labelSe
       const i = g.index.get(o)
       if (i !== undefined) neighbors.add(i)
     }
+    if (system) {
+      // The focus's own system: what it orbits and everything orbiting it.
+      const p = b.parentIdx[focusI]!
+      if (p >= 0) neighbors.add(p)
+      for (let k = b.childStart[focusI]!; k < b.childStart[focusI + 1]!; k++) neighbors.add(b.childList[k]!)
+    }
   }
 
   const highlight = c.highlight
@@ -642,23 +866,36 @@ function recolor(b: Buffers, c: BrainController, neighbors: Set<number>, labelSe
     base[i * 3] = col.r
     base[i * 3 + 1] = col.g
     base[i * 3 + 2] = col.b
+    const role = b.role[i]!
     let gl = IDLE_GLOW
-    if (i === selI) gl = SELECTED_GLOW
-    else if (i === hovI) gl = HOVER_GLOW
-    else if (neighbors.has(i)) gl = NEIGHBOR_GLOW
-    if (node.ghost) gl *= 0.55
+    let solid = 0
+    if (role === ROLE_FOLDER) {
+      solid = 1
+      gl = i === selI ? 1.2 : i === hovI ? 1.1 : neighbors.has(i) ? 1.02 : PLANET_GLOW
+    } else if (role >= 0) {
+      const star = role === ROLE_PROJECT ? STAR_GLOW : SUN_GLOW
+      gl = i === selI ? star + 0.4 : i === hovI ? star + 0.2 : star
+    } else {
+      if (i === selI) gl = SELECTED_GLOW
+      else if (i === hovI) gl = HOVER_GLOW
+      else if (neighbors.has(i)) gl = NEIGHBOR_GLOW
+      if (node.ghost) gl *= 0.55
+      b.labelColors[i] = node.ghost ? GHOST_COLOR : c.colorMode === 'area' ? AREA_COLORS[node.area] : '#e8ecff'
+    }
     let dim = 1
     if (hasHighlight && !highlight.has(node.id)) dim = 0.12
     else if (focusI >= 0 && i !== focusI && !neighbors.has(i)) dim = selI >= 0 ? 0.32 : 0.6
     colors[i * 3] = col.r
     colors[i * 3 + 1] = col.g
     colors[i * 3 + 2] = col.b
-    glow[i * 3] = gl
-    glow[i * 3 + 1] = dim
-    glow[i * 3 + 2] = (i * 0.618) % 6.283
+    glow[i * 4] = gl
+    glow[i * 4 + 1] = dim
+    glow[i * 4 + 2] = (i * 0.618) % 6.283
+    glow[i * 4 + 3] = solid
   }
   b.color.needsUpdate = true
   b.glow.needsUpdate = true
+  ;(b.edges.material as ShaderMaterial).uniforms['uBase']!.value = system ? EDGE_BASE_SYSTEM : EDGE_BASE
 
   // Edge colors + highlight.
   const ec = b.edgeColor.array as Float32Array
@@ -695,6 +932,63 @@ function recolor(b: Buffers, c: BrainController, neighbors: Set<number>, labelSe
   } else if (c.hubLabels) {
     for (const i of b.hubs) labelSet.add(i)
   }
+}
+
+/** Copy the worker's ring buffer (6 floats per ring) into the instance attributes. */
+function syncRings(b: Buffers, rings: Float32Array): void {
+  const radius = b.ringRadius.array as Float32Array
+  const quat = b.ringQuat.array as Float32Array
+  const total = Math.floor(rings.length / 6)
+  let k = 0
+  for (let r = 0; r < total && k < b.ringParent.length; r++) {
+    const p = rings[r * 6] ?? -1
+    if (!(p >= 0 && p < b.count)) continue
+    b.ringParent[k] = p
+    radius[k] = rings[r * 6 + 1] ?? 0
+    quat[k * 4] = rings[r * 6 + 2] ?? 0
+    quat[k * 4 + 1] = rings[r * 6 + 3] ?? 0
+    quat[k * 4 + 2] = rings[r * 6 + 4] ?? 0
+    quat[k * 4 + 3] = rings[r * 6 + 5] ?? 1
+    k++
+  }
+  b.ringCount = k
+  b.ringGeo.instanceCount = k
+  b.ringRadius.needsUpdate = true
+  b.ringQuat.needsUpdate = true
+}
+
+/** Ring tint (the parent's color, lifted toward white) and alpha: the selected node's system is brighter. */
+function styleRings(b: Buffers, c: BrainController): void {
+  const selI = c.selected ? (b.graph.index.get(c.selected) ?? -1) : -1
+  const selParent = selI >= 0 ? b.parentIdx[selI]! : -1
+  const color = b.ringColor.array as Float32Array
+  const alpha = b.ringAlpha.array as Float32Array
+  const base = b.baseColors
+  for (let k = 0; k < b.ringCount; k++) {
+    const p = b.ringParent[k]!
+    let a = RING_ALPHA
+    if (selI >= 0) a = p === selI ? RING_ALPHA_SELECTED : p === selParent ? RING_ALPHA_SIBLINGS : RING_ALPHA_DIMMED
+    alpha[k] = a
+    color[k * 3] = 0.45 + 0.55 * (base[p * 3] ?? 1)
+    color[k * 3 + 1] = 0.45 + 0.55 * (base[p * 3 + 1] ?? 1)
+    color[k * 3 + 2] = 0.45 + 0.55 * (base[p * 3 + 2] ?? 1)
+  }
+  b.ringColor.needsUpdate = true
+  b.ringAlpha.needsUpdate = true
+}
+
+/** Centre every ring on its parent's live position (only the used range is uploaded). */
+function placeRings(b: Buffers, pos: Float32Array): void {
+  const center = b.ringCenter.array as Float32Array
+  for (let k = 0; k < b.ringCount; k++) {
+    const p = b.ringParent[k]!
+    center[k * 3] = pos[p * 3] ?? 0
+    center[k * 3 + 1] = pos[p * 3 + 1] ?? 0
+    center[k * 3 + 2] = pos[p * 3 + 2] ?? 0
+  }
+  b.ringCenter.clearUpdateRanges()
+  b.ringCenter.addUpdateRange(0, b.ringCount * 3)
+  b.ringCenter.needsUpdate = true
 }
 
 const _centroid = new Vector3()
@@ -740,6 +1034,16 @@ function updateField(b: Buffers, c: BrainController): void {
 /* Labels                                                             */
 /* ------------------------------------------------------------------ */
 
+const LABEL_FONTS = [
+  '500 11px Inter, ui-sans-serif, system-ui, sans-serif',
+  '500 12px Inter, ui-sans-serif, system-ui, sans-serif',
+  '600 13px Inter, ui-sans-serif, system-ui, sans-serif',
+] as const
+/** Screen radius (px) above which a node gets a label: planets earlier than notes. */
+const LABEL_MIN_PX = 10
+const PLANET_LABEL_MIN_PX = 6
+const ZOOM_LABELS = 60
+
 function drawLabels(
   canvas: HTMLCanvasElement | null,
   b: Buffers,
@@ -769,7 +1073,8 @@ function drawLabels(
   const g = b.graph
   const highlight = c.highlight
 
-  const draw = (i: number, emphasis: number) => {
+  /** emphasis: 0 zoom-adaptive, 1 candidate, 2 hovered/selected. `always`: landmarks (root, mounts, project stars). */
+  const draw = (i: number, emphasis: 0 | 1 | 2, always = false) => {
     const depth = s[i * 4 + 2] ?? 2
     if (depth > 1 || depth < -1) return
     const x = s[i * 4] ?? 0
@@ -777,32 +1082,42 @@ function drawLabels(
     const r = s[i * 4 + 3] ?? 0
     if (x < -40 || x > width + 40 || y < -20 || y > height + 20) return
     const node = g.nodes[i]!
-    if (highlight && !highlight.has(node.id) && emphasis < 2) return
+    const filtered = highlight !== null && !highlight.has(node.id) && emphasis < 2
+    if (filtered && !always) return
     // Fade with distance (NDC depth close to 1 = far).
     const far = Math.min(1, Math.max(0, (depth - 0.985) / 0.015))
-    const alpha = emphasis >= 2 ? 1 : Math.max(0.18, 1 - far) * (emphasis === 1 ? 0.95 : 0.7)
-    const px = emphasis >= 2 ? 13 : emphasis === 1 ? 12 : 11
-    ctx.font = `${emphasis >= 2 ? 600 : 500} ${px}px Inter, ui-sans-serif, system-ui, sans-serif`
-    const label = node.ghost ? `+ ${node.title}` : node.title
-    const color = node.ghost ? GHOST_COLOR : c.colorMode === 'area' ? AREA_COLORS[node.area] : '#e8ecff'
+    let alpha = emphasis >= 2 ? 1 : Math.max(always ? 0.6 : 0.18, 1 - far) * (emphasis === 1 ? 0.95 : 0.7)
+    if (filtered) alpha *= 0.45
+    const label = b.labels[i] ?? node.title
+    ctx.font = LABEL_FONTS[emphasis]
     ctx.globalAlpha = alpha
     ctx.lineWidth = 3.5
     ctx.strokeStyle = 'rgba(4,5,13,0.85)'
     ctx.strokeText(label, x, y + r + 6)
-    ctx.fillStyle = emphasis >= 2 ? '#ffffff' : color
+    ctx.fillStyle = emphasis >= 2 ? '#ffffff' : (b.labelColors[i] ?? '#e8ecff')
     ctx.fillText(label, x, y + r + 6)
   }
 
-  // Zoom-adaptive: anything drawn large enough gets a label.
-  let extra = 0
-  for (let i = 0; i < b.count && extra < 60; i++) {
-    if (labelSet.has(i)) continue
-    if ((s[i * 4 + 3] ?? 0) > 10) {
+  // Zoom-adaptive: anything drawn large enough gets a label (planets sooner).
+  let notes = 0
+  let planets = 0
+  for (let i = 0; i < b.count; i++) {
+    if (labelSet.has(i) || i === selI || i === hovI) continue
+    const role = b.role[i]!
+    if (role >= 0 && role !== ROLE_FOLDER) continue // landmarks are drawn below
+    const px = s[i * 4 + 3] ?? 0
+    if (role === ROLE_FOLDER) {
+      if (px > PLANET_LABEL_MIN_PX && planets < ZOOM_LABELS) {
+        draw(i, 0)
+        planets++
+      }
+    } else if (px > LABEL_MIN_PX && notes < ZOOM_LABELS) {
       draw(i, 0)
-      extra++
+      notes++
     }
   }
-  for (const i of labelSet) if (i !== selI && i !== hovI) draw(i, 1)
+  for (const i of b.landmarks) if (!labelSet.has(i) && i !== selI && i !== hovI) draw(i, 1, true)
+  for (const i of labelSet) if (i !== selI && i !== hovI) draw(i, 1, b.role[i]! >= 0 && b.role[i] !== ROLE_FOLDER)
   if (hovI >= 0 && hovI !== selI) draw(hovI, 2)
   if (selI >= 0) draw(selI, 2)
   ctx.globalAlpha = 1

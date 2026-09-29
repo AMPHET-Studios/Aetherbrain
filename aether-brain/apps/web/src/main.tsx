@@ -20,7 +20,7 @@ const sources: VaultSource[] = [
   {
     id: 'demo',
     label: 'Open the demo vault',
-    description: '60 linked notes about drawing, game dev, graphics and knowledge work. Edits persist in this browser.',
+    description: '70 linked notes about drawing, game dev, graphics and knowledge work, with project folders as solar systems. Edits persist in this browser.',
     open: async () => useAether.getState().openVault(await createDemoVault()),
   },
   {

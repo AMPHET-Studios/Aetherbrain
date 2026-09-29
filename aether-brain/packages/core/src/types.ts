@@ -113,14 +113,59 @@ export interface ParsedNote {
   mtime?: number
 }
 
+/**
+ * What a graph node stands for. Notes and ghosts are the classic neurons;
+ * folder nodes only exist when the graph is built with folders (the "system"
+ * layout), where folders become stars and planets and notes orbit them.
+ */
+export type NodeKind = 'note' | 'ghost' | 'folder'
+
+/**
+ * Visual role of a folder node in the solar-system layout.
+ *  - root:    the vault itself (one per graph, id `folder:`)
+ *  - mount:   a top-level root folder in a multi-root vault (a drive such as D:\ or F:\)
+ *  - project: a folder bound to a project note — rendered as a star
+ *  - folder:  any other folder — a planet (or a moon, deeper down)
+ */
+export type FolderRole = 'root' | 'mount' | 'project' | 'folder'
+
+export interface FolderNodeInfo {
+  /** Vault path of the folder ('' = vault root). */
+  path: string
+  role: FolderRole
+  /** 0 = vault root; mounts are depth 1 in a multi-root vault. */
+  depth: number
+  /** Project note bound to this folder (the star's note), if any. */
+  projectId: NoteId | null
+  /** True when some ancestor folder is a project folder (its planets and moons). */
+  inProject: boolean
+  /** Direct subfolders that exist on disk (shown or not). */
+  childFolders: number
+  /** Direct subfolders that are not in the graph (collapsed or over the folder cap). */
+  hiddenFolders: number
+  /** Notes directly inside this folder. */
+  notes: number
+  /** Notes anywhere under this folder. */
+  totalNotes: number
+}
+
 export interface GraphNode {
   id: NoteId
   title: string
   area: Area
   type: NoteType
   tags: string[]
-  /** true for unresolved link targets (a note that should exist but doesn't). */
+  kind: NodeKind
+  /** true for unresolved link targets (a note that should exist but doesn't). Same as kind === 'ghost'. */
   ghost: boolean
+  /**
+   * Structural parent for the system layout: a folder node id (or, for a
+   * ghost, the first note that links to it). null for the vault root and for
+   * every node when the graph was built without folders.
+   */
+  parent: NoteId | null
+  /** Present on folder nodes only. */
+  folder?: FolderNodeInfo
   inDegree: number
   outDegree: number
   degree: number
@@ -151,6 +196,20 @@ export interface GraphData {
   orphans: NoteId[]
   tagCounts: Map<string, number>
   areaCounts: Map<Area, number>
+  /** Which folders the graph shows as nodes; null when built without folders. */
+  folderSelection: FolderSelection | null
+}
+
+/** Result of `selectFolders`: the folder nodes a system graph shows. */
+export interface FolderSelection {
+  /** Visible folder vault paths, always including '' (the root). */
+  visible: Set<string>
+  /** Direct subfolder counts on disk, per folder ('' included). */
+  childCount: Map<string, number>
+  /** Direct subfolders not visible, per visible folder. */
+  hidden: Map<string, number>
+  /** How many optional folders were dropped by maxFolders. */
+  dropped: number
 }
 
 export interface SearchHit {
@@ -163,7 +222,8 @@ export interface SearchHit {
   snippet: string
 }
 
-export type VaultChangeKind = 'add' | 'change' | 'unlink'
+/** File changes, plus folder creation/removal ('addDir' / 'unlinkDir', path = the folder). */
+export type VaultChangeKind = 'add' | 'change' | 'unlink' | 'addDir' | 'unlinkDir'
 
 export interface VaultChange {
   kind: VaultChangeKind
@@ -172,11 +232,25 @@ export interface VaultChange {
   mtime?: number
 }
 
+/** One folder on disk that is part of the vault. */
+export interface VaultRootInfo {
+  /** Absolute path on disk (e.g. `D:\` or `/home/me/notes`). */
+  path: string
+  /**
+   * Top-level vault folder this root appears under when the vault has several
+   * roots (`D` for `D:\`, else the folder name, de-duplicated). Unused ('') in
+   * a single-root vault, whose paths are relative to the root itself.
+   */
+  mount: string
+  /** Human label, e.g. `D:\` or `Notes`. */
+  label: string
+}
+
 /**
  * Anything that can act as a vault. Implemented by:
  *  - DemoVaultAdapter (bundled markdown, edits persisted in IndexedDB)
  *  - FsAccessVaultAdapter (browser File System Access API)
- *  - ElectronVaultAdapter (real folder on disk via IPC + chokidar)
+ *  - ElectronVaultAdapter (folders on disk via IPC; native recursive watch)
  */
 export interface VaultAdapter {
   readonly kind: 'demo' | 'fs-access' | 'electron' | 'memory'
@@ -187,8 +261,28 @@ export interface VaultAdapter {
   list(): Promise<VaultFile[]>
   read(path: string): Promise<string | null>
   write(path: string, content: string): Promise<void>
+  /**
+   * Create a NEW file: fails (an Error whose message contains `EEXIST`) when
+   * anything already exists at the path, including a file the vault ignores
+   * or, on case-insensitive disks, one whose name differs only in case. Use it
+   * for every new note so creating never overwrites. Optional: callers fall
+   * back to `read(path) === null` + `write` when an adapter lacks it.
+   */
+  create?(path: string, content: string): Promise<void>
   remove(path: string): Promise<void>
   rename(from: string, to: string): Promise<void>
   /** Subscribe to external changes. Returns an unsubscribe function. */
   watch(cb: (changes: VaultChange[]) => void): () => void
+  /**
+   * Roots on disk. More than one entry means a multi-root vault: every vault
+   * path then starts with the root's `mount` segment (`D/Projects/x.md`).
+   * Absent or one entry: paths are relative to the single root.
+   */
+  readonly roots?: VaultRootInfo[]
+  /** Every folder in the vault as vault paths (no trailing slash, root '' excluded). */
+  listFolders?(): Promise<string[]>
+  /** Create a folder (and any missing parents). Emits an 'addDir' change. */
+  createFolder?(path: string): Promise<void>
+  /** Show a file or folder in the OS file manager (desktop only). */
+  reveal?(path: string): Promise<void>
 }

@@ -2,291 +2,521 @@
  * Aether Brain — Electron main process.
  *
  * Responsibilities, and nothing more:
- *   - pick / remember a vault folder
- *   - read, write, rename, delete markdown files inside it (path-jailed)
- *   - watch it with chokidar and stream debounced change batches to the renderer
+ *   - remember the vault roots (one folder, or several such as whole drives)
+ *   - read, write, create, rename, delete markdown notes and create folders in them (FsVault, path-jailed)
+ *   - watch them (VaultWatcher) and stream debounced change batches to the renderer and the AI link
+ *   - run the AI link (the in-app MCP server on 127.0.0.1) when the user switches it on
  *
- * No network. No telemetry. The renderer is sandboxed with context isolation.
+ * No telemetry. The renderer is sandboxed with context isolation and makes no network requests.
  */
-import { app, BrowserWindow, dialog, ipcMain, shell, nativeTheme, session } from 'electron'
-import { watch, type FSWatcher } from 'chokidar'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, shell, nativeTheme, session } from 'electron'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { IPC, type VaultChangeDto, type VaultFileDto, type VaultInfo, type VaultProgressDto } from '../shared/ipc.js'
+import {
+  IPC,
+  type FolderListDto,
+  type VaultChangeDto,
+  type VaultFileDto,
+  type VaultInfo,
+  type VaultProgressDto,
+} from '../shared/ipc.js'
+import { FsVault, within } from './fsvault.js'
+import { VaultWatcher } from './watcher.js'
+import { AiLinkHost, aiSettings, cleanPatch, type AiLinkSettings } from './ai-link.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const isDev = !!process.env['VITE_DEV_SERVER_URL']
 const settingsFile = () => path.join(app.getPath('userData'), 'settings.json')
 
-/** First non-flag CLI argument, if it is a directory: `aether-brain ~/notes`. */
-function cliVault(): string | null {
-  const args = process.argv.slice(app.isPackaged ? 1 : 2).filter((a) => !a.startsWith('-'))
-  const candidate = args[0]
-  return candidate ? path.resolve(candidate) : null
-}
+/* ------------------------------------------------------------------ */
+/* Settings                                                           */
+/* ------------------------------------------------------------------ */
 
 interface Settings {
+  /** Vault roots to reopen, in order (their order decides the mount names). */
+  roots?: string[]
+  /** v0.2: the one remembered vault folder (migrated into `roots`). */
   lastVault?: string
+  /** Extra folder names skipped while scanning. */
+  exclude?: string[]
+  ai?: Partial<AiLinkSettings>
 }
 
-async function readSettings(): Promise<Settings> {
+let settings: Settings = {}
+let saving: Promise<void> = Promise.resolve()
+
+const isString = (x: unknown): x is string => typeof x === 'string' && x.length > 0
+
+/** settings.json, with a v0.2 `lastVault` folded into `roots`. */
+async function loadSettings(): Promise<{ settings: Settings; migrated: boolean }> {
+  let raw: Record<string, unknown> = {}
   try {
-    return JSON.parse(await fs.readFile(settingsFile(), 'utf8')) as Settings
+    const parsed: unknown = JSON.parse(await fs.readFile(settingsFile(), 'utf8'))
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) raw = parsed as Record<string, unknown>
   } catch {
-    return {}
+    /* first run or unreadable: defaults */
   }
+  const { lastVault, roots, exclude, ...rest } = raw
+  const out: Settings = { ...rest }
+  const list = Array.isArray(roots) ? roots.filter(isString) : []
+  if (!list.length && isString(lastVault)) list.push(lastVault)
+  if (list.length) out.roots = list
+  if (Array.isArray(exclude)) out.exclude = cleanNames(exclude)
+  return { settings: out, migrated: lastVault !== undefined }
 }
-async function writeSettings(patch: Settings): Promise<void> {
-  const next = { ...(await readSettings()), ...patch }
-  await fs.mkdir(path.dirname(settingsFile()), { recursive: true })
-  await fs.writeFile(settingsFile(), JSON.stringify(next, null, 2))
+
+/** Write the whole settings object (atomic, one write at a time). */
+function saveSettings(): Promise<void> {
+  const text = JSON.stringify(settings, null, 2)
+  saving = saving
+    .then(async () => {
+      const file = settingsFile()
+      await fs.mkdir(path.dirname(file), { recursive: true })
+      const tmp = `${file}.tmp`
+      await fs.writeFile(tmp, text)
+      await fs.rename(tmp, file)
+    })
+    .catch((err: unknown) => console.warn('[aether] could not save settings', err))
+  return saving
+}
+
+/** Folder names to skip: trimmed, no paths, no duplicates (case-insensitive). */
+function cleanNames(names: unknown[]): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const n of names) {
+    const name = String(n).trim()
+    if (!name || /[\\/]/.test(name) || seen.has(name.toLowerCase())) continue
+    seen.add(name.toLowerCase())
+    out.push(name)
+  }
+  return out
+}
+
+/**
+ * A root as typed on the command line or in AETHER_VAULT, made absolute. On
+ * Windows, stray quotes go (a shortcut argument `"D:\"` reaches argv as `D:"`)
+ * and a bare `D:` means the drive root, not the drive's current folder that
+ * path.resolve would use (cmd.exe hands it down).
+ */
+function rootArg(raw: string): string | null {
+  let s = raw.trim()
+  if (process.platform === 'win32') {
+    s = s.replace(/^"+|"+$/g, '')
+    if (/^[A-Za-z]:$/.test(s)) s += '\\'
+  }
+  return s ? path.resolve(s) : null
+}
+
+/** Every non-flag CLI argument is a root: `aether-brain D:\ F:\`. */
+function cliRoots(): string[] {
+  const args = process.argv.slice(1).filter((a) => a && !a.startsWith('-'))
+  // `electron [flags] <app> [roots]` (dev): the first non-flag argument is the app itself.
+  if (process.defaultApp) args.shift()
+  return args.map(rootArg).filter(isString)
+}
+
+/** AETHER_VAULT, split on the platform's path list separator (`;` on Windows, `:` elsewhere). */
+function envRoots(): string[] {
+  return (process.env['AETHER_VAULT'] ?? '')
+    .split(path.delimiter)
+    .map(rootArg)
+    .filter(isString)
 }
 
 /* ------------------------------------------------------------------ */
 /* Vault                                                              */
 /* ------------------------------------------------------------------ */
 
-class Vault {
-  root: string
-  private watcher: FSWatcher | null = null
-  private pending = new Map<string, VaultChangeDto>()
-  private flushTimer: NodeJS.Timeout | null = null
-  /** Content we just wrote, keyed by relative path, to swallow watcher echoes. */
-  private selfWrites = new Map<string, { content: string; t: number }>()
-  private sink: ((changes: VaultChangeDto[]) => void) | null = null
+let vault: FsVault | null = null
+let watcher: VaultWatcher | null = null
+/** Bumped by every open and every read, so a slow scan never installs a stale watcher. */
+let generation = 0
+/** Set once a vault opened in this run; from then on the remembered roots win over CLI / AETHER_VAULT. */
+let opened = false
+/**
+ * Changes for the AI link held while a read is in progress (the watcher starts
+ * before the scan); handed over after the snapshot, in order.
+ */
+let aiHeld: VaultChangeDto[][] | null = null
+let win: BrowserWindow | null = null
+let ai: AiLinkHost | null = null
 
-  constructor(root: string) {
-    this.root = path.resolve(root)
-  }
-
-  get info(): VaultInfo {
-    return { root: this.root, name: path.basename(this.root) }
-  }
-
-  /** Vault-relative posix path → absolute path, refusing anything outside the root. */
-  private abs(rel: string): string {
-    const clean = rel.replace(/\\/g, '/').replace(/^\/+/, '')
-    const full = path.resolve(this.root, ...clean.split('/'))
-    const jail = this.root.endsWith(path.sep) ? this.root : this.root + path.sep
-    if (full !== this.root && !full.startsWith(jail)) throw new Error(`Path escapes vault: ${rel}`)
-    return full
-  }
-
-  private rel(absPath: string): string {
-    return path.relative(this.root, absPath).split(path.sep).join('/')
-  }
-
-  /**
-   * Folders that never hold notes but routinely hold tens of thousands of
-   * files (build output, engine caches, dependency trees). Skipping them keeps
-   * startup fast even when the vault is a whole project folder.
-   */
-  static readonly HEAVY_DIRS = new Set([
-    'node_modules', '__macosx', '__pycache__', 'venv', 'env', 'dist', 'build', 'out', 'target', 'bin', 'obj',
-    // Unreal / Unity / game projects
-    'intermediate', 'saved', 'deriveddatacache', 'binaries', 'library', 'temp', 'logs',
-    // misc caches
-    'cache', 'caches', 'tmp', 'coverage', 'bower_components', 'vendor',
-  ])
-
-  static isIgnored(rel: string): boolean {
-    return rel.split('/').some((seg) => seg.startsWith('.') || Vault.HEAVY_DIRS.has(seg.toLowerCase()))
-  }
-
-  /** Called with running counts while list() walks the vault (for a progress UI). */
-  onProgress: ((p: VaultProgressDto) => void) | null = null
-
-  async list(): Promise<VaultFileDto[]> {
-    const out: VaultFileDto[] = []
-    const files: { full: string; rel: string }[] = []
-    let dirs = 0
-    let lastReport = 0
-    const report = (done: boolean) => {
-      const now = Date.now()
-      if (!done && now - lastReport < 120) return
-      lastReport = now
-      this.onProgress?.({ phase: done ? 'done' : files.length ? 'reading' : 'scanning', files: out.length, found: files.length, dirs, done })
-    }
-    // Pass 1: find every markdown file (directory walk, breadth first, no reads yet).
-    const queue: string[] = [this.root]
-    while (queue.length) {
-      const dir = queue.shift()!
-      let entries: import('node:fs').Dirent[]
-      try {
-        entries = await fs.readdir(dir, { withFileTypes: true })
-      } catch {
-        continue
-      }
-      dirs++
-      for (const e of entries) {
-        const full = path.join(dir, e.name)
-        const rel = this.rel(full)
-        if (Vault.isIgnored(rel)) continue
-        if (e.isDirectory()) queue.push(full)
-        else if (e.isFile() && /\.md$/i.test(e.name)) files.push({ full, rel })
-      }
-      if (dirs % 50 === 0) report(false)
-    }
-    // Pass 2: read with bounded concurrency (SSD-friendly, keeps the event loop responsive).
-    const CONCURRENCY = 32
-    let next = 0
-    const worker = async () => {
-      while (next < files.length) {
-        const f = files[next++]!
-        try {
-          const [content, st] = await Promise.all([fs.readFile(f.full, 'utf8'), fs.stat(f.full)])
-          out.push({ path: f.rel, content, mtime: st.mtimeMs })
-        } catch {
-          /* unreadable file: skip */
-        }
-        if (out.length % 25 === 0) report(false)
-      }
-    }
-    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, Math.max(1, files.length)) }, worker))
-    report(true)
-    return out
-  }
-
-  async read(rel: string): Promise<string | null> {
-    try {
-      return await fs.readFile(this.abs(rel), 'utf8')
-    } catch {
-      return null
-    }
-  }
-
-  async write(rel: string, content: string): Promise<void> {
-    const full = this.abs(rel)
-    await fs.mkdir(path.dirname(full), { recursive: true })
-    // Atomic-ish: write to a temp sibling then rename, so a crash never leaves
-    // a half-written note. Editors like Obsidian tolerate this pattern.
-    const tmp = `${full}.aether-tmp`
-    await fs.writeFile(tmp, content, 'utf8')
-    await fs.rename(tmp, full)
-    this.selfWrites.set(rel.replace(/\\/g, '/'), { content, t: Date.now() })
-  }
-
-  async remove(rel: string): Promise<void> {
-    await fs.rm(this.abs(rel), { force: true })
-    this.selfWrites.set(rel, { content: '\u0000deleted', t: Date.now() })
-  }
-
-  async rename(from: string, to: string): Promise<void> {
-    const a = this.abs(from)
-    const b = this.abs(to)
-    await fs.mkdir(path.dirname(b), { recursive: true })
-    await fs.rename(a, b)
-    const content = await fs.readFile(b, 'utf8')
-    this.selfWrites.set(from, { content: '\u0000deleted', t: Date.now() })
-    this.selfWrites.set(to, { content, t: Date.now() })
-  }
-
-  startWatching(sink: (changes: VaultChangeDto[]) => void): void {
-    this.stopWatching()
-    this.sink = sink
-    this.watcher = watch(this.root, {
-      ignoreInitial: true,
-      ignored: (p: string, stats?: import('node:fs').Stats) => {
-        const rel = this.rel(p)
-        if (!rel) return false
-        if (Vault.isIgnored(rel)) return true
-        if (stats?.isFile() && !/\.md$/i.test(p)) return true
-        return false
-      },
-      awaitWriteFinish: { stabilityThreshold: 150, pollInterval: 50 },
-      persistent: true,
-    })
-    const queue = (kind: VaultChangeDto['kind']) => (p: string) => {
-      const rel = this.rel(p)
-      if (!/\.md$/i.test(rel) || Vault.isIgnored(rel)) return
-      this.pending.set(rel, { kind, path: rel })
-      if (this.flushTimer) clearTimeout(this.flushTimer)
-      this.flushTimer = setTimeout(() => void this.flush(), 250)
-    }
-    this.watcher.on('add', queue('add')).on('change', queue('change')).on('unlink', queue('unlink'))
-    this.watcher.on('error', (err) => console.warn('[aether] watcher error', err))
-  }
-
-  private async flush(): Promise<void> {
-    const batch = [...this.pending.values()]
-    this.pending.clear()
-    const out: VaultChangeDto[] = []
-    const now = Date.now()
-    for (const c of batch) {
-      const self = this.selfWrites.get(c.path)
-      if (c.kind === 'unlink') {
-        if (self && self.content === '\u0000deleted' && now - self.t < 3000) continue
-        out.push(c)
-        continue
-      }
-      try {
-        const full = this.abs(c.path)
-        const [content, st] = await Promise.all([fs.readFile(full, 'utf8'), fs.stat(full)])
-        if (self && self.content === content && now - self.t < 3000) continue
-        out.push({ kind: c.kind, path: c.path, content, mtime: st.mtimeMs })
-      } catch {
-        out.push({ kind: 'unlink', path: c.path })
-      }
-    }
-    for (const [k, v] of this.selfWrites) if (now - v.t > 5000) this.selfWrites.delete(k)
-    if (out.length && this.sink) this.sink(out)
-  }
-
-  stopWatching(): void {
-    void this.watcher?.close()
-    this.watcher = null
-    if (this.flushTimer) clearTimeout(this.flushTimer)
-    this.pending.clear()
-  }
+/** Changes for the AI link's brain: held during a read, else applied now. */
+function toAi(changes: VaultChangeDto[]): void {
+  if (aiHeld) aiHeld.push(changes)
+  else ai?.applyExternal(changes)
 }
 
-/* ------------------------------------------------------------------ */
-/* App                                                                */
-/* ------------------------------------------------------------------ */
+/** Comparable form of an absolute path (Windows paths are case-insensitive). */
+const rootKey = (p: string): string => (process.platform === 'win32' ? path.resolve(p).toLowerCase() : path.resolve(p))
 
-let vault: Vault | null = null
-let win: BrowserWindow | null = null
+function uniqueRoots(input: string[]): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const r of input.filter(isString).map((x) => path.resolve(x))) {
+    if (seen.has(rootKey(r))) continue
+    seen.add(rootKey(r))
+    out.push(r)
+  }
+  return out
+}
 
-function requireVault(): Vault {
+async function isDir(p: string): Promise<boolean> {
+  const check = fs.stat(p).then(
+    (st) => st.isDirectory(),
+    () => false,
+  )
+  return within(check, 5000, false)
+}
+
+function toRenderer(channel: string, payload: unknown): void {
+  if (win && !win.isDestroyed()) win.webContents.send(channel, payload)
+}
+
+function requireVault(): FsVault {
   if (!vault) throw new Error('No vault open')
   return vault
 }
 
-async function openVault(root: string): Promise<VaultInfo> {
-  vault?.stopWatching()
-  vault = new Vault(root)
-  await fs.access(vault.root)
-  vault.onProgress = (p) => win?.webContents.send(IPC.progress, p)
-  vault.startWatching((changes) => win?.webContents.send(IPC.changes, changes))
-  await writeSettings({ lastVault: vault.root })
-  return vault.info
+function vaultInfo(v: FsVault): VaultInfo {
+  return {
+    root: v.roots[0]!.abs,
+    // One root: its folder name (or `D:\`); several: `D:\ + F:\`.
+    name: v.roots.map((r) => r.label).join(' + '),
+    roots: v.roots.map((r) => ({ path: r.abs, mount: r.mount, label: r.label })),
+    exclude: [...v.exclude],
+  }
 }
+
+/** Roots the vault is made of, including remembered ones that are unreachable right now (an unplugged drive). */
+function rememberedRoots(): string[] {
+  if (!vault) return []
+  return settings.roots?.length ? [...settings.roots] : vault.roots.map((r) => r.abs)
+}
+
+/**
+ * Open one or more folders as the vault. Folders that cannot be reached are
+ * skipped (they stay remembered, so an unplugged drive comes back next time);
+ * it fails only when none can be opened. Reading happens in listFiles.
+ */
+async function openVault(input: string[]): Promise<VaultInfo> {
+  const wanted = uniqueRoots(input)
+  if (!wanted.length) throw new Error('No folder to open')
+  const ok = (await Promise.all(wanted.map(async (r) => ((await isDir(r)) ? r : null)))).filter(isString)
+  if (!ok.length) {
+    throw new Error(
+      wanted.length === 1
+        ? `Cannot open ${wanted[0]}: the folder is missing or not reachable.`
+        : `None of these folders can be opened: ${wanted.join(', ')}`,
+    )
+  }
+  const next = new FsVault(ok, { exclude: settings.exclude ?? [] })
+  generation++
+  watcher?.stop()
+  watcher = null
+  aiHeld = null
+  vault = next
+  opened = true
+  settings.roots = wanted
+  await saveSettings()
+  // The AI link picks the vault up again once it has been read (listFiles).
+  void ai?.setVault(null)
+  return vaultInfo(next)
+}
+
+/**
+ * Scan + read every note with progress events. The watcher (re)starts before
+ * the scan and buffers what it sees until the scan is done (seed), so a note
+ * or folder created in an already-walked folder while a whole drive is
+ * scanned is reported too, as is an edit made while the notes are read (the
+ * renderer keeps those until its load is done; the AI link gets them after
+ * the snapshot).
+ */
+async function listFiles(): Promise<VaultFileDto[]> {
+  const v = requireVault()
+  const gen = ++generation
+  const latest = () => gen === generation && v === vault
+  const progress = (p: VaultProgressDto) => {
+    if (gen === generation) toRenderer(IPC.progress, p)
+  }
+  // A fresh hold: the snapshot below supersedes anything an earlier read's watcher reported.
+  aiHeld = []
+  try {
+    progress({ phase: 'scanning', files: 0, found: 0, dirs: 0, done: false })
+    const w = await startWatcher(v)
+    const scan = await v
+      .scan((p) => progress({ phase: 'scanning', files: 0, found: p.found, dirs: p.dirs, done: false }))
+      .catch((err: unknown) => {
+        // Nothing to compare its events against: stop it.
+        if (watcher === w) {
+          w.stop()
+          watcher = null
+        }
+        throw err
+      })
+    if (latest()) w.seed({ files: scan.files.map((f) => f.path), folders: scan.folders })
+    const found = scan.files.length
+    const files = await v.readAll(scan.files, (done) => progress({ phase: 'reading', files: done, found, dirs: scan.dirs, done: false }))
+    progress({ phase: 'done', files: files.length, found, dirs: scan.dirs, done: true })
+    if (latest()) void ai?.setVault({ roots: v.roots.map((r) => r.abs), exclude: [...v.exclude] }, { files, folders: scan.folders })
+    return files
+  } finally {
+    // setVault above already set the link's target, so these land after the snapshot.
+    if (latest()) {
+      const held = aiHeld ?? []
+      aiHeld = null
+      for (const changes of held) ai?.applyExternal(changes)
+    }
+  }
+}
+
+/** A new watcher for `v`, watching (once this resolves) but holding its events until seed() (the scan). */
+async function startWatcher(v: FsVault): Promise<VaultWatcher> {
+  watcher?.stop()
+  const w = new VaultWatcher(v, null, (changes) => {
+    toRenderer(IPC.changes, changes)
+    toAi(changes)
+  })
+  watcher = w
+  await w.start()
+  return w
+}
+
+/** The renderer only ever reads notes; anything else in the roots (whole drives) stays out of reach. */
+async function readNote(p: unknown): Promise<string | null> {
+  const v = requireVault()
+  const rel = String(p)
+  return /\.md$/i.test(rel) ? v.read(rel) : null
+}
+
+/** The renderer only ever writes markdown notes; refuse anything else (the roots can be whole drives). */
+function notePath(p: unknown): string {
+  const s = String(p)
+  if (!/\.md$/i.test(s)) throw new Error(`Only markdown notes can be written: ${s}`)
+  return s
+}
+
+async function writeNote(p: unknown, content: unknown): Promise<void> {
+  const v = requireVault()
+  const rel = notePath(p)
+  const text = String(content)
+  const existed = (await v.stat(rel)) !== null
+  watcher?.noteSelfWrite(rel, text)
+  await v.write(rel, text)
+  // Our own writes are swallowed by the watcher, so the AI link hears about them here.
+  toAi([{ kind: existed ? 'change' : 'add', path: rel, content: text, mtime: Date.now() }])
+}
+
+/**
+ * A new note: never replaces anything at the path (a note the renderer has
+ * not loaded, ignored boilerplate, a case variant). Rejects with a message
+ * containing EEXIST; the renderer then tries the next free name.
+ */
+async function createNote(p: unknown, content: unknown): Promise<void> {
+  const v = requireVault()
+  const rel = notePath(p)
+  const text = String(content)
+  watcher?.noteSelfWrite(rel, text)
+  try {
+    await v.create(rel, text)
+  } catch (err) {
+    // Whatever is there is not ours: report its changes as usual.
+    watcher?.forgetSelfWrite(rel, text)
+    throw err
+  }
+  toAi([{ kind: 'add', path: rel, content: text, mtime: Date.now() }])
+}
+
+async function deleteNote(p: unknown): Promise<void> {
+  const v = requireVault()
+  const rel = notePath(p)
+  watcher?.noteSelfWrite(rel, null)
+  await v.remove(rel)
+  toAi([{ kind: 'unlink', path: rel }])
+}
+
+async function renameNote(from: unknown, to: unknown): Promise<void> {
+  const v = requireVault()
+  const a = notePath(from)
+  const b = notePath(to)
+  const content = await v.read(a)
+  watcher?.noteSelfWrite(a, null)
+  if (content !== null) watcher?.noteSelfWrite(b, content)
+  await v.rename(a, b)
+  const changes: VaultChangeDto[] = [{ kind: 'unlink', path: a }]
+  if (content !== null) changes.push({ kind: 'add', path: b, content, mtime: Date.now() })
+  toAi(changes)
+}
+
+async function createFolder(p: unknown): Promise<void> {
+  const v = requireVault()
+  const rel = String(p)
+  await v.mkdir(rel)
+  // The watcher reports the new folder to the renderer; the AI link hears about it right away.
+  const canonical = v.toVault(v.abs(rel))
+  if (canonical) toAi([{ kind: 'addDir', path: canonical }])
+}
+
+async function reveal(p: unknown): Promise<void> {
+  const v = requireVault()
+  const rel = String(p)
+  if (!(await v.stat(rel))) throw new Error(`Not in the vault: ${rel}`)
+  shell.showItemInFolder(v.abs(rel))
+}
+
+/** OS folder picker; null when cancelled. */
+async function chooseFolder(title: string, message: string): Promise<string | null> {
+  const opts: Electron.OpenDialogOptions = { title, message, properties: ['openDirectory', 'createDirectory'] }
+  const res = win ? await dialog.showOpenDialog(win, opts) : await dialog.showOpenDialog(opts)
+  const dir = res.filePaths[0]
+  return res.canceled || !dir ? null : dir
+}
+
+/** Add a folder (or a whole drive) as another root and reopen; opens it alone when no vault is open. */
+async function addRootPath(p: unknown): Promise<VaultInfo> {
+  const abs = path.resolve(String(p))
+  if (!(await isDir(abs))) throw new Error(`Cannot add ${abs}: the folder is missing or not reachable.`)
+  const base = rememberedRoots()
+  if (vault && base.some((r) => rootKey(r) === rootKey(abs))) return vaultInfo(vault)
+  return openVault([...base, abs])
+}
+
+async function removeRoot(p: unknown): Promise<VaultInfo> {
+  const v = requireVault()
+  const key = rootKey(String(p))
+  const remembered = rememberedRoots()
+  const rest = remembered.filter((r) => rootKey(r) !== key)
+  if (!v.roots.some((r) => rootKey(r.abs) === key)) {
+    if (rest.length === remembered.length) throw new Error(`Not a folder of this vault: ${String(p)}`)
+    // Remembered but not reachable (a drive that is gone): forget it, nothing to reopen.
+    settings.roots = rest
+    await saveSettings()
+    return vaultInfo(v)
+  }
+  if (v.roots.length <= 1) throw new Error('A vault needs at least one folder. Add another one before removing this.')
+  return openVault(rest)
+}
+
+async function setExclude(names: unknown): Promise<VaultInfo> {
+  requireVault()
+  settings.exclude = cleanNames(Array.isArray(names) ? names : [])
+  await saveSettings()
+  return openVault(rememberedRoots())
+}
+
+/** Drive roots on Windows (`C:\`, `D:\`, …) that answer within a moment; empty elsewhere. */
+async function listDrives(): Promise<string[]> {
+  if (process.platform !== 'win32') return []
+  const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('')
+  const probe = async (l: string): Promise<string | null> => {
+    const root = `${l}:\\`
+    const ok = await within(
+      fs.access(root).then(
+        () => true,
+        () => false,
+      ),
+      1500,
+      false,
+    )
+    return ok ? root : null
+  }
+  return (await Promise.all(letters.map(probe))).filter(isString)
+}
+
+/* ------------------------------------------------------------------ */
+/* AI link                                                            */
+/* ------------------------------------------------------------------ */
+
+function createAiLink(): AiLinkHost {
+  // Built by `pnpm build:mcp` next to dist/main; asar-unpacked in the packaged app so
+  // Claude Desktop can run the same file with this executable (ELECTRON_RUN_AS_NODE=1).
+  const devBundle = path.join(__dirname, '..', 'mcp', 'aether-mcp.mjs')
+  const serverScript = app.isPackaged
+    ? path.join(process.resourcesPath, 'app.asar.unpacked', 'dist', 'mcp', 'aether-mcp.mjs')
+    : devBundle
+  const initial = aiSettings(settings.ai)
+  if (JSON.stringify(initial) !== JSON.stringify(settings.ai)) {
+    // First run (or a damaged entry): persist the generated token so URLs stay stable.
+    settings.ai = initial
+    void saveSettings()
+  }
+  return new AiLinkHost({
+    settings: initial,
+    save: (s) => {
+      settings.ai = s
+      return saveSettings()
+    },
+    onActivity: (a) => toRenderer(IPC.aiActivity, a),
+    currentVault: () => (vault ? { roots: vault.roots.map((r) => r.abs), exclude: [...vault.exclude] } : null),
+    // Packaged: import the real unpacked file, the one the client configs point at.
+    bundlePath: app.isPackaged ? serverScript : devBundle,
+    serverScript,
+    execPath: process.execPath,
+    portable: !!process.env['PORTABLE_EXECUTABLE_DIR'],
+  })
+}
+
+function requireAi(): AiLinkHost {
+  if (!ai) throw new Error('The AI link is not ready yet')
+  return ai
+}
+
+/* ------------------------------------------------------------------ */
+/* IPC                                                                */
+/* ------------------------------------------------------------------ */
 
 function registerIpc(): void {
   ipcMain.handle(IPC.pick, async (): Promise<VaultInfo | null> => {
-    const res = await dialog.showOpenDialog({
-      title: 'Choose your vault folder',
-      message: 'Pick a folder of markdown notes. Aether Brain reads and writes .md files in place.',
-      properties: ['openDirectory', 'createDirectory'],
-    })
-    const dir = res.filePaths[0]
-    if (res.canceled || !dir) return null
-    return openVault(dir)
+    const dir = await chooseFolder(
+      'Choose your vault folder',
+      'Pick a folder of markdown notes. Aether Brain reads and writes .md files in place.',
+    )
+    return dir ? openVault([dir]) : null
   })
-  ipcMain.handle(IPC.open, (_e, root: string) => openVault(String(root)))
-  // `aether-brain /path/to/vault` or AETHER_VAULT=/path wins over the remembered vault.
-  ipcMain.handle(IPC.last, async () => cliVault() ?? process.env['AETHER_VAULT'] ?? (await readSettings()).lastVault ?? null)
-  ipcMain.handle(IPC.list, () => requireVault().list())
-  ipcMain.handle(IPC.read, (_e, p: string) => requireVault().read(String(p)))
-  ipcMain.handle(IPC.write, (_e, p: string, content: string) => requireVault().write(String(p), String(content)))
-  ipcMain.handle(IPC.delete, (_e, p: string) => requireVault().remove(String(p)))
-  ipcMain.handle(IPC.rename, (_e, a: string, b: string) => requireVault().rename(String(a), String(b)))
-  ipcMain.handle(IPC.reveal, (_e, p: string) => {
-    const v = requireVault()
-    shell.showItemInFolder(path.resolve(v.root, ...String(p).split('/')))
+  ipcMain.handle(IPC.open, (_e, roots: unknown) => openVault(Array.isArray(roots) ? roots.map(String) : [String(roots)]))
+  // At launch `aether-brain D:\ F:\` or AETHER_VAULT wins over the remembered roots. Once a vault
+  // is open the remembered set is the truth: roots added or removed since then (the vault folders
+  // panel lists remembered roots it could not open) and a reloaded window keep them.
+  ipcMain.handle(IPC.last, (): string[] | null => {
+    if (!opened) {
+      const cli = cliRoots()
+      if (cli.length) return cli
+      const env = envRoots()
+      if (env.length) return env
+    }
+    return settings.roots?.length ? [...settings.roots] : null
   })
+  ipcMain.handle(IPC.info, (): VaultInfo | null => (vault ? vaultInfo(vault) : null))
+  ipcMain.handle(IPC.addRoot, async (): Promise<VaultInfo | null> => {
+    const dir = await chooseFolder('Add a folder to the vault', 'Its folders become planets in the brain, next to the ones already there.')
+    return dir ? addRootPath(dir) : null
+  })
+  ipcMain.handle(IPC.addRootPath, (_e, p: unknown) => addRootPath(p))
+  ipcMain.handle(IPC.removeRoot, (_e, p: unknown) => removeRoot(p))
+  ipcMain.handle(IPC.setExclude, (_e, names: unknown) => setExclude(names))
+  ipcMain.handle(IPC.drives, () => listDrives())
+  ipcMain.handle(IPC.list, () => listFiles())
+  ipcMain.handle(IPC.folders, (): FolderListDto => {
+    const scan = requireVault().lastScan
+    return { folders: scan ? [...scan.folders] : [], truncated: scan?.truncated ?? false }
+  })
+  ipcMain.handle(IPC.read, (_e, p: unknown) => readNote(p))
+  ipcMain.handle(IPC.write, (_e, p: unknown, content: unknown) => writeNote(p, content))
+  ipcMain.handle(IPC.create, (_e, p: unknown, content: unknown) => createNote(p, content))
+  ipcMain.handle(IPC.delete, (_e, p: unknown) => deleteNote(p))
+  ipcMain.handle(IPC.rename, (_e, a: unknown, b: unknown) => renameNote(a, b))
+  ipcMain.handle(IPC.mkdir, (_e, p: unknown) => createFolder(p))
+  ipcMain.handle(IPC.reveal, (_e, p: unknown) => reveal(p))
+  ipcMain.handle(IPC.aiStatus, () => requireAi().status())
+  ipcMain.handle(IPC.aiConfigure, (_e, patch: unknown) => requireAi().configure(cleanPatch(patch)))
+  ipcMain.handle(IPC.copy, (_e, text: unknown) => clipboard.writeText(String(text)))
 }
+
+/* ------------------------------------------------------------------ */
+/* Window                                                             */
+/* ------------------------------------------------------------------ */
 
 function createWindow(): void {
   nativeTheme.themeSource = 'dark'
@@ -334,16 +564,28 @@ function createWindow(): void {
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
 })
+/** Set once settings are loaded and IPC is registered (macOS can fire `activate` before that). */
+let started = false
 app.on('activate', () => {
-  if (BrowserWindow.getAllWindows().length === 0) createWindow()
+  if (started && BrowserWindow.getAllWindows().length === 0) createWindow()
+})
+app.on('before-quit', () => {
+  watcher?.stop()
+  watcher = null
+  void ai?.stop()
 })
 
-void app.whenReady().then(() => {
+void app.whenReady().then(async () => {
   // Belt and braces: no permission prompts, no outbound requests from the renderer.
   session.defaultSession.setPermissionRequestHandler((_wc, _perm, cb) => cb(false))
   if (!isDev) {
     session.defaultSession.webRequest.onBeforeRequest({ urls: ['http://*/*', 'https://*/*'] }, (_d, cb) => cb({ cancel: true }))
   }
+  const loaded = await loadSettings()
+  settings = loaded.settings
+  if (loaded.migrated) void saveSettings()
+  ai = createAiLink()
   registerIpc()
   createWindow()
+  started = true
 })

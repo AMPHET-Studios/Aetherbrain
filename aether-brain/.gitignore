@@ -8,8 +8,12 @@ out/
 .env
 .env.*
 !.env.example
+# Renderer CSP fragments for the desktop build (no secrets): must be in the repo so CI builds fill them in.
+!apps/desktop/.env.development
+!apps/desktop/.env.production
 coverage/
 test-results/
 playwright-report/
 .aether-user-settings.json
 release/
+.vitest/

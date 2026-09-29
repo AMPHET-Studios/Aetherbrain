@@ -1,7 +1,8 @@
 name: Desktop builds
 
 # Builds the Aether Brain desktop app installers.
-#   - On pull requests touching the app: Windows build only, downloadable as a run artifact.
+#   - On pull requests touching the app: Windows build only, downloadable as a run artifact
+#     (installer, portable .exe and the Claude Desktop extension aether-brain-<version>.mcpb).
 #   - Manually (Actions → "Desktop builds" → Run workflow): all three platforms. Fill in the
 #     "tag" input (e.g. v0.1.0) to also create that tag on main and publish a GitHub Release
 #     with the installers attached.
@@ -77,6 +78,7 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Test + typecheck
         run: |
+          pnpm --filter @aether/desktop build:mcp
           pnpm test
           pnpm typecheck
       - name: Package
@@ -86,17 +88,28 @@ jobs:
       - name: List artifacts
         shell: bash
         run: ls -la apps/desktop/release
-      - uses: actions/upload-artifact@v4
+      # The installers plus the Claude Desktop extension (aether-brain-<version>.mcpb, built by
+      # dist:win). Only this job ships the .mcpb, so the release gets exactly one copy.
+      - name: Upload run artifact
+        uses: actions/upload-artifact@v4
+        # The account's artifact storage can fill up (each build is ~220 MB). A full
+        # quota must not fail a good build: the release step below does not use it.
+        continue-on-error: true
         with:
           name: aether-brain-windows
-          path: aether-brain/apps/desktop/release/*.exe
+          path: |
+            aether-brain/apps/desktop/release/*.exe
+            aether-brain/apps/desktop/release/*.mcpb
           if-no-files-found: error
+          retention-days: 7
       - name: Attach to release
         if: env.RELEASE_TAG != ''
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          files: aether-brain/apps/desktop/release/*.exe
+          files: |
+            aether-brain/apps/desktop/release/*.exe
+            aether-brain/apps/desktop/release/*.mcpb
           generate_release_notes: true
 
   mac-linux:
@@ -139,6 +152,7 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Test + typecheck
         run: |
+          pnpm --filter @aether/desktop build:mcp
           pnpm test
           pnpm typecheck
       - name: Package (${{ matrix.script }})
@@ -147,11 +161,14 @@ jobs:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
       - name: List artifacts
         run: ls -la apps/desktop/release
-      - uses: actions/upload-artifact@v4
+      - name: Upload run artifact
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.files }}
           if-no-files-found: error
+          retention-days: 7
       - name: Attach to release
         if: env.RELEASE_TAG != ''
         uses: softprops/action-gh-release@v2

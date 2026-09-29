@@ -5,7 +5,8 @@ import { AdditiveBlending, Color, DoubleSide, NormalBlending, ShaderMaterial, Ve
  * it up selectively (edges and stars stay below the luminance threshold).
  * Per-instance color comes from `instanceColor` (three injects the attribute).
  * The alpha channel of the color is packed into `aGlow` (extra attribute):
- *   x = glow multiplier (1 = idle, ~2.4 = selected), y = dim (0..1), z = pulse phase
+ *   x = glow multiplier (1 = idle, ~2.4 = selected), y = dim (0..1), z = pulse phase,
+ *   w = 1 for a solid body (a planet: lit sphere, no bloom), 0 for a glowing neuron or star
  */
 export function createNodeMaterial(): ShaderMaterial {
   return new ShaderMaterial({
@@ -13,9 +14,9 @@ export function createNodeMaterial(): ShaderMaterial {
       uTime: { value: 0 },
     },
     vertexShader: /* glsl */ `
-      attribute vec3 aGlow;
+      attribute vec4 aGlow;
       varying vec3 vColor;
-      varying vec3 vGlow;
+      varying vec4 vGlow;
       varying vec3 vNormalW;
       varying vec3 vViewDir;
       void main() {
@@ -41,11 +42,13 @@ export function createNodeMaterial(): ShaderMaterial {
     fragmentShader: /* glsl */ `
       uniform float uTime;
       varying vec3 vColor;
-      varying vec3 vGlow;
+      varying vec4 vGlow;
       varying vec3 vNormalW;
       varying vec3 vViewDir;
       void main() {
-        float ndv = clamp(dot(normalize(vNormalW), normalize(vViewDir)), 0.0, 1.0);
+        vec3 nrm = normalize(vNormalW);
+        vec3 view = normalize(vViewDir);
+        float ndv = clamp(dot(nrm, view), 0.0, 1.0);
         float fresnel = pow(1.0 - ndv, 2.2);
         float pulse = 0.5 + 0.5 * sin(uTime * 2.4 + vGlow.z);
         float glow = vGlow.x;
@@ -54,6 +57,10 @@ export function createNodeMaterial(): ShaderMaterial {
         vec3 core = vColor * (0.55 + 0.45 * ndv);
         vec3 rim = vColor * fresnel * 1.6 + vec3(1.0) * pow(fresnel, 5.0) * 0.5;
         vec3 col = (core + rim) * glow * (1.0 + 0.18 * pulse * step(1.5, glow));
+        // Solid body (planet): lit from above the viewer, a thin atmosphere, stays under the bloom threshold.
+        float lit = max(dot(nrm, normalize(view + vec3(0.0, 0.9, 0.0))), 0.0);
+        vec3 body = (vColor * (0.2 + 0.8 * lit) + vColor * fresnel * 0.4) * glow;
+        col = mix(col, body, vGlow.w);
         col = mix(col * 0.12, col, dim);
         gl_FragColor = vec4(col, 1.0);
       }
@@ -72,10 +79,10 @@ export function createHaloMaterial(): ShaderMaterial {
   return new ShaderMaterial({
     uniforms: { uTime: { value: 0 } },
     vertexShader: /* glsl */ `
-      attribute vec3 aGlow;
+      attribute vec4 aGlow;
       varying vec2 vUv;
       varying vec3 vColor;
-      varying vec3 vGlow;
+      varying vec4 vGlow;
       void main() {
         vUv = uv;
         #ifdef USE_INSTANCING_COLOR
@@ -99,7 +106,7 @@ export function createHaloMaterial(): ShaderMaterial {
       uniform float uTime;
       varying vec2 vUv;
       varying vec3 vColor;
-      varying vec3 vGlow;
+      varying vec4 vGlow;
       void main() {
         vec2 p = vUv - 0.5;
         float d = length(p) * 2.0;
@@ -109,6 +116,8 @@ export function createHaloMaterial(): ShaderMaterial {
         float glow = vGlow.x;
         float strength = 0.42 * a * (0.5 + 0.5 * min(glow, 2.0)) * (1.0 + 0.3 * pulse * step(1.5, glow));
         strength *= mix(0.05, 1.0, vGlow.y);
+        // Solid bodies only get a faint atmosphere.
+        strength *= mix(1.0, 0.35, vGlow.w);
         gl_FragColor = vec4(vColor * strength, strength);
       }
     `,
@@ -170,6 +179,49 @@ export function createEdgeMaterial(): ShaderMaterial {
         vec3 col = vColor * (0.7 + 0.45 * hi) + vec3(1.0) * spark * 0.25;
         col = mix(col, uFogColor, fog * 0.6);
         gl_FragColor = vec4(col * alpha, alpha * (1.0 - fog * 0.5));
+      }
+    `,
+    transparent: true,
+    depthWrite: false,
+    blending: AdditiveBlending,
+  })
+}
+
+/**
+ * Orbit rings: one instanced LineSegments for every ring of the system layout.
+ * The geometry is a unit circle in the XZ plane; per instance: `iCenter` (the
+ * parent's live position), `iRadius`, `iQuat` (orbit plane), `iColor`, `iAlpha`.
+ */
+export function createRingMaterial(): ShaderMaterial {
+  return new ShaderMaterial({
+    uniforms: {
+      uFogDensity: { value: 0.00035 },
+    },
+    vertexShader: /* glsl */ `
+      attribute vec3 iCenter;
+      attribute float iRadius;
+      attribute vec4 iQuat;
+      attribute vec3 iColor;
+      attribute float iAlpha;
+      uniform float uFogDensity;
+      varying vec3 vColor;
+      varying float vAlpha;
+      void main() {
+        vec3 v = position * iRadius;
+        vec3 t = 2.0 * cross(iQuat.xyz, v);
+        vec3 p = iCenter + v + iQuat.w * t + cross(iQuat.xyz, t);
+        vec4 mv = modelViewMatrix * vec4(p, 1.0);
+        float fog = 1.0 - exp(-uFogDensity * uFogDensity * mv.z * mv.z);
+        vColor = iColor;
+        vAlpha = iAlpha * (1.0 - 0.75 * fog);
+        gl_Position = projectionMatrix * mv;
+      }
+    `,
+    fragmentShader: /* glsl */ `
+      varying vec3 vColor;
+      varying float vAlpha;
+      void main() {
+        gl_FragColor = vec4(vColor * vAlpha, vAlpha);
       }
     `,
     transparent: true,

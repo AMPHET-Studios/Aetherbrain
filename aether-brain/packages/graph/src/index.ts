@@ -1,6 +1,8 @@
 export * from './theme'
 export * from './layout/protocol'
 export { LayoutEngine } from './layout/LayoutEngine'
+export { computeSystemLayout, systemPositions, orbitSpeed } from './layout/system'
+export type { SystemInput, SystemLayout } from './layout/system'
 export { BrainController } from './BrainController'
 export type { BrainEvents, CameraLike } from './BrainController'
 export { BrainScene } from './scene/BrainScene'

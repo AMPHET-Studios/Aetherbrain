@@ -1,7 +1,7 @@
 import { useMemo, type MouseEvent } from 'react'
 import ReactMarkdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { LinkResolver, remarkWikilink, splitFrontmatter, type NoteId } from '@aether/core'
+import { LinkResolver, extractTasks, remarkWikilink, splitFrontmatter, type NoteId } from '@aether/core'
 import { useAether } from '../store'
 import { cx } from '../util'
 
@@ -94,7 +94,10 @@ export function MarkdownPreview({ source, selfId = null, depth = 0, className }:
                     const t = e.target as HTMLElement
                     if (t.tagName !== 'INPUT') return
                     e.preventDefault()
-                    void toggleTask(selfId!, fmLines + bodyLine - 1, !(t as HTMLInputElement).checked)
+                    // The new state comes from the markdown shown, not from `checked` (already flipped by the click).
+                    const line = fmLines + bodyLine - 1
+                    const task = extractTasks(source).find((x) => x.line === line)
+                    if (task) void toggleTask(selfId!, line, !task.done, source)
                   }
                 : undefined
             }
@@ -105,7 +108,7 @@ export function MarkdownPreview({ source, selfId = null, depth = 0, className }:
       },
       input: ({ node: _node, ...rest }) => <input {...rest} readOnly={!selfId} onChange={() => undefined} className={cx(selfId && 'cursor-pointer')} />,
     }),
-    [notes, depth, selfId, openNote, createGhost, toggleTag, toggleTask, fmLines],
+    [notes, depth, selfId, openNote, createGhost, toggleTag, toggleTask, fmLines, source],
   )
 
   return (

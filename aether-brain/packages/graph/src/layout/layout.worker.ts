@@ -1,12 +1,17 @@
 /// <reference lib="webworker" />
 /**
- * Layout worker: d3-force-3d simulation off the main thread.
+ * Layout worker: everything that moves nodes runs here, off the main thread.
  *
- * Constellation mode — clusters by PARA area (each area has an anchor on a
- * ring), links pull, charge repels, collide keeps neurons from overlapping.
+ * Constellation mode — d3-force-3d; clusters by PARA area (each area has an
+ * anchor on a ring), links pull, charge repels, collide keeps neurons from
+ * overlapping.
  *
- * Orbit mode — time is the layout: newer notes orbit close to the core, older
- * notes drift to outer rings, flattened into a tilted disc.
+ * Orbit mode — d3-force-3d; time is the layout: newer notes orbit close to the
+ * core, older notes drift to outer rings, flattened into a tilted disc.
+ *
+ * System mode — no physics: the folder tree is laid out analytically as
+ * nested solar systems (see system.ts). Positions ease in from the previous
+ * layout over 1.2 s, then planets and moons orbit while motion is on.
  */
 import {
   forceCenter,
@@ -23,6 +28,7 @@ import {
   type Simulation,
 } from 'd3-force-3d'
 import type { LayoutEdgeInput, LayoutMode, LayoutNodeInput, MainToWorker, WorkerToMain } from './protocol'
+import { computeSystemLayout, systemPositions, type SystemLayout } from './system'
 
 interface Node extends SimNode {
   id: string
@@ -58,6 +64,32 @@ let mode: LayoutMode = 'constellation'
 let generation = 0
 let timer: ReturnType<typeof setTimeout> | null = null
 let running = false
+/** The current node set as sent by the main thread (the d3 simulation is built from it lazily). */
+let inputs: LayoutNodeInput[] = []
+let edgeInputs: LayoutEdgeInput[] = []
+let seedValue = 7
+
+/* System mode state. */
+const TRANSITION_MS = 1200
+const EASE_FRAME_MS = 16
+const MOTION_FRAME_MS = 33
+let layout: SystemLayout | null = null
+/** Ids the system buffers are indexed by (to carry drag offsets across rebuilds). */
+let sysIds: string[] = []
+/** Last computed positions (what the main thread shows). */
+let sysPos = new Float32Array(0)
+/** Transition start positions. */
+let sysFrom: Float32Array = new Float32Array(0)
+/** Scratch: analytic positions at the current orbit time. */
+let sysTarget = new Float32Array(0)
+/** User drags, xyz per node; children follow because they are placed relative to their parent. */
+let offsets = new Float32Array(0)
+/** Orbit clock in seconds; only advances while motion is on, so pausing never jumps. */
+let sysTime = 0
+let lastTick = 0
+/** Transition start (ms), -1 when no transition is running. */
+let transitionStart = -1
+let motion = true
 
 function seeded(seed: number): () => number {
   let a = seed >>> 0
@@ -95,6 +127,19 @@ function buildNodes(input: LayoutNodeInput[], prev?: { ids: string[]; positions:
     const age = n.created === null ? 0.85 : 1 - (n.created - minT) / span
     return { ...n, x, y, z, age }
   })
+}
+
+function createSimulation(prev?: { ids: string[]; positions: Float32Array }): void {
+  nodes = buildNodes(inputs, prev, seedValue)
+  links = edgeInputs
+    .filter((e) => nodes[e.s] && nodes[e.t])
+    .map((e) => ({ source: nodes[e.s]!, target: nodes[e.t]!, w: e.w }))
+  sim = forceSimulation<Node, Link>(nodes, 3)
+    .alphaDecay(nodes.length > 600 ? 0.035 : 0.02)
+    .alphaMin(0.004)
+    .velocityDecay(0.42)
+    .randomSource(seeded(seedValue + 1))
+    .stop()
 }
 
 function applyForces(): void {
@@ -177,23 +222,225 @@ function start(alpha = 1): void {
   timer = setTimeout(loop, 0)
 }
 
+function stopLoop(): void {
+  running = false
+  if (timer) clearTimeout(timer)
+  timer = null
+}
+
+function postRings(rings: Float32Array): void {
+  const msg: WorkerToMain = { type: 'rings', rings, generation }
+  ctx.postMessage(msg, [rings.buffer])
+}
+
 function setGraph(input: LayoutNodeInput[], edges: LayoutEdgeInput[], prev?: { ids: string[]; positions: Float32Array }, seed?: number): void {
   generation++
-  if (timer) clearTimeout(timer)
-  running = false
-  nodes = buildNodes(input, prev, seed)
-  links = edges
-    .filter((e) => nodes[e.s] && nodes[e.t])
-    .map((e) => ({ source: nodes[e.s]!, target: nodes[e.t]!, w: e.w }))
-  sim = forceSimulation<Node, Link>(nodes, 3)
-    .alphaDecay(nodes.length > 600 ? 0.035 : 0.02)
-    .alphaMin(0.004)
-    .velocityDecay(0.42)
-    .randomSource(seeded((seed ?? 7) + 1))
-    .stop()
-  applyForces()
+  stopLoop()
+  const wasSystem = layout !== null
+  inputs = input
+  edgeInputs = edges
+  seedValue = seed ?? 7
   ctx.postMessage({ type: 'ready', generation } satisfies WorkerToMain)
+  if (mode === 'system') {
+    // The d3 simulation is only built when leaving system mode.
+    sim = null
+    nodes = []
+    links = []
+    const n = input.length
+    const from = new Float32Array(n * 3)
+    const known = new Uint8Array(n)
+    if (prev) {
+      const prevIndex = new Map<string, number>()
+      prev.ids.forEach((id, i) => prevIndex.set(id, i))
+      for (let i = 0; i < n; i++) {
+        const j = prevIndex.get(input[i]!.id)
+        if (j === undefined || j * 3 + 2 >= prev.positions.length) continue
+        from[i * 3] = prev.positions[j * 3]!
+        from[i * 3 + 1] = prev.positions[j * 3 + 1]!
+        from[i * 3 + 2] = prev.positions[j * 3 + 2]!
+        known[i] = 1
+      }
+    }
+    enterSystem(from, known, wasSystem)
+    return
+  }
+  layout = null
+  postRings(new Float32Array(0))
+  createSimulation(prev)
+  applyForces()
   start(prev ? 0.35 : 1)
+}
+
+/* ------------------------------------------------------------------ */
+/* System mode                                                        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Lay the current node set out as nested solar systems and ease into it.
+ * `from`: start positions; nodes not marked in `known` are born at their
+ * parent's start position. `keepOffsets`: carry drag offsets over by id.
+ */
+function enterSystem(from: Float32Array, known: Uint8Array | null, keepOffsets: boolean): void {
+  stopLoop()
+  const n = inputs.length
+  const parent = new Int32Array(n)
+  const kind = new Uint8Array(n)
+  const role = new Int8Array(n)
+  const radius = new Float32Array(n)
+  const ids = new Array<string>(n)
+  for (let i = 0; i < n; i++) {
+    const d = inputs[i]!
+    parent[i] = d.parent
+    kind[i] = d.kind
+    role[i] = d.role
+    radius[i] = d.radius
+    ids[i] = d.id
+  }
+  const next = computeSystemLayout({ parent, kind, role, radius, ids })
+
+  const nextOffsets = new Float32Array(n * 3)
+  if (keepOffsets && offsets.length) {
+    const old = new Map<string, number>()
+    sysIds.forEach((id, i) => old.set(id, i))
+    for (let i = 0; i < n; i++) {
+      const j = old.get(ids[i]!)
+      if (j === undefined) continue
+      nextOffsets[i * 3] = offsets[j * 3]!
+      nextOffsets[i * 3 + 1] = offsets[j * 3 + 1]!
+      nextOffsets[i * 3 + 2] = offsets[j * 3 + 2]!
+    }
+  }
+  layout = next
+  sysIds = ids
+  offsets = nextOffsets
+  sysTarget = new Float32Array(n * 3)
+  systemPositions(next, sysTime, sysTarget, offsets)
+  sysFrom = from
+  if (known) {
+    // Parents come first in `order`, so a newborn moon starts where its planet starts.
+    for (let o = 0; o < n; o++) {
+      const i = next.order[o]!
+      if (known[i]) continue
+      const p = next.parent[i]!
+      const src = p >= 0 ? sysFrom : sysTarget
+      const k = p >= 0 ? p : i
+      sysFrom[i * 3] = src[k * 3]!
+      sysFrom[i * 3 + 1] = src[k * 3 + 1]!
+      sysFrom[i * 3 + 2] = src[k * 3 + 2]!
+    }
+  }
+  sysPos = new Float32Array(sysFrom)
+  postRings(next.rings.slice())
+  transitionStart = performance.now()
+  startSystemLoop()
+}
+
+function startSystemLoop(): void {
+  if (running) return
+  running = true
+  lastTick = performance.now()
+  if (timer) clearTimeout(timer)
+  timer = setTimeout(systemLoop, 0)
+}
+
+function postSystem(settled: boolean, alpha: number): void {
+  const out = new Float32Array(sysPos)
+  const msg: WorkerToMain = { type: 'positions', positions: out, alpha, settled, generation }
+  ctx.postMessage(msg, [out.buffer])
+}
+
+/** Scratch for shiftSubtree: 1 for nodes inside the subtree. */
+let subtreeMark = new Uint8Array(0)
+
+/** Add (dx, dy, dz) to `buf` (xyz per node) for `root` and everything orbiting it. */
+function shiftSubtree(buf: Float32Array, root: number, dx: number, dy: number, dz: number): void {
+  if (!layout) return
+  const { order, parent } = layout
+  const n = order.length
+  if (subtreeMark.length < n) subtreeMark = new Uint8Array(n)
+  const mark = subtreeMark
+  // Parents come first in `order`, so a node's mark is known before its children's.
+  for (let o = 0; o < n; o++) {
+    const i = order[o]!
+    const p = parent[i]!
+    mark[i] = i === root || (p >= 0 && mark[p] === 1) ? 1 : 0
+    if (mark[i] === 0 || i * 3 + 2 >= buf.length) continue
+    buf[i * 3] = buf[i * 3]! + dx
+    buf[i * 3 + 1] = buf[i * 3 + 1]! + dy
+    buf[i * 3 + 2] = buf[i * 3 + 2]! + dz
+  }
+}
+
+/**
+ * One system frame: advance the orbit clock (motion on), ease from the start
+ * positions while the transition runs, post. `settled: true` goes out on the
+ * frame the transition completes, and on the single frame after motion stops.
+ */
+function systemLoop(): void {
+  timer = null
+  if (!running || !layout) return
+  const now = performance.now()
+  const dt = Math.min(0.1, Math.max(0, (now - lastTick) / 1000))
+  lastTick = now
+  if (motion) sysTime += dt
+  systemPositions(layout, sysTime, sysTarget, offsets)
+  let settled: boolean
+  let alpha = 0
+  if (transitionStart >= 0) {
+    const k = Math.min(1, (now - transitionStart) / TRANSITION_MS)
+    const e = k < 0.5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2
+    for (let i = 0; i < sysPos.length; i++) {
+      const a = sysFrom[i]!
+      sysPos[i] = a + (sysTarget[i]! - a) * e
+    }
+    alpha = 1 - k
+    settled = k >= 1
+    if (settled) transitionStart = -1
+  } else {
+    sysPos.set(sysTarget)
+    settled = !motion
+  }
+  postSystem(settled, alpha)
+  if (transitionStart >= 0) timer = setTimeout(systemLoop, EASE_FRAME_MS)
+  // Nothing to orbit (no vault yet): no motion frames.
+  else if (motion && sysPos.length > 0) timer = setTimeout(systemLoop, MOTION_FRAME_MS)
+  else running = false
+}
+
+/** Back to a force layout from the system positions; the simulation is created on first use. */
+function leaveSystem(): void {
+  stopLoop()
+  transitionStart = -1
+  const n = inputs.length
+  if (!sim || nodes.length !== n) {
+    createSimulation({ ids: inputs.map((d) => d.id), positions: sysPos })
+  } else {
+    for (let i = 0; i < n; i++) {
+      const d = nodes[i]!
+      d.x = sysPos[i * 3] ?? d.x
+      d.y = sysPos[i * 3 + 1] ?? d.y
+      d.z = sysPos[i * 3 + 2] ?? d.z
+      d.vx = 0
+      d.vy = 0
+      d.vz = 0
+    }
+  }
+  layout = null
+  postRings(new Float32Array(0))
+  applyForces()
+  start(0.8)
+}
+
+/** Current force-layout positions as a flat buffer. */
+function forcePositions(): Float32Array {
+  const out = new Float32Array(inputs.length * 3)
+  for (let i = 0; i < nodes.length && i < inputs.length; i++) {
+    const d = nodes[i]!
+    out[i * 3] = d.x
+    out[i * 3 + 1] = d.y
+    out[i * 3 + 2] = d.z
+  }
+  return out
 }
 
 ctx.onmessage = (ev: MessageEvent<MainToWorker>) => {
@@ -203,13 +450,46 @@ ctx.onmessage = (ev: MessageEvent<MainToWorker>) => {
       mode = msg.mode
       setGraph(msg.nodes, msg.edges, msg.prev, msg.seed)
       break
-    case 'mode':
+    case 'mode': {
       if (mode === msg.mode) break
+      const was = mode
       mode = msg.mode
-      applyForces()
-      start(0.8)
+      if (mode === 'system') {
+        enterSystem(forcePositions(), null, false)
+      } else if (was === 'system') {
+        leaveSystem()
+      } else {
+        applyForces()
+        start(0.8)
+      }
       break
+    }
     case 'pin': {
+      if (layout) {
+        // Drag in system mode: shift the node's offset so it sits under the pointer.
+        const i = msg.index
+        if (i < 0 || i * 3 + 2 >= sysPos.length) break
+        const dx = msg.x - sysPos[i * 3]!
+        const dy = msg.y - sysPos[i * 3 + 1]!
+        const dz = msg.z - sysPos[i * 3 + 2]!
+        offsets[i * 3] = offsets[i * 3]! + dx
+        offsets[i * 3 + 1] = offsets[i * 3 + 1]! + dy
+        offsets[i * 3 + 2] = offsets[i * 3 + 2]! + dz
+        // Mid-transition the shown position is eased from `sysFrom`: move the
+        // subtree's start by the same delta, or the drag would only count by
+        // the ease factor and pile up in the offset.
+        if (transitionStart >= 0) shiftSubtree(sysFrom, i, dx, dy, dz)
+        if (!running) {
+          systemPositions(layout, sysTime, sysPos, offsets)
+          postSystem(false, 0)
+        } else {
+          // Several pins can arrive before the next frame: measure the next one from here.
+          sysPos[i * 3] = msg.x
+          sysPos[i * 3 + 1] = msg.y
+          sysPos[i * 3 + 2] = msg.z
+        }
+        break
+      }
       const d = nodes[msg.index]
       if (!d) break
       d.fx = msg.x
@@ -219,6 +499,11 @@ ctx.onmessage = (ev: MessageEvent<MainToWorker>) => {
       break
     }
     case 'release': {
+      if (layout) {
+        // The offset stays: a dragged planet keeps its new place, with its moons.
+        if (!running) postSystem(true, 0)
+        break
+      }
       const d = nodes[msg.index]
       if (!d) break
       d.fx = null
@@ -228,11 +513,24 @@ ctx.onmessage = (ev: MessageEvent<MainToWorker>) => {
       break
     }
     case 'reheat':
+      if (layout) {
+        // Re-run the system layout: forget drags and ease back into place.
+        offsets.fill(0)
+        sysFrom = new Float32Array(sysPos)
+        transitionStart = performance.now()
+        startSystemLoop()
+        break
+      }
       start(msg.alpha ?? 0.5)
       break
+    case 'motion':
+      if (motion === msg.on) break
+      motion = msg.on
+      // Off: the next frame is posted settled and the loop stops (a running transition finishes first).
+      if (motion && layout) startSystemLoop()
+      break
     case 'stop':
-      running = false
-      if (timer) clearTimeout(timer)
+      stopLoop()
       break
   }
 }

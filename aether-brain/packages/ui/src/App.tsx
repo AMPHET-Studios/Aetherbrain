@@ -1,4 +1,5 @@
 import { useEffect, useMemo } from 'react'
+import { isFolderId } from '@aether/core'
 import { BrainScene } from '@aether/graph'
 import { useAether } from './store'
 import { useKeyboard } from './hooks/useKeyboard'
@@ -129,14 +130,28 @@ function Hint() {
   const selectedId = useAether((s) => s.selectedId)
   const hovered = useAether((s) => s.hoveredId)
   const notes = useAether((s) => s.notes)
+  const graph = useAether((s) => s.graph)
   const status = useAether((s) => s.status)
   if (status !== 'ready') return null
-  const h = hovered && hovered !== selectedId ? notes.get(hovered)?.meta.title : null
+  const node = hovered && hovered !== selectedId ? graph?.nodes[graph.index.get(hovered) ?? -1] : undefined
+  const h = node ? (node.kind === 'note' ? (notes.get(node.id)?.meta.title ?? node.title) : node.title) : null
   return (
     <div className="panel px-3 py-2 text-[11.5px] text-dim">
-      {h ? (
+      {h && node?.kind === 'folder' ? (
         <span>
-          <span className="text-ink">{h}</span> · click to select · double-click to open
+          <span className="text-ink">
+            {node.folder?.role === 'project' ? '★ ' : ''}
+            {h}
+          </span>{' '}
+          · {node.folder?.totalNotes ?? 0} notes · click to select · double-click to expand
+        </span>
+      ) : h ? (
+        <span>
+          <span className="text-ink">{h}</span> · click to select · double-click to {node?.kind === 'ghost' ? 'create' : 'open'}
+        </span>
+      ) : selectedId && isFolderId(selectedId) ? (
+        <span>
+          <kbd>x</kbd> expand · <kbd>Tab</kbd> planets · <kbd>f</kbd> fly · <kbd>[</kbd> <kbd>]</kbd> depth · <kbd>Esc</kbd> deselect
         </span>
       ) : selectedId ? (
         <span>

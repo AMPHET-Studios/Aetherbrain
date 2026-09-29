@@ -1,6 +1,9 @@
-import type { GraphData } from '@aether/core'
-import type { LayoutEdgeInput, LayoutMode, LayoutNodeInput, MainToWorker, WorkerToMain } from './protocol'
+import type { FolderRole, GraphData, NodeKind } from '@aether/core'
+import type { LayoutEdgeInput, LayoutKind, LayoutMode, LayoutNodeInput, LayoutRole, MainToWorker, WorkerToMain } from './protocol'
 import { AREA_INDEX, nodeRadius } from '../theme'
+
+const KIND_CODE: Record<NodeKind, LayoutKind> = { note: 0, ghost: 1, folder: 2 }
+const ROLE_CODE: Record<FolderRole, LayoutRole> = { root: 0, mount: 1, project: 2, folder: 3 }
 
 export type TickListener = (engine: LayoutEngine) => void
 
@@ -18,8 +21,23 @@ export class LayoutEngine {
   alpha = 0
   /** Increments on every positions frame. */
   frame = 0
+  /**
+   * Orbit rings of the system layout: 6 floats per ring (parentIndex, radius,
+   * qx, qy, qz, qw; see protocol). Empty in the other modes.
+   */
+  rings: Float32Array = new Float32Array(0)
+  /** Bumped whenever `rings` is replaced. */
+  ringsVersion = 0
+  /** System layout: planets and moons orbit while on (mirrors what the worker was told). */
+  motion = true
   private worker: Worker | null = null
   private listeners = new Set<TickListener>()
+  /**
+   * Generation of the last 'graph' message sent. The worker numbers its
+   * layouts the same way (one per 'graph' message), so anything it posts for
+   * an older node set is dropped, including frames still in flight after a
+   * rebuild: their indices belong to the old node order.
+   */
   private generation = 0
   private disposed = false
 
@@ -49,6 +67,9 @@ export class LayoutEngine {
       created: n.created,
       ghost: n.ghost,
       radius: nodeRadius(n),
+      parent: n.parent === null ? -1 : (graph.index.get(n.parent) ?? -1),
+      kind: KIND_CODE[n.kind] ?? 0,
+      role: n.folder ? (ROLE_CODE[n.folder.role] ?? 3) : -1,
     }))
     const edges: LayoutEdgeInput[] = []
     for (const e of graph.edges) {
@@ -60,24 +81,41 @@ export class LayoutEngine {
     this.ids = nodes.map((n) => n.id)
     this.index = new Map(this.ids.map((id, i) => [id, i]))
     // Seed the buffer with previous positions (or zeros) so the first frame
-    // before the worker replies has something sane to draw.
+    // before the worker replies has something sane to draw. New nodes start
+    // where their parent was, so they grow out of it instead of the origin.
     const next = new Float32Array(nodes.length * 3)
+    let rings: Float32Array = new Float32Array(0)
     if (prev) {
       const pi = new Map(prev.ids.map((id, i) => [id, i]))
       nodes.forEach((n, i) => {
-        const j = pi.get(n.id)
+        let j = pi.get(n.id)
+        if (j === undefined && n.parent >= 0) j = pi.get(nodes[n.parent]!.id)
         if (j !== undefined) {
           next[i * 3] = prev.positions[j * 3] ?? 0
           next[i * 3 + 1] = prev.positions[j * 3 + 1] ?? 0
           next[i * 3 + 2] = prev.positions[j * 3 + 2] ?? 0
         }
       })
+      // Keep drawing the old rings (re-indexed by id) until the worker sends the new ones.
+      if (this.rings.length && mode === 'system') {
+        const out: number[] = []
+        for (let k = 0; k + 5 < this.rings.length; k += 6) {
+          const id = prev.ids[this.rings[k]!]
+          const p = id === undefined ? undefined : this.index.get(id)
+          if (p === undefined) continue
+          out.push(p, this.rings[k + 1]!, this.rings[k + 2]!, this.rings[k + 3]!, this.rings[k + 4]!, this.rings[k + 5]!)
+        }
+        rings = new Float32Array(out)
+      }
     }
+    this.rings = rings
+    this.ringsVersion++
     this.positions = next
     this.settled = false
     this.frame++
     const msg: MainToWorker = { type: 'graph', nodes, edges, mode, seed }
     if (prev) msg.prev = { ids: prev.ids, positions: prev.positions }
+    this.generation++
     this.post(msg)
     this.emit()
   }
@@ -86,7 +124,18 @@ export class LayoutEngine {
     if (this.mode === mode) return
     this.mode = mode
     this.settled = false
+    if (mode !== 'system' && this.rings.length) {
+      this.rings = new Float32Array(0)
+      this.ringsVersion++
+    }
     this.post({ type: 'mode', mode })
+  }
+
+  /** System layout: start or stop the orbit motion. */
+  setMotion(on: boolean): void {
+    if (this.motion === on) return
+    this.motion = on
+    this.post({ type: 'motion', on })
   }
 
   pin(id: string, x: number, y: number, z: number): void {
@@ -133,11 +182,12 @@ export class LayoutEngine {
   }
 
   private onMessage(msg: WorkerToMain): void {
-    if (msg.type === 'ready') {
-      this.generation = msg.generation
+    if (msg.type === 'ready' || msg.generation !== this.generation) return
+    if (msg.type === 'rings') {
+      this.rings = msg.rings
+      this.ringsVersion++
       return
     }
-    if (msg.generation !== this.generation) return
     if (msg.positions.length !== this.ids.length * 3) return
     this.positions = msg.positions as Float32Array<ArrayBuffer>
     this.alpha = msg.alpha
