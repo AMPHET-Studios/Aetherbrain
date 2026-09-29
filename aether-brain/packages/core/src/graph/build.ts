@@ -2,7 +2,7 @@ import type { Area, FolderRole, FolderSelection, GraphData, GraphEdge, GraphNode
 import { LinkResolver } from './resolve'
 import { asString } from '../markdown/frontmatter'
 import { isProjectNote, projectFolderOf } from '../markdown/projects'
-import { selectFolders, type FolderSelectOptions } from '../vault/folders'
+import { folderUniverse, selectFolders, type FolderSelectOptions } from '../vault/folders'
 import { ancestorsOf, areaFromFolder, folderDepth, folderKey, folderOf, normalizeFolderPath } from '../vault/paths'
 
 export interface FolderGraphOptions extends FolderSelectOptions {
@@ -167,17 +167,9 @@ function addFolderSystem(
   unresolved: Map<NoteId, Set<NoteId>>,
   opts: FolderGraphOptions,
 ): FolderSelection {
-  // Folders known on disk: everything listed, every note folder, and their ancestors.
-  const known = new Set<string>()
-  const addChain = (path: string): void => {
-    let cur = path
-    while (cur !== '' && !known.has(cur)) {
-      known.add(cur)
-      cur = folderOf(cur)
-    }
-  }
-  for (const f of opts.all) addChain(normalizeFolderPath(f))
-  for (const id of ids) addChain(notes.get(id)!.meta.folder)
+  // Folders known on disk: everything listed, every note folder, and their
+  // ancestors ('' included). Indexed once per folder Set, not on every rebuild.
+  const known = folderUniverse(opts.all, ids.map((id) => notes.get(id)!.meta.folder)).all
 
   // Bind project notes to their home folders. A folder takes one project:
   // an explicit `folder:` beats a folder note, which beats a sibling note;
@@ -201,7 +193,7 @@ function addFolderSystem(
   }
 
   const selection = selectFolders(
-    known,
+    opts.all,
     ids.map((id) => notes.get(id)!.meta.path),
     {
       multiRoot: opts.multiRoot,

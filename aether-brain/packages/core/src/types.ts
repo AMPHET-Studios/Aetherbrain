@@ -261,6 +261,14 @@ export interface VaultAdapter {
   list(): Promise<VaultFile[]>
   read(path: string): Promise<string | null>
   write(path: string, content: string): Promise<void>
+  /**
+   * Create a NEW file: fails (an Error whose message contains `EEXIST`) when
+   * anything already exists at the path, including a file the vault ignores
+   * or, on case-insensitive disks, one whose name differs only in case. Use it
+   * for every new note so creating never overwrites. Optional: callers fall
+   * back to `read(path) === null` + `write` when an adapter lacks it.
+   */
+  create?(path: string, content: string): Promise<void>
   remove(path: string): Promise<void>
   rename(from: string, to: string): Promise<void>
   /** Subscribe to external changes. Returns an unsubscribe function. */

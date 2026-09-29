@@ -581,3 +581,299 @@ describe('layout settings', () => {
     expect(s().controller.motion).toBe(false)
   })
 })
+
+/** A memory vault whose changes never reach the app: like a file another app just wrote that the watcher has not reported yet. */
+class QuietVault extends MemoryVaultAdapter {
+  override watch(): () => void {
+    return () => {}
+  }
+}
+
+/** A memory vault whose writes take `delay` ms, like a slow or sleeping drive. */
+class SlowVault extends QuietVault {
+  delay = 0
+  override async write(path: string, content: string): Promise<void> {
+    if (this.delay) await new Promise((r) => setTimeout(r, this.delay))
+    return super.write(path, content)
+  }
+}
+
+describe('creating a note never overwrites a file', () => {
+  it('passes over a file the brain ignores (CHANGELOG.md) instead of writing the template over it', async () => {
+    const { s } = await freshStore()
+    const vault = new MemoryVaultAdapter([{ path: 'Code/Game/Design.md', content: '# Design\n' }])
+    await s().openVault(vault)
+    const history = '# Changelog\n\n## 1.0\n- important history\n'
+    await vault.write('Code/Game/CHANGELOG.md', history)
+    expect(s().notes.has('Code/Game/CHANGELOG')).toBe(false)
+    const id = await s().createNote('Code/Game', 'CHANGELOG')
+    expect(await vault.read('Code/Game/CHANGELOG.md')).toBe(history)
+    expect(id).toBe('Code/Game/CHANGELOG 2')
+    // The new note is one the brain shows.
+    expect(s().notes.has(id!)).toBe(true)
+    expect(s().notes.get(id!)!.meta.title).toBe('CHANGELOG')
+  })
+
+  it('numbers a note whose name is taken on disk but not reported yet, in any letter case', async () => {
+    const { s } = await freshStore()
+    const vault = new QuietVault(files())
+    await s().openVault(vault)
+    const ai = '# Buy milk\n\nWritten by Claude a moment ago.\n'
+    await vault.write('Inbox/buy milk.md', ai)
+    expect(await s().capture('Buy milk')).toBe('Inbox/Buy milk 2')
+    expect(await vault.read('Inbox/buy milk.md')).toBe(ai)
+    await vault.write('Projects/Monolith.md', '# Monolith\n\nNot reported yet.\n')
+    expect(await s().createProject('Monolith')).toBe('Projects/Monolith 2')
+    expect(await vault.read('Projects/Monolith.md')).toBe('# Monolith\n\nNot reported yet.\n')
+    await vault.write('Inbox/Portal lore.md', '# Portal lore\n')
+    await s().createGhost('ghost:Portal lore')
+    expect(s().editorId).toBe('Inbox/Portal lore 2')
+    expect(await vault.read('Inbox/Portal lore.md')).toBe('# Portal lore\n')
+  })
+
+  it('checks the disk first when the adapter has no create', async () => {
+    const { s } = await freshStore()
+    const vault = new QuietVault(files())
+    Object.defineProperty(vault, 'create', { value: undefined })
+    await s().openVault(vault)
+    await vault.write('Inbox/Buy milk.md', '# Buy milk\n\nMine.\n')
+    expect(await s().capture('Buy milk')).toBe('Inbox/Buy milk 2')
+    expect(await vault.read('Inbox/Buy milk.md')).toBe('# Buy milk\n\nMine.\n')
+  })
+
+  it("opens today's note when it is on disk already instead of replacing it", async () => {
+    const { s } = await freshStore()
+    const vault = new QuietVault(files())
+    await s().openVault(vault)
+    const today = `# ${todayIso()}\n\nLogged from another app.\n`
+    await vault.write(`Daily/${todayIso()}.md`, today)
+    await s().openDaily()
+    expect(await vault.read(`Daily/${todayIso()}.md`)).toBe(today)
+    expect(s().editorId).toBe(`Daily/${todayIso()}`)
+    expect(s().draft).toBe(today)
+    expect(await vault.read(`Daily/${todayIso()} 2.md`)).toBeNull()
+  })
+
+  it('makes a folder a project without replacing a folder note it has not seen yet', async () => {
+    const { s } = await freshStore()
+    const vault = new QuietVault(files())
+    await s().openVault(vault)
+    await vault.write('Resources/Drawing/Drawing.md', '# Drawing\n\nMy notes on drawing.\n')
+    const id = await s().makeProject('Resources/Drawing')
+    expect(id).toBe('Resources/Drawing/Drawing 2')
+    expect(await vault.read('Resources/Drawing/Drawing.md')).toBe('# Drawing\n\nMy notes on drawing.\n')
+    // Not a folder note by name: it names its folder, which becomes its star.
+    const note = s().notes.get(id!)!
+    expect(note.frontmatter['folder']).toBe('Resources/Drawing')
+    const g = s().graph!
+    expect(g.nodes[g.index.get(folderKey('Resources/Drawing'))!]!.folder?.projectId).toBe(id)
+  })
+})
+
+describe('store rewrites run one at a time, from the file on disk', () => {
+  const GATE = '---\ntitle: Gate\n---\n\n# Gate\n\n## To do\n\n- [ ] one\n- [ ] two\n'
+  const onDisk = async (vault: MemoryVaultAdapter) => extractTasks((await vault.read('Projects/Gate.md'))!)
+
+  it('keeps both of two quick ticks while the first write is still under way', async () => {
+    const { s } = await freshStore()
+    const vault = new SlowVault([{ path: 'Projects/Gate.md', content: GATE }])
+    await s().openVault(vault)
+    const id = 'Projects/Gate'
+    const shown = s().notes.get(id)!.raw
+    const [one, two] = extractTasks(shown)
+    vault.delay = 30
+    // The board shows the same text for both clicks: the second comes before the first write lands.
+    await Promise.all([s().toggleTask(id, one!.line, true, shown), s().toggleTask(id, two!.line, true, shown)])
+    expect((await onDisk(vault)).map((t) => t.done)).toEqual([true, true])
+    expect(extractTasks(s().notes.get(id)!.raw).map((t) => t.done)).toEqual([true, true])
+  })
+
+  it('keeps an edit the watcher has not reported yet (an AI adding a task)', async () => {
+    const { s } = await freshStore()
+    const vault = new QuietVault([{ path: 'Projects/Gate.md', content: GATE }])
+    await s().openVault(vault)
+    const id = 'Projects/Gate'
+    const shown = s().notes.get(id)!.raw
+    await vault.write('Projects/Gate.md', GATE.replace('- [ ] two\n', '- [ ] two\n- [ ] three (from Claude)\n'))
+    await s().toggleTask(id, extractTasks(shown)[0]!.line, true, shown)
+    expect((await onDisk(vault)).map((t) => [t.text, t.done])).toEqual([
+      ['one', true],
+      ['two', false],
+      ['three (from Claude)', false],
+    ])
+    // A project edit starts from the disk too.
+    await vault.write('Projects/Gate.md', `${(await vault.read('Projects/Gate.md'))!}- [ ] four (from Claude)\n`)
+    await s().updateProject(id, { status: 'paused' })
+    expect((await onDisk(vault)).map((t) => t.text)).toEqual(['one', 'two', 'three (from Claude)', 'four (from Claude)'])
+    expect(s().notes.get(id)!.meta.status).toBe('paused')
+  })
+
+  it('deletes a note only after a rewrite under way has landed (the write never brings it back)', async () => {
+    const { s } = await freshStore()
+    const vault = new SlowVault([{ path: 'Projects/Gate.md', content: GATE }])
+    await s().openVault(vault)
+    const id = 'Projects/Gate'
+    const shown = s().notes.get(id)!.raw
+    vault.delay = 30
+    const tick = s().toggleTask(id, extractTasks(shown)[0]!.line, true, shown)
+    // The delete comes while the tick's write is still on its way to the disk.
+    await new Promise((r) => setTimeout(r, 10))
+    await Promise.all([tick, s().deleteProject(id)])
+    expect(await vault.read('Projects/Gate.md')).toBeNull()
+    expect(s().notes.has(id)).toBe(false)
+  })
+
+  it('says so when a queued edit finds its note renamed or deleted, instead of dropping it silently', async () => {
+    const { s } = await freshStore()
+    const vault = new SlowVault([{ path: 'Projects/Gate.md', content: GATE }])
+    await s().openVault(vault)
+    const id = 'Projects/Gate'
+    const shown = s().notes.get(id)!.raw
+    vault.delay = 20
+    // The board still shows the old id when the second click comes.
+    await Promise.all([s().updateProject(id, { title: 'Verdant Gate', renameFile: true }), s().toggleTask(id, extractTasks(shown)[0]!.line, true, shown)])
+    expect(s().notes.has('Projects/Verdant Gate')).toBe(true)
+    expect(s().toasts.map((t) => t.text)).toContainEqual(expect.stringMatching(/^Could not update the task: .*(moved|deleted)/))
+  })
+
+  it('saves an inline task edit on the task it started on, after lines above it changed on disk', async () => {
+    const { s } = await freshStore()
+    const vault = new QuietVault([{ path: 'Projects/Gate.md', content: GATE }])
+    await s().openVault(vault)
+    const id = 'Projects/Gate'
+    // The board takes a snapshot when the edit starts.
+    const snapshot = s().notes.get(id)!.raw
+    const line = extractTasks(snapshot).find((t) => t.text === 'two')!.line
+    await vault.write('Projects/Gate.md', GATE.replace('- [ ] one\n', '- [ ] zero (from Claude)\n- [ ] one\n'))
+    await s().editTask(id, line, 'two, edited', snapshot)
+    expect((await onDisk(vault)).map((t) => t.text)).toEqual(['zero (from Claude)', 'one', 'two, edited'])
+  })
+})
+
+describe('renaming a project keeps every link to it', () => {
+  it('keeps file-name, setext and file-name links as aliases, and the file name when a note links by path', async () => {
+    const { s } = await freshStore()
+    await s().openVault(
+      new MemoryVaultAdapter([
+        { path: 'Projects/Monolith.md', content: 'Big stone generator.\n\n- [ ] carve\n' },
+        { path: 'Projects/Gate.md', content: 'Gate\n====\n\nSome text\n' },
+        { path: 'Projects/portal-game.md', content: '---\ntitle: Portal Game\n---\n# Portal Game\n\nx\n' },
+        { path: 'Notes/A.md', content: '# A\n\n[[Monolith]] [[Gate]] [[portal-game]] [[Portal Game]]\n' },
+        { path: 'Notes/B.md', content: '# B\n\nSee [[Projects/Gate]].\n' },
+      ]),
+    )
+    const ghosts = () => s().graph!.nodes.filter((n) => n.kind === 'ghost').map((n) => n.id)
+    expect(ghosts()).toEqual([])
+    const monolith = await s().updateProject('Projects/Monolith', { title: 'Obelisk', renameFile: true })
+    expect(monolith).toBe('Projects/Obelisk')
+    expect(s().notes.get(monolith)!.meta.aliases).toContain('Monolith')
+    // [[Projects/Gate]] can't be kept by an alias: the file keeps its name, the title changes.
+    expect(await s().updateProject('Projects/Gate', { title: 'Verdant Gate', renameFile: true })).toBe('Projects/Gate')
+    expect(s().notes.get('Projects/Gate')!.meta.title).toBe('Verdant Gate')
+    expect(s().notes.get('Projects/Gate')!.meta.aliases).toContain('Gate')
+    const quest = await s().updateProject('Projects/portal-game', { title: 'Portal Quest', renameFile: true })
+    expect(quest).toBe('Projects/Portal Quest')
+    expect(s().notes.get(quest)!.meta.aliases).toEqual(expect.arrayContaining(['Portal Game', 'portal-game']))
+    expect(ghosts()).toEqual([])
+  })
+
+  it('keeps the file name when a note on a drive links to it by a partial path (resolved by file name)', async () => {
+    const { s } = await freshStore()
+    await s().openVault(
+      new TwoRoots([
+        { path: 'D/Projects/Gate.md', content: '---\ntitle: Gate\ntype: project\n---\n# Gate\n' },
+        { path: 'D/Notes/B.md', content: '# B\n\nSee [[Projects/Gate#Plan|the gate]].\n' },
+        { path: 'F/Notes/C.md', content: '# C\n\n[[Gate]] by title only.\n' },
+      ]),
+    )
+    const ghosts = () => s().graph!.nodes.filter((n) => n.kind === 'ghost').map((n) => n.id)
+    expect(ghosts()).toEqual([])
+    expect(await s().updateProject('D/Projects/Gate', { title: 'Verdant Gate', renameFile: true })).toBe('D/Projects/Gate')
+    expect(s().notes.get('D/Projects/Gate')!.meta.title).toBe('Verdant Gate')
+    expect(ghosts()).toEqual([])
+    // Links by title only: the alias keeps them, so the file is renamed.
+    await s().openVault(
+      new TwoRoots([
+        { path: 'D/Projects/Gate.md', content: '---\ntitle: Gate\ntype: project\n---\n# Gate\n' },
+        { path: 'F/Notes/C.md', content: '# C\n\n[[Gate]] by title only.\n' },
+      ]),
+    )
+    expect(await s().updateProject('D/Projects/Gate', { title: 'Verdant Gate', renameFile: true })).toBe('D/Projects/Verdant Gate')
+    expect(ghosts()).toEqual([])
+  })
+
+  it('writes folder: relative to the note’s drive, so the binding survives drives coming and going', async () => {
+    const { s } = await freshStore()
+    const vault = new TwoRoots(
+      [
+        { path: 'D/Projects/Portal.md', content: '---\ntitle: Portal\ntype: project\n---\n# Portal\n' },
+        { path: 'F/Art/Sketch.md', content: '# Sketch\n' },
+      ],
+      { folders: ['D/Games/Portal', 'F/Art'] },
+    )
+    await s().openVault(vault)
+    const id = 'D/Projects/Portal'
+    await s().updateProject(id, { folder: 'D/Games/Portal' })
+    expect(s().notes.get(id)!.frontmatter['folder']).toBe('Games/Portal')
+    const g = s().graph!
+    expect(g.nodes[g.index.get(folderKey('D/Games/Portal'))!]!.folder?.projectId).toBe(id)
+    // A folder on another drive keeps its full path.
+    await s().updateProject(id, { folder: 'F/Art' })
+    expect(s().notes.get(id)!.frontmatter['folder']).toBe('F/Art')
+  })
+})
+
+describe('board and palette paths', () => {
+  it('predicts where a moved task lands exactly as the store moves it (past a done task)', async () => {
+    const { s } = await freshStore()
+    const { moveTaskOnBoard } = await import('../src/projects')
+    await s().openVault(new MemoryVaultAdapter(files()))
+    const id = 'Projects/Portal Game'
+    // First, Second, [x] Done one, Third: moving Second down passes over the done task.
+    const raw = s().notes.get(id)!.raw
+    const second = extractTasks(raw).find((t) => t.text === 'Second')!
+    const landing = moveTaskOnBoard(raw, second.line, 1).line
+    await s().moveTask(id, second.line, 1, raw)
+    const after = extractTasks(s().notes.get(id)!.raw)
+    expect(after.find((t) => t.line === landing)?.text).toBe('Second')
+    expect(after.map((t) => t.text)).toEqual(['First', 'Third', 'Done one', 'Second'])
+  })
+
+  it('leaves the board when a folder is shown (the board covers the graph)', async () => {
+    const { s } = await freshStore()
+    await s().openVault(new MemoryVaultAdapter(files()))
+    s().setView('projects')
+    s().showFolder('Resources/Drawing')
+    expect(s().view).toBe('graph')
+    expect(s().selectedId).toBe(folderKey('Resources/Drawing'))
+  })
+
+  it("opens a selected star's own board with p, and offers it in the palette", async () => {
+    const { s } = await freshStore()
+    await s().openVault(
+      new MemoryVaultAdapter([...files(), { path: 'Projects/Forge/Forge.md', content: '---\ntype: project\nstatus: active\n---\n# Forge\n' }]),
+    )
+    const { handleKey } = await import('../src/hooks/useKeyboard')
+    const { findCommands } = await import('../src/commands')
+    s().select(folderKey('Projects/Forge'))
+    expect(findCommands('', s()).map((c) => c.id)).toContain('folder-board')
+    const e = { key: 'p', metaKey: false, ctrlKey: false, altKey: false, shiftKey: false, target: { tagName: 'BODY', isContentEditable: false }, preventDefault() {} }
+    handleKey(e as unknown as KeyboardEvent)
+    expect(s().view).toBe('projects')
+    expect(s().projectId).toBe('Projects/Forge/Forge')
+  })
+})
+
+describe('createFolder from the Projects board', () => {
+  it('keeps the board open (adding planets one after another), while showFolder alone steps out of it', async () => {
+    const { s } = await freshStore()
+    await s().openVault(new MemoryVaultAdapter(files()))
+    s().setSettings({ layoutMode: 'system' })
+    s().setView('projects')
+    const p = await s().createFolder('Projects/PORTALz/Sound')
+    expect(p).toBe('Projects/PORTALz/Sound')
+    expect(s().view).toBe('projects')
+    s().showFolder('Projects/PORTALz/Sound')
+    expect(s().view).toBe('graph')
+  })
+})

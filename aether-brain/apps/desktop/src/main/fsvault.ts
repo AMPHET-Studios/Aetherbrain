@@ -101,9 +101,51 @@ function errCode(err: unknown): string | undefined {
   return (err as NodeJS.ErrnoException | null)?.code
 }
 
+/** The error create() throws when the path is taken (code and message both say EEXIST, so it survives IPC). */
+function existsError(vaultPath: string): NodeJS.ErrnoException {
+  return Object.assign(new Error(`EEXIST: something already exists at ${vaultPath}`), { code: 'EEXIST' })
+}
+
+/** A file name as compared for "the same name": letter case and Unicode normalization ignored. */
+function nameKey(name: string): string {
+  return name.normalize('NFC').toLowerCase()
+}
+
+/**
+ * `p`, or `fallback` after `ms`: an unreachable network drive can make fs
+ * calls hang for a long time. (The call itself keeps running.)
+ */
+export async function within<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
+  let timer: NodeJS.Timeout | undefined
+  const timeout = new Promise<T>((resolve) => {
+    timer = setTimeout(() => resolve(fallback), ms)
+  })
+  try {
+    return await Promise.race([p, timeout])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 /** A unique temp sibling of `full` (ends in TMP_SUFFIX, so scans and watchers skip it). */
 function tempPath(full: string): string {
   return `${full}.${Math.random().toString(36).slice(2, 10)}${TMP_SUFFIX}`
+}
+
+/**
+ * Write a file that must not exist yet (`wx`: EEXIST when anything is there).
+ * A write that fails midway removes the file it created.
+ */
+async function writeNew(full: string, content: string): Promise<void> {
+  const handle = await fs.open(full, 'wx')
+  try {
+    await handle.writeFile(content, 'utf8')
+    await handle.close()
+  } catch (err) {
+    await handle.close().catch(() => undefined)
+    await fs.rm(full, { force: true }).catch(() => undefined)
+    throw err
+  }
 }
 
 /**
@@ -293,13 +335,28 @@ export class FsVault {
   /**
    * Breadth-first walk of every root (one shared queue), collecting markdown
    * notes and folders. Stops after `maxDirs` folders (`truncated`). Symlinks
-   * are not followed; unreadable folders are skipped.
+   * are not followed; unreadable folders are skipped. Remembered as `lastScan`.
    */
   async scan(onProgress?: (p: ScanProgress) => void): Promise<ScanResult> {
+    const result = await this.walk(this.roots, onProgress)
+    this.lastScan = result
+    return result
+  }
+
+  /**
+   * scan() of one root only, for the watcher's resync after lost events.
+   * `dirs` is 0 when the root itself could not be read. Leaves `lastScan` alone.
+   */
+  scanRoot(root: MountedRoot): Promise<ScanResult> {
+    return this.walk([root])
+  }
+
+  private async walk(roots: MountedRoot[], onProgress?: (p: ScanProgress) => void): Promise<ScanResult> {
     const files: ScanResult['files'] = []
-    const folders: string[] = this.multi ? this.roots.map((r) => r.mount) : []
+    const folders: string[] = this.multi ? roots.map((r) => r.mount) : []
+    // Every root, not only the walked ones: a root nested inside another is never walked as part of it.
     const rootDirs = new Set(this.roots.map((r) => pathKey(r.abs)))
-    const queue = this.roots.map((r) => ({ abs: r.abs, vault: r.mount, root: true }))
+    const queue = roots.map((r) => ({ abs: r.abs, vault: r.mount, root: true }))
     let dirs = 0
     let truncated = false
     let lastReport = Date.now()
@@ -334,9 +391,7 @@ export class FsVault {
       }
     }
     onProgress?.({ dirs, found: files.length })
-    const result: ScanResult = { files, folders, truncated, dirs }
-    this.lastScan = result
-    return result
+    return { files, folders, truncated, dirs }
   }
 
   /** Read scanned files with bounded concurrency (32); unreadable files are skipped. Keeps input order. */
@@ -391,6 +446,56 @@ export class FsVault {
     } catch (err) {
       await fs.rm(tmp, { force: true }).catch(() => undefined)
       throw err
+    }
+  }
+
+  /**
+   * Create a new file, never replacing anything: it fails with EEXIST when
+   * something is already at the path — a note, a folder, a link, repo
+   * boilerplate the scan skips (`CHANGELOG.md`), or a name that differs only
+   * in letter case (also checked on case-sensitive disks, where the vault
+   * still treats them as one note). Parents are made. Refuses excluded paths
+   * like write().
+   *
+   * The content is written in full to a temp sibling first (scans and
+   * watchers skip it) and hard-linked into place: a link never replaces
+   * anything, and the note never shows up half written (a watcher that read
+   * it empty would report an empty note, then take the real content for the
+   * echo of our own write). Disks without hard links (FAT, exFAT, some
+   * shares) get the file created with `wx` and filled in place. A write that
+   * fails midway leaves nothing behind.
+   */
+  async create(p: string, content: string): Promise<void> {
+    const full = await this.entry(p)
+    const dir = path.dirname(full)
+    try {
+      await fs.mkdir(dir, { recursive: true })
+    } catch (err) {
+      // A file where the folder should be: not "this name is taken" (another suffix would not help).
+      if (errCode(err) !== 'EEXIST') throw err
+      throw Object.assign(new Error(`Not a folder: ${path.posix.dirname(p.replace(/\\/g, '/'))}`), { code: 'ENOTDIR' })
+    }
+    const key = nameKey(path.basename(full))
+    if ((await fs.readdir(dir)).some((n) => nameKey(n) === key)) throw existsError(p)
+    const tmp = tempPath(full)
+    await writeNew(tmp, content)
+    let linkErr: unknown
+    let linked = false
+    try {
+      await fs.link(tmp, full)
+      linked = true
+    } catch (err) {
+      linkErr = err
+    } finally {
+      await fs.rm(tmp, { force: true }).catch(() => undefined)
+    }
+    if (linked) return
+    if (errCode(linkErr) === 'EEXIST') throw existsError(p)
+    // No hard links here: create it in place (a reader may see it empty for a moment).
+    try {
+      await writeNew(full, content)
+    } catch (err) {
+      throw errCode(err) === 'EEXIST' ? existsError(p) : err
     }
   }
 

@@ -14,7 +14,7 @@ const GROUPS: HelpGroup[] = [
       [`${MOD} N · c`, 'Quick capture → Inbox'],
       ['d', "Today's daily note"],
       ['1 2 3 4 5 6', 'Graph · Editor · Capture · Search · Review · Projects'],
-      ['p', 'Projects board'],
+      ['p', 'Projects board (a selected ★ star: its board)'],
       ['?', 'This cheatsheet'],
       ['Esc', 'Close / clear filters / deselect'],
     ],

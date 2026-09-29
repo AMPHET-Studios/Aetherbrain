@@ -27,7 +27,7 @@ import {
 } from 'three'
 import type { CameraControlsImpl } from '@react-three/drei'
 import type { GraphData, GraphNode, NoteId } from '@aether/core'
-import { BrainController } from '../BrainController'
+import { BrainController, DEFAULT_FAR, DEFAULT_MAX_DISTANCE, cameraRange } from '../BrainController'
 import { AREA_COLORS, GHOST_COLOR, STAR_COLOR, SUN_COLOR, nodeBaseColor, nodeRadius, planetColor, tagColor } from '../theme'
 import {
   NEBULA_COLORS,
@@ -68,7 +68,7 @@ export function BrainScene({ controller, maxDpr = 1.5, className }: BrainScenePr
       <Canvas
         dpr={[1, maxDpr]}
         gl={{ antialias: false, powerPreference: 'high-performance', alpha: false, stencil: false }}
-        camera={{ fov: 55, near: 1, far: 12000, position: HOME_POS }}
+        camera={{ fov: 55, near: 1, far: DEFAULT_FAR, position: HOME_POS }}
         onCreated={({ gl }) => {
           gl.toneMapping = NoToneMapping
           gl.setClearColor(BG)
@@ -109,12 +109,23 @@ function CameraRig({ controller }: { controller: BrainController }) {
     const tgt = new Vector3()
     const shift = { value: 0 }
     const cam = camera as PerspectiveCamera
+    // Set here, not as a prop: `setRange` raises it for big scenes and a
+    // re-render must not put the default back.
+    c.maxDistance = DEFAULT_MAX_DISTANCE
     const applyShift = (smooth: boolean) => {
       const dist = c.distance
       const halfW = Math.tan((cam.fov * Math.PI) / 360) * dist * cam.aspect
       void c.setFocalOffset(-halfW * shift.value, 0, 0, smooth)
     }
     controller.registerCamera({
+      setRange(distance) {
+        const { far, maxDistance } = cameraRange(distance)
+        c.maxDistance = maxDistance
+        if (cam.far !== far) {
+          cam.far = far
+          cam.updateProjectionMatrix()
+        }
+      },
       flyTo(x, y, z, distance, smooth = true, minElevation) {
         c.getPosition(pos, true)
         c.getTarget(tgt, true)
@@ -169,7 +180,6 @@ function CameraRig({ controller }: { controller: BrainController }) {
       draggingSmoothTime={0.08}
       dollyToCursor
       minDistance={4}
-      maxDistance={5000}
       dollySpeed={0.6}
       truckSpeed={1.4}
     />

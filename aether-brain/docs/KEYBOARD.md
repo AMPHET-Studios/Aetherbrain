@@ -10,7 +10,7 @@ Every feature has a key. `⌘` is `Ctrl` on Windows/Linux. Single keys are ignor
 | `⌘ N` · `c`    | Quick capture → Inbox                             |
 | `d`            | Open (or create) today's daily note               |
 | `1` `2` `3` `4` `5` `6` | Graph · Editor · Capture · Search · Review · Projects |
-| `p`            | Projects board                                    |
+| `p`            | Projects board (with a ★ project star selected: that project's board) |
 | `?`            | Keyboard cheatsheet                               |
 | `Esc`          | Close overlay → close editor → clear filters → deselect (first thing that applies) |
 | `Alt ←` / `Alt →` | History back / forward                         |
@@ -47,17 +47,18 @@ The default layout. The vault is the sun at the centre; with several roots (e.g.
 | `o`         | Orbits moving / paused (the camera follows a selected planet while it moves) |
 | `t`         | Leave / come back to the system layout                            |
 
-The legend shows the same depth `−` / `+` and the motion switch. Selecting a folder opens the **folder inspector**: its path and counts, its planets (click = fly, double-click = expand) and moons, and buttons for *+ Note here*, *+ Folder here*, *★ Make project* (writes the folder note `<folder>/<name>.md`) or *★ Project board*, *Expand* / *Collapse* and *Reveal* (desktop: show it in Explorer / Finder). Every button is reachable with `Tab`; the palette has the same actions (`>` folder).
+The legend shows the same depth `−` / `+` and the motion switch. Selecting a folder opens the **folder inspector**: its path and counts, its planets (click = fly, double-click = expand) and moons, and buttons for *+ Note here*, *+ Folder here*, *★ Make project* (writes the folder note `<folder>/<name>.md`) or *★ Project board*, *Expand* / *Collapse* and *Reveal* (desktop: show it in Explorer / Finder). In the graph `Tab` walks the neighbors rather than the buttons, so every inspector action has a key or a palette command instead: `p` opens a star's board, `x` expands / collapses, and the palette (`>` folder) has *New note / New folder in the selected folder*, *Make the selected folder a project*, *Open the selected star's project board* and *Show in the file manager*.
 
 ## Palette
 
 | Key         | Action                                      |
 | ----------- | ------------------------------------------- |
 | `↑` `↓`     | Move                                        |
-| `Enter`     | Open note / fly to folder / run command     |
+| `Enter`     | Open note / fly to folder (over the Projects board: back to the graph first) / run command |
 | `⇧ Enter`   | Select + fly, keep the editor closed         |
 | `⌘ Enter`   | Turn the query into a graph filter          |
 | `Tab`       | Toggle `>` command mode                     |
+| `Esc`       | Close the palette (only the palette: the board under it stays open) |
 | typing a title that doesn't exist | offers "Create neuron …" |
 
 Folders match by name or path (up to six, after the three best notes); `Enter` selects the folder and flies there, switching to the system layout when needed. Pseudo-queries: `is:orphan`, `is:stale`.
@@ -92,7 +93,7 @@ Board keys work when no text field has focus.
 | ---------- | --------------------------------------------------------------- |
 | `j` / `k`  | Next / previous project                                         |
 | `Enter` · `o` | Open the project note in the editor                          |
-| `e`        | Rename the project (`Enter` saves, `Esc` cancels) — `Projects/Old.md` becomes `Projects/New.md` unless the note is its folder's own note; the old name stays as an alias so `[[links]]` keep working |
+| `e`        | Rename the project (`Enter` saves, `Esc` cancels) — `Projects/Old.md` becomes `Projects/New.md` unless the note is its folder's own note or other notes link to it by path (`[[Projects/Old]]`); the old title and file name stay as aliases so `[[links]]` keep working |
 | `s`        | Cycle the status: active → paused → done → someday              |
 | `f`        | Add a folder (planet) inside the project's home folder — the home folder is created and linked first if the project has none |
 | `n`        | Focus the new-task box (`Enter` writes `- [ ] …` under `## To do`) |
@@ -106,9 +107,9 @@ On a focused task row (`Tab` to it, or click it):
 
 | Key                 | Action                                                   |
 | ------------------- | -------------------------------------------------------- |
-| `Enter` · double-click | Edit the task text (`Enter` saves, `Esc` cancels)     |
+| `Enter` · double-click | Edit the task text (`Enter` saves, `Esc` cancels; if another app or an AI changes the note meanwhile, the save still lands on this task) |
 | `Space` · click ☐   | Tick — saved as `- [x] … ✅ YYYY-MM-DD`; untick removes the stamp |
-| `Alt ↑` / `Alt ↓`   | Move the task up / down within its section (sub-tasks travel with it) |
+| `Alt ↑` / `Alt ↓`   | Move the task up / down within its section, past the other list's tasks (open and done are listed apart; sub-tasks travel with it); focus follows it |
 | `Del` · `Backspace` | Delete the task (no question; the toast has **Undo**, or press `u`) |
 | `↑` / `↓`           | Focus the previous / next task                           |
 
@@ -139,4 +140,4 @@ Inside a panel: `Esc` closes it, its own key closes it too, the other panel's ke
 
 ## Commands (palette `>`)
 
-Move note → Projects / Areas / Resources / Archive · Set status → evergreen / seedling · Delete note · New project · New folder / new note in the selected folder · Make the selected folder a project · Show in the file manager · Cycle layout · Orbits moving / paused · Folder levels − / + · Expand / collapse folder · Reload vault from disk · Re-run layout physics · Vault folders · AI link (desktop) · everything above.
+Move note → Projects / Areas / Resources / Archive · Set status → evergreen / seedling · Delete note · New project · New folder / new note in the selected folder · Make the selected folder a project · Open the selected star's project board · Show in the file manager · Cycle layout · Orbits moving / paused · Folder levels − / + · Expand / collapse folder · Reload vault from disk · Re-run layout physics · Vault folders · AI link (desktop) · everything above.

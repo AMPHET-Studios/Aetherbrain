@@ -2,8 +2,9 @@
 //
 // An .mcpb is a plain ZIP: manifest.json + the bundled server + an icon.
 // Claude Desktop installs it with a double-click (or Settings → Extensions →
-// Advanced settings → Install Extension), asks for the vault folders, and runs
-// the server with its own Node. Needs `pnpm build:mcp` first.
+// Advanced settings → Install Extension), asks for the vault folders (and
+// folders to skip), and runs the server with its own Node. Needs
+// `pnpm build:mcp` first.
 //
 // A tiny built-in zip writer (deflate from node:zlib + CRC-32) keeps this
 // dependency-free. The archive has no directory entries.
@@ -50,7 +51,7 @@ const manifest = {
     '',
     'Claude can search and read your notes (with their [[wikilinks]] and backlinks), browse your folders, see every project with its tasks and progress, capture ideas to the Inbox, create notes and folders (new planets inside a project), add and complete tasks (done tasks get a ✅ date), and update projects.',
     '',
-    'Pick one or more folders, or whole drives such as D:\\ and F:\\. Everything stays on your computer: the files are the only source of truth, nothing is uploaded anywhere by the extension, and nothing outside the folders you picked can be read or written. No tool deletes a note, only .md notes and folders are ever created, and a name that is taken is never overwritten. Switch on Read only to let Claude look without changing anything.',
+    'Pick one or more folders, or whole drives such as D:\\ and F:\\. Everything stays on your computer: the files are the only source of truth, nothing is uploaded anywhere by the extension, and nothing outside the folders you picked can be read or written. Hidden and system folders are always skipped; list any other folder names Claude should never open in Skip these folders (the exclusions you set in the Aether Brain app do not reach the extension). No tool deletes a note, only .md notes and folders are ever created, and a name that is taken is never overwritten. Switch on Read only to let Claude look without changing anything.',
   ].join('\n'),
   author: { name: 'Aether Brain contributors' },
   repository: { type: 'git', url: REPO },
@@ -64,7 +65,13 @@ const manifest = {
     mcp_config: {
       command: 'node',
       // A `multiple` directory value expands to one argument per folder only when the argument is exactly the placeholder.
-      args: ['${__dirname}/server/aether-mcp.mjs', '--read-only=${user_config.read_only}', '${user_config.vaults}'],
+      // The server skips an empty value or an unexpanded `${…}` (an optional setting left unset).
+      args: [
+        '${__dirname}/server/aether-mcp.mjs',
+        '--read-only=${user_config.read_only}',
+        '--exclude-list=${user_config.exclude}',
+        '${user_config.vaults}',
+      ],
     },
   },
   tools: Object.entries(TOOLS).map(([name, t]) => ({ name, description: t.description })),
@@ -81,6 +88,14 @@ const manifest = {
       description: 'The folders that hold your notes. Whole drives work too (for example D:\\ and F:\\); pick several to use them together.',
       multiple: true,
       required: true,
+    },
+    exclude: {
+      type: 'string',
+      title: 'Skip these folders',
+      description:
+        'Folder names Claude must never open, separated by commas (for example: Private, Taxes). Every folder with such a name is skipped, at any depth. Hidden and system folders are always skipped. Exclusions set in the Aether Brain app do not apply here.',
+      default: '',
+      required: false,
     },
     read_only: {
       type: 'boolean',

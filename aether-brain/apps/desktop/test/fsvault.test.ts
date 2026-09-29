@@ -247,6 +247,23 @@ describe('FsVault.scan', () => {
     expect(v.toVault(path.join(tmp, 'Alpha', 'sub', 'y.md'))).toBe('sub/y.md')
   })
 
+  it('scans one root on its own without touching lastScan', async () => {
+    await put('Alpha/x.md')
+    await put('Alpha/sub/y.md')
+    await put('Alpha/Nested/n.md')
+    await put('Beta/z.md')
+    const v = new FsVault([path.join(tmp, 'Alpha'), path.join(tmp, 'Beta'), path.join(tmp, 'Alpha', 'Nested')])
+    const full = await v.scan()
+    const alpha = await v.scanRoot(v.roots[0]!)
+    expect(alpha.files.map((f) => f.path).sort()).toEqual(['Alpha/sub/y.md', 'Alpha/x.md'])
+    expect([...alpha.folders].sort()).toEqual(['Alpha', 'Alpha/sub'])
+    expect(alpha.dirs).toBe(2)
+    expect(v.lastScan).toBe(full)
+    // A root that cannot be read is walked zero folders.
+    await fs.rm(path.join(tmp, 'Beta'), { recursive: true })
+    expect((await v.scanRoot(v.roots[1]!)).dirs).toBe(0)
+  })
+
   it('reads scanned files in order with mtimes, skipping vanished ones', async () => {
     await put('a.md', 'alpha')
     await put('b.md', 'beta')
@@ -292,6 +309,131 @@ describe('FsVault file operations', () => {
     await expect(multi.write('C/x.md', 'x')).rejects.toThrow(/Unknown/)
     await multi.write('b/x.md', 'x')
     expect(await exists('B/x.md')).toBe(true)
+  })
+
+  it('creates a new note, making parents, and refuses to replace anything', async () => {
+    const v = new FsVault([tmp])
+    await v.create('Inbox/deep/new.md', 'hello')
+    expect(await v.read('Inbox/deep/new.md')).toBe('hello')
+    // An existing note, repo boilerplate the scan skips, and a folder are all taken.
+    await put('Code/Game/CHANGELOG.md', '# Changelog\n\n## 1.0\n- important history\n')
+    await fs.mkdir(path.join(tmp, 'Inbox', 'dir.md'))
+    for (const p of ['Inbox/deep/new.md', 'Code/Game/CHANGELOG.md', 'Inbox/dir.md']) {
+      const err = await v.create(p, 'template').then(
+        () => null,
+        (e: unknown) => e as NodeJS.ErrnoException,
+      )
+      expect(err?.code, p).toBe('EEXIST')
+      expect(err?.message, p).toMatch(/EEXIST/)
+    }
+    expect(await v.read('Inbox/deep/new.md')).toBe('hello')
+    expect(await fs.readFile(path.join(tmp, 'Code', 'Game', 'CHANGELOG.md'), 'utf8')).toMatch(/important history/)
+    expect((await fs.stat(path.join(tmp, 'Inbox', 'dir.md'))).isDirectory()).toBe(true)
+    // A file where a parent folder should be is not "name taken" (the next suffix would not help).
+    const notDir = await v.create('Inbox/deep/new.md/child.md', 'x').then(
+      () => null,
+      (e: unknown) => e as NodeJS.ErrnoException,
+    )
+    expect(notDir?.message).not.toMatch(/EEXIST/)
+    expect(notDir?.code).not.toBe('EEXIST')
+  })
+
+  it('treats a name that differs only in letter case as taken, on any disk', async () => {
+    await put('Code/Changelog.md', 'kept')
+    await put('Inbox/Buy milk.md', 'external')
+    const v = new FsVault([tmp])
+    await expect(v.create('Code/CHANGELOG.md', 'x')).rejects.toThrow(/EEXIST/)
+    await expect(v.create('Inbox/buy MILK.md', 'x')).rejects.toThrow(/EEXIST/)
+    expect((await fs.readdir(path.join(tmp, 'Code'))).sort()).toEqual(['Changelog.md'])
+    expect(await fs.readFile(path.join(tmp, 'Inbox', 'Buy milk.md'), 'utf8')).toBe('external')
+    await v.create('Inbox/Buy milk 2.md', 'x')
+    expect(await v.read('Inbox/Buy milk 2.md')).toBe('x')
+  })
+
+  it('refuses to create outside the vault, in ignored folders, or through a link out of the root', async () => {
+    await fs.mkdir(path.join(tmp, 'vault'))
+    await fs.mkdir(path.join(tmp, 'outside'))
+    await fs.symlink(path.join(tmp, 'outside'), path.join(tmp, 'vault', 'Link'))
+    const v = new FsVault([path.join(tmp, 'vault')])
+    await expect(v.create('../x.md', 'x')).rejects.toThrow(/escapes/)
+    await expect(v.create('.obsidian/x.md', 'x')).rejects.toThrow(/excluded/)
+    await expect(v.create('proj/node_modules/x.md', 'x')).rejects.toThrow(/excluded/)
+    await expect(v.create('Link/x.md', 'x')).rejects.toThrow(/escapes/)
+    await expect(v.create('', 'x')).rejects.toThrow()
+    expect(await fs.readdir(path.join(tmp, 'outside'))).toEqual([])
+    expect(await exists('vault/.obsidian')).toBe(false)
+  })
+
+  it('removes the file it created when the write fails', async () => {
+    const v = new FsVault([tmp])
+    const open = fs.open
+    vi.spyOn(fs, 'open').mockImplementation((async (...args: Parameters<typeof fs.open>) => {
+      const handle = await open(...args)
+      vi.spyOn(handle, 'writeFile').mockRejectedValue(Object.assign(new Error('no space left on device'), { code: 'ENOSPC' }))
+      return handle
+    }) as typeof fs.open)
+    await expect(v.create('full.md', 'x')).rejects.toThrow(/no space/)
+    expect(await exists('full.md')).toBe(false)
+    // Nothing left behind, temp files included.
+    expect(await fs.readdir(tmp)).toEqual([])
+  })
+
+  it('never shows a new note half written', async () => {
+    const v = new FsVault([tmp])
+    const full = path.join(tmp, 'Inbox', 'New.md')
+    // Hold every content write until released, then look at the note's path in the meantime.
+    let release = (): void => undefined
+    const gate = new Promise<void>((r) => (release = r))
+    let writing = (): void => undefined
+    const started = new Promise<void>((r) => (writing = r))
+    const open = fs.open
+    vi.spyOn(fs, 'open').mockImplementation((async (...args: Parameters<typeof fs.open>) => {
+      const handle = await open(...args)
+      const writeFile = handle.writeFile.bind(handle)
+      vi.spyOn(handle, 'writeFile').mockImplementation((async (...a: Parameters<typeof handle.writeFile>) => {
+        writing()
+        await gate
+        return writeFile(...a)
+      }) as typeof handle.writeFile)
+      return handle
+    }) as typeof fs.open)
+    const created = v.create('Inbox/New.md', 'captured text')
+    await started
+    // A watcher or another app looking now finds nothing there, never an empty note.
+    expect(await fs.readFile(full, 'utf8').catch(() => null)).toBeNull()
+    release()
+    await created
+    expect(await fs.readFile(full, 'utf8')).toBe('captured text')
+    expect(await fs.readdir(path.join(tmp, 'Inbox'))).toEqual(['New.md'])
+  })
+
+  it('never replaces a file that appears after the name check', async () => {
+    const v = new FsVault([tmp])
+    await put('Inbox/Race.md', 'written by another app')
+    // The listing is read before the file shows up; the final step must still refuse.
+    const readdir = fs.readdir
+    vi.spyOn(fs, 'readdir').mockImplementation(((p: Parameters<typeof fs.readdir>[0], opts?: never) =>
+      String(p) === path.join(tmp, 'Inbox') ? Promise.resolve([]) : readdir(p, opts)) as typeof fs.readdir)
+    await expect(v.create('Inbox/Race.md', 'template')).rejects.toThrow(/EEXIST/)
+    // Same on a disk without hard links.
+    vi.spyOn(fs, 'link').mockRejectedValue(Object.assign(new Error('operation not permitted'), { code: 'EPERM' }))
+    await expect(v.create('Inbox/Race.md', 'template')).rejects.toThrow(/EEXIST/)
+    vi.mocked(fs.readdir).mockRestore()
+    expect(await fs.readdir(path.join(tmp, 'Inbox'))).toEqual(['Race.md'])
+    expect(await fs.readFile(path.join(tmp, 'Inbox', 'Race.md'), 'utf8')).toBe('written by another app')
+  })
+
+  it('creates in place on a disk without hard links, still refusing anything that is there', async () => {
+    vi.spyOn(fs, 'link').mockRejectedValue(Object.assign(new Error('operation not supported'), { code: 'ENOTSUP' }))
+    await put('Code/Changelog.md', 'kept')
+    const v = new FsVault([tmp])
+    await v.create('Inbox/New.md', 'hello')
+    expect(await v.read('Inbox/New.md')).toBe('hello')
+    await expect(v.create('Inbox/New.md', 'x')).rejects.toThrow(/EEXIST/)
+    await expect(v.create('Code/CHANGELOG.md', 'x')).rejects.toThrow(/EEXIST/)
+    expect(await v.read('Inbox/New.md')).toBe('hello')
+    expect(await fs.readdir(path.join(tmp, 'Inbox'))).toEqual(['New.md'])
+    expect(await fs.readdir(path.join(tmp, 'Code'))).toEqual(['Changelog.md'])
   })
 
   it('cleans up the temp file when the target cannot be replaced', async () => {

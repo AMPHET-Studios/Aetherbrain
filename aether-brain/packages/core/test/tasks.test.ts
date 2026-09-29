@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { addTask, deleteTask, editTask, extractTasks, moveTask, parseNote, projectNote, setTaskDone, taskProgress } from '../src'
+import { addTask, atxHeading, deleteTask, editTask, extractTasks, moveTask, parseNote, projectNote, setTaskDone, taskProgress } from '../src'
 
 const NOTE = `---
 title: PORTALz
@@ -214,5 +214,93 @@ describe('task editing', () => {
     expect(addTask(crlf, 'four')).toBe(`${crlf}\r\n- [ ] four`)
     expect(addTask(`${crlf}\r\n`, 'four')).toBe(`${crlf}\r\n- [ ] four\r\n`)
     expect(addTask('# P\r\n', 'x')).toBe('# P\r\n\r\n## To do\r\n\r\n- [ ] x\r\n')
+  })
+})
+
+describe('addTask and fenced code', () => {
+  it('never puts the new task inside a fenced block of the section', () => {
+    const empty = addTask('# P\n\n## To do\n\n```md\n- [ ] example\n```\n\n## Notes\n', 'Real task')
+    expect(empty).toBe('# P\n\n## To do\n\n- [ ] Real task\n\n```md\n- [ ] example\n```\n\n## Notes\n')
+    expect(extractTasks(empty).map((t) => [t.text, t.section])).toEqual([['Real task', 'To do']])
+
+    const allDone = addTask('# P\n\n## To do\n\n- [x] shipped\n\nExample:\n\n```md\n- [ ] example\n```\n', 'Real task')
+    expect(allDone).toBe('# P\n\n## To do\n\n- [x] shipped\n- [ ] Real task\n\nExample:\n\n```md\n- [ ] example\n```\n')
+    expect(extractTasks(allDone).map((t) => t.text)).toEqual(['shipped', 'Real task'])
+  })
+
+  it('ignores headings inside fences and frontmatter when finding the section', () => {
+    const raw = '---\ntitle: P\n## To do\n---\n# P\n\n```\n## To do\n```\n\n## To do\n\n- [ ] one\n'
+    const out = addTask(raw, 'two')
+    expect(out).toBe(raw.replace('- [ ] one\n', '- [ ] one\n- [ ] two\n'))
+    expect(extractTasks(out).map((t) => [t.text, t.section])).toEqual([
+      ['one', 'To do'],
+      ['two', 'To do'],
+    ])
+    // A code block right after the section's heading doesn't end the section either.
+    const fenced = addTask('## To do\n\n```\n## Later\n```\n\n- [ ] one\n', 'two')
+    expect(extractTasks(fenced).map((t) => [t.text, t.section])).toEqual([
+      ['one', 'To do'],
+      ['two', 'To do'],
+    ])
+  })
+
+  it('keeps the new task on one line', () => {
+    const out = addTask('## To do\n\n- [ ] one\n', 'two\n```\n## Hijack')
+    expect(out).toBe('## To do\n\n- [ ] one\n- [ ] two ``` ## Hijack\n')
+  })
+})
+
+describe('linear-time parsing (text can come from an AI client)', () => {
+  // The regexes the hand-written parsers replaced: quadratic on long whitespace runs.
+  const OLD_HEADING = /^(#{1,6})\s+(.*?)(?:\s+#+)?\s*$/
+  const OLD_TASK = /^(\s*)([-*+])\s+\[([ xX])\]\s+(.*)$/
+  const OLD_STAMP = /\s*✅\s*(\d{4}-\d{2}-\d{2})\s*$/
+  let seed = 11
+  const rnd = (): number => (seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296
+  const randomLine = (alphabet: string[], max: number): string => {
+    let line = ''
+    for (let i = Math.floor(rnd() * max); i > 0; i--) line += alphabet[Math.floor(rnd() * alphabet.length)] ?? ''
+    return line
+  }
+
+  it('reads headings exactly like the old regex', () => {
+    const alphabet = ['#', '#', '#', ' ', ' ', '\t', 'a', 'C', '#', '\u00a0', '\u2028', '\r', 'x']
+    for (let n = 0; n < 30000; n++) {
+      const line = randomLine(alphabet, 12)
+      const h = OLD_HEADING.exec(line)
+      expect(atxHeading(line), JSON.stringify(line)).toEqual(h ? { level: h[1]!.length, text: h[2] } : null)
+    }
+  })
+
+  it('reads task lines and completion stamps exactly like the old regexes', () => {
+    const alphabet = ['-', '*', '+', ' ', ' ', ' ', '\t', '[', ']', ' ', 'x', 'X', 'a', '✅', '2', '0', '-', '1', '\u2028', '\r', '#']
+    const stamps = ['', ' ✅ 2026-09-20', '✅2026-01-01 ', ' ✅  1999-12-31\t', '✅ 2026-9-1', ' 2026-01-02', ' x 2026-01-03', '✅ 12026-01-04']
+    for (let n = 0; n < 30000; n++) {
+      const line = (rnd() < 0.5 ? `${' '.repeat(Math.floor(rnd() * 3))}- [${rnd() < 0.5 ? ' ' : 'x'}] ` : '') + randomLine(alphabet, 10) + (stamps[Math.floor(rnd() * stamps.length)] ?? '')
+      const text = line.endsWith('\r') ? line.slice(0, -1) : line
+      let want: unknown[] = []
+      const m = /^---\s*$/.test(text) || /^\s*(```|~~~)/.test(text) || OLD_HEADING.test(text) ? null : OLD_TASK.exec(text)
+      if (m) {
+        const stamp = OLD_STAMP.exec(m[4] ?? '')
+        const body = stamp ? (m[4] ?? '').slice(0, stamp.index) : (m[4] ?? '')
+        want = [{ line: 0, text: body.trim(), done: m[3] !== ' ', doneAt: stamp?.[1] ?? null, section: '', indent: (m[1] ?? '').length }]
+      }
+      expect(extractTasks(line), JSON.stringify(line)).toEqual(want)
+    }
+  })
+
+  it('stays fast on a long run of whitespace', () => {
+    const ws = ' '.repeat(50_000)
+    const start = performance.now()
+    expect(atxHeading(`# a${ws}x`)).toEqual({ level: 1, text: `a${ws}x` })
+    expect(extractTasks(`# a${ws}x\n- [ ] a${ws}✅${ws}x\n- [ ] ${ws}a\rb\n- [x] b${ws}✅ 2026-01-01${ws}`).map((t) => t.doneAt)).toEqual([
+      null,
+      '2026-01-01',
+    ])
+    expect(addTask(`# P\n\n## To do${ws}x\n\ntext${ws}x${ws}`, `t${ws}x`).endsWith(`## To do\n\n- [ ] t${ws}x\n`)).toBe(true)
+    expect(editTask('- [ ] a\n', 0, `b${ws}✅${ws}x`)).toBe(`- [ ] b${ws}✅${ws}x\n`)
+    expect(setTaskDone(`- [ ] a${ws}✅ 2026-01-01${ws}x`, 0, true, '2026-09-29')).toContain('✅ 2026-09-29')
+    // Each of these took seconds with the old regexes (quadratic: ~9 minutes for a 1 MB line).
+    expect(performance.now() - start).toBeLessThan(300)
   })
 })

@@ -45,11 +45,32 @@ describe('selectFolders', () => {
     expect(s.dropped).toBe(0)
   })
 
-  it('always shows every note folder chain, however deep', () => {
-    const s = selectFolders(['x', 'y'], ['x/y/z/w/Note.md', 'Top.md'], { multiRoot: false, maxDepth: 0 })
-    expect([...s.visible]).toEqual(['', 'x', 'x/y', 'x/y/z', 'x/y/z/w'])
+  it('shows every note folder chain down to maxDepth only', () => {
+    const s = selectFolders(['x', 'y'], ['x/y/z/w/Note.md', 'Top.md'], { multiRoot: false, maxDepth: 2, maxFolders: 0 })
+    // The note in x/y/z/w orbits x/y, its nearest visible ancestor; its deeper folders stay hidden.
+    expect([...s.visible]).toEqual(['', 'x', 'x/y'])
     expect(s.hidden.get('')).toBe(1)
-    expect(s.dropped).toBe(0)
+    expect(s.hidden.get('x/y')).toBe(1)
+    expect(s.dropped).toBe(1)
+    const flat = selectFolders(['x', 'y'], ['x/y/z/w/Note.md', 'Top.md'], { multiRoot: false, maxDepth: 0 })
+    expect([...flat.visible]).toEqual([''])
+    expect(flat.hidden.get('')).toBe(2)
+    expect(flat.dropped).toBe(0)
+    // Expanding a folder on the way shows the next level of the note's chain.
+    const open = selectFolders(['x', 'y'], ['x/y/z/w/Note.md'], { multiRoot: false, maxDepth: 2, maxFolders: 0, expanded: ['x/y'] })
+    expect([...open.visible]).toEqual(['', 'x', 'x/y', 'x/y/z'])
+  })
+
+  it("keeps one deep note from dragging a drive's whole folder chain in", () => {
+    const chain = Array.from({ length: 12 }, (_, i) => `D/${Array.from({ length: i + 1 }, (_, k) => `f${k}`).join('/')}`)
+    const s = selectFolders(['D', 'F', ...chain], [`${chain[chain.length - 1]}/README.md`], { multiRoot: true, maxDepth: 3, maxFolders: 0 })
+    expect([...s.visible]).toEqual(['', 'D', 'D/f0', 'D/f0/f1', 'F'])
+    const g = buildGraph(notesOf([{ path: `${chain[chain.length - 1]}/README.md`, content: '# Readme\n' }]), {
+      folders: { multiRoot: true, all: ['D', 'F', ...chain], rootTitle: 'Drives', maxDepth: 3, maxFolders: 0 },
+    })
+    expect(node(g, `${chain[chain.length - 1]}/README`).parent).toBe('folder:D/f0/f1')
+    expect(g.nodes.filter((n) => n.kind === 'folder').map((n) => n.id)).toEqual(['folder:', 'folder:D', 'folder:D/f0', 'folder:D/f0/f1', 'folder:F'])
+    expect(node(g, 'folder:D/f0/f1').folder).toMatchObject({ hiddenFolders: 1, notes: 0, totalNotes: 1 })
   })
 
   it('shows pinned folders with their ancestors, even when not listed', () => {
@@ -70,9 +91,13 @@ describe('selectFolders', () => {
 
   it('always shows every mount in a multi-root vault', () => {
     const s = selectFolders(['D', 'D/Games', 'F', 'F/Art', 'G'], ['F/Art/x.md'], { multiRoot: true, maxDepth: 0 })
-    expect([...s.visible]).toEqual(['', 'D', 'F', 'F/Art', 'G'])
+    expect([...s.visible]).toEqual(['', 'D', 'F', 'G'])
     expect(s.hidden.get('D')).toBe(1)
+    expect(s.hidden.get('F')).toBe(1)
     expect(s.dropped).toBe(0)
+    const deeper = selectFolders(['D', 'D/Games', 'F', 'F/Art', 'G'], ['F/Art/x.md'], { multiRoot: true, maxDepth: 2, maxFolders: 0 })
+    expect([...deeper.visible]).toEqual(['', 'D', 'F', 'F/Art', 'G'])
+    expect(deeper.dropped).toBe(1)
   })
 
   it('caps optional folders breadth-first, alphabetically, and counts the dropped ones', () => {
@@ -97,6 +122,104 @@ describe('selectFolders', () => {
     expect([...a.visible]).toEqual([...b.visible])
     expect([...a.hidden]).toEqual([...b.hidden])
     expect([...a.childCount]).toEqual([...b.childCount])
+  })
+
+  it('picks exactly what a straightforward full scan picks, memoized or not', () => {
+    // The pre-memo algorithm (index the whole universe on every call), with
+    // the note chain rule of Addendum 2: shown only down to maxDepth.
+    const reference = (all: string[], notePaths: string[], o: Parameters<typeof selectFolders>[2]) => {
+      const maxDepth = o.maxDepth ?? 3
+      const maxFolders = o.maxFolders ?? 1500
+      const norm = (f: string) => f.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '')
+      const up = (f: string) => (f.includes('/') ? f.slice(0, f.lastIndexOf('/')) : '')
+      const depth = (f: string) => (f === '' ? 0 : f.split('/').length)
+      const universe = new Set([''])
+      const chain = (f: string) => {
+        for (let cur = f; !universe.has(cur); cur = up(cur)) universe.add(cur)
+      }
+      for (const f of all) chain(norm(f))
+      const noteFolders = new Set(notePaths.map(up))
+      for (const f of noteFolders) chain(f)
+      const pinned = [...(o.pinned ?? [])].map(norm)
+      for (const f of pinned) chain(f)
+      const sorted = [...universe].sort()
+      const childCount = new Map(sorted.map((f) => [f, 0]))
+      for (const f of sorted) if (f !== '') childCount.set(up(f), (childCount.get(up(f)) ?? 0) + 1)
+      const visible = new Set([''])
+      const show = (f: string) => {
+        for (let cur = f; !visible.has(cur); cur = up(cur)) visible.add(cur)
+      }
+      if (o.multiRoot) for (const f of sorted) if (depth(f) === 1) show(f)
+      for (const f of noteFolders) show(f.split('/').slice(0, Math.max(0, maxDepth)).join('/'))
+      for (const f of pinned) show(f)
+      for (const e of o.expanded ?? []) for (const f of sorted) if (f !== '' && up(f) === norm(e)) show(f)
+      let added = 0
+      let dropped = 0
+      for (let d = 0; d <= maxDepth; d++) {
+        for (const f of sorted) {
+          if (depth(f) !== d || visible.has(f)) continue
+          if (added < maxFolders) {
+            visible.add(f)
+            added++
+          } else dropped++
+        }
+      }
+      const order = sorted.filter((f) => visible.has(f))
+      const shown = new Map<string, number>()
+      for (const f of order) if (f !== '') shown.set(up(f), (shown.get(up(f)) ?? 0) + 1)
+      return { visible: order, hidden: order.map((f) => [f, (childCount.get(f) ?? 0) - (shown.get(f) ?? 0)]), childCount, dropped }
+    }
+
+    let seed = 7
+    const rnd = (n: number): number => Math.floor(((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296) * n)
+    const names = ['a', 'b', 'C', 'a b', 'z', 'Projects']
+    const randomFolder = (top: string[]): string => {
+      const segs = [top[rnd(top.length)] ?? 'a']
+      for (let d = rnd(7); d > 0; d--) segs.push(names[rnd(names.length)] ?? 'a')
+      return segs.join('/')
+    }
+    for (let round = 0; round < 300; round++) {
+      const multiRoot = rnd(2) === 1
+      const top = multiRoot ? ['D', 'F', 'G'] : names
+      const all = Array.from({ length: 1 + rnd(60) }, () => randomFolder(top))
+      // Unnormalized spellings, like a listing may hand in.
+      const listed = all.map((f) => (rnd(8) === 0 ? `${f.replace(/\//g, '\\')}\\` : f))
+      const notePaths = Array.from({ length: rnd(12) }, () => `${rnd(4) === 0 ? randomFolder(top) : (all[rnd(all.length)] ?? '')}/n${rnd(99)}.md`)
+      const o = {
+        multiRoot,
+        maxDepth: rnd(6),
+        maxFolders: rnd(4) === 0 ? 1500 : rnd(25),
+        expanded: Array.from({ length: rnd(3) }, () => all[rnd(all.length)] ?? ''),
+        pinned: Array.from({ length: rnd(3) }, () => (rnd(3) === 0 ? `${randomFolder(top)}/` : (all[rnd(all.length)] ?? ''))),
+      }
+      const want = reference(listed, notePaths, o)
+      const set = new Set(listed)
+      // Twice on one Set (the second call reuses the memoized universe), and once from a plain array.
+      for (const input of [set, set, listed]) {
+        const got = selectFolders(input, notePaths, o)
+        const label = JSON.stringify({ round, o })
+        expect([...got.visible], label).toEqual(want.visible)
+        expect([...got.hidden], label).toEqual(want.hidden)
+        expect(got.dropped, label).toBe(want.dropped)
+        expect(new Map([...got.childCount].sort()), label).toEqual(new Map([...want.childCount].sort()))
+      }
+    }
+  })
+
+  it('re-indexes a folder Set that grew or shrank, and widens the index for one call only', () => {
+    const folders = new Set(['a', 'a/b'])
+    expect([...selectFolders(folders, [], { multiRoot: false, maxDepth: 3 }).visible]).toEqual(['', 'a', 'a/b'])
+    folders.add('c')
+    expect([...selectFolders(folders, [], { multiRoot: false, maxDepth: 3 }).visible]).toEqual(['', 'a', 'a/b', 'c'])
+    folders.delete('a/b')
+    folders.delete('c')
+    expect([...selectFolders(folders, [], { multiRoot: false, maxDepth: 3 }).visible]).toEqual(['', 'a'])
+    // Folders missing from the Set (note folders, pins) widen that call's index only.
+    expect([...selectFolders(folders, ['x/y/n.md'], { multiRoot: false, maxDepth: 3 }).visible]).toEqual(['', 'a', 'x', 'x/y'])
+    const other = selectFolders(folders, [], { multiRoot: false, maxDepth: 3, pinned: ['q'] })
+    expect([...other.visible]).toEqual(['', 'a', 'q'])
+    expect(other.childCount.has('x')).toBe(false)
+    expect([...selectFolders(folders, [], { multiRoot: false, maxDepth: 3 }).visible]).toEqual(['', 'a'])
   })
 })
 
@@ -261,8 +384,10 @@ describe('buildGraph with folders, multi-root', () => {
     expect(node(graph, 'folder:D').folder).toMatchObject({ role: 'mount', depth: 1, totalNotes: 2 })
     expect(node(graph, 'folder:G')).toMatchObject({ title: 'G', parent: 'folder:' })
     expect(node(graph, 'folder:G').folder).toMatchObject({ role: 'mount', totalNotes: 0, childFolders: 0 })
-    expect(node(graph, 'folder:F').folder).toMatchObject({ childFolders: 2, hiddenFolders: 1 })
+    // maxDepth 1: F/Notes holds a note but sits below the mounts, so it stays folded in F.
+    expect(node(graph, 'folder:F').folder).toMatchObject({ childFolders: 2, hiddenFolders: 2, notes: 0, totalNotes: 1 })
     expect(graph.index.has('folder:F/Games')).toBe(false)
+    expect(graph.index.has('folder:F/Notes')).toBe(false)
   })
 
   it('finds projects under <mount>/Projects and parents notes into the system', () => {
@@ -272,7 +397,10 @@ describe('buildGraph with folders, multi-root', () => {
     expect(node(graph, 'D/Projects/PORTALz').parent).toBe('folder:D/Projects/PORTALz')
     expect(node(graph, 'D/Projects/PORTALz/Art/Sketch').parent).toBe('folder:D/Projects/PORTALz/Art')
     expect(node(graph, 'folder:D/Projects/PORTALz/Art').folder?.inProject).toBe(true)
-    expect(node(graph, 'F/Notes/Idea').parent).toBe('folder:F/Notes')
+    // Deeper than maxDepth: the note orbits its nearest visible ancestor, the drive.
+    expect(node(graph, 'F/Notes/Idea').parent).toBe('folder:F')
+    const deeper = buildGraph(notesOf(files), { folders: { multiRoot: true, all, rootTitle: 'Drives', maxDepth: 2 } })
+    expect(node(deeper, 'F/Notes/Idea').parent).toBe('folder:F/Notes')
     expect(node(graph, 'ghost:Later').parent).toBe('F/Notes/Idea')
     expect(graph.edges).toHaveLength(3)
   })

@@ -1,4 +1,4 @@
-import { extractTasks, isProjectNote, projectFolderOf, taskProgress, type NoteId, type ParsedNote, type TaskItem } from '@aether/core'
+import { extractTasks, isProjectNote, moveTask, projectFolderOf, taskProgress, type NoteId, type ParsedNote, type TaskItem } from '@aether/core'
 
 /** One card on the Projects board. */
 export interface ProjectRow {
@@ -39,4 +39,15 @@ export function listProjects(notes: Map<NoteId, ParsedNote>, folders: Set<string
     if (sa !== sb) return sa - sb
     return (b.note.meta.updated ?? '').localeCompare(a.note.meta.updated ?? '')
   })
+}
+
+/**
+ * Move the task on `line` up / down the way the board lists tasks: open and
+ * done ones apart, so a move passes over the other list's tasks (sub-tasks
+ * travel along). Returns the new text and the line the task lands on. The
+ * store writes with it and the board predicts the focus with it, so the two
+ * always agree.
+ */
+export function moveTaskOnBoard(raw: string, line: number, dir: -1 | 1): { raw: string; line: number } {
+  return moveTask(raw, line, dir, { sameState: true })
 }

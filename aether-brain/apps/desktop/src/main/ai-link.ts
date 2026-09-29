@@ -155,23 +155,29 @@ export function claudeDesktopConfig(l: ServerLaunch): string {
 }
 
 /**
- * One argument double-quoted for a terminal. Windows (cmd.exe and PowerShell
- * both hand the text to the program's own argv parser): backslashes before the
- * closing quote are doubled so `"D:\\"` stays `D:\` instead of escaping the
- * quote. Elsewhere (sh, zsh): `\ " $ \`` are escaped inside the quotes.
+ * One argument as a literal for the terminal the command is meant for, with
+ * nothing inside expanded (a root can be any folder name: `D:\$Notes`,
+ * `Art$(…)`, a backtick).
+ *
+ * Windows: a PowerShell single-quoted string. `$`, `$(…)`, backticks and `%`
+ * stay text; a single quote is doubled, including the typographic ‘ ’ ‚ ‛
+ * PowerShell also treats as quotes. PowerShell passes the value on to the
+ * program as one argument (a drive root `D:\` stays `D:\`). The command is
+ * for PowerShell, not cmd.exe.
+ *
+ * Elsewhere (sh, bash, zsh): a POSIX single-quoted string (no `$`, backtick
+ * or `!` expansion), `'` written as `'\''`.
  */
 export function quoteArg(arg: string, platform: string = process.platform): string {
-  if (platform === 'win32') {
-    const body = arg.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, '$1$1')
-    return `"${body}"`
-  }
-  return `"${arg.replace(/[\\"$`]/g, '\\$&')}"`
+  if (platform === 'win32') return `'${arg.replace(/['\u2018\u2019\u201a\u201b]/g, '$&$&')}'`
+  return `'${arg.replace(/'/g, `'\\''`)}'`
 }
 
 /**
  * Ready-to-run `claude mcp add` command for Claude Code: user scope (every
  * project sees the brain), the env var after the name and before `--` so it
  * is never read as the name, everything after `--` passed to the server.
+ * On Windows it is a PowerShell command (see quoteArg): label it so where it is shown.
  */
 export function claudeCodeCommand(l: ServerLaunch, platform: string = process.platform): string {
   const q = (s: string) => quoteArg(s, platform)

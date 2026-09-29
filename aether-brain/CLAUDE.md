@@ -53,18 +53,18 @@ Multi-root vaults (e.g. `D:\` + `F:\`): every vault path starts with the root's 
 pnpm install
 pnpm dev             # web app at http://localhost:5173  (?demo=1 auto-opens the demo, ?stress=1000 the synthetic vault)
 pnpm dev:desktop     # Electron + Vite dev server
-pnpm test            # vitest: packages/core, packages/graph, packages/ui, apps/desktop (255 tests in 13 files at v0.3)
+pnpm test            # vitest: packages/core, packages/graph, packages/ui, apps/desktop (351 tests in 16 files at v0.3)
 pnpm typecheck       # tsc for renderer code + Electron main + MCP server
 pnpm build           # web build → apps/web/dist
 pnpm build:desktop   # MCP bundle (vite) + main/preload (tsc) + renderer (vite) → apps/desktop/dist
 ```
 
-Tests (v0.3): core 82 (`packages/core/test`: parsing, folders, projects, tasks), graph 29 (`packages/graph/test`: system layout, worker), ui 21 (`packages/ui/test/store.test.ts`: the store, palette commands and the global key handler against a `MemoryVaultAdapter`, node env, no Worker, no DOM), desktop 123 (`apps/desktop/test`: FsVault, watcher, MCP tools, AI link). Run one area with `pnpm exec vitest run packages/ui`.
+Tests (v0.3): core 113 (`packages/core/test`: parsing, folders, projects, tasks, frontmatter), graph 31 (`packages/graph/test`: system layout, worker, engine, camera follow and range), ui 46 (`packages/ui/test`: store, fsAccess adapter, folder search — the store, palette commands and the global key handler against a `MemoryVaultAdapter`, node env, no Worker, no DOM), desktop 161 (`apps/desktop/test`: FsVault, watcher, MCP tools, AI link). Run one area with `pnpm exec vitest run packages/ui`.
 
 ## Conventions
 
 - Store actions are the API; components don't touch adapters directly.
-- A project is decided **only** by `isProjectNote(note)` from `@aether/core`; `meta.type` is `'project'` for every note under a Projects folder at any depth. `setProjectFields` throws on frontmatter it can't parse — callers catch and show the error (the store toasts). Never rewrite a frontmatter block whose YAML does not parse (`updateFrontmatter` would drop it); the store stamps `updated:` in place.
+- A project is decided **only** by `isProjectNote(note)` from `@aether/core`; `meta.type` is `'project'` for every note under a Projects folder at any depth. `setProjectFields` throws on frontmatter it can't parse — callers catch and show the error (the store toasts). `updateFrontmatter` / `rewriteFrontmatter` patch changed keys in place (comments, untouched values, BOM and line endings survive) and leave a block they cannot parse alone. New notes are always created with `adapter.create` (fails with EEXIST, never overwrites); store rewrites of one note run one at a time and start from the file on disk.
 - Store rewrites of one note (tasks, project fields, `moveToArea`, `patchFrontmatter`, renames) first save a dirty editor draft of that note and stop (toast) when it can't be saved, so a draft is never overwritten. Task `line` numbers count in the saved note (what the board shows); the store follows them into the just-saved draft.
 - Windows and macOS file names are case-insensitive: new notes and folders reuse the vault's existing spelling of a folder (`D/inbox`, not a second `D/Inbox`), and creating never replaces a note whose id differs only in case.
 - Folder node ids are `folder:<vault path>` (`folderKey`, `isFolderId`, `folderPathOf`); anything that takes a note id must guard against folder and ghost ids.

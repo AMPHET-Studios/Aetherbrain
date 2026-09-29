@@ -126,6 +126,8 @@ export interface AetherBridge {
   listFolders(): Promise<FolderListDto>
   readFile(path: string): Promise<string | null>
   writeFile(path: string, content: string): Promise<void>
+  /** Create a new note; rejects (message contains `EEXIST`) when anything exists at the path. */
+  createFile(path: string, content: string): Promise<void>
   deleteFile(path: string): Promise<void>
   renameFile(from: string, to: string): Promise<void>
   /** Create a folder (and parents) inside the vault. */
@@ -160,6 +162,7 @@ export const IPC = {
   folders: 'vault:folders',
   read: 'vault:read',
   write: 'vault:write',
+  create: 'vault:create',
   delete: 'vault:delete',
   rename: 'vault:rename',
   mkdir: 'vault:mkdir',

@@ -311,9 +311,9 @@ function FolderInspector({ node }: { node: GraphNode }) {
                 selectProject(info.projectId)
                 setView('projects')
               }}
-              title={projectNote ? `Open the board of ${projectNote.meta.title}` : 'Open the project board'}
+              title={projectNote ? `Open the board of ${projectNote.meta.title} (p)` : 'Open the project board (p)'}
             >
-              ★ Project board
+              ★ Project board <kbd>p</kbd>
             </button>
           ) : (
             info.role === 'folder' && (

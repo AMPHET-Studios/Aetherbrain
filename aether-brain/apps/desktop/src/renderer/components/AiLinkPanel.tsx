@@ -64,15 +64,38 @@ function Copy({ text, what, label = 'Copy' }: { text: string; what: string; labe
   )
 }
 
-/** Monospace block with a copy button beside it. */
-function Snippet({ text, what }: { text: string; what: string }) {
+/** Monospace block with a copy button beside it; `display` is what shows (e.g. the token masked), `text` what is copied. */
+function Snippet({ text, display, what }: { text: string; display?: string; what: string }) {
   return (
     <div className="mt-1.5 flex items-start gap-2">
       <pre className="scroll max-h-40 min-w-0 flex-1 whitespace-pre-wrap break-all rounded-lg border border-[var(--line)] bg-black/30 px-3 py-2 font-mono text-[11.5px] leading-relaxed text-ink">
-        {text}
+        {display ?? text}
       </pre>
       <Copy text={text} what={what} />
     </div>
+  )
+}
+
+/** The Portable exe unpacks to a temporary folder that is deleted when it quits: a setup that names its path breaks. */
+function PortableWarning({ what }: { what: string }) {
+  return (
+    <li className="list-none text-inbox">
+      ⚠ You are running the Portable exe: it unpacks to a temporary folder that changes every launch and is deleted when the app quits, so {what} stops working.
+      Install Aether Brain with the setup exe first, or use the .mcpb.
+    </li>
+  )
+}
+
+/**
+ * In place of a setup snippet while no folder vault is open: the server
+ * needs at least one --vault folder, and without one it exits at start.
+ */
+function NeedsVault({ mcpb }: { mcpb?: boolean }) {
+  return (
+    <p className="mt-1.5 rounded-lg border border-[var(--line)] bg-black/30 px-3 py-2 text-[12px] text-inbox">
+      Open a vault folder first (<kbd>v</kbd>): this setup names the folders the server reads, and none is open.
+      {mcpb ? ' Or use the .mcpb above: it asks for its folders itself.' : ''}
+    </p>
   )
 }
 
@@ -106,7 +129,10 @@ const TONE: Record<'ok' | 'off' | 'wait' | 'error', string> = {
 /** AI link overlay (`a`): let Claude and ChatGPT search, read and write the brain. */
 export function AiLinkPanel() {
   const bridge = ElectronVaultAdapter.bridge()
+  // A folder vault: the demo is not on disk, and the setups below need real folders.
   const hasVault = useAether((s) => s.adapter instanceof ElectronVaultAdapter)
+  // On Windows the Claude Code command is quoted for PowerShell.
+  const windows = bridge?.platform === 'win32'
   const activity = useActivity()
   const [st, setSt] = useState<AiLinkStatus | null>(null)
   const [port, setPort] = useState('')
@@ -238,25 +264,25 @@ export function AiLinkPanel() {
                 <a className="text-accent2 underline-offset-2 hover:underline" href={RELEASES} target="_blank" rel="noreferrer">
                   Releases page
                 </a>{' '}
-                and double-click it; Claude Desktop installs it and asks which folders to use.
+                and double-click it; Claude Desktop installs it and asks which folders to use. Its own <span className="text-ink">Skip these folders</span> setting
+                (comma-separated names) is separate from this app's exclusions.
               </li>
               <li>
                 Or in Claude Desktop open Settings → Developer → Edit Config, paste this (merge it into <code className="font-mono text-ink">mcpServers</code> if
                 the file already has servers), save, and restart Claude Desktop.
-                <Snippet text={st.claudeDesktopConfig} what="the Claude Desktop config" />
+                {hasVault ? <Snippet text={st.claudeDesktopConfig} what="the Claude Desktop config" /> : <NeedsVault mcpb />}
               </li>
-              {st.portable && (
-                <li className="list-none text-inbox">
-                  ⚠ You are running the Portable exe: its path changes every launch, so this config breaks next time. Install Aether Brain with the setup exe for the
-                  Claude Desktop config, or use the .mcpb.
-                </li>
-              )}
+              {st.portable && <PortableWarning what="this config" />}
             </Client>
 
             <Client name="Claude Code" note="terminal">
               <li>
-                Run this once in a terminal (PowerShell, Command Prompt or Terminal):
-                <Snippet text={st.claudeCodeCommand} what="the Claude Code command" />
+                {windows ? 'Run this once in PowerShell (not Command Prompt):' : 'Run this once in a terminal:'}
+                {hasVault ? <Snippet text={st.claudeCodeCommand} what="the Claude Code command" /> : <NeedsVault />}
+              </li>
+              {st.portable && <PortableWarning what="the registered command" />}
+              <li className="text-faint">
+                The config and the command above hold your vault folders and skipped folders as they are now: copy them again after changing either.
               </li>
               <li>
                 Start <code className="font-mono text-ink">claude</code> anywhere and ask about your notes; <code className="font-mono text-ink">/mcp</code> shows the
@@ -274,7 +300,7 @@ export function AiLinkPanel() {
               <li>
                 Go to chatgpt.com/plugins → + → Connection: this URL with &lt;your-tunnel&gt; replaced by the address from step 2; Authentication: No
                 authentication.
-                <Snippet text={tunnelUrl} what="the ChatGPT connection URL" />
+                <Snippet text={tunnelUrl} display={showToken ? tunnelUrl : masked(tunnelUrl, st.token)} what="the ChatGPT connection URL" />
               </li>
             </Client>
 

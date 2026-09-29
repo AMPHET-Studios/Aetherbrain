@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { AREA_LABELS, planetColor } from '@aether/graph'
 import type { SearchHit } from '@aether/core'
 import { findCommands, type Command } from '../commands'
+import { folderIndex, matchFolders } from '../folderSearch'
 import { useAether } from '../store'
 import { cx, MOD } from '../util'
 
@@ -10,26 +11,6 @@ type Row =
   | { kind: 'folder'; path: string; name: string }
   | { kind: 'command'; cmd: Command }
   | { kind: 'create'; title: string }
-
-/**
- * Folders whose name (best) or path contains the query: exact name, then
- * name prefix, then name, then path; shorter paths first. At most `limit`.
- */
-function matchFolders(folders: Set<string>, query: string, limit: number): string[] {
-  const q = query.trim().toLowerCase()
-  if (!q) return []
-  const out: { path: string; rank: number }[] = []
-  for (const f of folders) {
-    const lower = f.toLowerCase()
-    const name = lower.slice(lower.lastIndexOf('/') + 1)
-    const rank = name === q ? 0 : name.startsWith(q) ? 1 : name.includes(q) ? 2 : lower.includes(q) ? 3 : -1
-    if (rank >= 0) out.push({ path: f, rank })
-  }
-  return out
-    .sort((a, b) => a.rank - b.rank || a.path.length - b.path.length || a.path.localeCompare(b.path))
-    .slice(0, limit)
-    .map((x) => x.path)
-}
 
 /**
  * Search + command palette. Type to search notes (title, headings, tags,
@@ -48,11 +29,14 @@ export function CommandPalette() {
   const setFilters = useAether((s) => s.setFilters)
   const folders = useAether((s) => s.folders)
   const showFolder = useAether((s) => s.showFolder)
+  const setView = useAether((s) => s.setView)
   const createNote = useAether((s) => s.createNote)
   const [q, setQ] = useState('')
   const [index, setIndex] = useState(0)
   const input = useRef<HTMLInputElement | null>(null)
   const list = useRef<HTMLDivElement | null>(null)
+  // Lower-cased once per folder Set, not per keystroke (a whole drive has hundreds of thousands).
+  const folderList = useMemo(() => folderIndex(folders), [folders])
 
   useEffect(() => {
     if (open) {
@@ -70,7 +54,7 @@ export function CommandPalette() {
       // The best few notes, then matching folders (planets), then the rest of the notes.
       const hits = search.search(q, { limit: 14 })
       for (const hit of hits.slice(0, 3)) out.push({ kind: 'note', hit })
-      for (const path of matchFolders(folders, q, 6)) out.push({ kind: 'folder', path, name: path.slice(path.lastIndexOf('/') + 1) })
+      for (const path of matchFolders(folderList, q, 6)) out.push({ kind: 'folder', path, name: path.slice(path.lastIndexOf('/') + 1) })
       for (const hit of hits.slice(3)) out.push({ kind: 'note', hit })
       const exact = [...notes.values()].some((n) => n.meta.title.toLowerCase() === q.trim().toLowerCase())
       if (!exact) out.push({ kind: 'create', title: q.trim() })
@@ -84,7 +68,7 @@ export function CommandPalette() {
       for (const cmd of findCommands('', s).slice(0, 6)) out.push({ kind: 'command', cmd })
     }
     return out
-  }, [q, search, notes, folders, revision])
+  }, [q, search, notes, folderList, revision])
 
   useEffect(() => setIndex(0), [rows.length, q])
   useEffect(() => {
@@ -97,10 +81,14 @@ export function CommandPalette() {
   const run = async (row: Row, alt = false) => {
     if (row.kind === 'note') {
       setPalette(false)
-      if (alt) select(row.hit.id, { fly: true })
-      else openNote(row.hit.id, { fly: true })
+      if (alt) {
+        // Fly only: step out of a view that covers the graph (the board), or nothing visible happens.
+        if (useAether.getState().view === 'projects') setView('graph')
+        select(row.hit.id, { fly: true })
+      } else openNote(row.hit.id, { fly: true })
     } else if (row.kind === 'folder') {
       setPalette(false)
+      // showFolder leaves the board (it covers the graph and the folder inspector).
       showFolder(row.path)
     } else if (row.kind === 'command') {
       setPalette(false)
@@ -133,7 +121,12 @@ export function CommandPalette() {
               else if (e.key === 'ArrowUp') (e.preventDefault(), setIndex((i) => Math.max(0, i - 1)))
               else if (e.key === 'Enter' && rows[index]) (e.preventDefault(), void run(rows[index]!, e.shiftKey))
               else if (e.key === 'Tab') (e.preventDefault(), setQ((v) => (v.startsWith('>') ? v.slice(1) : `>${v}`)))
-              else if (e.key === 'Escape') (e.preventDefault(), setPalette(false))
+              else if (e.key === 'Escape') {
+                // Only the palette closes: the window's Esc handler would also close the board under it.
+                e.preventDefault()
+                e.stopPropagation()
+                setPalette(false)
+              }
               else if ((e.metaKey || e.ctrlKey) && e.key === 'Enter' && q.trim()) {
                 e.preventDefault()
                 setFilters({ query: q.trim() })

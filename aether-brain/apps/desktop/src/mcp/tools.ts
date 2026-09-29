@@ -192,6 +192,22 @@ const CHANGES: ToolAnnotations = { readOnlyHint: false, destructiveHint: true, o
 /** Longest list a result carries (search hits, …); the rest is counted. */
 const MAX_HITS = 50
 
+/**
+ * Longest markdown one argument may carry (a note body, text to append, a
+ * passage to replace): about 200 KB, far more than a note needs. The parsing
+ * is linear; the cap keeps one call from making the vault huge all the same.
+ */
+export const MAX_TEXT_ARG = 200_000
+/** Longest one-line argument: titles, note and folder references, headings, tasks, tags, queries. */
+export const MAX_LINE_ARG = 4_000
+/** Longest list argument (tags, first tasks, keys to remove). */
+export const MAX_LIST_ARG = 200
+
+/** A markdown text argument. */
+const mdText = () => z.string().max(MAX_TEXT_ARG)
+/** A one-line argument. */
+const oneLine = () => z.string().max(MAX_LINE_ARG)
+
 /** What a tool handler hands back: the reply text, the activity line, the touched path. */
 interface Done {
   text: string
@@ -214,17 +230,24 @@ function plural(n: number, one: string, many = `${one}s`): string {
   return `${n} ${n === 1 ? one : many}`
 }
 
+/** Said when a task reply lists the current lines because the note changed since they were listed. */
+function relisted(r: { tasks?: unknown }): string {
+  return r.tasks ? ' The note had changed since its tasks were listed: use the lines in tasks from now on.' : ''
+}
+
 // Shared input fields.
-const noteArg = z.string().min(1).describe('The note: its title, alias, id or vault path (e.g. "Projects/PORTALz.md").')
-const projectArg = z.string().min(1).describe('The project: its title, alias, id, vault path, or its home folder.')
+const noteArg = oneLine().min(1).describe('The note: its title, alias, id or vault path (e.g. "Projects/PORTALz.md").')
+const projectArg = oneLine().min(1).describe('The project: its title, alias, id, vault path, or its home folder.')
 const lineArg = z
   .number()
   .int()
   .min(0)
   .optional()
-  .describe('Line number of the task (0-based), as get_project, read_note, add_task or delete_task last listed it. Lines move when a task above is added or deleted; also passing task is safest.')
-const taskArg = z.string().optional().describe('The task text (or a unique part of it), when you do not have its line.')
-const tagsArg = z.array(z.string()).optional().describe('Tags without "#", e.g. ["portal", "concept-art"].')
+  .describe(
+    'Line number of the task (0-based), as the last reply that listed it gave it (get_project, read_note, add_task, delete_task, or a task tool\'s tasks or error). Lines move when a task above is added or deleted; when the note changed since that listing, the task that was on the line is found again, or the call is refused with the current lines. Also passing task is safest.',
+  )
+const taskArg = oneLine().optional().describe('The task text (or a unique part of it), when you do not have its line.')
+const tagsArg = z.array(oneLine()).max(MAX_LIST_ARG).optional().describe('Tags without "#", e.g. ["portal", "concept-art"].')
 
 /**
  * An MCP server over `brain` with every tool of the AI link. A fresh one per
@@ -288,7 +311,7 @@ export function createMcpServer(brain: Brain, opts: McpServerOptions): McpServer
 
   tool(
     'search',
-    { query: z.string().describe('Words to look for.') },
+    { query: oneLine().describe('Words to look for.') },
     READ,
     async ({ query }) => {
       const results = await brain.find(query, 10)
@@ -300,7 +323,7 @@ export function createMcpServer(brain: Brain, opts: McpServerOptions): McpServer
 
   tool(
     'fetch',
-    { id: z.string().min(1).describe('A note id from search (a title or vault path works too).') },
+    { id: oneLine().min(1).describe('A note id from search (a title or vault path works too).') },
     READ,
     async ({ id }) => {
       const doc = await brain.fetch(id)
@@ -320,10 +343,10 @@ export function createMcpServer(brain: Brain, opts: McpServerOptions): McpServer
   tool(
     'search_notes',
     {
-      query: z.string().min(1).describe('Words to look for (all words must match; falls back to any word).'),
+      query: oneLine().min(1).describe('Words to look for (all words must match; falls back to any word).'),
       limit: z.number().int().min(1).max(MAX_HITS).optional().describe('How many hits (default 10, max 50).'),
-      folder: z.string().optional().describe('Only notes inside this folder (vault path), e.g. "Projects/PORTALz".'),
-      tag: z.string().optional().describe('Only notes with this tag.'),
+      folder: oneLine().optional().describe('Only notes inside this folder (vault path), e.g. "Projects/PORTALz".'),
+      tag: oneLine().optional().describe('Only notes with this tag.'),
     },
     READ,
     async ({ query, limit, folder, tag }) => {
@@ -342,7 +365,7 @@ export function createMcpServer(brain: Brain, opts: McpServerOptions): McpServer
   tool(
     'list_folder',
     {
-      path: z.string().optional().describe('Folder vault path, e.g. "Projects/PORTALz" (a drive in a multi-root vault: "D"). Omit for the top level.'),
+      path: oneLine().optional().describe('Folder vault path, e.g. "Projects/PORTALz" (a drive in a multi-root vault: "D"). Omit for the top level.'),
       depth: z.number().int().min(1).max(4).optional().describe('Levels of subfolders to include (default 1, max 4).'),
     },
     READ,
@@ -357,7 +380,7 @@ export function createMcpServer(brain: Brain, opts: McpServerOptions): McpServer
   tool(
     'list_projects',
     {
-      status: z.string().optional().describe('Only projects with this status, e.g. "active".'),
+      status: oneLine().optional().describe('Only projects with this status, e.g. "active".'),
       limit: z.number().int().min(1).max(100).optional().describe('How many (default 50).'),
     },
     READ,
@@ -391,7 +414,7 @@ export function createMcpServer(brain: Brain, opts: McpServerOptions): McpServer
     {
       limit: z.number().int().min(1).max(100).optional().describe('How many (default 15).'),
       days: z.number().int().min(1).max(3650).optional().describe('Only notes changed in the last N days.'),
-      folder: z.string().optional().describe('Only notes inside this folder (vault path).'),
+      folder: oneLine().optional().describe('Only notes inside this folder (vault path).'),
     },
     READ,
     async ({ limit, days, folder }) => {
@@ -405,9 +428,9 @@ export function createMcpServer(brain: Brain, opts: McpServerOptions): McpServer
   tool(
     'create_note',
     {
-      title: z.string().min(1).describe('Note title (also the file name).'),
-      folder: z.string().optional().describe('Folder vault path, e.g. "Resources/Lighting" (default: the Inbox). Created when missing.'),
-      content: z.string().optional().describe('Markdown body. A leading "# Heading" replaces the default title heading.'),
+      title: oneLine().min(1).describe('Note title (also the file name).'),
+      folder: oneLine().optional().describe('Folder vault path, e.g. "Resources/Lighting" (default: the Inbox). Created when missing.'),
+      content: mdText().optional().describe('Markdown body. A leading "# Heading" replaces the default title heading.'),
       tags: tagsArg,
       type: z.enum(NOTE_TYPES).optional().describe('Note type for frontmatter.'),
     },
@@ -422,8 +445,8 @@ export function createMcpServer(brain: Brain, opts: McpServerOptions): McpServer
     'append_to_note',
     {
       note: noteArg,
-      text: z.string().min(1).describe('Markdown to add.'),
-      heading: z.string().optional().describe('Add at the end of this section (heading text, any level); created when missing.'),
+      text: mdText().min(1).describe('Markdown to add.'),
+      heading: oneLine().optional().describe('Add at the end of this section (heading text, any level); created when missing.'),
     },
     ADDS,
     async ({ note, text, heading }) => {
@@ -436,8 +459,8 @@ export function createMcpServer(brain: Brain, opts: McpServerOptions): McpServer
     'edit_note',
     {
       note: noteArg,
-      old_text: z.string().min(1).describe('Exact text to replace; must occur exactly once in the note.'),
-      new_text: z.string().describe('Replacement text (empty removes old_text).'),
+      old_text: mdText().min(1).describe('Exact text to replace; must occur exactly once in the note.'),
+      new_text: mdText().describe('Replacement text (empty removes old_text).'),
     },
     CHANGES,
     async ({ note, old_text, new_text }) => {
@@ -450,8 +473,12 @@ export function createMcpServer(brain: Brain, opts: McpServerOptions): McpServer
     'update_frontmatter',
     {
       note: noteArg,
-      set: z.record(z.string(), z.unknown()).optional().describe('Properties to set, e.g. {"status": "active", "tags": ["portal"]}. null removes a key.'),
-      remove: z.array(z.string()).optional().describe('Property names to remove.'),
+      set: z
+        .record(oneLine(), z.unknown())
+        .refine((v) => JSON.stringify(v).length <= MAX_TEXT_ARG, { message: `Properties must be under ${MAX_TEXT_ARG} characters in all` })
+        .optional()
+        .describe('Properties to set, e.g. {"status": "active", "tags": ["portal"]}. null removes a key.'),
+      remove: z.array(oneLine()).max(MAX_LIST_ARG).optional().describe('Property names to remove.'),
     },
     { ...CHANGES, idempotentHint: true },
     async ({ note, set, remove }) => {
@@ -463,8 +490,8 @@ export function createMcpServer(brain: Brain, opts: McpServerOptions): McpServer
   tool(
     'capture',
     {
-      text: z.string().min(1).describe('What to jot down (markdown). The first line becomes the title.'),
-      title: z.string().optional().describe('Explicit title instead of the first line.'),
+      text: mdText().min(1).describe('What to jot down (markdown). The first line becomes the title.'),
+      title: oneLine().optional().describe('Explicit title instead of the first line.'),
       tags: tagsArg,
     },
     ADDS,
@@ -478,8 +505,8 @@ export function createMcpServer(brain: Brain, opts: McpServerOptions): McpServer
     'add_task',
     {
       project: projectArg,
-      text: z.string().min(1).describe('The task, e.g. "Block out the gate chamber".'),
-      section: z.string().optional().describe('Heading to add it under (default "To do").'),
+      text: oneLine().min(1).describe('The task, e.g. "Block out the gate chamber".'),
+      section: oneLine().optional().describe('Heading to add it under (default "To do").'),
     },
     ADDS,
     async ({ project, text, section }) => {
@@ -505,17 +532,17 @@ export function createMcpServer(brain: Brain, opts: McpServerOptions): McpServer
       const message = r.changed
         ? `${finish ? 'Completed' : 'Reopened'} ${quote(text, 120)} in ${r.note.path}.`
         : `No change: the task was already ${finish ? 'done' : 'open'}.`
-      return { text: reply(message, r), summary: `${finish ? 'completed' : 'reopened'} ${quote(text)}`, path: r.note.path }
+      return { text: reply(`${message}${relisted(r)}`, r), summary: `${finish ? 'completed' : 'reopened'} ${quote(text)}`, path: r.note.path }
     },
   )
 
   tool(
     'edit_task',
-    { project: projectArg, line: lineArg, task: taskArg, text: z.string().min(1).describe('The new task text.') },
+    { project: projectArg, line: lineArg, task: taskArg, text: oneLine().min(1).describe('The new task text.') },
     { ...CHANGES, idempotentHint: true },
     async ({ project, line, task, text }) => {
       const r = await brain.editTask(project, { ...(line !== undefined ? { line } : {}), ...(task ? { task } : {}) }, text)
-      return { text: reply(r.changed ? `Edited the task in ${r.note.path}.` : 'No change.', r), summary: `edited task ${quote(text)}`, path: r.note.path }
+      return { text: reply(`${r.changed ? `Edited the task in ${r.note.path}.` : 'No change.'}${relisted(r)}`, r), summary: `edited task ${quote(text)}`, path: r.note.path }
     },
   )
 
@@ -528,11 +555,11 @@ export function createMcpServer(brain: Brain, opts: McpServerOptions): McpServer
   tool(
     'create_project',
     {
-      title: z.string().optional().describe('Project name (optional when folder names an existing folder to turn into a project).'),
-      summary: z.string().optional().describe('One line on what the project is and what done looks like.'),
+      title: oneLine().optional().describe('Project name (optional when folder names an existing folder to turn into a project).'),
+      summary: oneLine().optional().describe('One line on what the project is and what done looks like.'),
       tags: tagsArg,
-      tasks: z.array(z.string()).optional().describe('First to-dos.'),
-      folder: z.string().optional().describe('Home folder (vault path). Its own name as title makes that folder the project itself.'),
+      tasks: z.array(oneLine()).max(MAX_LIST_ARG).optional().describe('First to-dos.'),
+      folder: oneLine().optional().describe('Home folder (vault path). Its own name as title makes that folder the project itself.'),
       make_folder: z.boolean().optional().describe('Create a home folder Projects/<title> for planets when no folder is given (default true).'),
     },
     ADDS,
@@ -554,11 +581,11 @@ export function createMcpServer(brain: Brain, opts: McpServerOptions): McpServer
     'update_project',
     {
       project: projectArg,
-      title: z.string().optional().describe('New name (the old one stays as an alias).'),
-      status: z.string().nullable().optional().describe('e.g. active, paused, done; null removes it.'),
-      summary: z.string().nullable().optional().describe('New one-line summary; empty or null removes it.'),
-      tags: z.array(z.string()).optional().describe('Replaces all tags.'),
-      folder: z.string().nullable().optional().describe('New home folder (vault path, created when missing); null unbinds it.'),
+      title: oneLine().optional().describe('New name (the old one stays as an alias).'),
+      status: oneLine().nullable().optional().describe('e.g. active, paused, done; null removes it.'),
+      summary: oneLine().nullable().optional().describe('New one-line summary; empty or null removes it.'),
+      tags: z.array(oneLine()).max(MAX_LIST_ARG).optional().describe('Replaces all tags.'),
+      folder: oneLine().nullable().optional().describe('New home folder (vault path, created when missing); null unbinds it.'),
     },
     { ...CHANGES, idempotentHint: true },
     async ({ project, title, status, summary, tags, folder }) => {
@@ -580,8 +607,8 @@ export function createMcpServer(brain: Brain, opts: McpServerOptions): McpServer
   tool(
     'create_folder',
     {
-      path: z.string().min(1).describe('Folder vault path, e.g. "Resources/Lighting"; with project, a name inside the project folder, e.g. "Sound".'),
-      project: z.string().optional().describe('Create the folder inside this project\'s home folder (a new planet).'),
+      path: oneLine().min(1).describe('Folder vault path, e.g. "Resources/Lighting"; with project, a name inside the project folder, e.g. "Sound".'),
+      project: oneLine().optional().describe('Create the folder inside this project\'s home folder (a new planet).'),
     },
     { ...ADDS, idempotentHint: true },
     async ({ path, project }) => {

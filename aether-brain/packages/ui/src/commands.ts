@@ -30,6 +30,13 @@ function diskFolder(s: AetherState): string | null {
   return f === '' && s.roots.length > 1 ? null : f
 }
 
+/** The project note of the selected folder when that folder is a project star, else null. */
+export function selectedProject(s: AetherState): NoteId | null {
+  if (!s.selectedId || !isFolderId(s.selectedId)) return null
+  const id = s.graph?.nodes[s.graph.index.get(s.selectedId) ?? -1]?.folder?.projectId ?? null
+  return id && s.notes.has(id) ? id : null
+}
+
 const writable = (s: AetherState) => !!s.adapter && !s.adapter.readOnly
 
 /** Every keyboard path has a palette twin, and vice versa. */
@@ -162,6 +169,17 @@ export const COMMANDS: Command[] = [
       return !!f && writable(s) && info?.role === 'folder'
     },
     run: (s) => s.makeProject(selectedFolder(s)!),
+  },
+  {
+    id: 'folder-board',
+    title: "Open the selected star's project board",
+    keys: 'p',
+    group: 'view',
+    when: (s) => selectedProject(s) !== null,
+    run: (s) => {
+      s.selectProject(selectedProject(s))
+      s.setView('projects')
+    },
   },
   {
     id: 'reveal',

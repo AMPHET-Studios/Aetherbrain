@@ -95,6 +95,10 @@ export async function loadVault(
  * Folders: `opts.folders` (else every note folder) plus the folders of added
  * notes; `addDir` adds a folder and its ancestors; `unlinkDir` removes a folder
  * and every folder under it (the adapter sends `unlink` for the notes itself).
+ * `opts.folders` itself is never modified, and it is returned as it is when
+ * the batch adds and removes no folder (copy on write): the folder index of
+ * the system layout is memoized per Set (`folderUniverse`), so an autosave
+ * doesn't re-index a whole drive's folders.
  */
 export function applyChanges(
   notes: Map<NoteId, ParsedNote>,
@@ -103,7 +107,21 @@ export function applyChanges(
   opts: { folders?: Set<string>; graph?: GraphOptionsFn } = {},
 ): { notes: Map<NoteId, ParsedNote>; graph: GraphData; touched: NoteId[]; folders: Set<string> } {
   const next = new Map(notes)
-  const folders = opts.folders ? new Set(opts.folders) : foldersOfNotes(notes.values())
+  let folders = opts.folders ?? foldersOfNotes(notes.values())
+  let owned = !opts.folders
+  /** The folder set, copied the first time the batch really changes it. */
+  const writable = (): Set<string> => {
+    if (!owned) {
+      folders = new Set(folders)
+      owned = true
+    }
+    return folders
+  }
+  const addFolderOnce = (path: string): void => {
+    const p = normalizeFolderPath(path)
+    // An ignored folder (`.git`, `node_modules`) is never added: no copy for it either.
+    if (p !== '' && !folders.has(p) && !isIgnoredPath(p)) addFolder(writable(), p)
+  }
   const touched: NoteId[] = []
   // Removed folders are collected and dropped in one pass: a deleted tree
   // arrives as one unlinkDir per folder (deepest first), and a full scan per
@@ -112,10 +130,11 @@ export function applyChanges(
   const gone = new Set<string>()
   const dropGone = (): void => {
     if (gone.size === 0) return
+    const doomed: string[] = []
     for (const f of folders) {
       for (let cur = f; ; ) {
         if (gone.has(cur)) {
-          folders.delete(f)
+          doomed.push(f)
           break
         }
         const i = cur.lastIndexOf('/')
@@ -124,6 +143,9 @@ export function applyChanges(
       }
     }
     gone.clear()
+    if (doomed.length === 0) return
+    const set = writable()
+    for (const f of doomed) set.delete(f)
   }
   for (const c of changes) {
     if (c.kind === 'unlinkDir') {
@@ -133,7 +155,7 @@ export function applyChanges(
     }
     if (c.kind === 'addDir') {
       dropGone()
-      addFolder(folders, c.path)
+      addFolderOnce(c.path)
       continue
     }
     const p = normalizePath(c.path)
@@ -154,7 +176,7 @@ export function applyChanges(
       search.upsert(n)
       touched.push(id)
       dropGone()
-      addFolder(folders, n.meta.folder)
+      addFolderOnce(n.meta.folder)
     } catch (err) {
       console.warn('[aether] failed to parse', p, err)
     }

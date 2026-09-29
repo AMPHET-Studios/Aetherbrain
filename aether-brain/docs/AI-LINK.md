@@ -36,10 +36,20 @@ The link runs on your own computer and reads the folders you chose.
 **It cannot:**
 
 - **delete files.** No tool deletes a note or a folder. The most it can remove is a single task line, or text inside a note that it replaces.
-- **overwrite a note by creating a new one.** If a name is taken, it adds ` 2`, ` 3`, and so on.
+- **overwrite a file by creating a new note.** A new note is only ever created
+  where nothing exists yet, so it can't replace a note the link hasn't seen yet,
+  a `README.md` or `CHANGELOG.md`, or a name that differs only in capitals. If a
+  name is taken, it adds ` 2`, ` 3`, and so on.
 - **create anything except `.md` notes and folders.** It can't create images, scripts or programs.
 - **reach outside the folders you chose.** Every path is checked, including symlinks and junctions that point elsewhere.
-- **open hidden or system folders.** It skips `Windows`, `Program Files`, `AppData`, `$RECYCLE.BIN`, `System Volume Information`, dot-folders, `node_modules`, build and cache folders, and any folders you excluded in the app.
+- **open hidden or system folders.** It always skips `Windows`, `Program Files`, `AppData`, `$RECYCLE.BIN`, `System Volume Information`, dot-folders, `node_modules`, and build and cache folders.
+- **open folders you told it to skip.** Where you set this depends on the setup:
+  - the app's **AI link** (ChatGPT, claude.ai) uses the folders you excluded in the app (<kbd>v</kbd>);
+  - the **Claude Desktop extension** uses its own **Skip these folders** setting. The
+    exclusions in the app don't reach it, so list the same folders there;
+  - a **config or command copied from the app** (Claude Desktop, Claude Code) contains
+    the exclusions from the moment you copied it. After you change the exclusions in
+    the app, copy it again and replace the old one.
 - **change anything at all when Read only is on.** In that mode it can still search and read.
 
 It works with the same folders the app shows. If you added `D:\` and `F:\` as
@@ -72,8 +82,12 @@ shows each call an AI makes through the link.
    Advanced settings → Install Extension…**, then pick the file.
 3. In **Vault folders**, choose your note folders. For whole drives, pick `D:\`,
    then add `F:\` as a second folder.
-4. Optionally switch on **Read only**.
-5. Make sure the extension is enabled. Then start a new chat and ask *"What
+4. Optionally, in **Skip these folders**, list folder names Claude must never
+   open, separated by commas (for example `Private, Taxes`). Every folder with
+   such a name is skipped, wherever it is. The exclusions you set in the app
+   don't apply to the extension, so repeat them here.
+5. Optionally switch on **Read only**.
+6. Make sure the extension is enabled. Then start a new chat and ask *"What
    projects do I have in my second brain?"*
 
 The extension carries its own copy of the server, and Claude Desktop runs it
@@ -81,6 +95,10 @@ with its built-in Node.js. You don't need to install anything else, and the
 Aether Brain app can stay closed.
 
 To change the folders later, go to **Settings → Extensions → Aether Brain**.
+
+If one of the folders is missing when Claude Desktop starts (for example an
+external `F:\` that isn't plugged in), the extension skips it and still serves
+the others. Once the drive is back, restart Claude Desktop to include it again.
 
 ### Alternative: the config from the app
 
@@ -98,6 +116,10 @@ The config starts the server with Aether Brain's own program in Node mode
 because its path changes every launch. In that case, install Aether Brain with
 the setup exe or use the extension.
 
+The config lists your vault folders and the folders you excluded in the app
+at the moment you copy it. If you change either later, copy it again and
+replace the old entry.
+
 **If it doesn't show up,** look at the logs in `%APPDATA%\Claude\logs`, mainly
 `mcp-server-aether-brain.log` and `mcp.log`. On a Mac they are in
 `~/Library/Logs/Claude`. A line such as `Vault folder not found` tells you what
@@ -106,20 +128,28 @@ to fix.
 ## Claude Code
 
 Press <kbd>a</kbd> in the app and copy the command under **Connect → Claude
-Code**. Run it once in PowerShell, Command Prompt or Terminal. It looks like
-this (your paths will differ):
+Code**. On Windows run it once in **PowerShell** (on macOS and Linux, in
+Terminal). It looks like this (your paths will differ):
 
 ```powershell
-claude mcp add aether-brain --scope user -e ELECTRON_RUN_AS_NODE=1 -- "C:\Users\you\AppData\Local\Programs\Aether Brain\Aether Brain.exe" "C:\Users\you\AppData\Local\Programs\Aether Brain\resources\app.asar.unpacked\dist\mcp\aether-mcp.mjs" --vault "D:\\" --vault "F:\\"
+claude mcp add aether-brain --scope user -e ELECTRON_RUN_AS_NODE=1 -- 'C:\Users\you\AppData\Local\Programs\Aether Brain\Aether Brain.exe' 'C:\Users\you\AppData\Local\Programs\Aether Brain\resources\app.asar.unpacked\dist\mcp\aether-mcp.mjs' --vault 'D:\' --vault 'F:\'
 ```
 
-Use the copied command rather than typing it. The copy has the quoting already
-right: a drive root is written `"D:\\"`, because on Windows `"D:\"` would swallow
-the closing quote.
+Use the copied command rather than typing it. Every path is in single quotes,
+which PowerShell takes literally, so folder names with `$`, backticks or spaces
+stay exactly as they are. It is a PowerShell command: Command Prompt (cmd.exe)
+does not understand single quotes.
 
 Then start `claude` in any folder and ask about your notes. `/mcp` shows whether
 the link is connected. Add `--read-only` at the end of the command for a
 read-only link.
+
+Like the Claude Desktop config, the command contains your folders and
+exclusions as they were when you copied it: after changing them in the app,
+run `claude mcp remove aether-brain --scope user` and then the new command. It
+also contains the path of the Aether Brain program, so with the **Portable** exe
+(whose path changes every launch) it stops working; install Aether Brain with
+the setup exe instead.
 
 ## ChatGPT
 
@@ -221,6 +251,11 @@ Write tools (hidden when the link is read-only):
 | `create_folder` | A new folder, such as a planet inside a project's folder |
 | `link_notes` | Add `- Related: [[other note]]` to a note |
 
+The task tools name a task by its line number or its text. If the note changed
+after the AI listed its tasks (you edited it in the app, for example), a task
+given only by its line is found again by its text; if that isn't possible, the
+tool changes nothing and replies with the current lines.
+
 ## Keeping it safe
 
 - **The token is a password.** Anyone who has the full link URL can use your brain
@@ -249,6 +284,9 @@ Write tools (hidden when the link is read-only):
   from source, run `pnpm build:mcp` in `apps/desktop`.
 - **Claude Desktop shows no Aether Brain tools**: make sure the extension is
   enabled, restart Claude Desktop, and check `%APPDATA%\Claude\logs\mcp-server-aether-brain.log`.
+- **One drive is missing from the answers**: the log says `Vault folder not found:
+  F:\ (skipped; the other folders are served)`. That drive wasn't reachable when
+  Claude Desktop started. Plug it in and restart Claude Desktop.
 - **ChatGPT says it can't connect**: check that the link is on, that the tunnel
   window is still running, and that the connector URL uses the tunnel's *current*
   address and ends in `/mcp/<token>`.
@@ -269,8 +307,11 @@ node aether-mcp.mjs --vault "D:\\" --http --port 7457 --token <secret>  # HTTP l
 ```
 
 Options: `--vault <folder>` (repeatable), `--read-only[=true|false]`,
-`--exclude <folder name>` (repeatable), `--http`, `--port <n>`,
+`--exclude <folder name>` (repeatable, one exact name each),
+`--exclude-list "<name>, <name>"` (several names separated by commas), `--http`, `--port <n>`,
 `--host <address>` (default `127.0.0.1`) and `--token <secret>` (16 or more
 characters from `A–Z a–z 0–9 - _`; a random one is made when you leave it out).
 In HTTP mode the server prints its local URL. `AETHER_VAULT` (folders separated
-by `;` on Windows, `:` elsewhere) is used when no folder is given.
+by `;` on Windows, `:` elsewhere) is used when no folder is given. A folder that
+is missing at start is skipped with a warning; the server only stops when none
+of the folders is there.

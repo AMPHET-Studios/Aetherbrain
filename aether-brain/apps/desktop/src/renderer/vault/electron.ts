@@ -98,6 +98,10 @@ export class ElectronVaultAdapter implements VaultAdapter {
   write(path: string, content: string): Promise<void> {
     return this.bridge.writeFile(path, content)
   }
+  /** Create a new note; main refuses (the error message carries `EEXIST`) when anything is at the path, in any letter case. */
+  create(path: string, content: string): Promise<void> {
+    return this.bridge.createFile(path, content)
+  }
   remove(path: string): Promise<void> {
     return this.bridge.deleteFile(path)
   }

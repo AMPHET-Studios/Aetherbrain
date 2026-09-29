@@ -7,12 +7,13 @@
  *
  *   node aether-mcp.mjs --vault "D:\" --vault "F:\"          stdio (Claude Desktop, Claude Code)
  *   node aether-mcp.mjs "D:\" "F:\" --read-only=true         bare folders (how the .mcpb passes them)
+ *   node aether-mcp.mjs "D:\" --exclude-list="Private, Taxes"  folder names to skip, comma-separated
  *   node aether-mcp.mjs --vault ~/Notes --http --port 7457   HTTP link for a tunnel (ChatGPT, claude.ai)
  *
  * In stdio mode stdout carries the protocol only; logs go to stderr.
  */
 import { randomBytes } from 'node:crypto'
-import { promises as fs, realpathSync } from 'node:fs'
+import { promises as fs, realpathSync, type Stats } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
@@ -49,7 +50,9 @@ Usage:
 Options:
   --vault <folder>       A vault root (repeatable; several roots appear as D/, F/, …)
   --read-only[=true|false]  Offer read tools only
-  --exclude <name>       Also skip folders with this name (repeatable)
+  --exclude <name>       Also skip folders with this name (repeatable; one exact name each)
+  --exclude-list <names> Also skip these folder names, separated by commas
+                         (the extension's "Skip these folders")
   --http                 Serve the HTTP link instead of stdio (for tunnels: ChatGPT, claude.ai)
   --port <n>             HTTP port (default ${DEFAULT_PORT}; 0 = any free port)
   --host <address>       HTTP interface (default 127.0.0.1)
@@ -57,6 +60,8 @@ Options:
   --help                 Show this help
 
 AETHER_VAULT (folders separated by "${path.delimiter}") is used when no folder is given.
+A folder that is missing at start (an unplugged drive) is skipped with a warning;
+the server stops only when none of them is there.
 `
 
 function bool(value: string | undefined): boolean {
@@ -95,8 +100,15 @@ export function parseArgs(argv: string[], env: NodeJS.ProcessEnv = process.env):
         break
       }
       case '--exclude': {
+        // One name, exactly (a folder name may contain a comma): how the app's copied configs pass them.
         const v = value()
         if (usable(v)) out.exclude.push(v.trim())
+        break
+      }
+      case '--exclude-list': {
+        // Several names in one value, comma-separated: the .mcpb's "Skip these folders" text field.
+        const v = value()
+        if (usable(v)) out.exclude.push(...v.split(',').map((s) => s.trim()).filter(Boolean))
         break
       }
       case '--read-only':
@@ -133,17 +145,46 @@ export function parseArgs(argv: string[], env: NodeJS.ProcessEnv = process.env):
   return out
 }
 
-/** Every root must be an existing folder. */
-async function checkRoots(roots: string[]): Promise<void> {
-  for (const r of roots) {
-    const st = await fs.stat(r).catch(() => null)
-    if (!st) throw new Error(`Vault folder not found: ${r}`)
-    if (!st.isDirectory()) throw new Error(`Not a folder: ${r}`)
-  }
-}
+/** How long a root may take to answer at start before it counts as missing (a sleeping disk spins up in seconds). */
+const ROOT_TIMEOUT_MS = 20_000
 
 function log(line: string): void {
   process.stderr.write(`${line}\n`)
+}
+
+/** fs.stat, or null when it fails or does not answer in `ms` (an offline network share can hang for minutes). */
+async function statWithin(p: string, ms: number): Promise<Stats | null> {
+  let timer: NodeJS.Timeout | undefined
+  const late = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), ms)
+    timer.unref()
+  })
+  try {
+    return await Promise.race([fs.stat(p).catch(() => null), late])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/**
+ * The roots that are folders right now, in order. A missing one (an unplugged
+ * F:\, a network share that is down) is skipped with a warning, so the other
+ * drives stay reachable: Claude Desktop starts the server once per session
+ * and would otherwise lose the whole link. Throws only when none is left.
+ */
+export async function usableRoots(roots: string[], warn: (line: string) => void = log, timeoutMs = ROOT_TIMEOUT_MS): Promise<string[]> {
+  const ok: string[] = []
+  const problems: string[] = []
+  const stats = await Promise.all(roots.map((r) => statWithin(r, timeoutMs)))
+  for (const [i, r] of roots.entries()) {
+    const st = stats[i]
+    const problem = !st ? `Vault folder not found: ${r}` : !st.isDirectory() ? `Not a folder: ${r}` : null
+    if (problem) problems.push(problem)
+    else ok.push(r)
+  }
+  if (!ok.length) throw new Error(problems.join('; '))
+  for (const p of problems) warn(`[aether] ${p} (skipped; the other folders are served)`)
+  return ok
 }
 
 function logActivity(a: ActivityEvent): void {
@@ -170,9 +211,9 @@ export async function runStdio(argv: string[]): Promise<void> {
   }
   if (!cli.roots.length) throw new Error('No vault folder given. Pass --vault <folder> (repeatable) or folders as arguments; see --help.')
   if (!cli.http) quietStdout()
-  await checkRoots(cli.roots)
+  const found = await usableRoots(cli.roots)
   // Load in the background: the MCP handshake must not wait for a whole drive to be scanned.
-  const brain = Brain.start({ roots: cli.roots, exclude: cli.exclude, readOnly: cli.readOnly, watch: true })
+  const brain = Brain.start({ roots: found, exclude: cli.exclude, readOnly: cli.readOnly, watch: true })
   const roots = brain.roots.map((r) => r.label).join(' + ')
   brain.ready().then(
     () => {

@@ -460,3 +460,20 @@ else `AI client`.
 `pack:mcpb` = `node scripts/pack-mcpb.mjs` → `release/aether-brain-<version>.mcpb`;
 every `dist*` script also runs `pack:mcpb`. `chokidar` is removed from dependencies.
 `scripts/dev.mjs` (desktop main agent) runs `pnpm build:mcp` once before starting Electron.
+
+## Addendum 2 (final review fixes)
+
+- **Create-only writes.** `VaultAdapter.create(path, content)` / bridge `createFile` /
+  `FsVault.create` fail with `EEXIST` when anything exists at the path (ignored files and
+  case variants included). Every new note (store, MCP) is created with it, trying the next
+  ` 2`, ` 3` suffix on `EEXIST`. Nothing that creates a note may overwrite a file.
+- **Portable project folders.** `folder:` is written relative to the note's root (no mount
+  segment when the folder is on the same root); `projectFolderOf` resolves `f`, then
+  `<note's first segment>/f`, then `f` minus its first segment, against the known folders.
+  Adding or removing a drive no longer unbinds projects.
+- **Drive scale.** A note's folder chain is must-show only down to `maxDepth` (deeper notes
+  orbit their nearest visible ancestor); the folder universe is memoized per folder Set;
+  content-only saves keep the Set's identity. Camera far plane / max distance follow the
+  fitted distance.
+- **Watcher resync.** A lost-events signal (null filename, overflow, re-arm after an error)
+  triggers a debounced rescan of that root and a diff against the known sets.

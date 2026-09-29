@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { promises as fs } from 'node:fs'
+import { EventEmitter } from 'node:events'
+import { mkdirSync, promises as fs, writeFileSync, type FSWatcher, type Stats } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import type { VaultChangeDto } from '../src/shared/ipc.js'
 import { FsVault } from '../src/main/fsvault.js'
-import { VaultWatcher } from '../src/main/watcher.js'
+import { VaultWatcher, type WatchFn } from '../src/main/watcher.js'
 
 let tmp: string
 let root: string
@@ -54,7 +55,7 @@ async function open(roots: string[], probe = 'probe.md'): Promise<FsVault> {
     (batch) => changes.push(...batch),
     { debounceMs: 60 },
   )
-  watcher.start()
+  await watcher.start()
   const probeAbs = vault.abs(probe)
   for (let i = 0; !changes.some((c) => c.path === probe); i++) {
     if (i > 40) throw new Error('watcher never became ready')
@@ -64,6 +65,36 @@ async function open(roots: string[], probe = 'probe.md'): Promise<FsVault> {
   changes = []
   return vault
 }
+
+type Listener = Parameters<WatchFn>[2]
+type FakeFsWatcher = EventEmitter & { close(): void; closed: boolean }
+
+/**
+ * fs.watch stand-in: arms instantly and delivers only the events a test
+ * fires, so "the OS lost these events" can be played out on a real disk.
+ */
+function fakeWatch() {
+  const calls: { dir: string; listener: Listener; w: FakeFsWatcher }[] = []
+  const fn: WatchFn = (dir, _opts, listener) => {
+    const w: FakeFsWatcher = Object.assign(new EventEmitter(), {
+      closed: false,
+      close() {
+        w.closed = true
+      },
+    })
+    calls.push({ dir, listener, w })
+    return w as unknown as FSWatcher
+  }
+  /** The live watcher of `dir`. */
+  const of = (dir: string) => {
+    const c = calls.filter((x) => x.dir === dir && !x.w.closed).at(-1)
+    if (!c) throw new Error(`no live watcher for ${dir}`)
+    return c
+  }
+  return { fn, calls, of }
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 describe('VaultWatcher', () => {
   beforeEach(async () => {
@@ -255,7 +286,7 @@ describe('VaultWatcher', () => {
       (batch) => changes.push(...batch),
       { debounceMs: 60 },
     )
-    watcher.start()
+    await watcher.start()
     expect(warn).toHaveBeenCalled()
     await fs.mkdir(late)
     // Re-armed after a 1 s back-off: keep touching a note until it is seen.
@@ -272,5 +303,266 @@ describe('VaultWatcher', () => {
     await put('vault/after-stop.md', 'x')
     await new Promise((r) => setTimeout(r, 300))
     expect(changes).toEqual([])
+  })
+})
+
+describe('VaultWatcher started before the scan', () => {
+  beforeEach(async () => {
+    await put('vault/known.md', 'old')
+    await put('vault/Folder/inner.md', 'inner')
+  })
+
+  it('reports a note and a folder created in an already-scanned folder while the scan runs', async () => {
+    const vault = new FsVault([root])
+    watcher = new VaultWatcher(vault, null, (batch) => changes.push(...batch), { debounceMs: 40 })
+    await watcher.start()
+    let made = false
+    // The last progress call comes after every folder was walked: what appears now is not in the scan.
+    const scan = await vault.scan(() => {
+      if (made) return
+      made = true
+      writeFileSync(path.join(root, 'Folder', 'during.md'), 'made during the scan')
+      mkdirSync(path.join(root, 'Planet'))
+    })
+    expect(scan.files.map((f) => f.path)).not.toContain('Folder/during.md')
+    await sleep(200)
+    // Held until the scan is handed over.
+    expect(changes).toEqual([])
+    watcher.seed({ files: scan.files.map((f) => f.path), folders: scan.folders })
+    const c = await waitChange('add', 'Folder/during.md')
+    expect(c.content).toBe('made during the scan')
+    await waitChange('addDir', 'Planet')
+    expect(count('add', 'known.md')).toBe(0)
+    // Live from here on.
+    await put('vault/after.md', 'after')
+    await waitChange('add', 'after.md')
+  })
+
+  it('classifies buffered paths against the seeded sets and resyncs a root that lost events before the seed', async () => {
+    const fake = fakeWatch()
+    const vault = new FsVault([root])
+    watcher = new VaultWatcher(vault, null, (batch) => changes.push(...batch), { debounceMs: 20, resyncMs: 20, watch: fake.fn })
+    await watcher.start()
+    const scan = await vault.scan()
+    await put('vault/seen.md', 'reported by the OS')
+    fake.of(root).listener('rename', 'seen.md')
+    await put('vault/Folder/unseen.md', 'its event was lost')
+    fake.of(root).listener('change', null)
+    await sleep(120)
+    expect(changes).toEqual([])
+    watcher.seed({ files: scan.files.map((f) => f.path), folders: scan.folders })
+    expect((await waitChange('add', 'seen.md')).content).toBe('reported by the OS')
+    expect((await waitChange('add', 'Folder/unseen.md')).content).toBe('its event was lost')
+  })
+})
+
+describe('VaultWatcher resync after lost events', () => {
+  let other: string
+  let fake: ReturnType<typeof fakeWatch>
+
+  beforeEach(async () => {
+    other = path.join(tmp, 'Other')
+    await put('vault/known.md', 'old')
+    await put('vault/Folder/inner.md', 'inner')
+    await put('vault/Folder/Sub/leaf.md', 'leaf')
+    await put('Other/a.md', 'a')
+    fake = fakeWatch()
+  })
+
+  async function watched(opts: { rearmMs?: number; probeMs?: number } = {}): Promise<FsVault> {
+    const vault = new FsVault([root, other])
+    const scan = await vault.scan()
+    watcher = new VaultWatcher(
+      vault,
+      { files: scan.files.map((f) => f.path), folders: scan.folders },
+      (batch) => changes.push(...batch),
+      { debounceMs: 20, resyncMs: 30, ...opts, watch: fake.fn },
+    )
+    await watcher.start()
+    return vault
+  }
+
+  /** Everything the rescan may report for a note nobody touched: at most a change with its own content. */
+  const untouched = (p: string, content: string) =>
+    changes.filter((c) => c.path === p).every((c) => c.kind === 'change' && c.content === content)
+
+  it('rescans a root after an event without a file name (Windows buffer overflow) and reports what was missed', async () => {
+    await watched()
+    // All of this happens while the OS drops the events.
+    await put('vault/new.md', 'fresh')
+    await put('vault/known.md', 'edited')
+    await fs.rm(path.join(root, 'Folder', 'Sub'), { recursive: true })
+    await put('vault/Planet/Moon/m.md', 'moon')
+    await put('Other/b.md', 'not lost: Other kept its events')
+    await sleep(100)
+    expect(changes).toEqual([])
+    fake.of(root).listener('change', null)
+    expect((await waitChange('add', 'vault/new.md')).content).toBe('fresh')
+    expect((await waitChange('change', 'vault/known.md')).content).toBe('edited')
+    await waitChange('unlink', 'vault/Folder/Sub/leaf.md')
+    await waitChange('unlinkDir', 'vault/Folder/Sub')
+    await waitChange('addDir', 'vault/Planet')
+    await waitChange('addDir', 'vault/Planet/Moon')
+    expect((await waitChange('add', 'vault/Planet/Moon/m.md')).content).toBe('moon')
+    await sleep(100)
+    expect(count('add', 'vault/Planet/Moon/m.md')).toBe(1)
+    expect(changes.some((c) => c.path.startsWith('Other/'))).toBe(false)
+    expect(untouched('vault/Folder/inner.md', 'inner')).toBe(true)
+    expect(changes.some((c) => c.kind === 'unlinkDir' && c.path === 'vault/Folder')).toBe(false)
+    // An empty file name means the same thing.
+    await put('vault/second.md', '2')
+    fake.of(root).listener('change', '')
+    await waitChange('add', 'vault/second.md')
+  })
+
+  it('never reports notes gone from a folder the rescan could not read', async () => {
+    await watched()
+    const folder = path.join(root, 'Folder')
+    const readdir = fs.readdir
+    vi.spyOn(fs, 'readdir').mockImplementation(((p: Parameters<typeof fs.readdir>[0], opts?: never) => {
+      if (String(p) === folder) return Promise.reject(Object.assign(new Error('access denied'), { code: 'EACCES' }))
+      return readdir(p, opts)
+    }) as typeof fs.readdir)
+    await put('vault/new.md', 'fresh')
+    fake.of(root).listener('change', null)
+    await waitChange('add', 'vault/new.md')
+    await sleep(100)
+    expect(untouched('vault/Folder/inner.md', 'inner')).toBe(true)
+    expect(untouched('vault/Folder/Sub/leaf.md', 'leaf')).toBe(true)
+    expect(changes.some((c) => c.kind === 'unlinkDir')).toBe(false)
+  })
+
+  it('catches up after a watcher error once the root is watched again', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    await watched({ rearmMs: 80 })
+    fake.of(root).w.emit('error', new Error('The specified network name is no longer available.'))
+    expect(warn).toHaveBeenCalled()
+    await put('vault/while-down.md', 'written while unwatched')
+    await fs.rm(path.join(root, 'known.md'))
+    await waitFor(() => fake.calls.filter((c) => c.dir === root).length === 2, 're-arm')
+    expect((await waitChange('add', 'vault/while-down.md')).content).toBe('written while unwatched')
+    await waitChange('unlink', 'vault/known.md')
+  })
+
+  it('re-arms only once an async check says the root answers, and never piles up checks on a hung share', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    await watched({ rearmMs: 20, probeMs: 30 })
+    const stat = fs.stat
+    let release = (_st: Stats): void => undefined
+    let answering = false
+    let rootStats = 0
+    vi.spyOn(fs, 'stat').mockImplementation(((p: Parameters<typeof fs.stat>[0], opts?: never) => {
+      if (String(p) !== root || answering) return stat(p, opts)
+      rootStats++
+      // A network share that stopped answering: the stat hangs.
+      return new Promise<Stats>((resolve) => (release = resolve))
+    }) as typeof fs.stat)
+    fake.of(root).w.emit('error', new Error('The network path was not found.'))
+    // Several re-arm rounds (20, 40, 80, 160 ms …) with a 30 ms answer limit each.
+    await sleep(500)
+    // fs.watch (synchronous, would block on the dead share) was never called again,
+    expect(fake.calls.filter((c) => c.dir === root)).toHaveLength(1)
+    // and the one hung stat was reused instead of starting another each round.
+    expect(rootStats).toBe(1)
+    answering = true
+    release(await stat(root))
+    await waitFor(() => fake.calls.filter((c) => c.dir === root).length === 2, 're-arm after the share answers')
+  })
+
+  it('never calls fs.watch at start on a root that does not answer, and watches it once it does', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const stat = fs.stat
+    let answering = false
+    let timeOut = (_err: Error): void => undefined
+    vi.spyOn(fs, 'stat').mockImplementation(((p: Parameters<typeof fs.stat>[0], opts?: never) => {
+      if (String(p) !== other || answering) return stat(p, opts)
+      // A share that does not answer, until the redirector gives up.
+      return new Promise<Stats>((_resolve, reject) => (timeOut = reject))
+    }) as typeof fs.stat)
+    const started = Date.now()
+    await watched({ rearmMs: 20, probeMs: 50 })
+    expect(Date.now() - started).toBeLessThan(2000)
+    expect(fake.calls.map((c) => c.dir)).toEqual([root])
+    // Written while Other is not watched.
+    await put('Other/while-away.md', 'x')
+    // The reachable root is live right away.
+    await put('vault/live.md', 'live')
+    fake.of(root).listener('rename', 'live.md')
+    await waitChange('add', 'vault/live.md')
+    await sleep(200)
+    expect(fake.calls.map((c) => c.dir)).toEqual([root])
+    answering = true
+    timeOut(Object.assign(new Error('The semaphore timeout period has expired.'), { code: 'ETIMEDOUT' }))
+    await waitFor(() => fake.calls.some((c) => c.dir === other), 'watching Other once it answers')
+    // Rescanned once watched: what the scan could not see is reported.
+    expect((await waitChange('add', 'Other/while-away.md')).content).toBe('x')
+  })
+
+  it('does not re-arm a root that is gone until it is back', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    await watched({ rearmMs: 20 })
+    await fs.rename(root, path.join(tmp, 'unplugged'))
+    fake.of(root).w.emit('error', new Error('EPERM'))
+    await sleep(300)
+    expect(fake.calls.filter((c) => c.dir === root)).toHaveLength(1)
+    expect(warn.mock.calls.filter(([m]) => m === '[aether] cannot watch')).toEqual([])
+    await fs.rename(path.join(tmp, 'unplugged'), root)
+    await waitFor(() => fake.calls.filter((c) => c.dir === root).length === 2, 're-arm when back')
+  })
+})
+
+describe('VaultWatcher and a note being created', () => {
+  it('never reports a note it is creating as empty, even where it is filled in place (no hard links)', async () => {
+    vi.spyOn(fs, 'link').mockRejectedValue(Object.assign(new Error('operation not permitted'), { code: 'EPERM' }))
+    await put('vault/known.md', 'old')
+    const fake = fakeWatch()
+    const vault = new FsVault([root])
+    const scan = await vault.scan()
+    watcher = new VaultWatcher(
+      vault,
+      { files: scan.files.map((f) => f.path), folders: scan.folders },
+      (batch) => changes.push(...batch),
+      { debounceMs: 20, watch: fake.fn },
+    )
+    await watcher.start()
+    // Hold the content write of the note itself so a flush runs while it is still empty.
+    const full = path.join(root, 'Inbox', 'New.md')
+    let release = (): void => undefined
+    const gate = new Promise<void>((r) => (release = r))
+    let writing = (): void => undefined
+    const started = new Promise<void>((r) => (writing = r))
+    const open = fs.open
+    vi.spyOn(fs, 'open').mockImplementation((async (...args: Parameters<typeof fs.open>) => {
+      const handle = await open(...args)
+      if (String(args[0]) !== full) return handle
+      const writeFile = handle.writeFile.bind(handle)
+      vi.spyOn(handle, 'writeFile').mockImplementation((async (...a: Parameters<typeof handle.writeFile>) => {
+        writing()
+        await gate
+        return writeFile(...a)
+      }) as typeof handle.writeFile)
+      return handle
+    }) as typeof fs.open)
+    // As main's createNote does it: noted first, then created.
+    watcher.noteSelfWrite('Inbox/New.md', 'captured text')
+    const created = vault.create('Inbox/New.md', 'captured text')
+    await started
+    expect(await fs.readFile(full, 'utf8')).toBe('')
+    fake.of(root).listener('rename', 'Inbox')
+    fake.of(root).listener('rename', path.join('Inbox', 'New.md'))
+    // Several flushes see it empty.
+    await sleep(150)
+    release()
+    await created
+    fake.of(root).listener('change', path.join('Inbox', 'New.md'))
+    await waitChange('addDir', 'Inbox')
+    await sleep(150)
+    expect(await fs.readFile(full, 'utf8')).toBe('captured text')
+    // Its own write: nothing to report, and above all never an empty note.
+    expect(changes.filter((c) => c.path === 'Inbox/New.md')).toEqual([])
+    // Live as usual afterwards.
+    await put('vault/Inbox/New.md', 'edited elsewhere')
+    fake.of(root).listener('change', path.join('Inbox', 'New.md'))
+    expect((await waitChange('change', 'Inbox/New.md')).content).toBe('edited elsewhere')
   })
 })

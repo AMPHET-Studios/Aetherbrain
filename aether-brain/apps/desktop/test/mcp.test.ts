@@ -1,15 +1,18 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { spawn } from 'node:child_process'
 import { existsSync, promises as fs } from 'node:fs'
 import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { inflateRawSync } from 'node:zlib'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { todayIso } from '@aether/core'
+import { FsVault } from '../src/main/fsvault.js'
+import { MAX_LINE_ARG, MAX_TEXT_ARG } from '../src/mcp/tools.js'
 import {
   Brain,
   TOOLS,
@@ -18,6 +21,7 @@ import {
   createMcpServer,
   parseArgs,
   startHttpLink,
+  usableRoots,
   type ActivityEvent,
   type BrainOptions,
 } from '../src/mcp/server.js'
@@ -90,6 +94,7 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
+  vi.restoreAllMocks()
   for (const c of cleanups.splice(0)) await c()
   brain?.close()
   brain = null
@@ -489,6 +494,92 @@ describe('tasks and projects', () => {
     expect(await disk('Projects/Five.md')).toContain(`- [x] l ✅ ${TODAY}\n`)
   })
 
+  it('a line-only task call follows its task when the note changed since it was listed', async () => {
+    await put('Projects/Gate.md', '---\ntype: project\n---\n# Gate\n\n## To do\n\n- [ ] one\n- [ ] two\n- [ ] three\n')
+    const b = await open()
+    const client = await connect(b)
+    const lineOf = (tasks: { line: number; text: string }[], text: string) => tasks.find((t) => t.text === text)!.line
+    const listed = json(await call(client, 'get_project', { project: 'Gate' })).tasks
+    // Edited in another editor after the listing; the index has not seen it yet.
+    await put('Projects/Gate.md', '---\ntype: project\n---\n# Gate\n\n## To do\n\n- [ ] zero\n- [ ] one\n- [ ] two\n- [ ] three\n')
+    const r = json(await call(client, 'delete_task', { project: 'Gate', line: lineOf(listed, 'two') }))
+    expect(r.deleted.text).toBe('two')
+    expect(await disk('Projects/Gate.md')).toContain('- [ ] zero\n- [ ] one\n- [ ] three\n')
+    // The reply's lines are the ones that count now.
+    json(await call(client, 'set_task_done', { project: 'Gate', line: lineOf(r.tasks, 'three') }))
+    expect(await disk('Projects/Gate.md')).toContain(`- [x] three ✅ ${TODAY}\n`)
+
+    // Edited in the app, and the change already reached the index before the call.
+    const again = json(await call(client, 'read_note', { note: 'Gate' })).tasks
+    const edited = (await disk('Projects/Gate.md')).replace('- [ ] zero\n', '- [ ] minus one\n- [ ] zero\n')
+    await put('Projects/Gate.md', edited)
+    b.applyExternal([{ kind: 'change', path: 'Projects/Gate.md', content: edited, mtime: Date.now() }])
+    const edit = await call(client, 'edit_task', { project: 'Gate', line: lineOf(again, 'one'), text: 'uno' })
+    expect(edit.content[0]?.text).toMatch(/changed since its tasks were listed/)
+    const e = json(edit)
+    expect(e.task.text).toBe('uno')
+    expect(await disk('Projects/Gate.md')).toContain('- [ ] minus one\n- [ ] zero\n- [ ] uno\n')
+    // That reply listed the current lines, and those are the ones that count next.
+    expect(e.tasks.map((t: { text: string }) => t.text)).toEqual(['minus one', 'zero', 'uno', 'three'])
+    json(await call(client, 'set_task_done', { project: 'Gate', line: lineOf(e.tasks, 'uno') }))
+    expect(await disk('Projects/Gate.md')).toContain(`- [x] uno ✅ ${TODAY}\n`)
+    // Nothing changed in between: the reply stays short.
+    expect(json(await call(client, 'set_task_done', { project: 'Gate', line: lineOf(e.tasks, 'zero') })).tasks).toBeUndefined()
+  })
+
+  it('refuses a line-only task call when the listed task is gone, and names the current lines', async () => {
+    await put('Projects/Gate.md', '---\ntype: project\n---\n# Gate\n\n## To do\n\n- [ ] one\n- [ ] two\n')
+    const client = await connect(await open())
+    const listed = json(await call(client, 'get_project', { project: 'Gate' })).tasks as { line: number; text: string }[]
+    const two = listed.find((t) => t.text === 'two')!.line
+    const now = '---\ntype: project\n---\n# Gate\n\n## To do\n\n- [ ] zero\n- [ ] one\n- [ ] deux\n'
+    await put('Projects/Gate.md', now)
+    const msg = errorOf(await call(client, 'delete_task', { project: 'Gate', line: two }))
+    expect(msg).toMatch(/changed since its tasks were listed: the task on line \d+ \("two"\)/)
+    expect(msg).toContain(`${two}: [ ] one`)
+    expect(await disk('Projects/Gate.md')).toBe(now)
+    // The lines the refusal listed are the current ones.
+    expect(json(await call(client, 'delete_task', { project: 'Gate', line: two })).deleted.text).toBe('one')
+  })
+
+  it('a line only a longer, earlier listing showed still finds its task after a shorter reply', async () => {
+    // More tasks than add_task, delete_task and errors list: their replies show only the first ones.
+    const many = Array.from({ length: 150 }, (_, i) => `- [ ] t${i}`).join('\n')
+    await put('Projects/Big.md', `---\ntype: project\n---\n# Big\n\n## Now\n\n- [ ] first\n\n## To do\n\n${many}\n`)
+    const client = await connect(await open())
+    const lineOf = (tasks: { line: number; text: string }[], text: string) => tasks.find((t) => t.text === text)?.line
+    const listed = json(await call(client, 'get_project', { project: 'Big' })).tasks
+    // Added above the To do list: every t<i> moved down a line, and the reply lists only the first 100 tasks.
+    const added = json(await call(client, 'add_task', { project: 'Big', text: 'second', section: 'Now' }))
+    expect(lineOf(added.tasks, 't140')).toBeUndefined()
+    json(await call(client, 'set_task_done', { project: 'Big', line: lineOf(listed, 't140') }))
+    expect(await disk('Projects/Big.md')).toContain(`- [ ] t139\n- [x] t140 ✅ ${TODAY}\n- [ ] t141\n`)
+    // Lines the short reply did show count as it showed them.
+    json(await call(client, 'set_task_done', { project: 'Big', line: lineOf(added.tasks, 't5') }))
+    expect(await disk('Projects/Big.md')).toContain(`- [ ] t4\n- [x] t5 ✅ ${TODAY}\n- [ ] t6\n`)
+    // An error lists only some tasks; a line from the full listing still finds its task after another edit.
+    const edited = (await disk('Projects/Big.md')).replace('- [ ] first\n', '- [ ] zeroth\n- [ ] first\n')
+    await put('Projects/Big.md', edited)
+    expect(errorOf(await call(client, 'set_task_done', { project: 'Big', task: 'no such task' }))).toMatch(/No task matching/)
+    json(await call(client, 'set_task_done', { project: 'Big', line: lineOf(listed, 't120') }))
+    expect(await disk('Projects/Big.md')).toContain(`- [ ] t119\n- [x] t120 ✅ ${TODAY}\n- [ ] t121\n`)
+  })
+
+  it('lists the lines again when stamping updated: moved them', async () => {
+    // A block value: the stamp rewrites it onto one line, so every task moves up a line.
+    await put('Projects/Stamp.md', '---\ntype: project\nupdated:\n- 2026-01-01\n---\n# Stamp\n\n## To do\n\n- [ ] a\n- [ ] b\n- [ ] c\n')
+    const client = await connect(await open())
+    const lineOf = (tasks: { line: number; text: string }[], text: string) => tasks.find((t) => t.text === text)!.line
+    const listed = json(await call(client, 'get_project', { project: 'Stamp' })).tasks
+    const r = json(await call(client, 'set_task_done', { project: 'Stamp', line: lineOf(listed, 'a') }))
+    expect(await disk('Projects/Stamp.md')).toContain(`---\n# Stamp\n\n## To do\n\n- [x] a ✅ ${TODAY}\n- [ ] b\n- [ ] c\n`)
+    expect(lineOf(r.tasks, 'b')).toBe(lineOf(listed, 'b') - 1)
+    json(await call(client, 'set_task_done', { project: 'Stamp', line: lineOf(r.tasks, 'b') }))
+    // A line from the listing before the move still means its task.
+    json(await call(client, 'edit_task', { project: 'Stamp', line: lineOf(listed, 'c'), text: 'see' }))
+    expect(await disk('Projects/Stamp.md')).toContain(`- [x] a ✅ ${TODAY}\n- [x] b ✅ ${TODAY}\n- [ ] see\n`)
+  })
+
   it('update_project renames and keeps the old title as an alias', async () => {
     const client = await connect(await open())
     const r = json(await call(client, 'update_project', { project: 'PORTALz', title: 'PORTALz Reborn', status: 'paused', summary: 'Gates, reborn.' }))
@@ -537,6 +628,111 @@ describe('tasks and projects', () => {
     expect(m).toMatchObject({ project: { path: 'Art/Monsters/Monsters.md', title: 'Monsters' }, folder: 'Art/Monsters' })
     const mp = json(await call(client, 'get_project', { project: 'Monsters' }))
     expect(mp.tasks.map((t: { text: string }) => t.text)).toEqual(['Sketch the brute'])
+  })
+})
+
+describe('create-only notes', () => {
+  it('a new note never lands on a file the index has not seen, in any letter case', async () => {
+    const client = await connect(await open())
+    // Written by another app after the load and not reported yet; on Windows and macOS
+    // `Buy milk.md` would be this very file.
+    await put('Inbox/buy milk.md', '# buy milk\n\nfrom the phone\n')
+    expect(json(await call(client, 'capture', { text: 'Buy milk' })).path).toBe('Inbox/Buy milk 2.md')
+    expect(json(await call(client, 'create_note', { title: 'BUY MILK' })).path).toBe('Inbox/BUY MILK 3.md')
+    expect(await disk('Inbox/buy milk.md')).toBe('# buy milk\n\nfrom the phone\n')
+    expect((await fs.readdir(path.join(root, 'Inbox'))).sort()).toEqual(['BUY MILK 3.md', 'Buy milk 2.md', 'Loose thought.md', 'buy milk.md'])
+  })
+
+  it('never replaces repo boilerplate the scan skips, whatever its case', async () => {
+    await put('Code/Game/CHANGELOG.md', '# Changelog\n\n## 1.0\n- important history\n')
+    const client = await connect(await open())
+    const r = json(await call(client, 'create_note', { title: 'Changelog', folder: 'Code/Game' }))
+    expect(r.path).toBe('Code/Game/Changelog 2.md')
+    expect(await disk('Code/Game/CHANGELOG.md')).toBe('# Changelog\n\n## 1.0\n- important history\n')
+    expect((await fs.readdir(path.join(root, 'Code', 'Game'))).sort()).toEqual(['CHANGELOG.md', 'Changelog 2.md'])
+  })
+
+  it('create_project refuses a folder note that exists on disk but not in the index', async () => {
+    const client = await connect(await open())
+    await put('Art/Monsters/monsters.md', '# monsters\n\nmine\n')
+    expect(errorOf(await call(client, 'create_project', { folder: 'Art/Monsters' }))).toMatch(/Art\/Monsters\/Monsters\.md already exists/)
+    expect(await fs.readdir(path.join(root, 'Art', 'Monsters'))).toEqual(['monsters.md'])
+    expect(await disk('Art/Monsters/monsters.md')).toBe('# monsters\n\nmine\n')
+    // A new project note takes the next free name; its planets' folder follows it.
+    await put('Projects/lab.md', '# lab\n')
+    const lab = json(await call(client, 'create_project', { title: 'Lab' }))
+    expect(lab).toMatchObject({ project: { path: 'Projects/Lab 2.md' }, folder: 'Projects/Lab 2' })
+    expect(await disk('Projects/lab.md')).toBe('# lab\n')
+  })
+})
+
+describe('AI text is scanned in linear time', () => {
+  const N = 100_000
+  const spaces = ' '.repeat(N)
+
+  it('long whitespace runs in appended text, headings, task text and frontmatter stay fast', async () => {
+    const b = await open()
+    const t0 = performance.now()
+    // What append_to_note, link_notes and create_note run on AI text.
+    expect(appendText('# A\n', `# a${spaces}x`)).toBe(`# A\n\n# a${spaces}x\n`)
+    expect(appendText(`# A\n\n## Notes${spaces}x\n`, 'more', 'Notes')).toContain('## Notes\n\nmore\n')
+    expect(appendText('# A\n', `text${spaces}`)).toBe('# A\n\ntext\n')
+    await b.appendToNote('Loose thought', `# a${spaces}x`)
+    await b.addTask('PORTALz', `long${spaces}x`)
+    await expect(b.createNote({ title: 'Broken', content: `---\n${spaces}x\n---\nbody` })).rejects.toThrow(/not valid YAML/)
+    await b.createNote({ title: 'Spacey', content: `body${spaces}` })
+    // A long `updated:` value, then an edit that stamps it.
+    await put('Resources/Stamp.md', `---\nupdated: a${spaces}x\n---\n# Stamp\n`)
+    b.applyExternal([{ kind: 'add', path: 'Resources/Stamp.md', content: await disk('Resources/Stamp.md'), mtime: Date.now() }])
+    await b.appendToNote('Stamp', 'more')
+    await b.listProjects()
+    await b.getProject('PORTALz')
+    await b.readNote('Loose thought')
+    expect(performance.now() - t0).toBeLessThan(3000)
+    expect(await disk('Resources/Stamp.md')).toBe(`---\nupdated: ${TODAY}\n---\n# Stamp\n\nmore\n`)
+    expect(await disk('Inbox/Spacey.md')).toMatch(/# Spacey\n\nbody\n$/)
+  }, 20_000)
+
+  it('updated: keeps its spacing and comment; a value that is not one plain line is rewritten', async () => {
+    await put('Resources/A.md', '---\nupdated: "2026-01-02"  # stamped\n---\n# A\n')
+    await put('Resources/B.md', '---\nupdated: 2026-01-02 # stamped\r\ntitle: B\r\n---\r\n# B\r\n')
+    await put('Resources/C.md', '---\nupdated: [2026-01-02]\n---\n# C\n')
+    // Values on the lines below the key: stamping only the key line would break the YAML
+    // (D, E: the other keys are lost) or glue the old value on (F).
+    await put('Resources/D.md', '---\nupdated:\n- 2026-01-02\ntype: project\n---\n# D\n')
+    await put('Resources/E.md', '---\nupdated:\n  - 2026-01-02\ntags: [x]\n---\n# E\n')
+    await put('Resources/F.md', '---\nupdated: 2026-01-02\n  and more\n---\n# F\n')
+    const client = await connect(await open())
+    for (const note of ['A', 'B', 'C', 'D', 'E', 'F']) json(await call(client, 'append_to_note', { note, text: 'x' }))
+    expect(await disk('Resources/A.md')).toMatch(new RegExp(`^---\\nupdated: ${TODAY}  # stamped\\n---\\n`))
+    expect(await disk('Resources/B.md')).toMatch(new RegExp(`^---\\nupdated: ${TODAY} # stamped\\r\\ntitle: B\\r\\n---`))
+    expect(await disk('Resources/C.md')).toMatch(new RegExp(`updated: ['"]?${TODAY}['"]?\\n`))
+    const props = async (note: string) => json(await call(client, 'read_note', { note })).frontmatter
+    expect(await props('D')).toEqual({ updated: TODAY, type: 'project' })
+    expect(await props('E')).toEqual({ updated: TODAY, tags: ['x'] })
+    expect(await props('F')).toEqual({ updated: TODAY })
+  })
+
+  it('caps the size of text arguments', async () => {
+    const client = await connect(await open())
+    expect((await call(client, 'create_note', { title: 'Huge', content: 'x'.repeat(MAX_TEXT_ARG + 1) })).isError).toBe(true)
+    expect((await call(client, 'append_to_note', { note: 'Home', text: 'x'.repeat(MAX_TEXT_ARG + 1) })).isError).toBe(true)
+    expect((await call(client, 'edit_note', { note: 'Home', old_text: 'Start', new_text: 'x'.repeat(MAX_TEXT_ARG + 1) })).isError).toBe(true)
+    expect((await call(client, 'add_task', { project: 'PORTALz', text: 'x'.repeat(MAX_LINE_ARG + 1) })).isError).toBe(true)
+    expect((await call(client, 'update_frontmatter', { note: 'Home', set: { big: 'x'.repeat(MAX_TEXT_ARG + 1) } })).isError).toBe(true)
+    expect(existsSync(path.join(root, 'Inbox', 'Huge.md'))).toBe(false)
+    expect(await disk('Home.md')).toBe(FILES['Home.md'])
+    expect(await disk('Projects/PORTALz.md')).toBe(PORTALZ)
+    // Right at the cap is fine.
+    expect(json(await call(client, 'create_note', { title: 'Big', content: 'x'.repeat(MAX_TEXT_ARG) })).path).toBe('Inbox/Big.md')
+  })
+
+  it('edit_note counts overlapping matches only as far as it needs to', async () => {
+    await put('Resources/Aaa.md', `# Aaa\n\n${'a'.repeat(200_000)}\n`)
+    const client = await connect(await open())
+    const t0 = performance.now()
+    expect(errorOf(await call(client, 'edit_note', { note: 'Aaa', old_text: 'a'.repeat(100_000), new_text: 'b' }))).toMatch(/occurs 50 or more times/)
+    expect(performance.now() - t0).toBeLessThan(3000)
   })
 })
 
@@ -597,6 +793,25 @@ describe('multi-root', () => {
     expect(json(await call(client, 'list_projects')).projects[0]).toMatchObject({ id: 'Alpha/Projects/Gate' })
     expect((await call(client, 'create_folder', { path: 'Alpha' })).isError).toBe(true)
   })
+
+  it('writes a project folder relative to its drive, so it still binds with the drive alone', async () => {
+    const alpha = path.join(tmp, 'Alpha')
+    const beta = path.join(tmp, 'Beta')
+    await put('Projects/Gate.md', '---\ntype: project\n---\n# Gate\n', alpha)
+    await put('Notes/x.md', '# x\n', beta)
+    brain = await Brain.open({ roots: [alpha, beta], watch: false })
+    const client = await connect(brain)
+    expect(json(await call(client, 'update_project', { project: 'Gate', folder: 'Art/Gate' })).project).toMatchObject({ folder: 'Alpha/Art/Gate', folderExists: true })
+    expect(json(await call(client, 'create_project', { title: 'Far', folder: 'Beta/Notes' })).folder).toBe('Beta/Notes')
+    expect(await disk('Projects/Gate.md', alpha)).toContain('folder: Art/Gate\n')
+    expect(await disk('Projects/Far.md', alpha)).toContain('folder: Beta/Notes\n')
+    brain.close()
+    // Beta unplugged: Alpha alone is a single-root vault without the `Alpha/` prefix.
+    brain = await Brain.open({ roots: [alpha], watch: false })
+    const solo = await connect(brain)
+    expect(json(await call(solo, 'get_project', { project: 'Gate' })).folder).toBe('Art/Gate')
+    expect(json(await call(solo, 'get_project', { project: 'Gate' })).folderExists).toBe(true)
+  })
 })
 
 describe('keeping current', () => {
@@ -625,6 +840,49 @@ describe('keeping current', () => {
       await new Promise((r) => setTimeout(r, 50))
     }
     expect(ids).toEqual(['Inbox/Dropped in'])
+  })
+
+  it('a watching brain indexes what changes on disk while it is still loading', async () => {
+    const readAll = FsVault.prototype.readAll
+    // Between the scan and the end of the load (minutes on a whole drive): a note
+    // edited after it was read, and a note created after its folder was scanned.
+    vi.spyOn(FsVault.prototype, 'readAll').mockImplementation(async function (this: FsVault, ...args: Parameters<FsVault['readAll']>) {
+      const files = await readAll.apply(this, args)
+      await put('Projects/PORTALz.md', PORTALZ.replace('## To do\n\n', '## To do\n\n- [ ] Added during the load\n'))
+      await put('Projects/New during load.md', '# New during load\n\nwombat\n')
+      return files
+    })
+    const b = await open({ watch: true })
+    const client = await connect(b)
+    const start = Date.now()
+    let tasks: string[] = []
+    let hits: string[] = []
+    while (Date.now() - start < 5000) {
+      tasks = json(await call(client, 'get_project', { project: 'PORTALz' })).tasks.map((t: { text: string }) => t.text)
+      hits = json(await call(client, 'search_notes', { query: 'wombat' })).hits.map((h: { id: string }) => h.id)
+      if (tasks.includes('Added during the load') && hits.length) break
+      await new Promise((r) => setTimeout(r, 50))
+    }
+    expect(tasks).toContain('Added during the load')
+    expect(hits).toEqual(['Projects/New during load'])
+  }, 10_000)
+
+  it('a note edit reuses the folder tables; a folder change rebuilds them', async () => {
+    const b = await open()
+    const client = await connect(b)
+    // What a tool call derives, seen from inside (on a whole drive the folder tables are the expensive part).
+    const tables = () => (b as unknown as { idx(): { children: unknown; foldersLower: unknown } }).idx()
+    json(await call(client, 'vault_overview'))
+    const before = tables()
+    b.applyExternal([{ kind: 'change', path: 'Home.md', content: '# Home\n\nchanged\n', mtime: Date.now() }])
+    json(await call(client, 'append_to_note', { note: 'Loose thought', text: 'more' }))
+    const after = tables()
+    expect(after).not.toBe(before)
+    expect(after.children).toBe(before.children)
+    expect(after.foldersLower).toBe(before.foldersLower)
+    json(await call(client, 'create_folder', { path: 'Resources/Fresh' }))
+    expect(tables().children).not.toBe(before.children)
+    expect(json(await call(client, 'list_folder', { path: 'Fresh' })).folder.path).toBe('Resources/Fresh')
   })
 
   it('serializes parallel writes to one note', async () => {
@@ -738,6 +996,23 @@ describe('CLI arguments', () => {
     expect(parseArgs([], { AETHER_VAULT: ['/x', '/y'].join(path.delimiter) }).roots).toEqual([path.resolve('/x'), path.resolve('/y')])
   })
 
+  it('--exclude takes one exact name; --exclude-list takes comma-separated names (the extension setting)', () => {
+    expect(parseArgs(['/a', '--exclude', 'Taxes, 2024', '--exclude-list=Private, Salary ,,', '--exclude-list', 'Old'], {}).exclude).toEqual(['Taxes, 2024', 'Private', 'Salary', 'Old'])
+    // Left empty, or not expanded by the client.
+    expect(parseArgs(['/a', '--exclude-list=', '--exclude-list=${user_config.exclude}'], {}).exclude).toEqual([])
+  })
+
+  it('skips a root that is missing (an unplugged drive) and fails only when none is left', async () => {
+    const warnings: string[] = []
+    const missing = path.join(tmp, 'F-drive')
+    await fs.writeFile(path.join(tmp, 'file.md'), '# not a folder\n')
+    expect(await usableRoots([root, missing, path.join(tmp, 'file.md')], (l) => warnings.push(l))).toEqual([root])
+    expect(warnings).toHaveLength(2)
+    expect(warnings[0]).toMatch(/Vault folder not found: .*F-drive \(skipped/)
+    expect(warnings[1]).toMatch(/Not a folder: .*file\.md/)
+    await expect(usableRoots([missing], () => undefined)).rejects.toThrow(/Vault folder not found/)
+  })
+
   it('parses HTTP options and rejects unknown flags', () => {
     expect(parseArgs(['/a', '--http', '--port', '0', '--token', TOKEN, '--host', '::1'], {})).toMatchObject({ http: true, port: 0, token: TOKEN, host: '::1' })
     expect(() => parseArgs(['--bogus'], {})).toThrow(/Unknown option --bogus/)
@@ -780,6 +1055,52 @@ describe.skipIf(!existsSync(BUNDLE))('bundle (dist/mcp/aether-mcp.mjs)', () => {
     const c = (await client.callTool({ name: 'add_task', arguments: { project: 'PORTALz', text: 'From the bundle' } })) as Result
     expect(c.isError).toBeFalsy()
     expect(await disk('Projects/PORTALz.md')).toContain('- [ ] From the bundle\n')
+  })
+
+  it('serves the drives that are there and skips the folders the extension lists', async () => {
+    await put('Private/Salary.md', '# Salary\n\nsalary figures\n')
+    await put('Resources/Pay.md', '# Pay\n\nsalary talk\n')
+    const missing = path.join(tmp, 'Unplugged')
+    // As Claude Desktop expands the extension's args: read_only, exclude, then one argument per folder.
+    const transport = new StdioClientTransport({
+      command: process.execPath,
+      args: [BUNDLE, '--read-only=false', '--exclude-list=Private, Taxes', root, missing],
+      stderr: 'pipe',
+    })
+    let stderr = ''
+    transport.stderr?.on('data', (c) => (stderr += c))
+    const client = new Client({ name: 'bundle-test', version: '1.0.0' })
+    await client.connect(transport)
+    cleanups.push(() => client.close())
+    const r = (await client.callTool({ name: 'search_notes', arguments: { query: 'salary' } })) as Result
+    expect(json(r).hits.map((h: { id: string }) => h.id)).toEqual(['Resources/Pay'])
+    expect(((await client.callTool({ name: 'read_note', arguments: { note: 'Private/Salary' } })) as Result).isError).toBe(true)
+    expect(stderr).toMatch(/Vault folder not found: .*Unplugged \(skipped/)
+  })
+
+  it('packs an .mcpb whose manifest passes "Skip these folders" to the server', async () => {
+    const out = path.join(tmp, 'mcpb')
+    const pack = await new Promise<{ code: number | null; stderr: string }>((resolve) => {
+      const child = spawn(process.execPath, [path.resolve(here, '../scripts/pack-mcpb.mjs'), '--out', out], { stdio: ['ignore', 'ignore', 'pipe'] })
+      let stderr = ''
+      child.stderr.on('data', (c) => (stderr += c))
+      child.on('close', (code) => resolve({ code, stderr }))
+    })
+    expect(pack).toEqual({ code: 0, stderr: '' })
+    const [name] = await fs.readdir(out)
+    const zip = await fs.readFile(path.join(out, name!))
+    // The first entry is manifest.json (local header: method at 8, sizes at 18, name and extra lengths at 26 and 28).
+    const method = zip.readUInt16LE(8)
+    const size = zip.readUInt32LE(18)
+    const start = 30 + zip.readUInt16LE(26) + zip.readUInt16LE(28)
+    expect(zip.subarray(30, 30 + zip.readUInt16LE(26)).toString()).toBe('manifest.json')
+    const body = zip.subarray(start, start + size)
+    const manifest = JSON.parse((method === 8 ? inflateRawSync(body) : body).toString('utf8'))
+    expect(manifest.user_config.exclude).toMatchObject({ type: 'string', title: 'Skip these folders', required: false })
+    expect(manifest.server.mcp_config.args).toContain('--exclude-list=${user_config.exclude}')
+    expect(manifest.server.mcp_config.args.at(-1)).toBe('${user_config.vaults}')
+    const cli = parseArgs(manifest.server.mcp_config.args.slice(1).map((a: string) => a.replace('${user_config.exclude}', 'Private, Taxes').replace('${user_config.read_only}', 'false').replace('${user_config.vaults}', root)), {})
+    expect(cli).toMatchObject({ roots: [root], exclude: ['Private', 'Taxes'], readOnly: false })
   })
 
   it('stays a module inside an Electron app process, whatever argv says', async () => {

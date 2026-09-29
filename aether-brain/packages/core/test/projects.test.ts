@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import {
+  basenameOf,
   buildGraph,
   defaultProjectFolder,
   extractTasks,
   folderProjectNote,
   isProjectNote,
   parseNote,
+  portableFolderRef,
   projectFolderOf,
   projectNote,
   projectSummary,
@@ -13,6 +15,7 @@ import {
   splitFrontmatter,
   type NoteId,
   type ParsedNote,
+  type VaultRootInfo,
 } from '../src'
 
 const note = (path: string, content = '# Note\n') => parseNote({ path, content })
@@ -96,6 +99,85 @@ describe('projectFolderOf', () => {
     expect(projectFolderOf(note('Projects/PORTALz.md'), folders)).toBe('Projects/PORTALz')
     expect(projectFolderOf(note('Projects/ConceptForge.md'), folders)).toBeNull()
     expect(projectFolderOf(note('Projects.md'), folders)).toBe('Projects')
+  })
+
+  it('resolves a folder written relative to the note\'s root, whichever drives are open', () => {
+    const content = '---\ntype: project\nfolder: Unreal Projects/PORTALz\n---\n# PORTALz\n'
+    const single = new Set(['Projects', 'Unreal Projects', 'Unreal Projects/PORTALz'])
+    expect(projectFolderOf(note('Projects/PORTALz.md', content), single)).toBe('Unreal Projects/PORTALz')
+    // F:\ added: the note is now D/Projects/PORTALz.md and the folder D/Unreal Projects/PORTALz.
+    const multi = new Set(['D', 'F', ...[...single].map((f) => `D/${f}`)])
+    expect(projectFolderOf(note('D/Projects/PORTALz.md', content), multi)).toBe('D/Unreal Projects/PORTALz')
+    // A full path written while two drives were open still binds after one is removed.
+    const full = '---\ntype: project\nfolder: D/Unreal Projects/PORTALz\n---\n# PORTALz\n'
+    expect(projectFolderOf(note('D/Projects/PORTALz.md', full), multi)).toBe('D/Unreal Projects/PORTALz')
+    expect(projectFolderOf(note('Projects/PORTALz.md', full), single)).toBe('Unreal Projects/PORTALz')
+    // A folder on another drive, written in full, stays there.
+    const other = '---\ntype: project\nfolder: F/Games/X\n---\n# X\n'
+    expect(projectFolderOf(note('D/Projects/X.md', other), new Set(['D', 'F', 'F/Games', 'F/Games/X', 'D/F/Games/X']))).toBe('F/Games/X')
+    // Missing everywhere: returned as written, so the UI can offer to create it.
+    expect(projectFolderOf(note('D/Projects/X.md', '---\nfolder: Nope/Here\n---\n'), multi)).toBe('Nope/Here')
+  })
+
+  it('writes folder: relative to the note\'s root', () => {
+    const roots: VaultRootInfo[] = [
+      { abs: 'D:\\', mount: 'D', label: 'D:\\' },
+      { abs: 'F:\\', mount: 'F', label: 'F:\\' },
+    ]
+    expect(portableFolderRef('D/Projects/X.md', 'D/Unreal Projects/X', roots)).toBe('Unreal Projects/X')
+    expect(portableFolderRef('D/Projects/X.md', 'D\\Games\\X\\', roots)).toBe('Games/X')
+    expect(portableFolderRef('D/Projects/X.md', 'F/Games/X', roots)).toBe('F/Games/X')
+    expect(portableFolderRef('D/Projects/X.md', 'D', roots)).toBe('D')
+    expect(portableFolderRef('D/Projects/X.md', 'Dx/Games', roots)).toBe('Dx/Games')
+    expect(portableFolderRef('Projects/X.md', 'Games/X', [roots[0]!])).toBe('Games/X')
+    expect(portableFolderRef('Projects/X.md', 'Games/X', null)).toBe('Games/X')
+    // Round trip: what is written binds the same folder with one drive or two.
+    const ref = portableFolderRef('D/Projects/X.md', 'D/Unreal Projects/X', roots)
+    const content = `---\ntype: project\nfolder: ${ref}\n---\n# X\n`
+    expect(projectFolderOf(note('D/Projects/X.md', content), new Set(['D', 'D/Unreal Projects', 'D/Unreal Projects/X', 'F']))).toBe('D/Unreal Projects/X')
+    expect(projectFolderOf(note('Projects/X.md', content), new Set(['Unreal Projects', 'Unreal Projects/X']))).toBe('Unreal Projects/X')
+  })
+
+  it('never reads a folder of the note\'s own drive as another drive\'s folder', () => {
+    const roots: VaultRootInfo[] = [
+      { abs: 'D:\\', mount: 'D', label: 'D:\\' },
+      { abs: 'F:\\', mount: 'F', label: 'F:\\' },
+    ]
+    // D:\F\Games stays written in full: `F/Games` would bind drive F's Games folder.
+    expect(portableFolderRef('D/Projects/X.md', 'D/F/Games', roots)).toBe('D/F/Games')
+    expect(portableFolderRef('D/Projects/X.md', 'D/f', roots)).toBe('D/f')
+    const content = `---\ntype: project\nfolder: ${portableFolderRef('D/Projects/X.md', 'D/F/Games', roots)}\n---\n# X\n`
+    expect(projectFolderOf(note('D/Projects/X.md', content), new Set(['D', 'D/F', 'D/F/Games', 'F', 'F/Games']))).toBe('D/F/Games')
+    // With only D:\ open the same text still finds it.
+    expect(projectFolderOf(note('Projects/X.md', content), new Set(['F', 'F/Games', 'Projects']))).toBe('F/Games')
+  })
+
+  it('never shifts a plain vault path that does not exist yet onto an unrelated folder', () => {
+    // `Projects/Game` is to be created; the top-level `Game` and `Projects/Projects/Game` are other folders.
+    const content = '---\ntype: project\nfolder: Projects/Game\n---\n# Game\n'
+    expect(projectFolderOf(note('Projects/Game.md', content), new Set(['Projects', 'Game']))).toBe('Projects/Game')
+    expect(projectFolderOf(note('Projects/Game.md', content), new Set(['Projects', 'Projects/Projects', 'Projects/Projects/Game']))).toBe(
+      'Projects/Game',
+    )
+    // A single segment that is itself a folder resolves as written.
+    expect(projectFolderOf(note('Projects/Game.md', '---\nfolder: Game\n---\n'), new Set(['Projects', 'Game']))).toBe('Game')
+    // The mount-shift rules still apply when the first segment is no folder here.
+    expect(projectFolderOf(note('Projects/Game.md', '---\nfolder: D/Game\n---\n'), new Set(['Projects', 'Game']))).toBe('Game')
+    expect(projectFolderOf(note('D/Projects/Game.md', '---\nfolder: Game\n---\n'), new Set(['D', 'D/Game']))).toBe('D/Game')
+  })
+
+  it('keeps a linked project bound (a star) when a drive is added', () => {
+    const content = '---\ntype: project\nfolder: Unreal Projects/PORTALz\n---\n# PORTALz\n'
+    const folders = ['Projects', 'Unreal Projects', 'Unreal Projects/PORTALz', 'Unreal Projects/PORTALz/Art']
+    const stars = (paths: [string, string[]], multiRoot: boolean) => {
+      const n = parseNote({ path: paths[0], content })
+      const g = buildGraph(new Map([[n.meta.id, n]]), { folders: { all: paths[1], rootTitle: 'V', multiRoot } })
+      return g.nodes.filter((x) => x.folder?.role === 'project').map((x) => [x.id, x.folder?.projectId])
+    }
+    expect(stars(['Projects/PORTALz.md', folders], false)).toEqual([['folder:Unreal Projects/PORTALz', 'Projects/PORTALz']])
+    expect(stars(['D/Projects/PORTALz.md', ['D', 'F', ...folders.map((f) => `D/${f}`)]], true)).toEqual([
+      ['folder:D/Unreal Projects/PORTALz', 'D/Projects/PORTALz'],
+    ])
   })
 
   it('suggests a default folder next to the note', () => {
@@ -231,8 +313,8 @@ describe('setProjectFields', () => {
     expect(() => setProjectFields(broken, { title: 'B' })).toThrow(/not valid YAML/)
     // Body-only edits leave the block alone, so they still work.
     expect(setProjectFields(broken, { summary: 'S' })).toBe(`${broken.replace('# A\n', '# A\n\n> S\n')}`)
-    // Blank or comment-only blocks hold nothing to lose.
-    expect(setProjectFields('---\n# only a comment\n---\n# A\n', { status: 'x' })).toBe('---\nstatus: x\n---\n# A\n')
+    // Blank or comment-only blocks parse (to nothing): the new key joins them, the comment stays.
+    expect(setProjectFields('---\n# only a comment\n---\n# A\n', { status: 'x' })).toBe('---\n# only a comment\nstatus: x\n---\n# A\n')
   })
 
   it('keeps multi-word string aliases whole and dedupes the alias list', () => {
@@ -246,6 +328,78 @@ describe('setProjectFields', () => {
       'Old',
     ])
     expect(fmOf(setProjectFields('---\ntitle: A\naliases: [X, x, X, new]\n---\n# A\n', { title: 'New' }))['aliases']).toEqual(['X', 'A'])
+  })
+})
+
+describe('setProjectFields: renames keep every old name resolving', () => {
+  /** Rename like the board does: new title + file renamed to the title's slug. */
+  const rename = (n: ParsedNote, title: string): ParsedNote => {
+    const raw = setProjectFields(n.raw, { title }, { oldTitle: n.meta.title, keepAliases: [basenameOf(n.meta.path)] })
+    return parseNote({ path: `${n.meta.folder}/${title}.md`, content: raw })
+  }
+
+  it('keeps file-name titles, setext titles and old file names as aliases', () => {
+    const monolith = parseNote({ path: 'Projects/Monolith.md', content: 'Big stone generator.\n\n- [ ] carve\n' })
+    const gate = parseNote({ path: 'Projects/Gate.md', content: 'Gate\n====\n\nSome text\n' })
+    const portal = parseNote({ path: 'Projects/portal-game.md', content: '---\ntitle: Portal Game\n---\n# Portal Game\n\nx\n' })
+    expect([monolith.meta.title, gate.meta.title, portal.meta.title]).toEqual(['Monolith', 'Gate', 'Portal Game'])
+    const a = rename(monolith, 'Obelisk')
+    expect(a.raw).toBe('---\ntitle: Obelisk\naliases: [Monolith]\n---\n\nBig stone generator.\n\n- [ ] carve\n')
+    const b = rename(gate, 'Verdant Gate')
+    expect(b.meta.aliases).toEqual(['Gate'])
+    const c = rename(portal, 'Portal Quest')
+    expect(c.meta.aliases).toEqual(['Portal Game', 'portal-game'])
+    expect(c.raw).toBe('---\ntitle: Portal Quest\naliases: [Portal Game, portal-game]\n---\n# Portal Quest\n\nx\n')
+
+    const links = parseNote({ path: 'Notes/A.md', content: '# A\n\n[[Monolith]] [[Gate]] [[portal-game]] [[Portal Game]]\n' })
+    const notes = new Map<NoteId, ParsedNote>([a, b, c, links].map((n) => [n.meta.id, n]))
+    const g = buildGraph(notes)
+    expect(g.nodes.filter((n) => n.ghost).map((n) => n.id)).toEqual([])
+    expect(g.outlinks.get('Notes/A')).toEqual(new Set(['Projects/Obelisk', 'Projects/Verdant Gate', 'Projects/Portal Quest']))
+  })
+
+  it('adds the extra names only on a real title change', () => {
+    const raw = '# Old\n'
+    expect(setProjectFields(raw, { title: 'Old' }, { oldTitle: 'Old', keepAliases: ['old-file'] })).toBe(raw)
+    expect(setProjectFields(raw, { status: 'x' }, { oldTitle: 'Old', keepAliases: ['old-file'] })).toBe('---\nstatus: x\n---\n\n# Old\n')
+    // A note titled by its file name, saved under that same title: nothing to write.
+    const plain = 'Big stone generator.\n'
+    expect(setProjectFields(plain, { title: 'Monolith' }, { oldTitle: 'Monolith', keepAliases: ['Monolith'] })).toBe(plain)
+    // The new title itself and duplicates (any case) are not kept.
+    const out = setProjectFields(raw, { title: 'New' }, { oldTitle: 'Old', keepAliases: ['new', 'OLD', ' spaced   name '] })
+    expect(splitFrontmatter(out).frontmatter['aliases']).toEqual(['Old', 'spaced name'])
+  })
+})
+
+describe('setProjectFields: frontmatter is patched in place', () => {
+  it('leaves comments and the values of untouched keys exactly as written', () => {
+    const raw =
+      '---\ntitle: Gate\n# owner: me (keep this)\nversion: 1.10\nstatus: active\nid: 01234\ndiscord: 123456789012345678901\n---\n# Gate\n\nx\n'
+    expect(setProjectFields(raw, { status: 'paused' })).toBe(raw.replace('status: active', 'status: paused'))
+    expect(setProjectFields(raw, { tags: ['a'] })).toBe(raw.replace('discord: 123456789012345678901\n', 'discord: 123456789012345678901\ntags: [a]\n'))
+    expect(setProjectFields(raw, { status: null })).toBe(raw.replace('status: active\n', ''))
+    // A multi-line value is replaced as a whole; the lines around it stay.
+    const block = '---\ntitle: A\ntags:\n  - one\n  - two\n# after the tags\nstatus: active\n---\n# A\n'
+    expect(setProjectFields(block, { tags: ['three'] })).toBe('---\ntitle: A\ntags: [three]\n# after the tags\nstatus: active\n---\n# A\n')
+    expect(setProjectFields(block, { title: 'B' })).toBe(
+      '---\ntitle: B\ntags:\n  - one\n  - two\n# after the tags\nstatus: active\naliases: [A]\n---\n# B\n',
+    )
+  })
+
+  it('keeps a CRLF block CRLF, untouched lines included', () => {
+    const raw = '---\r\ntitle: A\r\nversion: 1.10\r\n---\r\n# A\r\n'
+    expect(setProjectFields(raw, { status: 'x' })).toBe('---\r\ntitle: A\r\nversion: 1.10\r\nstatus: x\r\n---\r\n# A\r\n')
+    expect(setProjectFields(raw, { title: 'B' })).toBe('---\r\ntitle: B\r\nversion: 1.10\r\naliases: [A]\r\n---\r\n# B\r\n')
+  })
+
+  it('stays fast on long whitespace runs in the H1 and a broken block', () => {
+    const ws = ' '.repeat(50_000)
+    const start = performance.now()
+    expect(setProjectFields(`# a${ws}x\n`, { summary: 'S' })).toBe(`# a${ws}x\n\n> S\n`)
+    expect(() => setProjectFields(`---\n${ws}x: [\n---\n# A\n`, { status: 'x' })).toThrow(/not valid YAML/)
+    const note = parseNote({ path: 'Projects/A.md', content: '# A\n' })
+    expect(projectSummary({ ...note, body: `# A\n\n> [[${'[['.repeat(25_000)}\n\n> [a](${'[a]('.repeat(12_000)}\n` }).length).toBeGreaterThan(0)
+    expect(performance.now() - start).toBeLessThan(300)
   })
 })
 

@@ -1,10 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { execFileSync } from 'node:child_process'
 import { promises as fs } from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { MemoryVaultAdapter, type VaultChange } from '@aether/core'
 import { IPC, type AetherBridge, type AiActivityDto, type VaultChangeDto, type VaultFileDto, type VaultInfo } from '../src/shared/ipc.js'
 import { ElectronVaultAdapter } from '../src/renderer/vault/electron.js'
+import { FsVault } from '../src/main/fsvault.js'
 import {
   AI_DEFAULT_PORT,
   AI_HOST,
@@ -100,22 +103,43 @@ describe('client setups', () => {
     expect(JSON.parse(claudeDesktopConfig({ ...win, readOnly: true })).mcpServers['aether-brain'].args).toContain('--read-only')
   })
 
-  it('quotes Windows arguments so a drive root keeps its backslash', () => {
-    expect(quoteArg('D:\\', 'win32')).toBe('"D:\\\\"')
-    expect(quoteArg('C:\\Program Files\\x', 'win32')).toBe('"C:\\Program Files\\x"')
-    expect(quoteArg('a"b', 'win32')).toBe('"a\\"b"')
+  it('quotes Windows arguments as PowerShell literals (a drive root keeps its backslash)', () => {
+    expect(quoteArg('D:\\', 'win32')).toBe("'D:\\'")
+    expect(quoteArg('C:\\Program Files\\x', 'win32')).toBe("'C:\\Program Files\\x'")
+    expect(quoteArg("Dom's Notes", 'win32')).toBe("'Dom''s Notes'")
+    // PowerShell also ends a single-quoted string at typographic quotes: doubled too.
+    expect(quoteArg('Dom\u2019s \u2018x\u2019', 'win32')).toBe("'Dom\u2019\u2019s \u2018\u2018x\u2019\u2019'")
   })
 
-  it('escapes shell specials elsewhere', () => {
-    expect(quoteArg('/home/me/My $notes', 'linux')).toBe('"/home/me/My \\$notes"')
-    expect(quoteArg('/a/"b"', 'darwin')).toBe('"/a/\\"b\\""')
+  it('never lets PowerShell expand $, $(…), backticks or % inside a Windows argument', () => {
+    // Double quotes would expand these: `$Notes` to '' (the root widened to D:\), `$(…)` runs code, `t is a tab.
+    for (const root of ['D:\\$Notes', 'F:\\Art$(Write-Host INJECTED)', 'E:\\Work`tNotes', 'G:\\100%done%']) {
+      expect(quoteArg(root, 'win32')).toBe(`'${root}'`)
+    }
+    const cmd = claudeCodeCommand({ ...win, roots: ['D:\\$Notes', 'F:\\Art$(Write-Host INJECTED)'] }, 'win32')
+    expect(cmd).toContain("--vault 'D:\\$Notes' --vault 'F:\\Art$(Write-Host INJECTED)'")
+    expect(cmd).not.toContain('"')
+  })
+
+  it('single-quotes arguments for POSIX shells so nothing expands', () => {
+    expect(quoteArg('/home/me/My $notes', 'linux')).toBe("'/home/me/My $notes'")
+    expect(quoteArg('/a/"b"/`c`/wow!', 'darwin')).toBe("'/a/\"b\"/`c`/wow!'")
+    expect(quoteArg("/home/me/Dom's", 'linux')).toBe("'/home/me/Dom'\\''s'")
+  })
+
+  it.skipIf(process.platform === 'win32')('hands every argument to a real sh unchanged', () => {
+    const args = ['/home/me/$HOME', '/a/$(echo INJECTED)', '/b/`id`', "/c/Dom's \"notes\"", '/d/wow!x', '/e/back\\slash', '/f/%x%']
+    const out = execFileSync('/bin/sh', ['-c', `printf '%s\\n' ${args.map((a) => quoteArg(a, process.platform)).join(' ')}`], {
+      encoding: 'utf8',
+    })
+    expect(out.split('\n').slice(0, -1)).toEqual(args)
   })
 
   it('builds a claude mcp add command with the env var before --', () => {
     const cmd = claudeCodeCommand({ ...win, readOnly: true }, 'win32')
     expect(cmd).toBe(
       'claude mcp add aether-brain --scope user -e ELECTRON_RUN_AS_NODE=1 -- ' +
-        `"${win.command}" "${win.serverScript}" --vault "D:\\\\" --vault "F:\\\\" --read-only`,
+        `'${win.command}' '${win.serverScript}' --vault 'D:\\' --vault 'F:\\' --read-only`,
     )
   })
 
@@ -410,6 +434,60 @@ describe('ElectronVaultAdapter', () => {
     f.failList(new Error('No vault open'))
     await expect(a.list()).rejects.toThrow(/No vault open/)
     expect(f.subs.size).toBe(0)
+  })
+
+  it("creates new notes through main's create-only path and never replaces a file the store has not loaded", async () => {
+    stubStorage()
+    const { useAether } = await import('@aether/ui')
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'aether-create-'))
+    const at = (rel: string) => path.join(tmp, ...rel.split('/'))
+    const history = '# Changelog\n\n## 1.0\n- important history\n'
+    try {
+      await fs.mkdir(at('Code/Game'), { recursive: true })
+      await fs.mkdir(at('Inbox'))
+      await fs.writeFile(at('Code/Game/CHANGELOG.md'), history)
+      await fs.writeFile(at('Code/Game/Design.md'), '# Design\n')
+      await fs.writeFile(at('Inbox/Other.md'), '# Other\n')
+      const v = new FsVault([tmp])
+      const calls: string[] = []
+      // Main's handlers as the preload reaches them: a rejection crosses IPC with its message only.
+      const ipc = <T>(channel: string, run: () => Promise<T>): Promise<T> =>
+        run().catch((err: unknown) => {
+          throw new Error(`Error invoking remote method '${channel}': ${String(err)}`)
+        })
+      const bridge = {
+        listFiles: async () => v.readAll((await v.scan()).files),
+        listFolders: async () => ({ folders: v.lastScan?.folders ?? [], truncated: false }),
+        readFile: (p: string) => ipc(IPC.read, () => v.read(p)),
+        writeFile: (p: string, c: string) => {
+          calls.push(`write ${p}`)
+          return ipc(IPC.write, () => v.write(p, c))
+        },
+        createFile: (p: string, c: string) => {
+          calls.push(`create ${p}`)
+          return ipc(IPC.create, () => v.create(p, c))
+        },
+        onChanges: () => () => undefined,
+      } as unknown as AetherBridge
+      const info: VaultInfo = { root: tmp, name: 'vault', roots: [{ path: tmp, mount: '', label: 'vault' }], exclude: [] }
+      const s = () => useAether.getState()
+      await s().openVault(new ElectronVaultAdapter(bridge, info))
+      // Written by another app after the load, not reported yet.
+      await fs.writeFile(at('Inbox/Buy milk.md'), 'AI wrote this')
+      // Repo boilerplate the brain skips, the unreported note, and the unreported note in another letter case.
+      const made = [await s().createNote('Code/Game', 'CHANGELOG'), await s().capture('Buy milk'), await s().capture('buy MILK')]
+      expect(await fs.readFile(at('Code/Game/CHANGELOG.md'), 'utf8')).toBe(history)
+      expect(await fs.readFile(at('Inbox/Buy milk.md'), 'utf8')).toBe('AI wrote this')
+      expect(made.every((id) => id && s().notes.has(id))).toBe(true)
+      expect(made.map((id) => id?.toLowerCase())).not.toContain('inbox/buy milk')
+      expect(made[0]).not.toBe('Code/Game/CHANGELOG')
+      // Every new note went through create, none through write.
+      expect(calls.filter((c) => c.startsWith('write '))).toEqual([])
+      expect(calls.filter((c) => c.startsWith('create ')).length).toBeGreaterThanOrEqual(4)
+      expect((await fs.readdir(at('Inbox'))).length).toBe(4)
+    } finally {
+      await fs.rm(tmp, { recursive: true, force: true })
+    }
   })
 
   it('lets the store see a note written while the vault was loading', async () => {

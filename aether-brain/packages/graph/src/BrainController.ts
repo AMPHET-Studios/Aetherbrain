@@ -9,12 +9,35 @@ export interface BrainEvents {
   onHover?: (id: NoteId | null) => void
 }
 
+/** Default depth of the view: the camera's far plane and how far the user can dolly out. */
+export const DEFAULT_FAR = 12000
+export const DEFAULT_MAX_DISTANCE = 5000
+
+/**
+ * How deep the view must reach for a scene framed from `distance` (the
+ * distance `fitToGraph` puts the camera at): the far plane sees the whole
+ * framed sphere and then some, and the user can dolly out to twice the
+ * framing distance. Never below the defaults. A drive's solar system can be
+ * tens of thousands of units across; with a fixed far plane it rendered as
+ * an empty sky.
+ */
+export function cameraRange(distance: number): { far: number; maxDistance: number } {
+  const d = Number.isFinite(distance) && distance > 0 ? distance : 0
+  return { far: Math.max(DEFAULT_FAR, d * 4), maxDistance: Math.max(DEFAULT_MAX_DISTANCE, d * 2) }
+}
+
 export interface CameraLike {
   /**
    * Look at (x, y, z) from `distance`, keeping the current view direction but
    * raised to at least `minElevation` radians above the horizon when given.
    */
   flyTo(x: number, y: number, z: number, distance: number, smooth?: boolean, minElevation?: number): void
+  /**
+   * Make the view deep enough for a scene framed from `distance`: far plane
+   * and maximum dolly distance per `cameraRange(distance)`. Called by
+   * `fitToGraph` before it flies there.
+   */
+  setRange(distance: number): void
   reset(): void
   orbit(dAzimuth: number, dPolar: number): void
   dolly(delta: number): void
@@ -117,6 +140,9 @@ export class BrainController {
     const radius = Math.max(30, Math.sqrt(d2[Math.min(n - 1, Math.floor(n * 0.92))] ?? 0) * 1.12)
     const fov = (55 * Math.PI) / 180
     const distance = (radius / Math.sin(fov / 2)) * 0.95
+    // The far plane and the dolly limit follow the scene's size, so a huge
+    // system is not clipped away (nor snapped back in on the first wheel tick).
+    this.camera.setRange(distance)
     // Solar systems are flat-ish discs: look at them from above, not edge-on.
     this.camera.flyTo(cx, cy, cz, distance, smooth, this.layoutMode === 'system' ? 0.55 : undefined)
     return true

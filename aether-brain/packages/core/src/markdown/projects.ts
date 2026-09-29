@@ -6,14 +6,12 @@
  * the system layout that folder is the star and its subfolders are planets.
  * Everything here reads and rewrites ordinary markdown — no sidecar files.
  */
-import type { Frontmatter, ParsedNote } from '../types'
-import { asString, asStringArray, joinFrontmatter, splitFrontmatter } from './frontmatter'
+import type { Frontmatter, ParsedNote, VaultRootInfo } from '../types'
+import { asString, asStringArray, rewriteFrontmatter, splitFrontmatter } from './frontmatter'
 import { normalizeTag } from './parse'
-import { projectNote } from './tasks'
-import { areaFromFolder, areaOfFolderName, basenameOf, folderOf, normalizeFolderPath } from '../vault/paths'
+import { atxHeading, projectNote } from './tasks'
+import { areaFromFolder, areaOfFolderName, basenameOf, folderOf, mountOf, normalizeFolderPath, topFolderOf } from '../vault/paths'
 
-/** ATX H1; a closing `#` run only counts after whitespace (`# Learn C#` keeps its `#`). */
-const H1_RE = /^#\s+(.*?)(?:\s+#+)?\s*$/
 const FENCE_RE = /^\s*(```|~~~)/
 const QUOTE_RE = /^\s{0,3}>/
 
@@ -50,8 +48,15 @@ export function isProjectNote(note: ParsedNote): boolean {
 
 /**
  * Home folder of a project:
- *  1. frontmatter `folder:` (vault path, normalized; returned even when it
- *     does not exist yet, so the UI can offer to create it);
+ *  1. frontmatter `folder:`, normalized. It is written relative to the note's
+ *     root (see `portableFolderRef`), so it is resolved against `folders` as
+ *     written (`F/Games/X` on another drive, or a single-root vault), then
+ *     under the note's first path segment (`D/` + `Games/X`: its mount in a
+ *     multi-root vault), then without its first segment (a full path written
+ *     while more drives were open). The last two apply only when the value's
+ *     first segment is not a folder of the vault; when it is, the value is a
+ *     plain vault path that does not exist yet. None existing, it is returned
+ *     as written so the UI can offer to create it;
  *  2. the note is a folder note — its basename equals its folder's basename
  *     (case-insensitive): that folder;
  *  3. a sibling folder named like the note (`Projects/PORTALz.md` +
@@ -62,13 +67,45 @@ export function projectFolderOf(note: ParsedNote, folders: Set<string>): string 
   const explicit = asString(note.frontmatter['folder'])
   if (explicit) {
     const f = normalizeFolderPath(explicit)
-    if (f) return f
+    if (f) {
+      if (folders.has(f)) return f
+      // Only a value whose first segment is no folder here can be mount-shifted:
+      // `Projects/Game` (not created yet) in a vault with a `Projects` folder
+      // means exactly that, never an unrelated top-level `Game`.
+      const cut = f.indexOf('/')
+      if (!folders.has(cut < 0 ? f : f.slice(0, cut))) {
+        const first = topFolderOf(note.meta.path)
+        if (first && folders.has(`${first}/${f}`)) return `${first}/${f}`
+        if (cut > 0 && folders.has(f.slice(cut + 1))) return f.slice(cut + 1)
+      }
+      return f
+    }
   }
   const base = basenameOf(note.meta.path)
   const folder = note.meta.folder
   if (folder && lastSegment(folder).toLowerCase() === base.toLowerCase()) return folder
   const sibling = folder ? `${folder}/${base}` : base
   return folders.has(sibling) ? sibling : null
+}
+
+/**
+ * The value to store in a project note's `folder:` for its home folder
+ * `folderPath` (a vault path): relative to the note's root, so the binding
+ * survives drives being added or removed. In a multi-root vault a folder on
+ * the note's own drive drops the mount (`D/Games/X` → `Games/X` for
+ * `D/Projects/X.md`); a folder on another drive, the drive itself, a folder
+ * whose relative path would start with another root's mount (`D/F/Games`),
+ * or any folder of a single-root vault keeps its full vault path.
+ * `projectFolderOf` resolves either form.
+ */
+export function portableFolderRef(notePath: string, folderPath: string, roots?: VaultRootInfo[] | null): string {
+  const folder = normalizeFolderPath(folderPath)
+  const mount = mountOf(notePath, roots)
+  if (!mount || !folder.startsWith(`${mount}/`)) return folder
+  const rel = folder.slice(mount.length + 1)
+  // `D/F/Games` must not become `F/Games`, which reads as drive F's folder.
+  const head = (rel.split('/', 1)[0] ?? '').toLowerCase()
+  return roots?.some((r) => r.mount.toLowerCase() === head) ? folder : rel
 }
 
 /** Where a new folder for a project without one goes: `<note folder>/<basename>`. */
@@ -100,13 +137,19 @@ function linesOf(text: string): string[] {
   return text.match(/[^\n]*\n|[^\n]+$/g) ?? []
 }
 
+/** The text of an ATX H1 line (`# **PORTALz**` → `**PORTALz**`), or null. Linear time. */
+function h1Of(line: string): string | null {
+  const h = atxHeading(line)
+  return h?.level === 1 ? h.text : null
+}
+
 /** Index of the first ATX H1 outside fenced code, or -1. */
 function findH1(lines: string[]): number {
   let inFence = false
   for (let i = 0; i < lines.length; i++) {
     const l = textOf(lines[i] ?? '')
     if (FENCE_RE.test(l)) inFence = !inFence
-    else if (!inFence && H1_RE.test(l)) return i
+    else if (!inFence && h1Of(l) !== null) return i
   }
   return -1
 }
@@ -153,7 +196,11 @@ function sameValue(a: unknown, b: unknown): boolean {
 function unparsedFrontmatter(raw: string, split: ReturnType<typeof splitFrontmatter>): boolean {
   if (!split.hasFrontmatter || Object.keys(split.frontmatter).length > 0) return false
   const block = raw.slice(0, split.bodyOffset).split(/\r?\n/).slice(1)
-  return block.some((l) => !/^\s*(#.*|---|\.\.\.)?\s*$/.test(l))
+  // Blank, comment, `---` or `...` lines hold nothing (trim, not a regex: linear on long lines).
+  return block.some((l) => {
+    const t = l.trim()
+    return t !== '' && !t.startsWith('#') && t !== '---' && t !== '...'
+  })
 }
 
 /** Aliases as written: a list, or one string of comma-separated aliases (`aliases: Portal game`). */
@@ -162,20 +209,38 @@ function aliasList(v: unknown): string[] {
   return asStringArray(v)
 }
 
+/** What `setProjectFields` should know about the note beyond its text. */
+export interface ProjectFieldOptions {
+  /**
+   * The note's current title as the app resolves it (`meta.title`: frontmatter
+   * title, else the first H1 — setext too — else the file name). Kept as an
+   * alias on a rename even when the text alone can't tell it.
+   */
+  oldTitle?: string
+  /**
+   * More names to keep resolving after a rename, e.g. the old file name when
+   * the file is renamed too (`[[portal-game]]` resolved by basename).
+   */
+  keepAliases?: string[]
+}
+
 /**
  * Rewrite a project note.
- *  - title: frontmatter `title` + the first H1; the old title is appended to
- *    `aliases` (deduplicated, case-insensitively like link resolution) so
- *    existing [[links]] keep resolving; an alias equal to the new title goes.
+ *  - title: frontmatter `title` + the first H1; the old title (frontmatter
+ *    title, else `opts.oldTitle`, else the H1) and `opts.keepAliases` are
+ *    appended to `aliases` (deduplicated, case-insensitively like link
+ *    resolution) so existing [[links]] keep resolving; an alias equal to the
+ *    new title goes.
  *  - summary: replaces the `>` blockquote right after the H1, inserts one
  *    after the H1 when missing, removes it for '' / null.
  *  - status / tags / folder: frontmatter keys; null (or '') deletes the key.
  * The rest of the body stays byte-identical (every line keeps its own
- * ending), and the frontmatter block is not re-serialized unless one of its
- * keys changes; a rewritten block keeps the file's CRLF / LF. Throws instead
- * of rewriting a frontmatter block whose YAML does not parse.
+ * ending). Frontmatter keys are patched in place (`rewriteFrontmatter`):
+ * comments and the keys not edited keep their exact text, and new lines
+ * follow the file's CRLF / LF. Throws instead of rewriting a frontmatter
+ * block whose YAML does not parse.
  */
-export function setProjectFields(raw: string, patch: ProjectPatch): string {
+export function setProjectFields(raw: string, patch: ProjectPatch, opts: ProjectFieldOptions = {}): string {
   const split = splitFrontmatter(raw)
   const fm: Frontmatter = { ...split.frontmatter }
   // A byte-order mark stays the first thing in the file, whatever is rewritten.
@@ -187,23 +252,28 @@ export function setProjectFields(raw: string, patch: ProjectPatch): string {
   let fmChanged = false
   let bodyChanged = false
 
+  // Keys to rewrite, in order; `undefined` deletes (see rewriteFrontmatter).
+  const fmPatch: Record<string, unknown> = {}
   const setKey = (key: string, value: unknown): void => {
     if (value === null) {
       if (key in fm) {
         delete fm[key]
+        fmPatch[key] = undefined
         fmChanged = true
       }
     } else if (!sameValue(fm[key], value)) {
       fm[key] = value
+      fmPatch[key] = value
       fmChanged = true
     }
   }
 
   const title = patch.title?.replace(/\s+/g, ' ').trim()
-  const h1Raw = h1 >= 0 ? (H1_RE.exec(textOf(lines[h1] ?? ''))?.[1] ?? null) : null
+  const h1Raw = h1 >= 0 ? h1Of(textOf(lines[h1] ?? '')) : null
   // The H1 as the note's title reads (`# **PORTALz**` → PORTALz), like parseNote.
   const h1Text = h1Raw === null ? null : plainInline(h1Raw)
-  const old = asString(fm['title']) ?? h1Text
+  const given = opts.oldTitle?.replace(/\s+/g, ' ').trim() || null
+  const old = asString(fm['title']) ?? given ?? h1Text
   // Only a real change touches anything: saving the current title is a no-op.
   if (title && title !== old) {
     setKey('title', title)
@@ -211,11 +281,16 @@ export function setProjectFields(raw: string, patch: ProjectPatch): string {
       lines[h1] = `# ${title}${eolOf(lines[h1])}`
       bodyChanged = true
     }
-    if (old) {
+    // Every name the note answered to keeps resolving: its title, and what
+    // the caller knows (the old file name when that changes too).
+    const keep = [old, given, ...(opts.keepAliases ?? [])]
+      .map((a) => a?.replace(/\s+/g, ' ').trim() ?? '')
+      .filter(Boolean)
+    if (keep.length) {
       // Case-insensitive like link resolution: the title itself already resolves.
       const seen = new Set([title.toLowerCase()])
       const aliases: string[] = []
-      for (const a of [...aliasList(fm['aliases']), old]) {
+      for (const a of [...aliasList(fm['aliases']), ...keep]) {
         const k = a.toLowerCase()
         if (seen.has(k)) continue
         seen.add(k)
@@ -253,24 +328,20 @@ export function setProjectFields(raw: string, patch: ProjectPatch): string {
   const body = bodyChanged ? lines.join('') : original
   if (!fmChanged) return split.hasFrontmatter ? raw.slice(0, split.bodyOffset) + body : bom + body
   if (unparsedFrontmatter(raw, split)) throw new Error('The frontmatter is not valid YAML; fix it before editing the project')
-  if (Object.keys(fm).length === 0) return bom + body
-  // `joinFrontmatter(fm, '')` ends with `---\n\n`; keep the original gap before the body.
-  const block = joinFrontmatter(fm, '')
-  const head = split.hasFrontmatter ? block.slice(0, -1) : block
-  const fmEol = split.hasFrontmatter ? (raw.slice(0, split.bodyOffset).includes('\r\n') ? '\r\n' : '\n') : eol
-  return bom + (fmEol === '\n' ? head : head.replace(/\n/g, fmEol)) + body
+  return rewriteFrontmatter(raw, fmPatch, body)
 }
 
 /** Markdown inline syntax → readable text for cards (wikilinks, links, emphasis, code). */
 function plainInline(text: string): string {
   return text
-    .replace(/!?\[\[([^\]]+?)\]\]/g, (_m, inner: string) => {
+    // `[^[\]]`: a run of brackets must not make these scans quadratic.
+    .replace(/!?\[\[([^[\]]+?)\]\]/g, (_m, inner: string) => {
       const pipe = inner.indexOf('|')
       if (pipe >= 0) return inner.slice(pipe + 1).trim()
       const hash = inner.indexOf('#')
       return (hash >= 0 ? inner.slice(0, hash) : inner).trim()
     })
-    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/!?\[([^[\]]*)\]\([^()]*\)/g, '$1')
     .replace(/(\*\*|__|`)/g, '')
     .replace(/(^|[^\p{L}\p{N}])[*_]([^*_]+)[*_](?=$|[^\p{L}\p{N}])/gu, '$1$2')
     .replace(/\s+/g, ' ')

@@ -5,14 +5,15 @@ import {
   asStringArray,
   defaultProjectFolder,
   folderOf,
-  moveTask as moveTaskInNote,
   normalizeTag,
   projectFolderOf,
   projectSummary,
+  type NoteId,
   type ParsedNote,
   type TaskItem,
 } from '@aether/core'
-import { listProjects, type ProjectRow } from '../projects'
+import { folderIndex, matchFolders } from '../folderSearch'
+import { listProjects, moveTaskOnBoard, type ProjectRow } from '../projects'
 import { useAether } from '../store'
 import { cx, isControl, MOD, plural, relativeTime } from '../util'
 
@@ -20,6 +21,39 @@ import { cx, isControl, MOD, plural, relativeTime } from '../util'
 const STATUSES = ['active', 'paused', 'done', 'someday']
 
 type EditField = 'title' | 'summary' | 'tags'
+
+/** An inline task edit under way: the task as it was when the edit started (the save is made against it). */
+interface TaskEdit {
+  /** The project note. */
+  note: NoteId
+  /** Row key of the task (see `taskKeys`). */
+  key: string
+  /** Its line in `raw`. */
+  line: number
+  /** The note's text when the edit started: the store finds the task in the file from it, wherever it moved. */
+  raw: string
+  /** The task's text then (a save of the same text writes nothing). */
+  text: string
+}
+
+/**
+ * A row key per task line that follows the task, not its line number: the
+ * line's text and which occurrence of that text it is (file order, like the
+ * store's line remapping). A line inserted above by another writer keeps
+ * every key, so an inline edit stays on its own task.
+ */
+function taskKeys(raw: string, tasks: TaskItem[]): Map<number, string> {
+  const lines = raw.split('\n')
+  const seen = new Map<string, number>()
+  const out = new Map<number, string>()
+  for (const t of [...tasks].sort((a, b) => a.line - b.line)) {
+    const text = lines[t.line] ?? ''
+    const n = seen.get(text) ?? 0
+    seen.set(text, n + 1)
+    out.set(t.line, `${n}:${text}`)
+  }
+  return out
+}
 
 /**
  * The summary as written: the `>` lines right after the H1, markdown kept (so
@@ -83,7 +117,7 @@ export function ProjectsView() {
   const [edit, setEdit] = useState<EditField | null>(null)
   const [picking, setPicking] = useState(false)
   const [newFolder, setNewFolder] = useState('')
-  const [editingLine, setEditingLine] = useState<number | null>(null)
+  const [editing, setEditing] = useState<TaskEdit | null>(null)
   const [focusLine, setFocusLine] = useState<number | null>(null)
   const taskInput = useRef<HTMLInputElement | null>(null)
   const folderInput = useRef<HTMLInputElement | null>(null)
@@ -93,6 +127,7 @@ export function ProjectsView() {
 
   const current = rows.find((r) => r.note.meta.id === projectId) ?? rows[0] ?? null
   const currentId = current?.note.meta.id ?? null
+  const keys = useMemo(() => (current ? taskKeys(current.note.raw, current.tasks) : new Map<number, string>()), [current])
 
   /** Direct subfolder counts, per folder. */
   const childCounts = useMemo(() => {
@@ -143,8 +178,15 @@ export function ProjectsView() {
   useEffect(() => {
     setEdit(null)
     setPicking(false)
-    setEditingLine(null)
+    setEditing(null)
   }, [currentId])
+
+  // The task being edited was changed or removed by another writer (an AI, another app): stop, and say so.
+  useEffect(() => {
+    if (!editing || editing.note !== currentId || [...keys.values()].includes(editing.key)) return
+    setEditing(null)
+    useAether.getState().toast('The task you were editing changed on disk; edit it again', 'error')
+  }, [keys, editing, currentId])
 
   // Put focus back on a task row after it was edited, moved or deleted (its line may have changed).
   useEffect(() => {
@@ -461,12 +503,13 @@ export function ProjectsView() {
                 <TaskList
                   tasks={current.open}
                   row={current}
+                  keys={keys}
                   readOnly={readOnly}
-                  editingLine={editingLine}
-                  setEditingLine={setEditingLine}
+                  editing={editing}
+                  setEditing={setEditing}
                   setFocusLine={setFocusLine}
                   onToggle={(t, done) => toggleTask(current.note.meta.id, t.line, done, current.note.raw)}
-                  onEdit={(t, text) => editTask(current.note.meta.id, t.line, text, current.note.raw)}
+                  onEdit={(edit, text) => editTask(current.note.meta.id, edit.line, text, edit.raw)}
                   onDelete={(t) => deleteTask(current.note.meta.id, t.line, current.note.raw)}
                   onMove={(t, dir) => moveTask(current.note.meta.id, t.line, dir, current.note.raw)}
                 />
@@ -477,12 +520,13 @@ export function ProjectsView() {
                   <TaskList
                     tasks={current.done}
                     row={current}
+                    keys={keys}
                     readOnly={readOnly}
-                    editingLine={editingLine}
-                    setEditingLine={setEditingLine}
+                    editing={editing}
+                    setEditing={setEditing}
                     setFocusLine={setFocusLine}
                     onToggle={(t, done) => toggleTask(current.note.meta.id, t.line, done, current.note.raw)}
-                    onEdit={(t, text) => editTask(current.note.meta.id, t.line, text, current.note.raw)}
+                    onEdit={(edit, text) => editTask(current.note.meta.id, edit.line, text, edit.raw)}
                     onDelete={(t) => deleteTask(current.note.meta.id, t.line, current.note.raw)}
                     onMove={(t, dir) => moveTask(current.note.meta.id, t.line, dir, current.note.raw)}
                   />
@@ -809,25 +853,15 @@ function HomeFolder({
 function FolderPicker({ folders, near, onPick, onCancel }: { folders: Set<string>; near: string; onPick: (path: string) => void; onCancel: () => void }) {
   const [q, setQ] = useState('')
   const [index, setIndex] = useState(0)
-  const matches = useMemo(() => {
-    const query = q.trim().toLowerCase()
-    const out: { path: string; rank: number }[] = []
-    for (const f of folders) {
-      if (!query) {
-        // Nothing typed yet: the folders next to the project note.
-        if (folderOf(f) === near) out.push({ path: f, rank: 0 })
-        continue
-      }
-      const lower = f.toLowerCase()
-      const name = lower.slice(lower.lastIndexOf('/') + 1)
-      const rank = name === query ? 0 : name.startsWith(query) ? 1 : name.includes(query) ? 2 : lower.includes(query) ? 3 : -1
-      if (rank >= 0) out.push({ path: f, rank })
-    }
-    return out
-      .sort((a, b) => a.rank - b.rank || a.path.length - b.path.length || a.path.localeCompare(b.path))
-      .slice(0, 12)
-      .map((x) => x.path)
-  }, [q, folders, near])
+  // Lower-cased once per folder Set, not per keystroke (a whole drive has hundreds of thousands).
+  const folderList = useMemo(() => folderIndex(folders), [folders])
+  // Nothing typed yet: the folders next to the project note.
+  const nearby = useMemo(() => {
+    const out: string[] = []
+    for (const f of folders) if (folderOf(f) === near) out.push(f)
+    return out.sort((a, b) => a.length - b.length || a.localeCompare(b)).slice(0, 12)
+  }, [folders, near])
+  const matches = useMemo(() => (q.trim() ? matchFolders(folderList, q, 12) : nearby), [q, folderList, nearby])
   useEffect(() => setIndex(0), [q])
   return (
     <div className="mt-2 rounded-xl border border-[var(--panel-border)] bg-black/20 p-2">
@@ -875,9 +909,10 @@ function FolderPicker({ folders, near, onPick, onCancel }: { folders: Set<string
 function TaskList({
   tasks,
   row,
+  keys,
   readOnly,
-  editingLine,
-  setEditingLine,
+  editing,
+  setEditing,
   setFocusLine,
   onToggle,
   onEdit,
@@ -886,12 +921,15 @@ function TaskList({
 }: {
   tasks: TaskItem[]
   row: ProjectRow
+  /** Row keys by task line (see `taskKeys`). */
+  keys: Map<number, string>
   readOnly: boolean
-  editingLine: number | null
-  setEditingLine: (line: number | null) => void
+  editing: TaskEdit | null
+  setEditing: (edit: TaskEdit | null) => void
   setFocusLine: (line: number | null) => void
   onToggle: (t: TaskItem, done: boolean) => Promise<void>
-  onEdit: (t: TaskItem, text: string) => Promise<void>
+  /** Save an inline edit: against the note as it was when the edit started. */
+  onEdit: (edit: TaskEdit, text: string) => Promise<void>
   onDelete: (t: TaskItem) => Promise<void>
   onMove: (t: TaskItem, dir: -1 | 1) => Promise<void>
 }) {
@@ -905,40 +943,44 @@ function TaskList({
   }
   return (
     <ul className="mb-4">
-      {tasks.map((t) => (
-        <TaskRow
-          key={t.line}
-          task={t}
-          readOnly={readOnly}
-          editing={editingLine === t.line}
-          onStartEdit={() => setEditingLine(t.line)}
-          onSaveEdit={async (text) => {
-            setEditingLine(null)
-            if (text.trim() && text.trim() !== t.text) await onEdit(t, text)
-            setFocusLine(t.line)
-          }}
-          onCancelEdit={() => {
-            setEditingLine(null)
-            setFocusLine(t.line)
-          }}
-          onToggle={async (done) => {
-            const next = neighborLine(t, 0)
-            await onToggle(t, done)
-            if (next !== null) setFocusLine(next)
-          }}
-          onDelete={async () => {
-            const next = neighborLine(t, 1)
-            await onDelete(t)
-            if (next !== null) setFocusLine(next)
-          }}
-          onMove={async (dir) => {
-            // Where the task lands (moveTask keeps every other line's content; `updated` is stamped in place).
-            const to = moveTaskInNote(row.note.raw, t.line, dir).line
-            await onMove(t, dir)
-            setFocusLine(to)
-          }}
-        />
-      ))}
+      {tasks.map((t) => {
+        const key = keys.get(t.line) ?? `line:${t.line}`
+        return (
+          <TaskRow
+            key={key}
+            task={t}
+            readOnly={readOnly}
+            editing={editing?.key === key}
+            onStartEdit={() => setEditing({ note: row.note.meta.id, key, line: t.line, raw: row.note.raw, text: t.text })}
+            onSaveEdit={async (text) => {
+              const edit = editing?.key === key ? editing : null
+              setEditing(null)
+              if (edit && text.trim() && text.trim() !== edit.text) await onEdit(edit, text)
+              setFocusLine(t.line)
+            }}
+            onCancelEdit={() => {
+              setEditing(null)
+              setFocusLine(t.line)
+            }}
+            onToggle={async (done) => {
+              const next = neighborLine(t, 0)
+              await onToggle(t, done)
+              if (next !== null) setFocusLine(next)
+            }}
+            onDelete={async () => {
+              const next = neighborLine(t, 1)
+              await onDelete(t)
+              if (next !== null) setFocusLine(next)
+            }}
+            onMove={async (dir) => {
+              // Where the task lands: the store moves it the same way (open and done tasks apart).
+              const to = moveTaskOnBoard(row.note.raw, t.line, dir).line
+              await onMove(t, dir)
+              setFocusLine(to)
+            }}
+          />
+        )
+      })}
     </ul>
   )
 }

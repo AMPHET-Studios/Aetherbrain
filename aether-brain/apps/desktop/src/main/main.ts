@@ -3,7 +3,7 @@
  *
  * Responsibilities, and nothing more:
  *   - remember the vault roots (one folder, or several such as whole drives)
- *   - read, write, rename, delete markdown notes and create folders in them (FsVault, path-jailed)
+ *   - read, write, create, rename, delete markdown notes and create folders in them (FsVault, path-jailed)
  *   - watch them (VaultWatcher) and stream debounced change batches to the renderer and the AI link
  *   - run the AI link (the in-app MCP server on 127.0.0.1) when the user switches it on
  *
@@ -21,7 +21,7 @@ import {
   type VaultInfo,
   type VaultProgressDto,
 } from '../shared/ipc.js'
-import { FsVault, type ScanResult } from './fsvault.js'
+import { FsVault, within } from './fsvault.js'
 import { VaultWatcher } from './watcher.js'
 import { AiLinkHost, aiSettings, cleanPatch, type AiLinkSettings } from './ai-link.js'
 
@@ -137,7 +137,7 @@ let generation = 0
 let opened = false
 /**
  * Changes for the AI link held while a read is in progress (the watcher starts
- * before the notes are read); handed over after the snapshot, in order.
+ * before the scan); handed over after the snapshot, in order.
  */
 let aiHeld: VaultChangeDto[][] | null = null
 let win: BrowserWindow | null = null
@@ -161,19 +161,6 @@ function uniqueRoots(input: string[]): string[] {
     out.push(r)
   }
   return out
-}
-
-/** `p`, or `fallback` after `ms` (an unreachable network drive can make fs calls hang for a long time). */
-async function within<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
-  let timer: NodeJS.Timeout | undefined
-  const timeout = new Promise<T>((resolve) => {
-    timer = setTimeout(() => resolve(fallback), ms)
-  })
-  try {
-    return await Promise.race([p, timeout])
-  } finally {
-    clearTimeout(timer)
-  }
 }
 
 async function isDir(p: string): Promise<boolean> {
@@ -240,9 +227,11 @@ async function openVault(input: string[]): Promise<VaultInfo> {
 }
 
 /**
- * Scan + read every note with progress events. The watcher (re)starts right
- * after the scan, so an edit made while the notes are read is reported too
- * (the renderer keeps it until its load is done; the AI link gets it after
+ * Scan + read every note with progress events. The watcher (re)starts before
+ * the scan and buffers what it sees until the scan is done (seed), so a note
+ * or folder created in an already-walked folder while a whole drive is
+ * scanned is reported too, as is an edit made while the notes are read (the
+ * renderer keeps those until its load is done; the AI link gets them after
  * the snapshot).
  */
 async function listFiles(): Promise<VaultFileDto[]> {
@@ -252,13 +241,22 @@ async function listFiles(): Promise<VaultFileDto[]> {
   const progress = (p: VaultProgressDto) => {
     if (gen === generation) toRenderer(IPC.progress, p)
   }
+  // A fresh hold: the snapshot below supersedes anything an earlier read's watcher reported.
+  aiHeld = []
   try {
     progress({ phase: 'scanning', files: 0, found: 0, dirs: 0, done: false })
-    const scan = await v.scan((p) => progress({ phase: 'scanning', files: 0, found: p.found, dirs: p.dirs, done: false }))
-    if (latest()) {
-      aiHeld ??= []
-      startWatcher(v, scan)
-    }
+    const w = await startWatcher(v)
+    const scan = await v
+      .scan((p) => progress({ phase: 'scanning', files: 0, found: p.found, dirs: p.dirs, done: false }))
+      .catch((err: unknown) => {
+        // Nothing to compare its events against: stop it.
+        if (watcher === w) {
+          w.stop()
+          watcher = null
+        }
+        throw err
+      })
+    if (latest()) w.seed({ files: scan.files.map((f) => f.path), folders: scan.folders })
     const found = scan.files.length
     const files = await v.readAll(scan.files, (done) => progress({ phase: 'reading', files: done, found, dirs: scan.dirs, done: false }))
     progress({ phase: 'done', files: files.length, found, dirs: scan.dirs, done: true })
@@ -274,13 +272,16 @@ async function listFiles(): Promise<VaultFileDto[]> {
   }
 }
 
-function startWatcher(v: FsVault, scan: ScanResult): void {
+/** A new watcher for `v`, watching (once this resolves) but holding its events until seed() (the scan). */
+async function startWatcher(v: FsVault): Promise<VaultWatcher> {
   watcher?.stop()
-  watcher = new VaultWatcher(v, { files: scan.files.map((f) => f.path), folders: scan.folders }, (changes) => {
+  const w = new VaultWatcher(v, null, (changes) => {
     toRenderer(IPC.changes, changes)
     toAi(changes)
   })
-  watcher.start()
+  watcher = w
+  await w.start()
+  return w
 }
 
 /** The renderer only ever reads notes; anything else in the roots (whole drives) stays out of reach. */
@@ -306,6 +307,26 @@ async function writeNote(p: unknown, content: unknown): Promise<void> {
   await v.write(rel, text)
   // Our own writes are swallowed by the watcher, so the AI link hears about them here.
   toAi([{ kind: existed ? 'change' : 'add', path: rel, content: text, mtime: Date.now() }])
+}
+
+/**
+ * A new note: never replaces anything at the path (a note the renderer has
+ * not loaded, ignored boilerplate, a case variant). Rejects with a message
+ * containing EEXIST; the renderer then tries the next free name.
+ */
+async function createNote(p: unknown, content: unknown): Promise<void> {
+  const v = requireVault()
+  const rel = notePath(p)
+  const text = String(content)
+  watcher?.noteSelfWrite(rel, text)
+  try {
+    await v.create(rel, text)
+  } catch (err) {
+    // Whatever is there is not ours: report its changes as usual.
+    watcher?.forgetSelfWrite(rel, text)
+    throw err
+  }
+  toAi([{ kind: 'add', path: rel, content: text, mtime: Date.now() }])
 }
 
 async function deleteNote(p: unknown): Promise<void> {
@@ -483,6 +504,7 @@ function registerIpc(): void {
   })
   ipcMain.handle(IPC.read, (_e, p: unknown) => readNote(p))
   ipcMain.handle(IPC.write, (_e, p: unknown, content: unknown) => writeNote(p, content))
+  ipcMain.handle(IPC.create, (_e, p: unknown, content: unknown) => createNote(p, content))
   ipcMain.handle(IPC.delete, (_e, p: unknown) => deleteNote(p))
   ipcMain.handle(IPC.rename, (_e, a: unknown, b: unknown) => renameNote(a, b))
   ipcMain.handle(IPC.mkdir, (_e, p: unknown) => createFolder(p))

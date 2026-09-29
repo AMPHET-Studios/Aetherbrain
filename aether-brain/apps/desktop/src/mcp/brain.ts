@@ -7,12 +7,17 @@
  * Safety rules, enforced here and not only by the tool layer:
  *  - every write goes through FsVault (path jail, excluded folders, atomic);
  *  - only `.md` notes are ever written, and a new note never overwrites an
- *    existing file (` 2`, ` 3` suffixes);
+ *    existing file: it is created with FsVault.create, which fails with
+ *    EEXIST when anything is at the path (a note the index has not seen yet,
+ *    repo boilerplate, a case variant), and the next name (` 2`, ` 3`) is tried;
  *  - nothing here deletes a note file;
  *  - a read-only brain refuses every write.
  * Markdown is changed only through the core helpers (tasks, projects,
  * frontmatter, templates), so files stay byte-identical outside the edit.
+ * Text from an AI is only scanned in linear time (no backtracking regex on a
+ * whole line): one crafted argument must not freeze the process it runs in.
  */
+import { createHash } from 'node:crypto'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
@@ -33,6 +38,7 @@ import {
   homePrefix,
   idFromPath,
   inboxNote,
+  isExistsError,
   isIgnoredPath,
   isProjectNote,
   joinFrontmatter,
@@ -41,6 +47,7 @@ import {
   normalizePath,
   normalizeTag,
   parseWikilinkRaw,
+  portableFolderRef,
   projectFolderOf,
   projectNote,
   projectSummary,
@@ -150,8 +157,19 @@ const MAX_TREE = 400
 
 /** Tasks listed after a task is added or deleted (lines below it moved). */
 const MAX_TASK_LIST = 100
+/** Tasks an error that names the note's tasks lists. */
+const MAX_ERROR_TASKS = 25
+/** Tasks read_note lists. */
+const MAX_NOTE_TASKS = 200
+/** Tasks get_project lists. */
+const MAX_PROJECT_TASKS = 300
+/** Notes whose listed task lines are remembered (see TaskView). */
+const MAX_VIEWS = 500
+/** Listings remembered per note, newest first: a short reply must not hide what a longer one showed. */
+const VIEWS_PER_NOTE = 4
+/** Occurrences of edit_note's old_text counted at most (only "exactly once" matters). */
+const MAX_OCCURRENCES = 50
 
-const HEADING_RE = /^(#{1,6})\s+(.*?)(?:\s+#+)?\s*$/
 const FENCE_RE = /^\s*(```|~~~)/
 const LIST_RE = /^\s*([-*+]|\d+[.)])\s/
 const DONE_STATUS = /^(done|complete|completed|finished|shipped|archived|cancel+ed|dropped|abandoned)$/i
@@ -176,6 +194,8 @@ interface Derived {
   children: Map<string, string[]>
   /** Lowercased folder → folders. */
   foldersLower: Map<string, string[]>
+  /** Lowercased last segment (folder name) → folders. */
+  foldersNamed: Map<string, string[]>
   /** Project notes. */
   projects: ParsedNote[]
   /** Project → its home folder (may not exist yet). */
@@ -183,6 +203,49 @@ interface Derived {
   /** Existing home folder → the project bound to it (one per folder). */
   projectAt: Map<string, NoteId>
   resolver: LinkResolver
+}
+
+/** The tables of Derived that depend on the folder set only (rebuilt when it changes, not per note edit). */
+interface FolderTables {
+  /** The folder set they were built from (applyChanges keeps its identity when a batch has no folder change). */
+  of: Set<string>
+  children: Map<string, string[]>
+  foldersLower: Map<string, string[]>
+  foldersNamed: Map<string, string[]>
+}
+
+/**
+ * The task lines one reply listed for a note: the lines an AI's `line`
+ * numbers count in. When the note changed since (an edit in the app, in
+ * another editor, by another client, or a task added above by the AI itself
+ * with a reply too short to list this one again), a line-only task call is
+ * mapped onto the note as it is now instead of acting on whatever sits there.
+ */
+interface TaskView {
+  /** Hash of the note text the lines were counted in. */
+  hash: string
+  /** Listed task line → what was on it. Only the tasks the reply listed. */
+  tasks: Map<number, ShownTask>
+}
+
+/** A listed task line as the listing showed it. */
+interface ShownTask {
+  /** The line's text (without `\r`). */
+  line: string
+  /** Which of the note's task lines with that text it was (0 = the first). */
+  nth: number
+  /** The task's text. */
+  text: string
+}
+
+/** A task pick that failed; `shown` are the tasks its message lists (their lines count in the note as it is now). */
+class TaskPickError extends Error {
+  constructor(
+    message: string,
+    readonly shown: readonly TaskItem[],
+  ) {
+    super(message)
+  }
 }
 
 function push<K, V>(map: Map<K, V[]>, key: K, value: V): void {
@@ -220,26 +283,59 @@ function cleanTags(v: unknown): string[] {
 
 /** One line of task text: no line breaks, no checkbox prefix. */
 function cleanTaskText(text: string): string {
-  return text
-    .replace(/\s*[\r\n]+\s*/g, ' ')
-    .trim()
-    .replace(/^[-*+]\s+\[[ xX]\]\s*/, '')
-    .trim()
+  // Split and trim, not `/\s*[\r\n]+\s*/g`: that backtracks quadratically on a long run of spaces.
+  const one = text
+    .split(/[\r\n]+/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .join(' ')
+  return one.replace(/^[-*+]\s+\[[ xX]\]\s*/, '').trim()
+}
+
+/** One whitespace character, as `\s` and `String.prototype.trim` define it. */
+function isSpace(ch: string | undefined): boolean {
+  return ch !== undefined && ch !== '' && ch.trim() === ''
+}
+
+/**
+ * An ATX heading (`## Notes`): its level and trimmed text, or null. A closing
+ * `#` run only counts after whitespace (`## Learn C#` keeps its `#`). By hand:
+ * the regex `/^(#{1,6})\s+(.*?)(?:\s+#+)?\s*$/` backtracks quadratically on a
+ * long run of spaces, and note text can come from an AI.
+ */
+function headingOf(line: string): { level: number; text: string } | null {
+  let level = 0
+  while (line[level] === '#') level++
+  if (level === 0 || level > 6 || !isSpace(line[level])) return null
+  let text = line.slice(level).trim()
+  let end = text.length
+  while (end > 0 && text[end - 1] === '#') end--
+  if (end < text.length && end > 0 && isSpace(text[end - 1])) text = text.slice(0, end).trimEnd()
+  return { level, text }
+}
+
+/** A line without its trailing `\r`. */
+function stripCr(line: string): string {
+  return line.endsWith('\r') ? line.slice(0, -1) : line
+}
+
+/** Short fingerprint of a note's text (to tell whether it changed). */
+function hashText(raw: string): string {
+  return createHash('sha1').update(raw).digest('base64')
 }
 
 function taskInfo(t: TaskItem): TaskInfo {
   return { line: t.line, text: t.text, done: t.done, doneAt: t.doneAt, section: t.section }
 }
 
-/** A note's tasks with their current lines, as a write returns them. */
-function taskList(tasks: TaskItem[]): TaskInfo[] {
-  return tasks.slice(0, MAX_TASK_LIST).map(taskInfo)
-}
-
-/** Every start index of `needle` in `hay`, overlapping ones included (so "exactly once" is strict). */
-function occurrences(hay: string, needle: string): number[] {
+/**
+ * Start indexes of `needle` in `hay`, overlapping ones included (so "exactly
+ * once" is strict), up to `max` of them: a periodic needle in a periodic note
+ * has as many overlapping matches as characters, and only 0, 1 or "more" matter.
+ */
+function occurrences(hay: string, needle: string, max = MAX_OCCURRENCES): number[] {
   const out: number[] = []
-  for (let i = hay.indexOf(needle); i >= 0; i = hay.indexOf(needle, i + 1)) out.push(i)
+  for (let i = hay.indexOf(needle); i >= 0 && out.length < max; i = hay.indexOf(needle, i + 1)) out.push(i)
   return out
 }
 
@@ -251,7 +347,12 @@ function brokenFrontmatter(raw: string): boolean {
   const split = splitFrontmatter(raw)
   if (!split.hasFrontmatter || Object.keys(split.frontmatter).length > 0) return false
   const block = raw.slice(0, split.bodyOffset).split(/\r?\n/).slice(1)
-  return block.some((l) => !/^\s*(#.*|---|\.\.\.)?\s*$/.test(l))
+  // Blank, comment, `---` or `...` lines hold nothing. Trim, not `/^\s*(…)?\s*$/`: two
+  // adjacent `\s*` backtrack quadratically on a long run of spaces.
+  return block.some((l) => {
+    const t = l.trim()
+    return t !== '' && !t.startsWith('#') && t !== '---' && t !== '...'
+  })
 }
 
 /**
@@ -297,10 +398,53 @@ function touchUpdated(raw: string, today = todayIso()): string {
   const split = splitFrontmatter(raw)
   if (!split.hasFrontmatter || !Object.hasOwn(split.frontmatter, 'updated')) return raw
   if (split.frontmatter['updated'] === today) return raw
-  const head = raw.slice(0, split.bodyOffset)
-  const re = /^(updated:[ \t]*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s#][^\r\n#]*?|)([ \t]*(?:#[^\r\n]*)?)(\r?)$/m
-  if (!re.test(head)) return patchFrontmatter(raw, { updated: today })
-  return head.replace(re, (_m, key: string, tail: string, cr: string) => `${key}${today}${tail}${cr}`) + raw.slice(split.bodyOffset)
+  const lines = raw.slice(0, split.bodyOffset).split('\n')
+  const i = lines.findIndex((l) => l.startsWith('updated:'))
+  const line = i >= 0 ? stripCr(lines[i] ?? '') : ''
+  // A value that goes on below (a block list, a plain scalar continued on an indented line) is not one line.
+  const below = i >= 0 ? stripCr(lines[i + 1] ?? '') : ''
+  const goesOn = /^[ \t]/.test(below) || below === '-' || below.startsWith('- ')
+  const value = i >= 0 && !goesOn ? replaceScalar(line.slice('updated:'.length), today) : null
+  if (value === null) return patchFrontmatter(raw, { updated: today })
+  lines[i] = `updated:${value}${(lines[i] ?? '').endsWith('\r') ? '\r' : ''}`
+  return lines.join('\n') + raw.slice(split.bodyOffset)
+}
+
+/**
+ * The rest of a `key:` line (` "2026-01-02"  # note`) with its value replaced
+ * by `value`, spacing and comment kept; null when the value is not one plain
+ * or quoted scalar on this line (a block scalar, a list, escapes). By hand, in
+ * one pass: the equivalent regex backtracks quadratically on long space runs.
+ */
+function replaceScalar(rest: string, value: string): string | null {
+  let start = 0
+  while (rest[start] === ' ' || rest[start] === '\t') start++
+  const first = rest[start]
+  let end: number
+  if (first === '"' || first === "'") {
+    const close = rest.indexOf(first, start + 1)
+    if (close < 0) return null
+    end = close + 1
+  } else {
+    // A plain scalar runs to a comment (`#` after whitespace) or the end, minus trailing spaces.
+    end = rest.length
+    for (let k = start; k < rest.length; k++) {
+      if (rest[k] === '#' && (k === start || rest[k - 1] === ' ' || rest[k - 1] === '\t')) {
+        end = k
+        break
+      }
+    }
+    while (end > start && (rest[end - 1] === ' ' || rest[end - 1] === '\t')) end--
+    if (end > start && first !== undefined && '|>[{&*!%@`'.includes(first)) return null
+  }
+  // Nothing on the line: the value (if any) is a block below it.
+  if (end === start) return null
+  // `updated:2026` is not a YAML key at all: leave such a line to the full rewrite.
+  if (start === 0) return null
+  const tail = rest.slice(end)
+  const after = tail.trimStart()
+  if (after !== '' && !after.startsWith('#')) return null
+  return `${rest.slice(0, start) || ' '}${value}${tail.startsWith('#') ? ` ${tail}` : tail}`
 }
 
 /** Insert lines at `at`; appended after a last line without an ending, that line gets the ending instead. */
@@ -321,7 +465,7 @@ function insertLines(lines: string[], at: number, add: string[], cr: string): vo
  * list items following list items. Untouched lines stay byte-identical.
  */
 export function appendText(raw: string, text: string, heading?: string): string {
-  const add = text.replace(/\r\n?/g, '\n').replace(/^(?:[ \t]*\n)+/, '').replace(/\s+$/, '')
+  const add = text.replace(/\r\n?/g, '\n').replace(/^(?:[ \t]*\n)+/, '').trimEnd()
   if (!add) return raw
   const addLines = add.split('\n')
   const cr = raw.includes('\r\n') ? '\r' : ''
@@ -339,11 +483,11 @@ export function appendText(raw: string, text: string, heading?: string): string 
       const l = plain[i] ?? ''
       if (FENCE_RE.test(l)) fence = !fence
       if (fence || FENCE_RE.test(l)) continue
-      const h = HEADING_RE.exec(l)
+      const h = headingOf(l)
       if (!h) continue
-      const level = (h[1] ?? '').length
+      const level = h.level
       if (start < 0) {
-        if (nameKey(h[2] ?? '') === nameKey(want)) {
+        if (nameKey(h.text) === nameKey(want)) {
           start = i
           depth = level
         }
@@ -411,6 +555,10 @@ class SnapshotAdapter implements VaultAdapter {
     return this.vault.write(p, content)
   }
 
+  create(p: string, content: string): Promise<void> {
+    return this.vault.create(p, content)
+  }
+
   remove(p: string): Promise<void> {
     return this.vault.remove(p)
   }
@@ -448,6 +596,10 @@ export class Brain {
   /** Changes not applied yet: applied in one batch (one graph rebuild) when a tool needs the data. */
   private pending: VaultChange[] = []
   private derived: Derived | null = null
+  /** Folder-only tables, kept across note edits (see FolderTables). */
+  private folderTables: FolderTables | null = null
+  /** Note path → the task lines replies listed for it, newest listing first (see TaskView). */
+  private views = new Map<string, TaskView[]>()
   private watcher: VaultWatcher | null = null
   private loaded = false
   private closed = false
@@ -509,6 +661,8 @@ export class Brain {
     this.notes = new Map()
     this.folders = new Set()
     this.derived = null
+    this.folderTables = null
+    this.views.clear()
     this.index.rebuild([])
   }
 
@@ -664,7 +818,7 @@ export class Brain {
       missingLinks: missing.slice(0, 50),
       backlinks: backlinks.slice(0, 100),
       backlinkCount: backlinks.length,
-      tasks: extractTasks(n.raw).slice(0, 200).map(taskInfo),
+      tasks: this.showTasks(n.meta.path, n.raw, MAX_NOTE_TASKS).map(taskInfo),
       content: truncated ? n.raw.slice(0, MAX_TEXT) : n.raw,
       ...(truncated ? { truncated: `${n.raw.length - MAX_TEXT} more characters not shown` } : {}),
     }
@@ -750,7 +904,7 @@ export class Brain {
     return {
       ...brief,
       summary: projectSummary(n),
-      tasks: extractTasks(n.raw).slice(0, 300).map(taskInfo),
+      tasks: this.showTasks(n.meta.path, n.raw, MAX_PROJECT_TASKS).map(taskInfo),
       planets: planets.slice(0, 100),
       notes: inside.slice(0, 60).map((x) => this.ref(x)),
       moreNotes: Math.max(0, inside.length - 60),
@@ -805,7 +959,6 @@ export class Brain {
       const dir = input.folder?.trim() ? this.targetFolder(d, input.folder) : this.canonical(d, `${this.home}Inbox`)
       let body = input.content ?? ''
       if (brokenFrontmatter(body)) throw new Error('The frontmatter (--- block) at the start of content is not valid YAML; fix it or leave it out')
-      const file = await this.freeNotePath(d, dir, base)
       const { frontmatter } = splitFrontmatter(blankNote(title, dir).content)
       let extra: Record<string, unknown> = {}
       const split = splitFrontmatter(body)
@@ -818,9 +971,9 @@ export class Brain {
       else if (Object.hasOwn(extra, 'tags')) fm['tags'] = cleanTags(extra['tags'])
       if (input.type) fm['type'] = input.type
       else if (!Object.hasOwn(extra, 'type') && areaFromFolder(`${dir}/x.md`) === 'inbox') fm['type'] = 'inbox'
-      const text = body.replace(/^\s*\n/, '').replace(/\s+$/, '')
+      const text = body.replace(/^\s*\n/, '').trimEnd()
       const content = joinFrontmatter(fm, /^#\s/.test(text) ? `${text}\n` : `# ${title}\n\n${text ? `${text}\n` : ''}`)
-      const note = await this.writeNote(file, content, 'add')
+      const note = await this.addNote(d, dir, base, content)
       return { ...this.ref(note), folder: note.meta.folder }
     })
   }
@@ -833,8 +986,7 @@ export class Brain {
       const made = inboxNote({ text: input.text, ...(input.title?.trim() ? { title: input.title } : {}), tags: cleanTags(input.tags ?? []) })
       const dir = this.canonical(d, `${this.home}Inbox`)
       const base = noteBase(basenameOf(made.path)) || 'Capture'
-      const file = await this.freeNotePath(d, dir, base)
-      const note = await this.writeNote(file, made.content, 'add')
+      const note = await this.addNote(d, dir, base, made.content)
       return this.ref(note)
     })
   }
@@ -847,7 +999,7 @@ export class Brain {
       if (!text.trim()) throw new Error('Nothing to append: the text is empty')
       const raw = await this.current(n)
       const next = appendText(raw, text, heading)
-      const note = await this.writeNote(n.meta.path, touchUpdated(next), 'change')
+      const note = await this.writeNote(n.meta.path, touchUpdated(next))
       return this.ref(note)
     })
   }
@@ -872,12 +1024,13 @@ export class Brain {
         throw new Error(`old_text was not found in ${n.meta.path}. Read the note and copy the exact text, including spaces and line breaks.`)
       }
       if (hits.length > 1) {
-        throw new Error(`old_text occurs ${hits.length} times in ${n.meta.path}; include more of the surrounding text so it matches exactly once.`)
+        const times = hits.length >= MAX_OCCURRENCES ? `${MAX_OCCURRENCES} or more` : String(hits.length)
+        throw new Error(`old_text occurs ${times} times in ${n.meta.path}; include more of the surrounding text so it matches exactly once.`)
       }
       const at = hits[0]!
       const next = raw.slice(0, at) + to + raw.slice(at + from.length)
       if (next === raw) return { ...this.ref(n), changed: false }
-      const note = await this.writeNote(n.meta.path, touchUpdated(next), 'change')
+      const note = await this.writeNote(n.meta.path, touchUpdated(next))
       return { ...this.ref(note), changed: true }
     })
   }
@@ -910,7 +1063,7 @@ export class Brain {
       if (Object.hasOwn(frontmatter, 'updated') && !Object.hasOwn(patch, 'updated')) patch['updated'] = todayIso()
       const next = patchFrontmatter(raw, patch)
       if (next === raw) return { ...this.ref(n), frontmatter: n.frontmatter }
-      const note = await this.writeNote(n.meta.path, next, 'change')
+      const note = await this.writeNote(n.meta.path, next)
       return { ...this.ref(note), frontmatter: note.frontmatter }
     })
   }
@@ -926,11 +1079,13 @@ export class Brain {
       const raw = await this.current(n)
       const next = addTask(raw, clean, sec)
       if (next === raw) throw new Error(`Could not add the task to ${n.meta.path}`)
-      const note = await this.writeNote(n.meta.path, touchUpdated(next), 'change')
+      const note = await this.writeNote(n.meta.path, touchUpdated(next))
       const tasks = extractTasks(note.raw)
       const added = [...tasks].reverse().find((t) => !t.done && t.text === clean && nameKey(t.section) === nameKey(sec))
       // Tasks below the new line moved down one: hand back the current lines.
-      return { note: this.ref(note), task: added ? taskInfo(added) : null, tasks: taskList(tasks) }
+      const shown = tasks.slice(0, MAX_TASK_LIST)
+      this.remember(note.meta.path, note.raw, added ? [...shown, added] : shown, tasks)
+      return { note: this.ref(note), task: added ? taskInfo(added) : null, tasks: shown.map(taskInfo) }
     })
   }
 
@@ -940,12 +1095,13 @@ export class Brain {
       const d = await this.state()
       const n = this.resolve(d, ref, isProjectNote)
       const raw = await this.current(n)
-      const t = pickTask(raw, which, n.meta.path, (x) => x.done !== done)
-      if (t.done === done) return { note: this.ref(n), task: taskInfo(t), changed: false }
+      const { task: t, stale } = this.pick(n, raw, which, (x) => x.done !== done)
+      if (t.done === done) return { note: this.ref(n), task: taskInfo(t), changed: false, ...this.relist(n.meta.path, raw, raw, t, stale) }
       const next = setTaskDone(raw, t.line, done, todayIso())
       if (next === raw) throw new Error(`Line ${t.line} of ${n.meta.path} is not a task`)
-      const note = await this.writeNote(n.meta.path, touchUpdated(next), 'change')
-      return { note: this.ref(note), task: this.taskAfter(note, t), changed: true }
+      const note = await this.writeNote(n.meta.path, touchUpdated(next))
+      const after = this.taskAfter(note, t)
+      return { note: this.ref(note), task: after && taskInfo(after), changed: true, ...this.relist(note.meta.path, raw, note.raw, after, stale) }
     })
   }
 
@@ -957,11 +1113,12 @@ export class Brain {
       const clean = cleanTaskText(text)
       if (!clean) throw new Error('The new task text is empty')
       const raw = await this.current(n)
-      const t = pickTask(raw, which, n.meta.path)
+      const { task: t, stale } = this.pick(n, raw, which)
       const next = editTask(raw, t.line, clean)
-      if (next === raw) return { note: this.ref(n), task: taskInfo(t), changed: false }
-      const note = await this.writeNote(n.meta.path, touchUpdated(next), 'change')
-      return { note: this.ref(note), task: this.taskAfter(note, t), changed: true }
+      if (next === raw) return { note: this.ref(n), task: taskInfo(t), changed: false, ...this.relist(n.meta.path, raw, raw, t, stale) }
+      const note = await this.writeNote(n.meta.path, touchUpdated(next))
+      const after = this.taskAfter(note, t)
+      return { note: this.ref(note), task: after && taskInfo(after), changed: true, ...this.relist(note.meta.path, raw, note.raw, after, stale) }
     })
   }
 
@@ -971,12 +1128,12 @@ export class Brain {
       const d = await this.state()
       const n = this.resolve(d, ref, isProjectNote)
       const raw = await this.current(n)
-      const t = pickTask(raw, which, n.meta.path)
+      const { task: t } = this.pick(n, raw, which)
       const next = deleteTask(raw, t.line)
       if (next === raw) throw new Error(`Line ${t.line} of ${n.meta.path} is not a task`)
-      const note = await this.writeNote(n.meta.path, touchUpdated(next), 'change')
+      const note = await this.writeNote(n.meta.path, touchUpdated(next))
       // Tasks below the deleted line moved up one: hand back the current lines.
-      return { note: this.ref(note), deleted: taskInfo(t), tasks: taskList(extractTasks(note.raw)) }
+      return { note: this.ref(note), deleted: taskInfo(t), tasks: this.showTasks(note.meta.path, note.raw, MAX_TASK_LIST).map(taskInfo) }
     })
   }
 
@@ -1003,37 +1160,40 @@ export class Brain {
       const tags = cleanTags(input.tags ?? [])
       const tasks = (input.tasks ?? []).map(cleanTaskText).filter(Boolean)
       const summary = input.summary?.trim()
-      let file: string
-      let content: string
+      let note: ParsedNote
       let home: string | null = folder
       if (folder && nameKey(lastSegment(folder)) === nameKey(title)) {
         const made = folderProjectNote(folder, { ...(summary ? { summary } : {}), tags })
-        if (d.byId.has(idFromPath(made.path).toLowerCase()) || (await this.vault.stat(made.path))) {
-          throw new Error(`${made.path} already exists; make it a project with update_frontmatter (set type: project)`)
-        }
-        file = made.path
-        content = made.content
+        const taken = new Error(`${made.path} already exists; make it a project with update_frontmatter (set type: project)`)
+        if (d.byId.has(idFromPath(made.path).toLowerCase())) throw taken
+        let content = made.content
         if (tasks.length) {
           // Replace the template's placeholder task with the given ones.
           const placeholder = extractTasks(content)[0]
           if (placeholder) content = deleteTask(content, placeholder.line)
           for (const t of tasks) content = addTask(content, t, 'To do')
         }
+        try {
+          note = await this.createFile(made.path, content)
+        } catch (err) {
+          throw isExistsError(err) ? taken : err
+        }
       } else {
+        const dir = `${this.home}Projects`
         const made = projectNote({
           name: title,
           ...(summary ? { summary } : {}),
           tags,
           ...(tasks.length ? { tasks } : {}),
-          dir: `${this.home}Projects`,
-          ...(folder ? { folder } : {}),
+          dir,
+          // Stored relative to the note's root, so adding or removing a drive keeps the binding.
+          ...(folder ? { folder: portableFolderRef(`${dir}/${noteBase(title)}.md`, folder, this.roots) } : {}),
         })
-        file = await this.freeNotePath(d, this.canonical(d, folderOf(made.path)), noteBase(basenameOf(made.path)))
-        content = made.content
-        if (!folder && input.makeFolder !== false) home = folderOf(file) ? `${folderOf(file)}/${basenameOf(file)}` : basenameOf(file)
+        note = await this.addNote(d, this.canonical(d, folderOf(made.path)), noteBase(basenameOf(made.path)), made.content)
+        // The planets' folder is named after the file the note got (`Projects/Lab 2/` for `Lab 2.md`).
+        if (!folder && input.makeFolder !== false) home = defaultProjectFolder(note)
       }
       if (home) await this.makeFolder(home)
-      const note = await this.writeNote(file, content, 'add')
       const after = this.idx()
       return { project: this.ref(note), folder: after.homeOf.get(note.meta.id) ?? home }
     })
@@ -1045,17 +1205,20 @@ export class Brain {
       const d = await this.state()
       const n = this.resolveProject(d, ref)
       const p: ProjectPatch = { ...patch }
-      if (typeof patch.folder === 'string') p.folder = patch.folder.trim() ? this.targetFolder(d, patch.folder) : null
+      // The new home folder as a vault path (to create); `folder:` stores it relative to the note's root.
+      const home = typeof patch.folder === 'string' && patch.folder.trim() ? this.targetFolder(d, patch.folder) : null
+      if (typeof patch.folder === 'string') p.folder = home === null ? null : portableFolderRef(n.meta.path, home, this.roots)
       const raw = await this.current(n)
       let next: string
       try {
-        next = setProjectFields(raw, p)
+        // The title the index resolves it by stays an alias even when the text alone can't tell it.
+        next = setProjectFields(raw, p, { oldTitle: n.meta.title })
       } catch (err) {
         throw new Error(`Could not update ${n.meta.path}: ${errorText(err)}`)
       }
-      if (p.folder) await this.makeFolder(p.folder)
+      if (home) await this.makeFolder(home)
       if (next === raw) return { project: this.projectBrief(this.idx(), n), changed: false }
-      const note = await this.writeNote(n.meta.path, touchUpdated(next), 'change')
+      const note = await this.writeNote(n.meta.path, touchUpdated(next))
       return { project: this.projectBrief(this.idx(), note), changed: true }
     })
   }
@@ -1103,7 +1266,7 @@ export class Brain {
         throw new Error(`A [[wikilink]] cannot reach ${b.meta.path}: its file name contains # | [ or ]. Ask the user to rename the file, then link again.`)
       }
       const raw = await this.current(a)
-      const note = await this.writeNote(a.meta.path, touchUpdated(appendText(raw, `- Related: ${link}`)), 'change')
+      const note = await this.writeNote(a.meta.path, touchUpdated(appendText(raw, `- Related: ${link}`)))
       return { from: this.ref(note), to: this.ref(b), added: true, line: `- Related: ${link}` }
     })
   }
@@ -1112,31 +1275,56 @@ export class Brain {
   /* Internals                                                      */
   /* -------------------------------------------------------------- */
 
+  /**
+   * Scan, read and index the vault. A watching brain starts its watcher
+   * before the scan: on a whole drive the scan and the read take minutes, and
+   * fs.watch never reports what happened before it started. What changes
+   * meanwhile is buffered and, once the scan is handed over (seed), classified
+   * against it and applied on top of the load (applyChanges is idempotent).
+   */
   private async load(): Promise<void> {
-    let files: VaultFile[]
-    let folders: string[]
-    const pre = this.opts.preload
-    if (pre) {
-      files = pre.files.map((f) => ({ path: f.path, content: f.content, mtime: f.mtime }))
-      folders = [...pre.folders]
-    } else {
-      const scan = await this.vault.scan()
+    const watch = this.opts.watch !== false
+    const sink = (changes: VaultChangeDto[]): void => this.applyExternal(changes)
+    let early: VaultWatcher | null = null
+    try {
+      let files: VaultFile[]
+      let folders: string[]
+      const pre = this.opts.preload
+      if (pre) {
+        files = pre.files.map((f) => ({ path: f.path, content: f.content, mtime: f.mtime }))
+        folders = [...pre.folders]
+      } else {
+        if (watch) {
+          early = new VaultWatcher(this.vault, null, sink)
+          this.watcher = early
+          await early.start()
+          if (this.closed) return
+        }
+        const scan = await this.vault.scan()
+        if (this.closed) return
+        files = await this.vault.readAll(scan.files)
+        folders = scan.folders
+      }
       if (this.closed) return
-      files = await this.vault.readAll(scan.files)
-      folders = scan.folders
-    }
-    if (this.closed) return
-    const adapter = new SnapshotAdapter(this.vault, this.roots, files, folders, this.readOnly)
-    const loaded = await loadVault(adapter, this.index)
-    if (this.closed) return
-    this.notes = loaded.notes
-    this.graph = loaded.graph
-    this.folders = loaded.folders
-    this.derived = null
-    this.loaded = true
-    if (this.opts.watch !== false) {
-      this.watcher = new VaultWatcher(this.vault, { files: files.map((f) => f.path), folders }, (changes) => this.applyExternal(changes))
-      this.watcher.start()
+      const adapter = new SnapshotAdapter(this.vault, this.roots, files, folders, this.readOnly)
+      const loaded = await loadVault(adapter, this.index)
+      if (this.closed) return
+      this.notes = loaded.notes
+      this.graph = loaded.graph
+      this.folders = loaded.folders
+      this.derived = null
+      this.loaded = true
+      const known = { files: files.map((f) => f.path), folders }
+      if (early) early.seed(known)
+      else if (watch) {
+        // A host's preload: watch from what the host read.
+        this.watcher = new VaultWatcher(this.vault, known, sink)
+        await this.watcher.start()
+      }
+    } catch (err) {
+      early?.stop()
+      if (this.watcher === early) this.watcher = null
+      throw err
     }
   }
 
@@ -1165,6 +1353,28 @@ export class Brain {
     return (this.derived ??= this.derive())
   }
 
+  /**
+   * children / foldersLower / foldersNamed for the current folder set. Built
+   * once per set: applyChanges keeps the set's identity when a batch changes
+   * notes only, and on a whole drive (hundreds of thousands of folders) these
+   * tables are most of the work a tool call after an edit would redo.
+   */
+  private folderIdx(): FolderTables {
+    if (this.folderTables?.of === this.folders) return this.folderTables
+    const children = new Map<string, string[]>()
+    const foldersLower = new Map<string, string[]>()
+    const foldersNamed = new Map<string, string[]>()
+    for (const f of this.folders) {
+      push(children, folderOf(f), f)
+      const lower = f.toLowerCase()
+      push(foldersLower, lower, f)
+      push(foldersNamed, lastSegment(lower), f)
+    }
+    for (const list of children.values()) list.sort((a, b) => a.localeCompare(b))
+    this.folderTables = { of: this.folders, children, foldersLower, foldersNamed }
+    return this.folderTables
+  }
+
   private derive(): Derived {
     const byId = new Map<string, NoteId[]>()
     const byName = new Map<string, NoteId[]>()
@@ -1187,13 +1397,7 @@ export class Brain {
     for (const ids of notesIn.values()) {
       ids.sort((a, b) => (this.notes.get(a)?.meta.title ?? a).localeCompare(this.notes.get(b)?.meta.title ?? b))
     }
-    const children = new Map<string, string[]>()
-    const foldersLower = new Map<string, string[]>()
-    for (const f of this.folders) {
-      push(children, folderOf(f), f)
-      push(foldersLower, f.toLowerCase(), f)
-    }
-    for (const list of children.values()) list.sort((a, b) => a.localeCompare(b))
+    const { children, foldersLower, foldersNamed } = this.folderIdx()
     // Bind projects to home folders like the graph does: an explicit `folder:`
     // beats a folder note, which beats a sibling folder; ties go to the first id.
     const homeOf = new Map<NoteId, string | null>()
@@ -1215,6 +1419,7 @@ export class Brain {
       totals,
       children,
       foldersLower,
+      foldersNamed,
       projects,
       homeOf,
       projectAt,
@@ -1284,10 +1489,9 @@ export class Brain {
   }
 
   /** The task a write left at `before`'s place (same line, or found again by text). */
-  private taskAfter(note: ParsedNote, before: TaskItem): TaskInfo | null {
+  private taskAfter(note: ParsedNote, before: TaskItem): TaskItem | null {
     const tasks = extractTasks(note.raw)
-    const t = tasks.find((x) => x.line === before.line) ?? tasks.find((x) => x.text === before.text)
-    return t ? taskInfo(t) : null
+    return tasks.find((x) => x.line === before.line) ?? tasks.find((x) => x.text === before.text) ?? null
   }
 
   /**
@@ -1391,7 +1595,7 @@ export class Brain {
     const found =
       unique(d.foldersLower.get(lower) ?? []) ??
       (this.vault.multi ? unique(this.roots.flatMap((r) => d.foldersLower.get(`${r.mount}/${lower}`.toLowerCase()) ?? [])) : null) ??
-      (p.includes('/') ? null : unique([...this.folders].filter((f) => lastSegment(f).toLowerCase() === lower)))
+      (p.includes('/') ? null : unique(d.foldersNamed.get(lower) ?? []))
     if (found !== null) return found
     throw new Error(`No folder "${raw}" in the vault. Use list_folder to see the folders.`)
   }
@@ -1475,18 +1679,118 @@ export class Brain {
     return cur
   }
 
-  /** `<dir>/<base>.md`, or `<base> 2.md`, `<base> 3.md`… — the first name no note or file uses. */
-  private async freeNotePath(d: Derived, dir: string, base: string): Promise<string> {
+  /**
+   * A new note `<dir>/<base>.md`, or `<base> 2.md`, `<base> 3.md`… Names the
+   * index knows (in any case), Windows device names and skipped names are
+   * passed over; FsVault.create then refuses anything on disk the index has
+   * not seen (EEXIST: a note the watcher has not reported yet, repo
+   * boilerplate the scan skips, a case variant) and the next name is tried.
+   */
+  private async addNote(d: Derived, dir: string, base: string, content: string): Promise<ParsedNote> {
     for (let n = 1; n <= 500; n++) {
       const file = `${n === 1 ? base : `${base} ${n}`}.md`
       const p = dir ? `${dir}/${file}` : file
       // `CON.md` on Windows is the console, not a file: take the next name.
       if (WIN_RESERVED.test(file) || isIgnoredPath(p) || this.vault.isIgnored(p)) continue
       if (d.byId.has(idFromPath(p).toLowerCase())) continue
-      if (await this.vault.stat(p)) continue
-      return p
+      try {
+        return await this.createFile(p, content)
+      } catch (err) {
+        if (!isExistsError(err)) throw err
+      }
     }
     throw new Error(`No free file name for "${base}" in ${dir || 'the vault root'}`)
+  }
+
+  /** The note's first `max` tasks, remembered as a listing a reply shows (see TaskView). */
+  private showTasks(notePath: string, raw: string, max: number): TaskItem[] {
+    const tasks = extractTasks(raw)
+    const shown = tasks.slice(0, max)
+    this.remember(notePath, raw, shown, tasks)
+    return shown
+  }
+
+  /**
+   * Remember that a reply listed `shown` (tasks of `raw`) for the note. A
+   * listing of the same text adds to the newest one; any other goes first,
+   * and the older ones stay (up to VIEWS_PER_NOTE) for the lines it does not
+   * show: a reply lists at most a few hundred tasks, add_task and delete_task
+   * only the first MAX_TASK_LIST, while lines further down may have moved.
+   */
+  private remember(notePath: string, raw: string, shown: readonly TaskItem[], all?: TaskItem[]): void {
+    if (!shown.length) return
+    const hash = hashText(raw)
+    const list = this.views.get(notePath) ?? []
+    let view = list[0]
+    if (!view || view.hash !== hash) {
+      view = { hash, tasks: new Map() }
+      list.unshift(view)
+      if (list.length > VIEWS_PER_NOTE) list.length = VIEWS_PER_NOTE
+    }
+    for (const [line, t] of shownTasks(raw, all ?? extractTasks(raw), shown)) view.tasks.set(line, t)
+    this.views.delete(notePath)
+    this.views.set(notePath, list)
+    if (this.views.size > MAX_VIEWS) {
+      const oldest = this.views.keys().next()
+      if (!oldest.done) this.views.delete(oldest.value)
+    }
+  }
+
+  /**
+   * The listing side of a task call that moves no line (a task ticked,
+   * reopened or reworded; `before` → `after`). When the AI's lines still
+   * count (not `stale`, and the write moved no task line), the listings carry
+   * over to the new text and nothing is listed. Otherwise its line numbers
+   * are stale, so the reply lists the current ones (`tasks`), which become
+   * the newest listing. `task` is the task the reply names (with its line).
+   */
+  private relist(notePath: string, before: string, after: string, task: TaskItem | null, stale: boolean): { tasks?: TaskInfo[] } {
+    const tasks = extractTasks(after)
+    if (!stale && this.carryOver(notePath, before, after, tasks)) {
+      if (task) this.remember(notePath, after, [task], tasks)
+      return {}
+    }
+    const shown = tasks.slice(0, MAX_TASK_LIST)
+    this.remember(notePath, after, task ? [...shown, task] : shown, tasks)
+    return { tasks: shown.map(taskInfo) }
+  }
+
+  /**
+   * Move the listings of `before` over to `after` (the note after a write
+   * that should move no line), refreshed from it, and return true. Returns
+   * false and changes nothing when task lines did move after all (the
+   * `updated:` stamp rewrote a value that spanned several lines).
+   */
+  private carryOver(notePath: string, before: string, after: string, tasks: TaskItem[]): boolean {
+    if (before === after) return true
+    const was = extractTasks(before)
+    if (was.length !== tasks.length || was.some((t, i) => tasks[i]?.line !== t.line)) return false
+    const from = hashText(before)
+    const to = hashText(after)
+    for (const v of this.views.get(notePath) ?? []) {
+      if (v.hash !== from) continue
+      v.hash = to
+      v.tasks = shownTasks(after, tasks, tasks.filter((t) => v.tasks.has(t.line)))
+    }
+    return true
+  }
+
+  /**
+   * pickTask against the listings remembered for the note. `stale`: the AI's
+   * line numbers may not count in `raw` (the note changed since its newest
+   * listing, or the line had to be found again). An error that lists tasks
+   * makes those lines (as they are now) the newest listing.
+   */
+  private pick(n: ParsedNote, raw: string, which: TaskSelector, prefer?: (t: TaskItem) => boolean): { task: TaskItem; stale: boolean } {
+    const views = this.views.get(n.meta.path) ?? []
+    const hash = views.length ? hashText(raw) : ''
+    try {
+      const { task, remapped } = pickTask(raw, which, n.meta.path, prefer, views, hash)
+      return { task, stale: remapped || (views[0] !== undefined && views[0].hash !== hash) }
+    } catch (err) {
+      if (err instanceof TaskPickError) this.remember(n.meta.path, raw, err.shown)
+      throw err
+    }
   }
 
   /** The note's text on disk right now (the index can lag a moment behind an edit made in the app). */
@@ -1501,17 +1805,37 @@ export class Brain {
     if (this.closed) throw new Error('The vault link is closed')
   }
 
-  /** Write a note (.md only, inside the vault) and index it right away. */
-  private async writeNote(p: string, content: string, kind: 'add' | 'change'): Promise<ParsedNote> {
+  /** Writes only `.md` notes inside the visible vault, and only when writable. */
+  private assertNotePath(p: string): void {
     this.assertWritable()
     if (!/\.md$/i.test(p)) throw new Error(`Only markdown notes (.md) can be written: ${p}`)
     if (isIgnoredPath(p) || this.vault.isIgnored(p)) throw new Error(`${p} is inside a folder the vault skips`)
+  }
+
+  /** Rewrite an existing note (atomic) and index it right away. */
+  private async writeNote(p: string, content: string): Promise<ParsedNote> {
+    this.assertNotePath(p)
     this.watcher?.noteSelfWrite(p, content)
     await this.vault.write(p, content)
-    this.pending.push({ kind, path: p, content, mtime: Date.now() })
+    return this.indexed({ kind: 'change', path: p, content, mtime: Date.now() })
+  }
+
+  /** Create a note at exactly `p` (fails with EEXIST when anything is there, see FsVault.create) and index it. */
+  private async createFile(p: string, content: string): Promise<ParsedNote> {
+    this.assertNotePath(p)
+    // Noted before the create, like writeNote: on disks without hard links FsVault.create fills
+    // the file in place, and the watcher must not index it half-written. Harmless when the create
+    // fails: echoes are only swallowed when the content matches ours, which an existing file's won't.
+    this.watcher?.noteSelfWrite(p, content)
+    await this.vault.create(p, content)
+    return this.indexed({ kind: 'add', path: p, content, mtime: Date.now() })
+  }
+
+  private indexed(change: VaultChange): ParsedNote {
+    this.pending.push(change)
     this.sync()
-    const note = this.notes.get(idFromPath(p))
-    if (!note) throw new Error(`Wrote ${p} but could not index it`)
+    const note = this.notes.get(idFromPath(change.path))
+    if (!note) throw new Error(`Wrote ${change.path} but could not index it`)
     return note
   }
 
@@ -1533,31 +1857,95 @@ export class Brain {
   }
 }
 
+/** Listing entries for `shown` (tasks of `raw`; `all` are all its tasks): each line's text and which of the task lines with that text it is. */
+function shownTasks(raw: string, all: readonly TaskItem[], shown: readonly TaskItem[]): Map<number, ShownTask> {
+  const out = new Map<number, ShownTask>()
+  if (!shown.length) return out
+  const want = new Set(shown.map((t) => t.line))
+  const lines = raw.split('\n')
+  const seen = new Map<string, number>()
+  for (const t of all) {
+    const line = stripCr(lines[t.line] ?? '')
+    const nth = seen.get(line) ?? 0
+    seen.set(line, nth + 1)
+    if (want.has(t.line)) out.set(t.line, { line, nth, text: t.text })
+  }
+  return out
+}
+
+/**
+ * `line` as it counts in `raw` (whose hash is `hash`) now. The line means
+ * what the newest listing that showed a task there said; when the note
+ * changed since that listing, that task is found again: the same line text
+ * (the same occurrence of it), else the only task with its text (`at` null
+ * when neither works). A line no listing showed stands when the newest
+ * listing counts in this text, or there is none; else `at` is null.
+ */
+function remapLine(views: readonly TaskView[], hash: string, raw: string, tasks: TaskItem[], line: number): { at: number | null; was: ShownTask | null; remapped: boolean } {
+  let from: TaskView | null = null
+  let was: ShownTask | null = null
+  for (const v of views) {
+    was = v.tasks.get(line) ?? null
+    if (was) {
+      from = v
+      break
+    }
+  }
+  if (!from || !was) {
+    const newest = views[0]
+    return { at: !newest || newest.hash === hash ? line : null, was: null, remapped: false }
+  }
+  if (from.hash === hash) return { at: line, was, remapped: false }
+  const lines = raw.split('\n')
+  const text = was.line
+  const same = tasks.filter((t) => stripCr(lines[t.line] ?? '') === text)
+  const hit = same[was.nth] ?? (same.length === 1 ? same[0] : undefined)
+  if (hit) return { at: hit.line, was, remapped: true }
+  // Ticked off, reopened or re-indented meanwhile: the same task by its text.
+  const key = nameKey(was.text)
+  const byText = tasks.filter((t) => nameKey(t.text) === key)
+  return { at: byText.length === 1 ? (byText[0]?.line ?? null) : null, was, remapped: true }
+}
+
 /**
  * The task a caller means: by line (0-based, as get_project / read_note list
  * them), by text (exact, else a unique substring, case-insensitive), or both
- * (the line wins when its text agrees). `prefer` breaks ties between text matches.
+ * (the line wins when its text agrees). `prefer` breaks ties between text
+ * matches. `views` are the listings the line may come from (newest first,
+ * `hash` is raw's): when the note changed since the one that showed the line,
+ * the line is mapped onto the note as it is now (`remapped`), and a line-only
+ * call whose task can't be found again is refused (listing the current
+ * lines) instead of acting on whatever task sits on that line now.
  */
-function pickTask(raw: string, which: TaskSelector, notePath: string, prefer?: (t: TaskItem) => boolean): TaskItem {
+function pickTask(
+  raw: string,
+  which: TaskSelector,
+  notePath: string,
+  prefer?: (t: TaskItem) => boolean,
+  views: readonly TaskView[] = [],
+  hash = '',
+): { task: TaskItem; remapped: boolean } {
   const tasks = extractTasks(raw)
-  const list = () =>
-    tasks
-      .slice(0, 25)
-      .map((t) => `${t.line}: ${t.done ? '[x]' : '[ ]'} ${t.text}`)
-      .join('; ')
+  const listed = tasks.slice(0, MAX_ERROR_TASKS)
+  const list = () => listed.map((t) => `${t.line}: ${t.done ? '[x]' : '[ ]'} ${t.text}`).join('; ')
   if (!tasks.length) throw new Error(`${notePath} has no tasks`)
   const want = which.task !== undefined ? nameKey(cleanTaskText(which.task)) : ''
   if (which.line !== undefined) {
-    const t = tasks.find((x) => x.line === which.line)
-    if (t && (!want || nameKey(t.text).includes(want))) return t
-    if (!want) throw new Error(`Line ${which.line} of ${notePath} is not a task. Tasks (line: text): ${list()}`)
+    const { at, was, remapped } = remapLine(views, hash, raw, tasks, which.line)
+    const t = at === null ? undefined : tasks.find((x) => x.line === at)
+    if (t && (!want || nameKey(t.text).includes(want))) return { task: t, remapped }
+    if (!want) {
+      if (at !== null && !remapped) throw new TaskPickError(`Line ${which.line} of ${notePath} is not a task. Tasks (line: text): ${list()}`, listed)
+      const what = was ? `the task on line ${which.line} ("${clip(was.text, 80)}") is not there any more, or not only once` : `line ${which.line} was not a task`
+      throw new TaskPickError(`${notePath} changed since its tasks were listed: ${what}. Nothing was changed. Tasks now (line: text): ${list()}. Pass task (its text) to be sure.`, listed)
+    }
   }
   if (!want) throw new Error('Say which task: pass its line (from get_project or read_note) or its text')
   const exact = tasks.filter((t) => nameKey(t.text) === want)
   const matches = exact.length ? exact : tasks.filter((t) => nameKey(t.text).includes(want))
-  if (matches.length === 1) return matches[0]!
-  if (!matches.length) throw new Error(`No task matching "${which.task}" in ${notePath}. Tasks (line: text): ${list()}`)
+  if (matches.length === 1) return { task: matches[0]!, remapped: false }
+  if (!matches.length) throw new TaskPickError(`No task matching "${which.task}" in ${notePath}. Tasks (line: text): ${list()}`, listed)
   const preferred = prefer ? matches.filter(prefer) : []
-  if (preferred.length === 1) return preferred[0]!
-  throw new Error(`"${which.task}" matches ${matches.length} tasks in ${notePath}; pass line instead: ${matches.map((t) => `${t.line}: ${t.text}`).join('; ')}`)
+  if (preferred.length === 1) return { task: preferred[0]!, remapped: false }
+  throw new TaskPickError(`"${which.task}" matches ${matches.length} tasks in ${notePath}; pass line instead: ${matches.map((t) => `${t.line}: ${t.text}`).join('; ')}`, matches)
 }

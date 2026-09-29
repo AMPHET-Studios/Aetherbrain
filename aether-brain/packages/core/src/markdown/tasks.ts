@@ -25,11 +25,87 @@ export interface TaskItem {
   indent: number
 }
 
-const TASK_RE = /^(\s*)([-*+])\s+\[([ xX])\]\s+(.*)$/
-const STAMP_RE = /\s*✅\s*(\d{4}-\d{2}-\d{2})\s*$/
-/** ATX heading; a closing `#` run only counts after whitespace (`## Learn C#` keeps its `#`). */
-const HEADING_RE = /^(#{1,6})\s+(.*?)(?:\s+#+)?\s*$/
 const FENCE_RE = /^\s*(```|~~~)/
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
+/** Characters `.` does not match in a regex: heading and task text never contain them. */
+const LINE_BREAK_RE = /[\r\n\u2028\u2029]/
+
+/*
+ * Headings, task lines and completion stamps are parsed by hand, in one pass
+ * over the line. The equivalent regexes (`/^(#{1,6})\s+(.*?)(?:\s+#+)?\s*$/`,
+ * `/\s*✅\s*(\d{4}-\d{2}-\d{2})\s*$/`, `/\s+$/` …) backtrack quadratically
+ * on a long run of whitespace, and note text can come from an AI client: one
+ * crafted line must not freeze the app for minutes.
+ */
+
+/** One whitespace character, as `\s` and `String.prototype.trim` define it. */
+function isSpace(ch: string | undefined): boolean {
+  return ch !== undefined && ch !== '' && ch.trim() === ''
+}
+
+/** Index of the first non-whitespace character at or after `from` (the length when there is none). */
+function skipSpace(text: string, from: number): number {
+  let i = from
+  while (i < text.length && isSpace(text[i])) i++
+  return i
+}
+
+/**
+ * An ATX heading (`## Section`): its level and text, or null. The text is
+ * trimmed, and a closing `#` run only counts after whitespace (`## Learn C#`
+ * keeps its `#`, `## Later ##` reads `Later`). Needs whitespace after the
+ * opening hashes, like before (`#tag` is not a heading). Linear time.
+ */
+export function atxHeading(line: string): { level: number; text: string } | null {
+  let level = 0
+  while (line[level] === '#') level++
+  if (level === 0 || level > 6 || !isSpace(line[level])) return null
+  let text = line.slice(level).trim()
+  let end = text.length
+  while (end > 0 && text[end - 1] === '#') end--
+  if (end < text.length && end > 0 && isSpace(text[end - 1])) text = text.slice(0, end).trimEnd()
+  // Like the regex's `.`: the heading text never spans a line break (`\r`, U+2028 …).
+  return LINE_BREAK_RE.test(text) ? null : { level, text }
+}
+
+/** The parts of a task line (`  - [x] text`), or null when the line is not one. Linear time. */
+function taskParts(line: string): { indent: string; bullet: string; mark: string; rest: string } | null {
+  const b = skipSpace(line, 0)
+  const bullet = line[b]
+  if (bullet !== '-' && bullet !== '*' && bullet !== '+') return null
+  const open = skipSpace(line, b + 1)
+  if (open === b + 1 || line[open] !== '[') return null
+  const mark = line[open + 1]
+  if ((mark !== ' ' && mark !== 'x' && mark !== 'X') || line[open + 2] !== ']') return null
+  const start = skipSpace(line, open + 3)
+  if (start === open + 3) return null
+  const rest = line.slice(start)
+  // The text runs to the end of the line and never spans a line break (`\r`, U+2028 …).
+  if (LINE_BREAK_RE.test(rest)) return null
+  return { indent: line.slice(0, b), bullet, mark, rest }
+}
+
+/**
+ * A trailing `✅ YYYY-MM-DD` completion stamp: where it starts (whitespace
+ * before the ✅ included) and its date, or null. Linear time.
+ */
+function stampOf(text: string): { index: number; date: string } | null {
+  const t = text.trimEnd()
+  const date = t.slice(-10)
+  if (!DATE_RE.test(date)) return null
+  let i = t.length - 10
+  while (i > 0 && isSpace(t[i - 1])) i--
+  if (t[i - 1] !== '✅') return null
+  i--
+  while (i > 0 && isSpace(t[i - 1])) i--
+  return { index: i, date }
+}
+
+/** `text` without its trailing completion stamp. */
+function withoutStamp(text: string): string {
+  const stamp = stampOf(text)
+  return stamp ? text.slice(0, stamp.index) : text
+}
 
 /** A line without its trailing `\r`, plus the `\r` to put back. */
 function splitCr(line: string): { text: string; cr: string } {
@@ -44,7 +120,9 @@ function scan(lines: string[]): { tasks: TaskItem[]; headings: number[] } {
   let inFence = false
   let inFrontmatter = false
   for (let i = 0; i < lines.length; i++) {
-    const line = splitCr(lines[i] ?? '').text
+    let line = splitCr(lines[i] ?? '').text
+    // A byte-order mark in front of the opening `---` is still frontmatter.
+    if (i === 0 && line.startsWith('\uFEFF')) line = line.slice(1)
     if (i === 0 && /^---\s*$/.test(line)) {
       inFrontmatter = true
       continue
@@ -58,28 +136,22 @@ function scan(lines: string[]): { tasks: TaskItem[]; headings: number[] } {
       continue
     }
     if (inFence) continue
-    const h = HEADING_RE.exec(line)
+    const h = atxHeading(line)
     if (h) {
-      section = h[2] ?? ''
+      section = h.text
       headings.push(i)
       continue
     }
-    const m = TASK_RE.exec(line)
+    const m = taskParts(line)
     if (!m) continue
-    let text = m[4] ?? ''
-    let doneAt: string | null = null
-    const stamp = STAMP_RE.exec(text)
-    if (stamp) {
-      doneAt = stamp[1] ?? null
-      text = text.slice(0, stamp.index)
-    }
+    const stamp = stampOf(m.rest)
     tasks.push({
       line: i,
-      text: text.trim(),
-      done: (m[3] ?? ' ') !== ' ',
-      doneAt,
+      text: (stamp ? m.rest.slice(0, stamp.index) : m.rest).trim(),
+      done: m.mark !== ' ',
+      doneAt: stamp?.date ?? null,
       section,
-      indent: (m[1] ?? '').length,
+      indent: m.indent.length,
     })
   }
   return { tasks, headings }
@@ -102,20 +174,20 @@ function taskAt(lines: string[], line: number): { indent: string; bullet: string
   if (cur === undefined) return null
   if (!scan(lines).tasks.some((t) => t.line === line)) return null
   const { text, cr } = splitCr(cur)
-  const m = TASK_RE.exec(text)
+  const m = taskParts(line === 0 && text.startsWith('\uFEFF') ? text.slice(1) : text)
   if (!m) return null
-  const [, indent = '', bullet = '-', mark = ' ', rest = ''] = m
-  return { indent, bullet, mark, rest, cr }
+  // A task on the first line keeps the byte-order mark in front of it.
+  const indent = (line === 0 && text.startsWith('\uFEFF') ? '\uFEFF' : '') + m.indent
+  return { indent, bullet: m.bullet, mark: m.mark, rest: m.rest, cr }
 }
 
 /** Task text from user input: one line, no checkbox prefix, no completion stamp. */
 function cleanTaskText(text: string): string {
-  return text
-    .replace(/[\r\n]+/g, ' ')
+  const line = text
+    .replace(/[\r\n\u2028\u2029]+/g, ' ')
     .trim()
     .replace(/^[-*+]\s+\[[ xX]\]\s*/, '')
-    .replace(STAMP_RE, '')
-    .trim()
+  return withoutStamp(line).trim()
 }
 
 /** Mark the task on `line` done/undone, keeping everything else byte-identical. */
@@ -123,7 +195,7 @@ export function setTaskDone(raw: string, line: number, done: boolean, today = to
   const lines = raw.split('\n')
   const t = taskAt(lines, line)
   if (!t) return raw
-  const text = t.rest.replace(STAMP_RE, '')
+  const text = withoutStamp(t.rest)
   lines[line] = (done ? `${t.indent}${t.bullet} [x] ${text} ✅ ${today}` : `${t.indent}${t.bullet} [ ] ${text}`) + t.cr
   return lines.join('\n')
 }
@@ -137,8 +209,8 @@ export function editTask(raw: string, line: number, text: string): string {
   const t = taskAt(lines, line)
   const clean = cleanTaskText(text)
   if (!t || !clean) return raw
-  const stamp = STAMP_RE.exec(t.rest)
-  lines[line] = `${t.indent}${t.bullet} [${t.mark}] ${clean}${stamp ? ` ✅ ${stamp[1] ?? ''}` : ''}${t.cr}`
+  const stamp = stampOf(t.rest)
+  lines[line] = `${t.indent}${t.bullet} [${t.mark}] ${clean}${stamp ? ` ✅ ${stamp.date}` : ''}${t.cr}`
   return lines.join('\n')
 }
 
@@ -218,57 +290,46 @@ export function moveTask(raw: string, line: number, dir: -1 | 1, opts: { sameSta
  * note if missing). A new task goes right after the last open top-level task
  * of the section (with its sub-tasks), so open tasks stay together, in the
  * order they were written, above the ones already ticked off. With no open
- * task it goes after the last task of the section.
+ * task it goes after the last task of the section (and its sub-tasks); with
+ * no task at all, right under the heading. Headings and tasks inside fenced
+ * code or frontmatter don't count, so a new task never lands in a code block.
+ * The text becomes one line (line breaks collapse to spaces).
  */
 export function addTask(raw: string, text: string, section = 'To do'): string {
-  const clean = text.trim().replace(/^[-*+]\s+\[[ xX]\]\s*/, '')
+  const clean = cleanTaskText(text)
   if (!clean) return raw
   const lines = raw.split('\n')
   const cr = raw.includes('\r\n') ? '\r' : ''
   const want = section.trim().toLowerCase()
-  const plain = lines.map((l) => splitCr(l).text)
-  let headingIdx = -1
-  let inFence = false
-  for (let i = 0; i < plain.length; i++) {
-    const l = plain[i] ?? ''
-    if (FENCE_RE.test(l)) inFence = !inFence
-    if (inFence) continue
-    const h = HEADING_RE.exec(l)
-    if (h && (h[2] ?? '').trim().toLowerCase() === want) {
-      headingIdx = i
-      break
-    }
-  }
+  const plain = lines.map((l, i) => {
+    const text = splitCr(l).text
+    return i === 0 && text.startsWith('\uFEFF') ? text.slice(1) : text
+  })
+  // Real headings and tasks only: scan skips frontmatter and fenced code.
+  const { tasks, headings } = scan(lines)
+  const k = headings.findIndex((i) => atxHeading(plain[i] ?? '')?.text.toLowerCase() === want)
+  const headingIdx = k < 0 ? -1 : (headings[k] ?? -1)
   if (headingIdx < 0) {
     const eol = `${cr}\n`
-    const body = raw.replace(/\s+$/, '')
+    const body = raw.trimEnd()
     return `${body}${eol}${eol}## ${section.trim()}${eol}${eol}- [ ] ${clean}${eol}`
   }
-  // Section ends at the next heading (or EOF).
-  let end = plain.length
-  for (let i = headingIdx + 1; i < plain.length; i++) {
-    if (HEADING_RE.test(plain[i] ?? '')) {
-      end = i
-      break
-    }
-  }
-  let insertAt = headingIdx + 1
-  for (let i = headingIdx + 1; i < end; i++) {
-    if (TASK_RE.test(plain[i] ?? '')) insertAt = i + 1
-  }
-  const inSection = scan(lines).tasks.filter((t) => t.line > headingIdx && t.line < end)
+  // The section ends at the next heading (or EOF).
+  const end = headings[k + 1] ?? plain.length
+  const inSection = tasks.filter((t) => t.line > headingIdx && t.line < end)
   const top = Math.min(...inSection.map((t) => t.indent))
   const lastOpen = inSection.filter((t) => t.indent === top && !t.done).pop()
-  if (lastOpen) insertAt = blockEnd(lines, lastOpen)
+  const last = lastOpen ?? inSection[inSection.length - 1]
   const taskLine = `- [ ] ${clean}`
-  if (insertAt === headingIdx + 1) {
+  if (!last) {
     // No tasks yet: keep one blank line after the heading.
+    let insertAt = headingIdx + 1
     if ((plain[insertAt] ?? '').trim() === '') insertAt += 1
     insertLine(lines, insertAt, taskLine, cr)
     if ((lines[insertAt + 1] ?? '').trim() !== '' && insertAt + 1 < lines.length) lines.splice(insertAt + 1, 0, cr)
     return lines.join('\n')
   }
-  insertLine(lines, insertAt, taskLine, cr)
+  insertLine(lines, blockEnd(lines, last), taskLine, cr)
   return lines.join('\n')
 }
 

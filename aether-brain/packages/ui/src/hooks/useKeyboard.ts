@@ -1,5 +1,6 @@
 import { useEffect } from 'react'
 import { folderPathOf, isFolderId } from '@aether/core'
+import { selectedProject } from '../commands'
 import { useAether } from '../store'
 import { isControl, isTyping } from '../util'
 
@@ -99,9 +100,13 @@ export function handleKey(e: KeyboardEvent): void {
       s.setView('review')
       return
     case '6':
-    case 'p':
+    case 'p': {
+      // A selected project star opens its own board.
+      const project = selectedProject(s)
+      if (project) s.selectProject(project)
       s.setView('projects')
       return
+    }
     case 'e':
     case 'Enter':
       // Enter on a focused button or link is that control's own (Expand, ✕, a toast's Undo …).

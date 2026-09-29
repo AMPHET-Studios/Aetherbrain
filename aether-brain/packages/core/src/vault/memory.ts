@@ -16,6 +16,22 @@ export interface MemoryVaultOptions {
 }
 
 /**
+ * True for the error a create-only write fails with when something already
+ * exists at the path: Node's `EEXIST` (`err.code`), or any error whose message
+ * carries it (errors that crossed Electron IPC keep only their message).
+ */
+export function isExistsError(err: unknown): boolean {
+  if (typeof err !== 'object' || err === null) return typeof err === 'string' && err.includes('EEXIST')
+  const e = err as { code?: unknown; message?: unknown }
+  return e.code === 'EEXIST' || (typeof e.message === 'string' && e.message.includes('EEXIST'))
+}
+
+/** The error `create` fails with when the path is taken (see `isExistsError`). */
+function existsError(path: string): Error {
+  return Object.assign(new Error(`EEXIST: file already exists, create '${path}'`), { code: 'EEXIST' })
+}
+
+/**
  * In-memory vault. Used for the bundled demo (with an IndexedDB overlay in the
  * web app), for tests, and as the base for synthetic stress vaults.
  */
@@ -64,6 +80,21 @@ export class MemoryVaultAdapter implements VaultAdapter {
     this.emit([{ kind: existed ? 'change' : 'add', path: p, content, mtime: file.mtime }])
   }
 
+  /**
+   * Create a new file; fails with an `EEXIST` error when anything already
+   * exists at the path: a file (in any letter case, like a case-insensitive
+   * disk) or a folder. Emits 'add' like `write`.
+   */
+  async create(path: string, content: string): Promise<void> {
+    if (this.readOnly) throw new Error('Vault is read-only')
+    const p = normalizePath(path)
+    const lower = p.toLowerCase()
+    // Checked and written without an await in between, so two creates can't both win.
+    for (const f of this.files.keys()) if (f.toLowerCase() === lower) throw existsError(p)
+    for (const f of this.folderList()) if (f.toLowerCase() === lower) throw existsError(p)
+    return this.write(p, content)
+  }
+
   async remove(path: string): Promise<void> {
     if (this.readOnly) throw new Error('Vault is read-only')
     const p = normalizePath(path)
@@ -93,6 +124,10 @@ export class MemoryVaultAdapter implements VaultAdapter {
 
   /** Every folder: the explicit ones plus every folder a file sits in, with ancestors; sorted, root excluded. */
   async listFolders(): Promise<string[]> {
+    return this.folderList()
+  }
+
+  private folderList(): string[] {
     const out = new Set<string>()
     const add = (path: string): void => {
       for (let cur = path; cur !== '' && !out.has(cur); cur = folderOf(cur)) out.add(cur)
@@ -108,7 +143,7 @@ export class MemoryVaultAdapter implements VaultAdapter {
     const p = normalizeFolderPath(path)
     if (!p) throw new Error('Invalid folder path')
     if (isIgnoredPath(p)) throw new Error(`Folder is ignored: ${p}`)
-    const existed = (await this.listFolders()).includes(p)
+    const existed = this.folderList().includes(p)
     this.folders.add(p)
     this.persist()
     if (!existed) this.emit([{ kind: 'addDir', path: p }])

@@ -14,15 +14,20 @@ import {
   homePrefix,
   inboxNote,
   isBoilerplateMarkdown,
+  isExistsError,
   isFolderId,
   isIgnoredPath,
   loadVault,
   mountOf,
   neighborhood,
+  parseMarkdown,
   parseNote,
   splitFrontmatter,
   tokenizeWikilinks,
   updateFrontmatter,
+  type GraphOptionsFn,
+  type NoteId,
+  type ParsedNote,
   type VaultChange,
   type VaultFile,
 } from '../src'
@@ -106,9 +111,88 @@ describe('frontmatter', () => {
     expect(out).toContain('tags: [x]')
     expect(out.endsWith('# A\n\nbody')).toBe(true)
   })
+  it('patches keys in place: comments and untouched values stay exactly as written', () => {
+    const raw = '---\ntitle: Gate\n# owner: me (keep this)\nversion: 1.10\nstatus: active\nid: 01234\ndiscord: 123456789012345678901\n---\n# Gate\n\nx\n'
+    expect(updateFrontmatter(raw, { status: 'paused' })).toBe(raw.replace('status: active', 'status: paused'))
+    expect(updateFrontmatter(raw, { updated: '2026-09-29' })).toBe(raw.replace('\n---\n#', '\nupdated: "2026-09-29"\n---\n#'))
+    expect(updateFrontmatter(raw, { status: undefined, version: undefined })).toBe(raw.replace('version: 1.10\nstatus: active\n', ''))
+    // Nothing changes: the very same text, not a re-serialized block.
+    expect(updateFrontmatter(raw, { status: 'active', missing: undefined })).toBe(raw)
+    // No blank line is added (or removed) between the block and the body.
+    expect(updateFrontmatter('---\na: 1\n---\n# A\n', { b: 2 })).toBe('---\na: 1\nb: 2\n---\n# A\n')
+    // Every key gone: the block goes.
+    expect(updateFrontmatter('---\na: 1\n---\n# A\n', { a: undefined })).toBe('# A\n')
+  })
+  it('round-trips any value it writes, in place or appended', () => {
+    for (const v of ['a\n\n', 'a\nb', 'x', ['a', 'b'], { k: 1 }, '', null, 'line: with colon', '2026-09-29', '# not a comment']) {
+      expect(splitFrontmatter(updateFrontmatter('---\nt: 1\n---\n# A\n', { v })).frontmatter).toEqual({ t: 1, v })
+      expect(splitFrontmatter(updateFrontmatter('---\nv: 1\nt: 1\n---\n# A\n', { v })).frontmatter).toEqual({ v, t: 1 })
+    }
+  })
+  it('keeps a byte-order mark first, so an H1 after it still titles the note', () => {
+    const bom = '\uFEFF# Big Idea\n\ntext\n'
+    const out = updateFrontmatter(bom, { status: 'active' })
+    expect(out).toBe('\uFEFF---\nstatus: active\n---\n\n# Big Idea\n\ntext\n')
+    expect(parseNote({ path: 'Resources/Idea.md', content: out }).meta.title).toBe('Big Idea')
+    const crlf = '\uFEFF# Drawing Practice\r\n\r\nDaily sketches.\r\n'
+    const moved = updateFrontmatter(crlf, { type: 'project', status: 'active' })
+    expect(moved).toBe('\uFEFF---\r\ntype: project\r\nstatus: active\r\n---\r\n\r\n# Drawing Practice\r\n\r\nDaily sketches.\r\n')
+    expect(parseNote({ path: 'Art/Drawing/Drawing.md', content: moved }).meta.title).toBe('Drawing Practice')
+    // With a block already there, the mark stays in front of it and a CRLF block stays CRLF.
+    expect(updateFrontmatter('\uFEFF---\r\na: 1\r\n---\r\n# A\r\n', { b: 'x' })).toBe('\uFEFF---\r\na: 1\r\nb: x\r\n---\r\n# A\r\n')
+  })
+  it('never drops a block it cannot parse, and re-serializes YAML the line model cannot follow', () => {
+    const broken = '---\ntitle: A\ntags: [unclosed\nnotes: keep me\n---\n# A\n'
+    expect(updateFrontmatter(broken, { tags: ['x'] })).toBe('---\ntitle: A\ntags: [x]\nnotes: keep me\n---\n# A\n')
+    expect(updateFrontmatter(broken, { status: 'x' })).toBe(broken.replace('keep me\n', 'keep me\nstatus: x\n'))
+    const opaque = '---\n{broken: [\n---\n# A\n'
+    expect(updateFrontmatter(opaque, { status: 'x' })).toBe(opaque)
+    // A flow mapping parses fine but has no key lines: the whole block is rewritten, as before.
+    expect(updateFrontmatter('---\n{a: 1, b: two}\n---\n# A\n', { c: 3 })).toBe('---\na: 1\nb: two\nc: 3\n---\n# A\n')
+    // Quoted keys and values that span lines are recognized.
+    const quoted = '---\n"my key": 1\n\'it\'\'s\': 2\ndesc: |\n  one\n\n  two\nz: 3\n---\n'
+    expect(updateFrontmatter(quoted, { desc: 'short' })).toBe('---\n"my key": 1\n\'it\'\'s\': 2\ndesc: short\nz: 3\n---\n')
+    expect(updateFrontmatter(quoted, { 'my key': 5 })).toBe(quoted.replace('"my key": 1', 'my key: 5'))
+  })
+  it('never leaves a block that no longer parses: a replaced anchor re-serializes the block', () => {
+    // Replacing `a: &x 1` in place would leave `b: *x` pointing at nothing, and
+    // a block that doesn't parse loses every key (title, tags) of the note.
+    const anchored = '---\ntitle: A\na: &x 1\nb: *x\n---\n# A\n'
+    const out = updateFrontmatter(anchored, { a: 2 })
+    expect(splitFrontmatter(out).frontmatter).toEqual({ title: 'A', a: 2, b: 1 })
+    expect(out).toBe('---\ntitle: A\na: 2\nb: 1\n---\n# A\n')
+    const merged = '---\nbase: &b {x: 1}\nc:\n  <<: *b\n  y: 2\nstatus: active\n---\n# A\n'
+    expect(splitFrontmatter(updateFrontmatter(merged, { base: 'z' })).frontmatter).toMatchObject({ base: 'z', c: { y: 2 }, status: 'active' })
+    // Keys the alias doesn't depend on are still patched in place.
+    expect(updateFrontmatter(anchored, { title: 'B' })).toBe(anchored.replace('title: A', 'title: B'))
+    expect(updateFrontmatter(merged, { status: 'paused' })).toBe(merged.replace('status: active', 'status: paused'))
+  })
+  it('stays fast on long whitespace runs', () => {
+    const ws = ' '.repeat(50_000)
+    const start = performance.now()
+    expect(updateFrontmatter(`---\ntitle: a${ws}x\n---\n# A${ws}x\n`, { status: 'x' })).toContain('status: x')
+    // Not a mapping, and its lines can't be told apart: left exactly as it is.
+    const scalar = `---\n${ws}x\n---\n# A\n`
+    expect(updateFrontmatter(scalar, { status: 'x' }) === scalar).toBe(true)
+    expect(updateFrontmatter(`---\na: 1\n${ws}\nb: 2${ws}\n---\n# A\n`, { b: 3 }).endsWith(`${ws}\nb: 3\n---\n# A\n`)).toBe(true)
+    expect(performance.now() - start).toBeLessThan(300)
+  })
 })
 
 describe('wikilinks', () => {
+  it('strips a long run of [[ from the plain text in linear time', () => {
+    const body = `x ${'[['.repeat(25_000)} y [[Target|shown]] z`
+    parseMarkdown(body)
+    const t0 = performance.now()
+    parseMarkdown(body)
+    const markdown = performance.now() - t0
+    const t1 = performance.now()
+    const n = parseNote({ path: 'x.md', content: body })
+    // parseNote = the markdown parse plus a little; the old wikilink strip alone took ~0.7 s here.
+    expect(performance.now() - t1 - markdown).toBeLessThan(250)
+    expect(n.plain.endsWith('y shown z')).toBe(true)
+  })
+
   it('tokenizes all forms', () => {
     const t = tokenizeWikilinks('a [[B]] c [[D|alias]] e [[F#Head]] g ![[H]] [[I#J|K]]')
     expect(t.map((x) => x.target)).toEqual(['B', 'D', 'F', 'H', 'I'])
@@ -333,6 +417,38 @@ describe('folders in the vault', () => {
     expect(await legacy.listFolders()).toEqual(['New'])
   })
 
+  it('MemoryVaultAdapter.create never overwrites, whatever the letter case', async () => {
+    const vault = new MemoryVaultAdapter([{ path: 'Code/Game/README.md', content: '# Readme' }], { folders: ['Code/Game/Notes.md'] })
+    const seen: VaultChange[] = []
+    vault.watch((c) => seen.push(...c))
+    await vault.create('Code/Game/New.md', '# New')
+    expect(await vault.read('Code/Game/New.md')).toBe('# New')
+    expect(seen).toEqual([expect.objectContaining({ kind: 'add', path: 'Code/Game/New.md', content: '# New' })])
+    for (const taken of ['Code/Game/README.md', 'code/game/readme.md', 'Code\\Game\\New.md', 'Code/Game/Notes.md']) {
+      const err = await vault.create(taken, 'clobber').catch((e: unknown) => e)
+      expect(isExistsError(err), taken).toBe(true)
+    }
+    expect(await vault.read('Code/Game/README.md')).toBe('# Readme')
+    expect(seen).toHaveLength(1)
+    // A file planted outside the app (a changelog the vault ignores) is still there to refuse.
+    vault.external([{ kind: 'add', path: 'Code/Game/CHANGELOG.md', content: '## 1.0' }])
+    expect(isExistsError(await vault.create('Code/Game/Changelog.md', '# x').catch((e: unknown) => e))).toBe(true)
+    await expect(new MemoryVaultAdapter([], { readOnly: true }).create('A.md', '')).rejects.toThrow(/read-only/)
+    // Two creates of one path at once: exactly one wins.
+    const results = await Promise.allSettled([vault.create('Race.md', 'a'), vault.create('race.md', 'b')])
+    expect(results.map((r) => r.status)).toEqual(['fulfilled', 'rejected'])
+  })
+
+  it('isExistsError recognizes EEXIST however it arrives', () => {
+    expect(isExistsError(Object.assign(new Error('boom'), { code: 'EEXIST' }))).toBe(true)
+    expect(isExistsError(new Error("Error invoking remote method 'vault:create': Error: EEXIST: file already exists"))).toBe(true)
+    expect(isExistsError('EEXIST')).toBe(true)
+    expect(isExistsError(new Error('ENOENT: no such file'))).toBe(false)
+    expect(isExistsError(Object.assign(new Error('x'), { code: 'EACCES' }))).toBe(false)
+    expect(isExistsError(null)).toBe(false)
+    expect(isExistsError(undefined)).toBe(false)
+  })
+
   it('MemoryVaultAdapter keeps a folder when its last note goes, like a disk', async () => {
     const vault = new MemoryVaultAdapter([
       { path: 'Inbox/Only.md', content: '# Only' },
@@ -447,6 +563,81 @@ describe('folders in the vault', () => {
     expect([...again.folders].filter((f) => f.startsWith('T') || f === 'Gone').sort()).toEqual(['T', 'T/a', 'T/a/b', 'T/a/new', 'T/ab', 'Tx'])
   })
 
+  it('applyChanges keeps the folder Set when a batch adds or removes no folder, and never mutates it', () => {
+    const folders = new Set(['Inbox', 'Projects', 'Projects/X'])
+    const notes = new Map<NoteId, ParsedNote>()
+    const n = parseNote({ path: 'Projects/X/a.md', content: '# a\n' })
+    notes.set(n.meta.id, n)
+    const search = new SearchIndex()
+    const same = applyChanges(
+      notes,
+      [
+        { kind: 'change', path: 'Projects/X/a.md', content: '# a\n\nedited\n' },
+        { kind: 'add', path: 'Inbox/b.md', content: '# b\n' },
+        { kind: 'unlink', path: 'Inbox/b.md' },
+        { kind: 'addDir', path: 'Projects/X/' },
+        { kind: 'unlinkDir', path: 'Nowhere' },
+        // Ignored folders are never added, so they don't cost a copy either.
+        { kind: 'addDir', path: 'Projects/X/node_modules' },
+        { kind: 'addDir', path: '.git' },
+      ],
+      search,
+      { folders },
+    )
+    expect(same.folders).toBe(folders)
+    const grown = applyChanges(notes, [{ kind: 'add', path: 'New/c.md', content: '# c\n' }], search, { folders })
+    expect(grown.folders).not.toBe(folders)
+    expect([...grown.folders].sort()).toEqual(['Inbox', 'New', 'Projects', 'Projects/X'])
+    const shrunk = applyChanges(notes, [{ kind: 'unlinkDir', path: 'Inbox' }], search, { folders })
+    expect([...shrunk.folders].sort()).toEqual(['Projects', 'Projects/X'])
+    expect([...folders].sort()).toEqual(['Inbox', 'Projects', 'Projects/X'])
+  })
+
+  it('a content-only save stays fast on a whole drive (~100k folders) in the system layout', () => {
+    // A synthetic drive: D and F, each folder with 1-6 subfolders, breadth-first.
+    let seed = 3
+    const rnd = (): number => (seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296
+    const all: string[] = ['D', 'F']
+    for (let i = 0; all.length < 100_000; i++) {
+      const parent = all[i]!
+      for (let k = 1 + Math.floor(rnd() * 6); k > 0 && all.length < 100_000; k--) all.push(`${parent}/Folder_${all.length}`)
+    }
+    const folders = new Set(all)
+    const notes = new Map<NoteId, ParsedNote>()
+    for (let i = 0; i < 300; i++) {
+      const n = parseNote({ path: `${all[Math.floor(rnd() * all.length)]}/README ${i}.md`, content: `# Readme ${i}\n\nSee [[Readme ${(i * 7) % 300}]].\n` })
+      notes.set(n.meta.id, n)
+    }
+    const graph: GraphOptionsFn = (f) => ({
+      folders: { all: f, rootTitle: 'Drives', mountLabels: { D: 'D:\\', F: 'F:\\' }, maxDepth: 3, expanded: [], multiRoot: true },
+    })
+    const search = new SearchIndex()
+    search.rebuild(notes.values())
+    // Opening the vault indexes the folders once.
+    const first = buildGraph(notes, graph(folders, notes))
+    const one = [...notes.values()][5]!
+    let current = notes
+    for (let k = 0; k < 3; k++) {
+      const t0 = performance.now()
+      const r = applyChanges(current, [{ kind: 'change', path: one.meta.path, content: `${one.raw}\nedit ${k}\n`, mtime: Date.now() }], search, {
+        folders,
+        graph,
+      })
+      // Was ~0.6 s per save here (1.2 s at 200k folders), all on the renderer's main thread.
+      expect(performance.now() - t0).toBeLessThan(200)
+      expect(r.folders).toBe(folders)
+      expect(r.graph.nodes.filter((x) => x.kind === 'folder').map((x) => x.id)).toEqual(
+        first.nodes.filter((x) => x.kind === 'folder').map((x) => x.id),
+      )
+      current = r.notes
+    }
+    // The memoized index is the one a fresh build computes.
+    const fresh = buildGraph(current, graph(new Set(all), current))
+    expect(fresh.folderSelection?.visible).toEqual(first.folderSelection?.visible)
+    expect(fresh.folderSelection?.hidden).toEqual(first.folderSelection?.hidden)
+    expect(fresh.folderSelection?.dropped).toBe(first.folderSelection?.dropped)
+  })
+
   it('applyChanges removes a big tree from a whole-drive folder set in one pass', () => {
     // One scan per unlinkDir was 2 000 × 100 000 comparisons here (seconds); now it is one pass.
     const folders = new Set<string>(['Drive', 'Drive/Gone'])
@@ -463,5 +654,19 @@ describe('folders in the vault', () => {
     expect(performance.now() - t0).toBeLessThan(1500)
     expect(r.folders.size).toBe(98_002)
     expect(r.folders.has('Drive/Gone')).toBe(false)
+  })
+})
+
+describe('pathological nesting', () => {
+  it('parses a note with a list thousands of levels deep quickly, without overflowing', () => {
+    const deep = `# Deep\n\n${'- '.repeat(8000)}x [[Target]]\n\n${'> '.repeat(4000)}quote\n\nafter [[Other]]\n`
+    const t0 = performance.now()
+    const n = parseNote({ path: 'Inbox/Deep.md', content: deep })
+    expect(performance.now() - t0).toBeLessThan(1500)
+    expect(n.meta.title).toBe('Deep')
+    expect(n.links.map((l) => l.raw)).toContain('Other')
+    // Normal nesting is untouched.
+    const ok = parseNote({ path: 'a.md', content: '- a\n  - b [[B]]\n    - c\n' })
+    expect(ok.links.map((l) => l.raw)).toEqual(['B'])
   })
 })
