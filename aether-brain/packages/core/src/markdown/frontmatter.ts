@@ -3,6 +3,7 @@ import type { Frontmatter } from '../types'
 
 const FM_OPEN = /^(?:﻿)?---[ \t]*\r?\n/
 const FM_CLOSE = /\r?\n(?:---|\.\.\.)[ \t]*(?:\r?\n|$)/
+const FM_CLOSE_EMPTY = /^(?:---|\.\.\.)[ \t]*(?:\r?\n|$)/
 
 export interface SplitResult {
   frontmatter: Frontmatter
@@ -22,7 +23,8 @@ export function splitFrontmatter(raw: string): SplitResult {
   const open = FM_OPEN.exec(raw)
   if (!open) return { frontmatter: {}, body: raw, bodyOffset: 0, hasFrontmatter: false }
   const rest = raw.slice(open[0].length)
-  const close = FM_CLOSE.exec(rest)
+  // An empty block closes on the very next line (`---\n---`).
+  const close = FM_CLOSE_EMPTY.exec(rest) ?? FM_CLOSE.exec(rest)
   if (!close) return { frontmatter: {}, body: raw, bodyOffset: 0, hasFrontmatter: false }
   const yamlText = rest.slice(0, close.index)
   const bodyOffset = open[0].length + close.index + close[0].length

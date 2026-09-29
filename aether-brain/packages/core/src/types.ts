@@ -196,6 +196,20 @@ export interface GraphData {
   orphans: NoteId[]
   tagCounts: Map<string, number>
   areaCounts: Map<Area, number>
+  /** Which folders the graph shows as nodes; null when built without folders. */
+  folderSelection: FolderSelection | null
+}
+
+/** Result of `selectFolders`: the folder nodes a system graph shows. */
+export interface FolderSelection {
+  /** Visible folder vault paths, always including '' (the root). */
+  visible: Set<string>
+  /** Direct subfolder counts on disk, per folder ('' included). */
+  childCount: Map<string, number>
+  /** Direct subfolders not visible, per visible folder. */
+  hidden: Map<string, number>
+  /** How many optional folders were dropped by maxFolders. */
+  dropped: number
 }
 
 export interface SearchHit {

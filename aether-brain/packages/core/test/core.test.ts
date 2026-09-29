@@ -2,18 +2,29 @@ import { describe, expect, it } from 'vitest'
 import {
   MemoryVaultAdapter,
   SearchIndex,
+  ancestorsOf,
   applyChanges,
+  areaFromFolder,
   buildGraph,
   dailyNote,
   findUnlinkedMentions,
+  folderKey,
+  folderPathOf,
   generateSyntheticVault,
+  homePrefix,
   inboxNote,
+  isBoilerplateMarkdown,
+  isFolderId,
+  isIgnoredPath,
   loadVault,
+  mountOf,
   neighborhood,
   parseNote,
   splitFrontmatter,
   tokenizeWikilinks,
   updateFrontmatter,
+  type VaultChange,
+  type VaultFile,
 } from '../src'
 
 const VAULT = [
@@ -83,6 +94,11 @@ describe('frontmatter', () => {
     const broken = splitFrontmatter('---\ntitle: [unclosed\n---\n# Hi')
     expect(broken.hasFrontmatter).toBe(true)
     expect(broken.frontmatter).toEqual({})
+  })
+  it('recognizes an empty frontmatter block', () => {
+    expect(splitFrontmatter('---\n---\n# Hi\n')).toEqual({ frontmatter: {}, body: '# Hi\n', bodyOffset: 8, hasFrontmatter: true })
+    expect(splitFrontmatter('---\r\n...\r\nBody').body).toBe('Body')
+    expect(parseNote({ path: 'x.md', content: '---\n---\n# Hi\n' }).body).toBe('# Hi\n')
   })
   it('updates keys while preserving the body', () => {
     const out = updateFrontmatter('---\ntitle: A\nstatus: seedling\n---\n\n# A\n\nbody', { status: 'evergreen', tags: ['x'] })
@@ -154,6 +170,10 @@ describe('graph', () => {
     expect(graph.edges.find((e) => e.from === vs && e.to === 'Resources/Drawing/Composition' && e.kind === 'embed')?.weight).toBe(1)
     expect(neighborhood(graph, vs, 1).size).toBe(4)
     expect(graph.nodes.find((n) => n.id === vs)?.degree).toBe(4)
+    // Classic graphs: kind set, no structural parents, no folder selection.
+    expect(graph.nodes.map((n) => n.kind)).toEqual([...Array(6).fill('note'), 'ghost'])
+    expect(graph.nodes.every((n) => n.parent === null)).toBe(true)
+    expect(graph.folderSelection).toBeNull()
   })
 
   it('finds unlinked mentions', async () => {
@@ -226,5 +246,222 @@ describe('search index sync', () => {
     expect(idx.search('yak')).toHaveLength(1)
     idx.remove('A')
     expect(idx.size).toBe(0)
+  })
+})
+
+describe('paths', () => {
+  it('derives the area from the first two folder segments only', () => {
+    expect(areaFromFolder('Projects/x.md')).toBe('projects')
+    expect(areaFromFolder('D/Projects/x.md')).toBe('projects')
+    expect(areaFromFolder('D/1 Projects/Sub/x.md')).toBe('projects')
+    expect(areaFromFolder('a/b/Projects/x.md')).toBeNull()
+    expect(areaFromFolder('Resources/Archive/x.md')).toBe('resources')
+    expect(areaFromFolder('Projects.md')).toBeNull()
+    expect(areaFromFolder('x.md')).toBeNull()
+    expect(parseNote({ path: 'F/Resources/Drawing/Value.md', content: '# Value' }).meta.area).toBe('resources')
+  })
+
+  it('never takes a folder named like an Object.prototype key for an area or type', () => {
+    expect(areaFromFolder('Notes/constructor/x.md')).toBeNull()
+    expect(areaFromFolder('toString/x.md')).toBeNull()
+    const n = parseNote({ path: 'D/constructor/valueOf/__proto__/hasOwnProperty/x.md', content: '# X' })
+    expect(n.meta.area).toBe('untagged')
+    expect(n.meta.type).toBe('note')
+  })
+
+  it('recognizes repo boilerplate exactly and ignores it', () => {
+    for (const name of ['LICENSE.md', 'CHANGELOG.md', 'CODE_OF_CONDUCT.md', 'PULL_REQUEST_TEMPLATE.md', 'NOTICE.md']) {
+      expect(isBoilerplateMarkdown(`code/repo/${name}`)).toBe(true)
+      expect(isIgnoredPath(name)).toBe(true)
+    }
+    expect(isBoilerplateMarkdown('License.md')).toBe(false)
+    expect(isBoilerplateMarkdown('README.md')).toBe(false)
+    expect(isBoilerplateMarkdown('Notes/LICENSE.md.bak')).toBe(false)
+    expect(isBoilerplateMarkdown('LICENSE')).toBe(false)
+    expect(isIgnoredPath('Notes/My License.md')).toBe(false)
+  })
+
+  it('builds folder ids, ancestors, mounts and the home prefix', () => {
+    expect(folderKey('')).toBe('folder:')
+    expect(folderKey('a\\b/')).toBe('folder:a/b')
+    expect(isFolderId('folder:a/b')).toBe(true)
+    expect(isFolderId('a/b')).toBe(false)
+    expect(folderPathOf('folder:a/b')).toBe('a/b')
+    expect(folderPathOf(folderKey(''))).toBe('')
+    expect(ancestorsOf('a/b/c')).toEqual(['a', 'a/b'])
+    expect(ancestorsOf('a')).toEqual([])
+    expect(ancestorsOf('')).toEqual([])
+    const roots = [
+      { path: 'D:\\', mount: 'D', label: 'D:\\' },
+      { path: 'F:\\', mount: 'F', label: 'F:\\' },
+    ]
+    expect(mountOf('D/Projects/x.md', roots)).toBe('D')
+    expect(mountOf('F', roots)).toBe('F')
+    expect(mountOf('D/Projects/x.md', roots.slice(0, 1))).toBe('')
+    expect(mountOf('D/Projects/x.md')).toBe('')
+    expect(homePrefix(roots)).toBe('D/')
+    expect(homePrefix(roots.slice(0, 1))).toBe('')
+    expect(homePrefix(null)).toBe('')
+  })
+})
+
+describe('folders in the vault', () => {
+  const files: VaultFile[] = [
+    { path: 'Projects/PORTALz.md', content: '---\ntype: project\n---\n# PORTALz\n' },
+    { path: 'Projects/PORTALz/Art/Sketch.md', content: '# Sketch\n\n[[PORTALz]]\n' },
+    { path: 'code/repo/LICENSE.md', content: '# MIT' },
+  ]
+
+  it('MemoryVaultAdapter lists and creates folders', async () => {
+    const persisted: Set<string>[] = []
+    const vault = new MemoryVaultAdapter(files, { folders: ['Empty/Inner/', '.hidden'], onPersist: (_f, folders) => persisted.push(new Set(folders)) })
+    expect(await vault.listFolders()).toEqual(['Empty', 'Empty/Inner', 'Projects', 'Projects/PORTALz', 'Projects/PORTALz/Art'])
+    const seen: VaultChange[] = []
+    vault.watch((c) => seen.push(...c))
+    await vault.createFolder('Projects\\PORTALz\\Tech\\')
+    expect(seen).toEqual([{ kind: 'addDir', path: 'Projects/PORTALz/Tech' }])
+    expect(await vault.listFolders()).toContain('Projects/PORTALz/Tech')
+    expect(persisted.at(-1)).toEqual(new Set(['Empty/Inner', 'Projects/PORTALz/Tech']))
+    await vault.createFolder('Projects/PORTALz')
+    expect(seen).toHaveLength(1)
+    await expect(vault.createFolder('')).rejects.toThrow()
+    await expect(vault.createFolder('a/.git')).rejects.toThrow()
+    await expect(new MemoryVaultAdapter([], { readOnly: true }).createFolder('X')).rejects.toThrow(/read-only/)
+    // Old single-argument persistence hooks still work.
+    const legacy = new MemoryVaultAdapter([], { onPersist: (map) => void map.size })
+    await legacy.createFolder('New')
+    expect(await legacy.listFolders()).toEqual(['New'])
+  })
+
+  it('MemoryVaultAdapter keeps a folder when its last note goes, like a disk', async () => {
+    const vault = new MemoryVaultAdapter([
+      { path: 'Inbox/Only.md', content: '# Only' },
+      { path: 'A/B/n.md', content: '# n' },
+      { path: 'A/B/C/m.md', content: '# m' },
+    ])
+    await vault.remove('A/B/n.md')
+    await vault.rename('Inbox/Only.md', 'Projects/Only.md')
+    expect(await vault.listFolders()).toEqual(['A', 'A/B', 'A/B/C', 'Inbox', 'Projects'])
+    vault.external([{ kind: 'unlink', path: 'A/B/C/m.md' }])
+    expect(await vault.listFolders()).toContain('A/B/C')
+    // unlinkDir takes the whole tree, files included, whatever order the batch has.
+    vault.external([{ kind: 'unlinkDir', path: 'A/B' }, { kind: 'unlink', path: 'A/B/C/m.md' }, { kind: 'addDir', path: 'x/.git' }])
+    expect(await vault.listFolders()).toEqual(['A', 'Inbox', 'Projects'])
+    expect((await vault.list()).map((f) => f.path)).toEqual(['Projects/Only.md'])
+  })
+
+  it('loadVault returns folders and builds the graph with the options callback', async () => {
+    const vault = new MemoryVaultAdapter(files, { folders: ['Projects/PORTALz/Tech'] })
+    const { notes, folders, graph } = await loadVault(vault, undefined, undefined, (f) => ({
+      folders: { multiRoot: false, all: f, rootTitle: 'Memory' },
+    }))
+    expect(notes.size).toBe(2)
+    expect([...folders].sort()).toEqual(['Projects', 'Projects/PORTALz', 'Projects/PORTALz/Art', 'Projects/PORTALz/Tech'])
+    expect(graph.folderSelection).not.toBeNull()
+    expect(graph.nodes.find((n) => n.id === 'folder:Projects/PORTALz')?.folder?.role).toBe('project')
+    expect(graph.nodes.find((n) => n.id === 'folder:Projects/PORTALz/Tech')?.parent).toBe('folder:Projects/PORTALz')
+    // Without listFolders, folders come from the notes.
+    const plain = await loadVault(Object.assign(new MemoryVaultAdapter(files), { listFolders: undefined }))
+    expect([...plain.folders].sort()).toEqual(['Projects', 'Projects/PORTALz', 'Projects/PORTALz/Art'])
+    expect(plain.graph.folderSelection).toBeNull()
+  })
+
+  it('applyChanges tracks addDir / unlinkDir and note folders', async () => {
+    const loaded = await loadVault(new MemoryVaultAdapter(files, { folders: ['Projects/PORTALz/Tech'] }))
+    const graphOpts = (f: Set<string>) => ({ folders: { multiRoot: false, all: f, rootTitle: 'V' } })
+    const added = applyChanges(
+      loaded.notes,
+      [
+        { kind: 'addDir', path: 'Projects/PORTALz/Tech/Shaders/' },
+        { kind: 'addDir', path: 'Deep/A/B' },
+        { kind: 'addDir', path: '.obsidian' },
+        { kind: 'add', path: 'Inbox/Idea.md', content: '# Idea\n' },
+      ],
+      loaded.search,
+      { folders: loaded.folders, graph: graphOpts },
+    )
+    expect(loaded.folders.has('Deep')).toBe(false)
+    expect([...added.folders].sort()).toEqual([
+      'Deep',
+      'Deep/A',
+      'Deep/A/B',
+      'Inbox',
+      'Projects',
+      'Projects/PORTALz',
+      'Projects/PORTALz/Art',
+      'Projects/PORTALz/Tech',
+      'Projects/PORTALz/Tech/Shaders',
+    ])
+    expect(added.touched).toEqual(['Inbox/Idea'])
+    expect(added.graph.index.has('folder:Deep/A/B')).toBe(true)
+    expect(added.graph.index.has('folder:Inbox')).toBe(true)
+    // Depth 4 is below the default maxDepth: collapsed into its parent.
+    expect(added.graph.index.has('folder:Projects/PORTALz/Tech/Shaders')).toBe(false)
+    const tech = added.graph.nodes[added.graph.index.get('folder:Projects/PORTALz/Tech') ?? -1]
+    expect(tech?.folder).toMatchObject({ childFolders: 1, hiddenFolders: 1 })
+
+    const removed = applyChanges(
+      added.notes,
+      [
+        { kind: 'unlinkDir', path: 'Projects/PORTALz/Tech' },
+        { kind: 'unlinkDir', path: 'Deep' },
+        { kind: 'unlinkDir', path: '' },
+      ],
+      loaded.search,
+      { folders: added.folders, graph: graphOpts },
+    )
+    expect([...removed.folders].sort()).toEqual(['Inbox', 'Projects', 'Projects/PORTALz', 'Projects/PORTALz/Art'])
+    expect(removed.notes.size).toBe(3)
+    expect(removed.touched).toEqual([])
+    expect(removed.graph.index.has('folder:Projects/PORTALz/Tech')).toBe(false)
+    expect(removed.graph.index.has('folder:Deep')).toBe(false)
+
+    // No folder set given: start from the notes' folders.
+    const bare = applyChanges(loaded.notes, [{ kind: 'addDir', path: 'X' }], loaded.search)
+    expect([...bare.folders].sort()).toEqual(['Projects', 'Projects/PORTALz', 'Projects/PORTALz/Art', 'X'])
+    expect(bare.graph.folderSelection).toBeNull()
+  })
+
+  it('applyChanges removes a deleted tree reported deepest first, and keeps batch order', () => {
+    const folders = new Set(['T', 'T/a', 'T/a/b', 'T/a/b/c', 'T/ab', 'Tx', 'Keep', 'Big'])
+    for (let i = 0; i < 300; i++) folders.add(`Big/${i}`)
+    // The desktop watcher reports a removed tree deepest folder first, the root last.
+    const tree = ['T/a/b/c', 'T/a/b', 'T/ab', 'T/a', 'T'].map((path): VaultChange => ({ kind: 'unlinkDir', path }))
+    const r = applyChanges(new Map(), tree, new SearchIndex(), { folders })
+    expect([...r.folders].filter((f) => !f.startsWith('Big/')).sort()).toEqual(['Big', 'Keep', 'Tx'])
+    expect(r.folders.size).toBe(303)
+    expect(folders.has('T/a')).toBe(true)
+    // A folder removed and re-created in one batch exists afterwards, and the other way round.
+    const again = applyChanges(
+      new Map(),
+      [
+        { kind: 'unlinkDir', path: 'T\\a' },
+        { kind: 'addDir', path: 'T/a/new' },
+        { kind: 'addDir', path: 'Gone' },
+        { kind: 'unlinkDir', path: 'Gone' },
+        { kind: 'add', path: 'T/a/b/Note.md', content: '# Note' },
+      ],
+      new SearchIndex(),
+      { folders },
+    )
+    expect([...again.folders].filter((f) => f.startsWith('T') || f === 'Gone').sort()).toEqual(['T', 'T/a', 'T/a/b', 'T/a/new', 'T/ab', 'Tx'])
+  })
+
+  it('applyChanges removes a big tree from a whole-drive folder set in one pass', () => {
+    // One scan per unlinkDir was 2 000 × 100 000 comparisons here (seconds); now it is one pass.
+    const folders = new Set<string>(['Drive', 'Drive/Gone'])
+    for (let i = 0; i < 98_000; i++) folders.add(`Drive/Keep/${i}`)
+    folders.add('Drive/Keep')
+    const changes: VaultChange[] = []
+    for (let i = 0; i < 2000; i++) {
+      folders.add(`Drive/Gone/${i}`)
+      changes.push({ kind: 'unlinkDir', path: `Drive/Gone/${i}` })
+    }
+    changes.push({ kind: 'unlinkDir', path: 'Drive/Gone' })
+    const t0 = performance.now()
+    const r = applyChanges(new Map(), changes, new SearchIndex(), { folders })
+    expect(performance.now() - t0).toBeLessThan(1500)
+    expect(r.folders.size).toBe(98_002)
+    expect(r.folders.has('Drive/Gone')).toBe(false)
   })
 })
