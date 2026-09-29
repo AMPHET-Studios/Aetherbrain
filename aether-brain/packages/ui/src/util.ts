@@ -41,6 +41,18 @@ export function isTyping(e: KeyboardEvent | { target: EventTarget | null }): boo
   return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable
 }
 
+/**
+ * True when the event's target is a control that `Enter` activates by itself
+ * (a button, a link, a list option …): a global `Enter` shortcut must leave
+ * it alone, or both would run.
+ */
+export function isControl(target: EventTarget | null): boolean {
+  const el = target as HTMLElement | null
+  if (!el?.tagName) return false
+  if (el.tagName === 'BUTTON' || el.tagName === 'SUMMARY' || (el.tagName === 'A' && !!el.hasAttribute?.('href'))) return true
+  return ['button', 'link', 'option', 'menuitem', 'tab', 'checkbox', 'switch'].includes(el.getAttribute?.('role') ?? '')
+}
+
 export function plural(n: number, s: string, p = `${s}s`): string {
   return `${n} ${n === 1 ? s : p}`
 }

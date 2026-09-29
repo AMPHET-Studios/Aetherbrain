@@ -1,4 +1,4 @@
-import { isIgnoredPath, isMarkdownPath, normalizePath, type VaultAdapter, type VaultChange, type VaultFile } from '@aether/core'
+import { ancestorsOf, isIgnoredPath, isMarkdownPath, normalizeFolderPath, normalizePath, type VaultAdapter, type VaultChange, type VaultFile } from '@aether/core'
 
 /* Minimal File System Access API typings (Chromium). */
 interface FSHandle {
@@ -43,6 +43,9 @@ export class FsAccessVaultAdapter implements VaultAdapter {
   private timer: ReturnType<typeof setInterval> | null = null
   /** Paths we wrote ourselves recently; skip their echo in the poll. */
   private selfWrites = new Map<string, number>()
+  /** Every folder seen by the last walk (vault paths, root excluded). */
+  private folders = new Set<string>()
+  private walked = false
 
   constructor(private root: FSDirHandle) {
     this.name = root.name
@@ -59,18 +62,23 @@ export class FsAccessVaultAdapter implements VaultAdapter {
     }
   }
 
-  private async walk(dir: FSDirHandle, prefix: string, out: { path: string; handle: FSFileHandle }[]): Promise<void> {
+  private async walk(dir: FSDirHandle, prefix: string, out: { path: string; handle: FSFileHandle }[], folders: Set<string>): Promise<void> {
     for await (const entry of dir.values()) {
       const path = prefix ? `${prefix}/${entry.name}` : entry.name
       if (isIgnoredPath(path)) continue
-      if (entry.kind === 'directory') await this.walk(entry, path, out)
-      else if (isMarkdownPath(path)) out.push({ path, handle: entry })
+      if (entry.kind === 'directory') {
+        folders.add(path)
+        await this.walk(entry, path, out, folders)
+      } else if (isMarkdownPath(path)) out.push({ path, handle: entry })
     }
   }
 
   async list(): Promise<VaultFile[]> {
     const entries: { path: string; handle: FSFileHandle }[] = []
-    await this.walk(this.root, '', entries)
+    const folders = new Set<string>()
+    await this.walk(this.root, '', entries, folders)
+    this.folders = folders
+    this.walked = true
     const files = await Promise.all(
       entries.map(async ({ path, handle }) => {
         const f = await handle.getFile()
@@ -87,6 +95,29 @@ export class FsAccessVaultAdapter implements VaultAdapter {
     let dir = this.root
     for (const p of parts) dir = await dir.getDirectoryHandle(p, { create })
     return { dir, name }
+  }
+
+  /** Every folder from the last walk (the one `list()` just did, else a fresh one). */
+  async listFolders(): Promise<string[]> {
+    if (!this.walked) await this.list()
+    return [...this.folders].sort()
+  }
+
+  /** Create a folder and any missing parents; emits 'addDir' for each one that is new. */
+  async createFolder(path: string): Promise<void> {
+    const p = normalizeFolderPath(path)
+    if (!p) throw new Error('Invalid folder path')
+    if (isIgnoredPath(p)) throw new Error(`Folder is ignored: ${p}`)
+    let dir = this.root
+    for (const seg of p.split('/')) dir = await dir.getDirectoryHandle(seg, { create: true })
+    const added: VaultChange[] = []
+    for (const f of [...ancestorsOf(p), p]) {
+      if (this.folders.has(f)) continue
+      this.folders.add(f)
+      this.selfWrites.set(f, Date.now())
+      added.push({ kind: 'addDir', path: f })
+    }
+    if (added.length) for (const l of this.listeners) l(added)
   }
 
   async read(path: string): Promise<string | null> {
@@ -142,10 +173,21 @@ export class FsAccessVaultAdapter implements VaultAdapter {
     this.polling = true
     try {
       const entries: { path: string; handle: FSFileHandle }[] = []
-      await this.walk(this.root, '', entries)
+      const folders = new Set<string>()
+      await this.walk(this.root, '', entries, folders)
       const seen = new Set<string>()
       const changes: VaultChange[] = []
       const now = Date.now()
+      // Folders made or removed outside the app (the files inside them follow below).
+      for (const f of [...folders].sort()) if (!this.folders.has(f)) changes.push({ kind: 'addDir', path: f })
+      for (const f of this.folders) {
+        if (folders.has(f)) continue
+        // Created by us while this walk was already under way: still there.
+        const self = this.selfWrites.get(f)
+        if (self && now - self < POLL_MS * 2) folders.add(f)
+        else changes.push({ kind: 'unlinkDir', path: f })
+      }
+      this.folders = folders
       for (const { path, handle } of entries) {
         seen.add(path)
         const f = await handle.getFile()

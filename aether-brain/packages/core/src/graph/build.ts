@@ -207,7 +207,9 @@ function addFolderSystem(
       multiRoot: opts.multiRoot,
       maxDepth: opts.maxDepth,
       maxFolders: opts.maxFolders,
-      expanded: opts.expanded,
+      // A project star always shows its planets (its direct subfolders), however
+      // deep the project folder sits on a drive (F/Lunco/PORTALz is depth 3).
+      expanded: [...(opts.expanded ?? []), ...projectAt.keys()],
       pinned: [...(opts.pinned ?? []), ...projectAt.keys()],
     },
   )

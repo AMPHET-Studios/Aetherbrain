@@ -1,16 +1,41 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { AREA_LABELS } from '@aether/graph'
-import { blankNote, type SearchHit } from '@aether/core'
+import { AREA_LABELS, planetColor } from '@aether/graph'
+import type { SearchHit } from '@aether/core'
 import { findCommands, type Command } from '../commands'
 import { useAether } from '../store'
 import { cx, MOD } from '../util'
 
-type Row = { kind: 'note'; hit: SearchHit } | { kind: 'command'; cmd: Command } | { kind: 'create'; title: string }
+type Row =
+  | { kind: 'note'; hit: SearchHit }
+  | { kind: 'folder'; path: string; name: string }
+  | { kind: 'command'; cmd: Command }
+  | { kind: 'create'; title: string }
+
+/**
+ * Folders whose name (best) or path contains the query: exact name, then
+ * name prefix, then name, then path; shorter paths first. At most `limit`.
+ */
+function matchFolders(folders: Set<string>, query: string, limit: number): string[] {
+  const q = query.trim().toLowerCase()
+  if (!q) return []
+  const out: { path: string; rank: number }[] = []
+  for (const f of folders) {
+    const lower = f.toLowerCase()
+    const name = lower.slice(lower.lastIndexOf('/') + 1)
+    const rank = name === q ? 0 : name.startsWith(q) ? 1 : name.includes(q) ? 2 : lower.includes(q) ? 3 : -1
+    if (rank >= 0) out.push({ path: f, rank })
+  }
+  return out
+    .sort((a, b) => a.rank - b.rank || a.path.length - b.path.length || a.path.localeCompare(b.path))
+    .slice(0, limit)
+    .map((x) => x.path)
+}
 
 /**
  * Search + command palette. Type to search notes (title, headings, tags,
- * body, path); prefix with `>` for commands. Enter opens, Shift+Enter
- * selects-and-flies without opening the editor.
+ * body, path) and folders (name, path); prefix with `>` for commands. Enter
+ * opens (a folder: selects it and flies there in the system layout),
+ * Shift+Enter selects-and-flies without opening the editor.
  */
 export function CommandPalette() {
   const open = useAether((s) => s.paletteOpen)
@@ -21,7 +46,9 @@ export function CommandPalette() {
   const openNote = useAether((s) => s.openNote)
   const select = useAether((s) => s.select)
   const setFilters = useAether((s) => s.setFilters)
-  const writeNote = useAether((s) => s.writeNote)
+  const folders = useAether((s) => s.folders)
+  const showFolder = useAether((s) => s.showFolder)
+  const createNote = useAether((s) => s.createNote)
   const [q, setQ] = useState('')
   const [index, setIndex] = useState(0)
   const input = useRef<HTMLInputElement | null>(null)
@@ -40,7 +67,11 @@ export function CommandPalette() {
     if (q.startsWith('>')) return findCommands(q.slice(1), s).map((cmd) => ({ kind: 'command', cmd }))
     const out: Row[] = []
     if (q.trim()) {
-      for (const hit of search.search(q, { limit: 14 })) out.push({ kind: 'note', hit })
+      // The best few notes, then matching folders (planets), then the rest of the notes.
+      const hits = search.search(q, { limit: 14 })
+      for (const hit of hits.slice(0, 3)) out.push({ kind: 'note', hit })
+      for (const path of matchFolders(folders, q, 6)) out.push({ kind: 'folder', path, name: path.slice(path.lastIndexOf('/') + 1) })
+      for (const hit of hits.slice(3)) out.push({ kind: 'note', hit })
       const exact = [...notes.values()].some((n) => n.meta.title.toLowerCase() === q.trim().toLowerCase())
       if (!exact) out.push({ kind: 'create', title: q.trim() })
       for (const cmd of findCommands(q, s).slice(0, 4)) out.push({ kind: 'command', cmd })
@@ -53,7 +84,7 @@ export function CommandPalette() {
       for (const cmd of findCommands('', s).slice(0, 6)) out.push({ kind: 'command', cmd })
     }
     return out
-  }, [q, search, notes, revision])
+  }, [q, search, notes, folders, revision])
 
   useEffect(() => setIndex(0), [rows.length, q])
   useEffect(() => {
@@ -68,13 +99,15 @@ export function CommandPalette() {
       setPalette(false)
       if (alt) select(row.hit.id, { fly: true })
       else openNote(row.hit.id, { fly: true })
+    } else if (row.kind === 'folder') {
+      setPalette(false)
+      showFolder(row.path)
     } else if (row.kind === 'command') {
       setPalette(false)
       await row.cmd.run(useAether.getState())
     } else {
       setPalette(false)
-      const n = blankNote(row.title, 'Inbox')
-      await writeNote(n.path, n.content, { open: true })
+      await createNote(`${useAether.getState().homePrefix()}Inbox`, row.title)
     }
   }
 
@@ -116,7 +149,7 @@ export function CommandPalette() {
           {rows.map((row, i) => (
             <button
               type="button"
-              key={row.kind === 'note' ? row.hit.id : row.kind === 'command' ? row.cmd.id : 'create'}
+              key={row.kind === 'note' ? row.hit.id : row.kind === 'folder' ? `folder:${row.path}` : row.kind === 'command' ? row.cmd.id : 'create'}
               id={`row-${i}`}
               data-row={i}
               role="option"
@@ -129,6 +162,18 @@ export function CommandPalette() {
               onClick={(e) => void run(row, e.shiftKey)}
             >
               {row.kind === 'note' && <NoteRow hit={row.hit} />}
+              {row.kind === 'folder' && (
+                <>
+                  <span className="mt-0.5 w-5 text-center" style={{ color: planetColor(row.path) }}>
+                    ●
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-[13.5px] font-medium text-ink">{row.name}</span>
+                    <span className="block truncate font-mono text-[11px] text-dim">{row.path}/</span>
+                  </span>
+                  <span className="shrink-0 text-[10.5px] text-faint">folder</span>
+                </>
+              )}
               {row.kind === 'command' && (
                 <>
                   <span className="mt-0.5 w-5 text-center text-faint">›</span>

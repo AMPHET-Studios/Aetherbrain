@@ -250,7 +250,7 @@ export interface VaultRootInfo {
  * Anything that can act as a vault. Implemented by:
  *  - DemoVaultAdapter (bundled markdown, edits persisted in IndexedDB)
  *  - FsAccessVaultAdapter (browser File System Access API)
- *  - ElectronVaultAdapter (real folder on disk via IPC + chokidar)
+ *  - ElectronVaultAdapter (folders on disk via IPC; native recursive watch)
  */
 export interface VaultAdapter {
   readonly kind: 'demo' | 'fs-access' | 'electron' | 'memory'

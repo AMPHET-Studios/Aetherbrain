@@ -46,13 +46,35 @@ describe('tasks', () => {
     expect(setTaskDone(NOTE, 0, true)).toBe(NOTE)
   })
 
-  it('adds tasks at the end of the section, creating it when missing', () => {
+  it('moves an open task past hidden done tasks with sameState', () => {
+    const raw = '## To do\n\n- [ ] A\n- [x] X ✅ 2026-01-01\n- [ ] B\n'
+    const b = raw.split('\n').indexOf('- [ ] B')
+    // Plain move swaps with the done task right above.
+    expect(moveTask(raw, b, -1).raw).toBe('## To do\n\n- [ ] A\n- [ ] B\n- [x] X ✅ 2026-01-01\n')
+    // sameState passes over it to the previous open task.
+    const up = moveTask(raw, b, -1, { sameState: true })
+    expect(up.raw).toBe('## To do\n\n- [ ] B\n- [x] X ✅ 2026-01-01\n- [ ] A\n')
+    expect(up.raw.split('\n')[up.line]).toBe('- [ ] B')
+    // No open task above: no-op.
+    expect(moveTask(up.raw, up.line, -1, { sameState: true })).toEqual({ raw: up.raw, line: up.line })
+  })
+
+  it('adds tasks after the last open task of the section, creating it when missing', () => {
     const added = addTask(NOTE, 'Model the monolith')
     const lines = added.split('\n')
     const idx = lines.indexOf('- [ ] Model the monolith')
     expect(idx).toBeGreaterThan(0)
-    expect(lines[idx - 1]).toBe('  - [ ] nested sub-task')
-    expect(lines[idx + 1]).toBe('')
+    // Open tasks stay together above the ticked-off ones.
+    expect(lines[idx - 1]).toBe('- [ ] Block out the terrace')
+    expect(lines[idx + 1]).toBe('- [x] Pick the palette ✅ 2026-09-20')
+    const again = addTask(added, 'Rig the drone').split('\n')
+    expect(again.indexOf('- [ ] Rig the drone')).toBe(again.indexOf('- [ ] Model the monolith') + 1)
+    // Nothing open yet: after the last task, sub-tasks included.
+    const allDone = addTask(setTaskDone(NOTE, extractTasks(NOTE)[0]!.line, true, '2026-09-24'), 'Next').split('\n')
+    expect(allDone[allDone.indexOf('- [ ] Next') - 1]).toBe('  - [ ] nested sub-task')
+    // An open parent keeps its sub-tasks: the new task goes after the whole block.
+    const parent = '## To do\n\n- [ ] Parent\n  - [ ] child\n- [x] Old ✅ 2026-01-01\n'
+    expect(addTask(parent, 'New')).toBe('## To do\n\n- [ ] Parent\n  - [ ] child\n- [ ] New\n- [x] Old ✅ 2026-01-01\n')
     const noSection = addTask('# Empty\n\nsome text\n', 'First')
     expect(noSection).toBe('# Empty\n\nsome text\n\n## To do\n\n- [ ] First\n')
     const emptySection = addTask('# X\n\n## To do\n\n## Notes\n', 'A')

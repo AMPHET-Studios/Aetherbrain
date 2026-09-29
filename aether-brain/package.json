@@ -13,7 +13,7 @@
     "dev:desktop": "pnpm --filter @aether/desktop dev",
     "build": "pnpm --filter @aether/web build",
     "build:desktop": "pnpm --filter @aether/desktop build",
-    "typecheck": "tsc -p tsconfig.json --noEmit && pnpm --filter @aether/desktop typecheck:main",
+    "typecheck": "tsc -p tsconfig.json --noEmit && pnpm --filter @aether/desktop typecheck:main && pnpm --filter @aether/desktop typecheck:mcp",
     "test": "vitest run",
     "test:watch": "vitest",
     "check": "pnpm typecheck && pnpm test && pnpm build"

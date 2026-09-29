@@ -1,4 +1,5 @@
-// Dev runner: Vite dev server for the renderer + tsc for main/preload + Electron.
+// Dev runner: Vite dev server for the renderer + tsc for main/preload + the AI link's
+// MCP server bundle (built once) + Electron.
 // No extra dependencies (concurrently, wait-on, ...) — a few lines of Node do it.
 import { spawn } from 'node:child_process'
 import { createConnection } from 'node:net'
@@ -23,12 +24,25 @@ const waitForPort = (port, tries = 200) =>
     attempt(tries)
   })
 
+/** dist/mcp/aether-mcp.mjs, which main imports for the AI link. A failed build is not fatal: the link reports it. */
+const buildMcp = () =>
+  new Promise((resolve) => {
+    const p = run('pnpm', ['build:mcp'])
+    p.once('error', () => resolve())
+    p.once('exit', (code) => {
+      if (code) console.warn('[dev] pnpm build:mcp failed; the AI link will show the server as missing')
+      resolve()
+    })
+  })
+
+const mcp = buildMcp()
 const vite = run('pnpm', ['exec', 'vite', '--port', String(PORT), '--strictPort'])
 const tsc = run('pnpm', ['exec', 'tsc', '-p', 'tsconfig.main.json', '--watch', '--preserveWatchOutput'])
 
 await waitForPort(PORT)
 // Give tsc a moment to emit dist/main on a cold start.
 await new Promise((r) => setTimeout(r, 1500))
+await mcp
 
 const electron = run('pnpm', ['exec', 'electron', '.'], { env: { ...process.env, VITE_DEV_SERVER_URL: url } })
 electron.on('exit', () => {

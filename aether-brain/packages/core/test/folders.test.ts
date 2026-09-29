@@ -223,15 +223,16 @@ describe('buildGraph with folders', () => {
     expect(node(graph, 'folder:Empty/Deep/Deeper').folder).toMatchObject({ childFolders: 1, hiddenFolders: 1, totalNotes: 0 })
     expect(graph.folderSelection?.visible.has('Empty/Deep/Deeper')).toBe(true)
     const shallow = buildGraph(notes, { folders: { multiRoot: false, all: SINGLE_FOLDERS, rootTitle: 'V', maxDepth: 1 } })
-    // Tech holds no notes and sits below depth 1, but the PORTALz star is pinned.
-    expect(shallow.index.has('folder:Projects/PORTALz/Tech')).toBe(false)
-    expect(node(shallow, 'folder:Projects/PORTALz').folder?.hiddenFolders).toBe(1)
+    // Tech holds no notes and sits below depth 1, but it is a planet of the
+    // PORTALz star, and a star always shows its planets.
+    expect(node(shallow, 'folder:Projects/PORTALz/Tech').parent).toBe('folder:Projects/PORTALz')
+    expect(node(shallow, 'folder:Projects/PORTALz').folder?.hiddenFolders).toBe(0)
     expect(shallow.index.has('folder:Work/Alpha')).toBe(true)
     expect(shallow.index.has('folder:Empty/Deep')).toBe(false)
     const expanded = buildGraph(notes, {
-      folders: { multiRoot: false, all: SINGLE_FOLDERS, rootTitle: 'V', maxDepth: 1, expanded: ['Projects/PORTALz'] },
+      folders: { multiRoot: false, all: SINGLE_FOLDERS, rootTitle: 'V', maxDepth: 1, expanded: ['Empty'] },
     })
-    expect(node(expanded, 'folder:Projects/PORTALz/Tech').parent).toBe('folder:Projects/PORTALz')
+    expect(node(expanded, 'folder:Empty/Deep').parent).toBe('folder:Empty')
   })
 
   it('omits ghosts cleanly with ghosts: false', () => {
@@ -274,6 +275,22 @@ describe('buildGraph with folders, multi-root', () => {
     expect(node(graph, 'F/Notes/Idea').parent).toBe('folder:F/Notes')
     expect(node(graph, 'ghost:Later').parent).toBe('F/Notes/Idea')
     expect(graph.edges).toHaveLength(3)
+  })
+})
+
+describe('buildGraph with folders, deep project stars', () => {
+  it('shows a project star\'s planets (direct subfolders) at any depth, even empty ones', () => {
+    const files = [{ path: 'F/Lunco/PORTALz/PORTALz.md', content: '---\ntype: project\n---\n# PORTALz\n' }]
+    const all = ['F', 'F/Lunco', 'F/Lunco/PORTALz', 'F/Lunco/PORTALz/Content', 'F/Lunco/PORTALz/Content/Maps', 'F/Lunco/PORTALz/Docs', 'F/Other']
+    const graph = buildGraph(notesOf(files), { folders: { multiRoot: true, all, rootTitle: 'Drives', maxDepth: 1 } })
+    expect(node(graph, 'folder:F/Lunco/PORTALz').folder).toMatchObject({ role: 'project', depth: 3, hiddenFolders: 0 })
+    // Planets: shown although deeper than maxDepth and without notes.
+    expect(node(graph, 'folder:F/Lunco/PORTALz/Content').parent).toBe('folder:F/Lunco/PORTALz')
+    expect(node(graph, 'folder:F/Lunco/PORTALz/Docs').folder?.inProject).toBe(true)
+    // Their own subfolders (moons) still follow the depth rule.
+    expect(graph.index.has('folder:F/Lunco/PORTALz/Content/Maps')).toBe(false)
+    expect(node(graph, 'folder:F/Lunco/PORTALz/Content').folder?.hiddenFolders).toBe(1)
+    expect(graph.index.has('folder:F/Other')).toBe(false)
   })
 })
 

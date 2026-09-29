@@ -16,9 +16,13 @@ module.exports = {
     output: 'release',
     buildResources: 'build',
   },
-  // Everything the app needs at runtime is in dist/ (tsc main + preload, Vite renderer)
-  // plus the one production dependency (chokidar), which electron-builder adds itself.
+  // Everything the app needs at runtime is in dist/: tsc main + preload, the Vite
+  // renderer, and the self-contained MCP server bundle (dist/mcp). There are no
+  // production dependencies (the watcher is native recursive fs.watch).
   files: ['dist/**/*', 'package.json', '!dist/**/*.map', '!dist/*-unpacked/**'],
+  // The MCP server also runs outside the app: Claude Desktop / Claude Code start it
+  // with this app's executable (ELECTRON_RUN_AS_NODE=1), which needs a real file on disk.
+  asarUnpack: ['dist/mcp/**'],
   extraMetadata: {
     // Electron reads `main` from the packaged package.json.
     main: 'dist/main/main.js',

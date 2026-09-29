@@ -1,6 +1,6 @@
-import { useMemo } from 'react'
-import { findUnlinkedMentions, ghostTitle, isGhostId, type NoteId } from '@aether/core'
-import { AREA_LABELS } from '@aether/graph'
+import { useEffect, useMemo, useState } from 'react'
+import { findUnlinkedMentions, ghostTitle, isFolderId, isGhostId, type GraphNode, type NoteId } from '@aether/core'
+import { AREA_LABELS, STAR_COLOR, SUN_COLOR, planetColor } from '@aether/graph'
 import { useAether } from '../store'
 import { cx, plural, relativeTime, MOD } from '../util'
 
@@ -30,6 +30,11 @@ export function Inspector() {
   )
 
   if (!selectedId || !graph) return null
+
+  if (isFolderId(selectedId)) {
+    const node = graph.nodes[graph.index.get(selectedId) ?? -1]
+    return node?.folder ? <FolderInspector key={selectedId} node={node} /> : null
+  }
 
   if (isGhostId(selectedId)) {
     const refs = [...(graph.backlinks.get(selectedId) ?? [])]
@@ -189,5 +194,205 @@ function LinkList({
         )
       })}
     </Section>
+  )
+}
+
+const ROLE_LABEL = { root: 'Vault', mount: 'Drive · root folder', project: '★ Project star', folder: 'Folder' } as const
+
+/**
+ * Inspector for a folder node of the system layout: where it is, what is in
+ * it (planets with their note counts, moons), and folder actions — a note or
+ * a folder inside it, make it a project, expand / collapse, reveal on disk.
+ */
+function FolderInspector({ node }: { node: GraphNode }) {
+  const info = node.folder!
+  const graph = useAether((s) => s.graph)
+  const adapter = useAether((s) => s.adapter)
+  const roots = useAether((s) => s.roots)
+  const notes = useAether((s) => s.notes)
+  const expanded = useAether((s) => s.expandedFolders.has(info.path))
+  const select = useAether((s) => s.select)
+  const openNote = useAether((s) => s.openNote)
+  const toggleFolder = useAether((s) => s.toggleFolder)
+  const createFolder = useAether((s) => s.createFolder)
+  const createNote = useAether((s) => s.createNote)
+  const makeProject = useAether((s) => s.makeProject)
+  const selectProject = useAether((s) => s.selectProject)
+  const setView = useAether((s) => s.setView)
+  const reveal = useAether((s) => s.reveal)
+  const controller = useAether((s) => s.controller)
+  const [adding, setAdding] = useState<'note' | 'folder' | null>(null)
+  const [name, setName] = useState('')
+  /** Bumped per palette request so the field mounts again and takes the focus. */
+  const [asked, setAsked] = useState(0)
+
+  const children = useMemo(() => {
+    const planets: GraphNode[] = []
+    const moons: GraphNode[] = []
+    for (const n of graph?.nodes ?? []) {
+      if (n.parent !== node.id) continue
+      if (n.kind === 'folder') planets.push(n)
+      else if (n.kind === 'note') moons.push(n)
+    }
+    planets.sort((a, b) => (b.folder?.totalNotes ?? 0) - (a.folder?.totalNotes ?? 0) || a.title.localeCompare(b.title))
+    moons.sort((a, b) => a.title.localeCompare(b.title))
+    return { planets, moons }
+  }, [graph, node.id])
+
+  const readOnly = !adapter || adapter.readOnly
+  // The vault root of a multi-root vault is not a folder on disk; a drive can't be a project.
+  const onDisk = !(info.role === 'root' && roots.length > 1)
+  const canMkdir = !!adapter?.createFolder
+
+  // The palette's "New note / New folder in the selected folder…" open the inline form below.
+  const formRequest = useAether((s) => s.formRequest)
+  useEffect(() => {
+    if (formRequest !== 'note' && formRequest !== 'folder') return
+    useAether.getState().requestForm(null)
+    if (readOnly || (formRequest === 'folder' && !canMkdir)) return
+    if (!onDisk) {
+      useAether.getState().toast('Pick a drive, or a folder inside one, for that')
+      return
+    }
+    setAdding(formRequest)
+    setName('')
+    setAsked((n) => n + 1)
+  }, [formRequest, readOnly, onDisk, canMkdir])
+  const role = info.role === 'folder' && info.inProject ? 'Planet of a project' : ROLE_LABEL[info.role]
+  const color = info.role === 'project' ? STAR_COLOR : info.role === 'folder' ? planetColor(info.path) : SUN_COLOR
+  const projectNote = info.projectId ? notes.get(info.projectId) : undefined
+  const where = info.role === 'root' ? (adapter?.location ?? '') : `${info.path}/`
+
+  const submit = async () => {
+    const value = name.trim()
+    if (!value || !adding) return
+    const done = adding === 'note' ? await createNote(info.path, value) : await createFolder(info.path ? `${info.path}/${value}` : value)
+    if (done) {
+      setAdding(null)
+      setName('')
+    }
+  }
+
+  return (
+    <aside className="panel rise flex max-h-full w-80 flex-col overflow-hidden" aria-label="Folder inspector">
+      <div className="p-4 pb-3">
+        <div className="section-title flex items-center gap-1.5">
+          <span className="inline-block h-2 w-2 rounded-full" style={{ background: color, boxShadow: `0 0 8px ${color}` }} />
+          {role}
+        </div>
+        <button
+          type="button"
+          className="mt-1 block w-full truncate text-left text-[17px] font-semibold leading-tight text-white hover:text-accent2"
+          onClick={() => controller.flyTo(node.id)}
+          title="Fly to it (f)"
+        >
+          {node.title}
+        </button>
+        <div className="mt-1 truncate font-mono text-[10.5px] text-faint" title={where}>
+          {where}
+        </div>
+        <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11.5px] text-dim">
+          <span title="Notes directly in this folder">· {plural(info.notes, 'moon')}</span>
+          <span title="Notes anywhere under this folder">{plural(info.totalNotes, 'note')} in all</span>
+          <span title="Subfolders on disk">● {plural(info.childFolders, 'folder')}</span>
+          {info.hiddenFolders > 0 && <span className="text-inbox">+{info.hiddenFolders} hidden</span>}
+        </div>
+        <div className="mt-3 flex flex-wrap gap-1.5">
+          {(info.hiddenFolders > 0 || expanded) && (
+            <button type="button" className="hud-btn primary" onClick={() => toggleFolder(info.path)} title="Expand / collapse (x)">
+              {expanded ? 'Collapse' : `Expand +${info.hiddenFolders}`} <kbd className="!text-white/80">x</kbd>
+            </button>
+          )}
+          {info.projectId ? (
+            <button
+              type="button"
+              className="hud-btn"
+              onClick={() => {
+                selectProject(info.projectId)
+                setView('projects')
+              }}
+              title={projectNote ? `Open the board of ${projectNote.meta.title}` : 'Open the project board'}
+            >
+              ★ Project board
+            </button>
+          ) : (
+            info.role === 'folder' && (
+              <button type="button" className="hud-btn" disabled={readOnly} onClick={() => void makeProject(info.path)} title={`Writes ${info.path}/${node.title}.md — the folder becomes a star`}>
+                ★ Make project
+              </button>
+            )
+          )}
+          {adapter?.reveal && onDisk && (
+            <button type="button" className="hud-btn" onClick={() => void reveal(info.path)} title="Show in the file manager">
+              Reveal
+            </button>
+          )}
+          <button type="button" className="hud-btn" onClick={() => select(null)} title="Deselect (Esc)">
+            ✕
+          </button>
+        </div>
+        {!readOnly && onDisk && (
+          <div className="mt-2 flex gap-1.5">
+            <button type="button" className="hud-btn" aria-pressed={adding === 'note'} onClick={() => setAdding(adding === 'note' ? null : 'note')}>
+              + Note here
+            </button>
+            <button type="button" className="hud-btn" aria-pressed={adding === 'folder'} onClick={() => setAdding(adding === 'folder' ? null : 'folder')} disabled={!canMkdir}>
+              + Folder here
+            </button>
+          </div>
+        )}
+        {adding && (
+          <form
+            className="mt-2 flex gap-1.5"
+            onSubmit={(e) => {
+              e.preventDefault()
+              void submit()
+            }}
+          >
+            <input
+              key={asked}
+              autoFocus
+              className="input !py-1.5 !text-[12.5px]"
+              placeholder={adding === 'note' ? 'Title of the new note' : 'Name of the new folder'}
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              onKeyDown={(e) => e.key === 'Escape' && (e.stopPropagation(), setAdding(null))}
+              aria-label={adding === 'note' ? 'New note title' : 'New folder name'}
+            />
+            <button type="submit" className="hud-btn primary" disabled={!name.trim()}>
+              Add
+            </button>
+          </form>
+        )}
+      </div>
+
+      <div className="scroll flex-1 border-t border-[var(--line)] px-4 py-3">
+        {children.planets.length > 0 && (
+          <Section title={`Planets · ${children.planets.length}`}>
+            {children.planets.map((p) => (
+              <div key={p.id} className="flex items-center gap-2 py-0.5">
+                <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: p.folder?.role === 'project' ? STAR_COLOR : planetColor(p.folder?.path ?? '') }} />
+                <button
+                  type="button"
+                  className="min-w-0 flex-1 truncate text-left text-[12.5px] text-dim hover:text-ink"
+                  onClick={() => select(p.id, { fly: true })}
+                  onDoubleClick={() => openNote(p.id, { fly: true })}
+                  title="Click: select · double-click: expand"
+                >
+                  {p.folder?.role === 'project' ? '★ ' : ''}
+                  {p.title}
+                </button>
+                <span className="shrink-0 text-[10.5px] tabular-nums text-faint">
+                  {p.folder?.totalNotes ?? 0}
+                  {p.folder?.hiddenFolders ? ` · +${p.folder.hiddenFolders}` : ''}
+                </span>
+              </div>
+            ))}
+          </Section>
+        )}
+        {children.moons.length > 0 && <LinkList title="Moons" ids={children.moons.map((n) => n.id)} onOpen={openNote} onSelect={select} />}
+        {children.planets.length === 0 && children.moons.length === 0 && <div className="text-[12px] text-faint">Empty so far. Add a note or a folder above.</div>}
+      </div>
+    </aside>
   )
 }

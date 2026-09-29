@@ -13,3 +13,4 @@ test-results/
 playwright-report/
 .aether-user-settings.json
 release/
+.vitest/

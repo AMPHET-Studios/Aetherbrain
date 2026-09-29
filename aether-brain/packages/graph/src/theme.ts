@@ -43,6 +43,29 @@ export const TYPE_COLORS: Record<NoteType, string> = {
 
 export const GHOST_COLOR = '#ff3e6c'
 
+/** Project folders: the stars of the system layout. */
+export const STAR_COLOR = '#ffcf6b'
+/** The vault root and its mounts (drives): the suns everything orbits. */
+export const SUN_COLOR = '#fff1d6'
+
+/**
+ * Planet color for a folder: a stable hashed hue with soft saturation. Hues in
+ * the gold band of the stars are skipped so a planet never reads as a star.
+ */
+export function planetColor(path: string): string {
+  let h = 2166136261
+  for (let i = 0; i < path.length; i++) {
+    h ^= path.charCodeAt(i)
+    h = Math.imul(h, 16777619)
+  }
+  h ^= h >>> 15
+  h = Math.imul(h, 0x2c1b3c6d)
+  h ^= h >>> 12
+  let hue = (h >>> 0) % 335
+  if (hue >= 32) hue += 25
+  return `hsl(${hue}, 42%, 62%)`
+}
+
 export type ColorMode = 'area' | 'type' | 'tag' | 'age'
 
 /** Stable hue per tag (golden-angle walk over a string hash). */
@@ -53,7 +76,8 @@ export function tagColor(tag: string): string {
     h = Math.imul(h, 16777619)
   }
   const hue = ((h >>> 0) * 137.508) % 360
-  return `hsl(${hue.toFixed(0)} 85% 68%)`
+  // Comma syntax: three's Color parser does not read the space-separated form (it falls back to white).
+  return `hsl(${hue.toFixed(0)}, 85%, 68%)`
 }
 
 const _ageA = new Color('#ffe08a')
@@ -81,6 +105,13 @@ export function nodeBaseColor(
   activeTag: string | null,
   ageOf: (n: GraphNode) => number,
 ): Color {
+  // Folders are the structure of the system layout: they ignore the color mode.
+  if (n.folder) {
+    const role = n.folder.role
+    if (role === 'root' || role === 'mount') return cachedColor(SUN_COLOR)
+    if (role === 'project') return cachedColor(STAR_COLOR)
+    return cachedColor(planetColor(n.folder.path))
+  }
   if (n.ghost) return cachedColor(GHOST_COLOR)
   switch (mode) {
     case 'type':
@@ -98,8 +129,19 @@ export function nodeBaseColor(
   }
 }
 
-/** Visual radius in world units. Hubs grow with sqrt(degree); MOCs get a bonus. */
+/**
+ * Visual radius in world units. Notes: hubs grow with sqrt(degree); MOCs get a
+ * bonus. Folders by role: suns (root 8, mounts 6.5), project stars 5.5, and
+ * planets that grow with how much they hold (1.6 to 4.2).
+ */
 export function nodeRadius(n: GraphNode): number {
+  if (n.folder) {
+    const f = n.folder
+    if (f.role === 'root') return 8
+    if (f.role === 'mount') return 6.5
+    if (f.role === 'project') return 5.5
+    return Math.min(4.2, Math.max(1.6, 1.6 + 0.55 * Math.log2(1 + f.totalNotes + f.childFolders)))
+  }
   if (n.ghost) return 0.8
   const base = 1.0 + 0.5 * Math.sqrt(n.degree)
   const bonus = n.type === 'moc' ? 1.3 : n.type === 'project' || n.type === 'area' ? 1.1 : 1

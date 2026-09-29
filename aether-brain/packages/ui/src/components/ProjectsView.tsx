@@ -1,67 +1,127 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { LinkResolver, extractTasks, taskProgress, type NoteId, type ParsedNote, type TaskItem } from '@aether/core'
+import {
+  LinkResolver,
+  asString,
+  asStringArray,
+  defaultProjectFolder,
+  folderOf,
+  moveTask as moveTaskInNote,
+  normalizeTag,
+  projectFolderOf,
+  projectSummary,
+  type ParsedNote,
+  type TaskItem,
+} from '@aether/core'
+import { listProjects, type ProjectRow } from '../projects'
 import { useAether } from '../store'
-import { cx, MOD, plural, relativeTime } from '../util'
+import { cx, isControl, MOD, plural, relativeTime } from '../util'
 
-interface ProjectRow {
-  note: ParsedNote
-  tasks: TaskItem[]
-  open: TaskItem[]
-  done: TaskItem[]
-  pct: number
-}
+/** What the status select offers (plus the project's own value when it is something else). */
+const STATUSES = ['active', 'paused', 'done', 'someday']
 
-const STATUS_ORDER: Record<string, number> = { active: 0, 'in progress': 0, budding: 1, seedling: 1, paused: 2, done: 3 }
+type EditField = 'title' | 'summary' | 'tags'
 
 /**
- * Projects board: every project note (type: project or in Projects/) as a
- * card with progress, and a to-do panel whose ticks and additions are written
- * straight back into the note's markdown — the file is the memory.
+ * The summary as written: the `>` lines right after the H1, markdown kept (so
+ * an edit doesn't flatten its [[links]]); null when the note has none.
+ */
+function summaryQuote(note: ParsedNote): string | null {
+  const lines = note.body.split(/\r?\n/)
+  let i = lines.findIndex((l) => /^#\s+/.test(l)) + 1
+  while (i < lines.length && (lines[i] ?? '').trim() === '') i++
+  const quote: string[] = []
+  while (i < lines.length && /^\s{0,3}>/.test(lines[i] ?? '')) quote.push((lines[i++] ?? '').replace(/^\s{0,3}>\s?/, ''))
+  return quote.length ? quote.join(' ').replace(/\s+/g, ' ').trim() : null
+}
+
+/** A text field that takes the keys (checkboxes, buttons and task rows don't). */
+function isTextEntry(target: EventTarget | null): boolean {
+  const el = target as HTMLElement | null
+  if (!el?.tagName) return false
+  if (el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable) return true
+  return el.tagName === 'INPUT' && !['checkbox', 'radio', 'button'].includes((el as HTMLInputElement).type)
+}
+
+/**
+ * Projects board: every project note (see `isProjectNote`) as a card with
+ * progress; the selected project is editable in place — name, status, tags,
+ * summary, its home folder (the star) and the folders inside it (planets),
+ * and a to-do list whose ticks, edits, moves and deletes are written straight
+ * back into the note's markdown. The file is the memory.
  */
 export function ProjectsView() {
   const view = useAether((s) => s.view)
   const setView = useAether((s) => s.setView)
   const notes = useAether((s) => s.notes)
+  const folders = useAether((s) => s.folders)
   const revision = useAether((s) => s.revision)
   const projectId = useAether((s) => s.projectId)
   const selectProject = useAether((s) => s.selectProject)
   const toggleTask = useAether((s) => s.toggleTask)
   const addTask = useAether((s) => s.addTask)
+  const editTask = useAether((s) => s.editTask)
+  const deleteTask = useAether((s) => s.deleteTask)
+  const moveTask = useAether((s) => s.moveTask)
   const createProject = useAether((s) => s.createProject)
+  const updateProject = useAether((s) => s.updateProject)
+  const archiveProject = useAether((s) => s.archiveProject)
+  const deleteProject = useAether((s) => s.deleteProject)
+  const createFolder = useAether((s) => s.createFolder)
+  const showFolder = useAether((s) => s.showFolder)
   const openNote = useAether((s) => s.openNote)
+  const homePrefix = useAether((s) => s.homePrefix)
   const readOnly = useAether((s) => s.adapter?.readOnly ?? false)
+  const canMkdir = useAether((s) => !!s.adapter?.createFolder)
 
   const [newTask, setNewTask] = useState('')
   const [creating, setCreating] = useState(false)
+  /** Bumped per palette request so the name field mounts again and takes the focus. */
+  const [asked, setAsked] = useState(0)
   const [newName, setNewName] = useState('')
   const [newSummary, setNewSummary] = useState('')
   const [showDone, setShowDone] = useState(false)
+  const [edit, setEdit] = useState<EditField | null>(null)
+  const [picking, setPicking] = useState(false)
+  const [newFolder, setNewFolder] = useState('')
+  const [editingLine, setEditingLine] = useState<number | null>(null)
+  const [focusLine, setFocusLine] = useState<number | null>(null)
   const taskInput = useRef<HTMLInputElement | null>(null)
+  const folderInput = useRef<HTMLInputElement | null>(null)
+  const board = useRef<HTMLDivElement | null>(null)
 
-  const rows = useMemo<ProjectRow[]>(() => {
-    const out: ProjectRow[] = []
-    for (const n of notes.values()) {
-      const m = n.meta
-      if (m.area === 'archive') continue
-      if (m.type !== 'project' && m.area !== 'projects') continue
-      const tasks = extractTasks(n.raw)
-      out.push({
-        note: n,
-        tasks,
-        open: tasks.filter((t) => !t.done),
-        done: tasks.filter((t) => t.done).sort((a, b) => (b.doneAt ?? '').localeCompare(a.doneAt ?? '')),
-        pct: taskProgress(tasks).pct,
-      })
-    }
-    return out.sort((a, b) => {
-      const sa = STATUS_ORDER[(a.note.meta.status ?? '').toLowerCase()] ?? 1
-      const sb = STATUS_ORDER[(b.note.meta.status ?? '').toLowerCase()] ?? 1
-      if (sa !== sb) return sa - sb
-      return (b.note.meta.updated ?? '').localeCompare(a.note.meta.updated ?? '')
-    })
-  }, [notes, revision])
+  const rows = useMemo(() => listProjects(notes, folders), [notes, folders, revision])
 
   const current = rows.find((r) => r.note.meta.id === projectId) ?? rows[0] ?? null
+  const currentId = current?.note.meta.id ?? null
+
+  /** Direct subfolder counts, per folder. */
+  const childCounts = useMemo(() => {
+    const m = new Map<string, number>()
+    for (const f of folders) {
+      const p = folderOf(f)
+      m.set(p, (m.get(p) ?? 0) + 1)
+    }
+    return m
+  }, [folders])
+
+  // The planets of the current project: subfolders of its home folder, with the notes under each.
+  const home = current?.home ?? null
+  const planets = useMemo(() => {
+    if (!home) return { list: [] as { path: string; name: string; notes: number; sub: number }[], total: 0 }
+    const list = [...folders].filter((f) => folderOf(f) === home).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }))
+    const counts = new Map(list.map((f) => [f, 0]))
+    let total = 0
+    for (const n of notes.values()) {
+      const f = n.meta.folder
+      if (f !== home && !f.startsWith(`${home}/`)) continue
+      total++
+      if (f === home) continue
+      const top = `${home}/${f.slice(home.length + 1).split('/')[0] ?? ''}`
+      const c = counts.get(top)
+      if (c !== undefined) counts.set(top, c + 1)
+    }
+    return { list: list.map((f) => ({ path: f, name: f.slice(home.length + 1), notes: counts.get(f) ?? 0, sub: childCounts.get(f) ?? 0 })), total }
+  }, [home, folders, notes, revision, childCounts])
 
   // Keep the store's selection valid so the graph highlights the right neuron.
   useEffect(() => {
@@ -69,35 +129,91 @@ export function ProjectsView() {
     if (current && current.note.meta.id !== projectId) selectProject(current.note.meta.id)
   }, [view, current?.note.meta.id, projectId, selectProject])
 
+  // The palette's "New project…" opens the create form here.
+  const formRequest = useAether((s) => s.formRequest)
+  useEffect(() => {
+    if (formRequest !== 'project' || view !== 'projects') return
+    useAether.getState().requestForm(null)
+    if (readOnly) return
+    setCreating(true)
+    setAsked((n) => n + 1)
+  }, [formRequest, view, readOnly])
+
+  // Another project: leave any half-done edit behind.
+  useEffect(() => {
+    setEdit(null)
+    setPicking(false)
+    setEditingLine(null)
+  }, [currentId])
+
+  // Put focus back on a task row after it was edited, moved or deleted (its line may have changed).
+  useEffect(() => {
+    if (focusLine === null) return
+    board.current?.querySelector<HTMLElement>(`[data-task="${focusLine}"]`)?.focus()
+    setFocusLine(null)
+  }, [focusLine, current])
+
+  const cycleStatus = () => {
+    if (!current || readOnly) return
+    const cur = (current.note.meta.status ?? '').toLowerCase()
+    const next = STATUSES[(STATUSES.indexOf(cur) + 1) % STATUSES.length]!
+    void updateProject(current.note.meta.id, { status: next })
+  }
+
   useEffect(() => {
     if (view !== 'projects') return
     const onKey = (e: KeyboardEvent) => {
-      const el = e.target as HTMLElement | null
-      const typing = !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')
-      if (typing) return
-      if (!current) return
-      const idx = rows.findIndex((r) => r.note.meta.id === current.note.meta.id)
+      if (e.ctrlKey || e.metaKey || e.altKey || isTextEntry(e.target)) return
+      const st = useAether.getState()
+      if (st.paletteOpen || st.helpOpen) return
+      // A focused task row handles its own keys (Enter edits, ↑↓ move focus, Del deletes, Space ticks).
+      const onRow = !!(e.target as HTMLElement | null)?.closest?.('[data-task]')
+      if (onRow && ['Enter', 'ArrowUp', 'ArrowDown', 'Delete', 'Backspace', ' '].includes(e.key)) return
+      const idx = current ? rows.findIndex((r) => r.note.meta.id === current.note.meta.id) : -1
       switch (e.key) {
+        case 'N':
+          if (readOnly) return
+          setCreating(true)
+          break
+        case 'u':
+          if (!useAether.getState().toastAction()) return
+          break
         case 'j':
         case 'ArrowDown':
+          if (!current) return
           selectProject(rows[Math.min(rows.length - 1, idx + 1)]?.note.meta.id ?? current.note.meta.id)
           break
         case 'k':
         case 'ArrowUp':
+          if (!current) return
           selectProject(rows[Math.max(0, idx - 1)]?.note.meta.id ?? current.note.meta.id)
           break
         case 'o':
         case 'Enter':
+          // Enter on a focused card, button or link activates that control (a card selects its project).
+          if (!current || (e.key === 'Enter' && isControl(e.target))) return
           openNote(current.note.meta.id, { fly: true, view: 'editor' })
           break
         case 'n':
+          if (!current) return
           taskInput.current?.focus()
-          break
-        case 'N':
-          setCreating(true)
           break
         case 'x':
           setShowDone((v) => !v)
+          break
+        case 'e':
+          if (!current || readOnly) return
+          setCreating(false)
+          setEdit('title')
+          break
+        case 'f':
+          if (!current || readOnly || !canMkdir) return
+          setCreating(false)
+          folderInput.current?.focus()
+          break
+        case 's':
+          if (!current || readOnly) return
+          cycleStatus()
           break
         default:
           return
@@ -107,7 +223,7 @@ export function ProjectsView() {
     }
     window.addEventListener('keydown', onKey, { capture: true })
     return () => window.removeEventListener('keydown', onKey, { capture: true })
-  }, [view, rows, current, selectProject, openNote])
+  }, [view, rows, current, selectProject, openNote, readOnly, canMkdir])
 
   if (view !== 'projects') return null
 
@@ -127,8 +243,38 @@ export function ProjectsView() {
     if (id) selectProject(id)
   }
 
+  /** Fly to a folder in the system layout (the board steps aside). */
+  const flyToFolder = (path: string) => {
+    setView('graph')
+    showFolder(path)
+  }
+
+  /**
+   * Create `path` (or find it: `createFolder` keeps an existing spelling) and
+   * make it the current project's home, linked with `folder:` when the name
+   * rules don't bind it on their own. Returns the folder, or null.
+   */
+  const makeHome = async (path: string): Promise<string | null> => {
+    if (!current) return null
+    const id = current.note.meta.id
+    const dir = folders.has(path) ? path : await createFolder(path)
+    if (!dir) return null
+    const s = useAether.getState()
+    const note = s.notes.get(id)
+    if (note && projectFolderOf(note, s.folders) !== dir) await updateProject(id, { folder: dir })
+    return dir
+  }
+
+  /** A planet `<home>/<name>`; the home folder is created (and linked) first when the project has none yet. */
+  const addPlanet = async () => {
+    const name = newFolder.trim()
+    if (!current || !name) return
+    const dir = await makeHome(current.home ?? defaultProjectFolder(current.note))
+    if (dir && (await createFolder(`${dir}/${name}`))) setNewFolder('')
+  }
+
   return (
-    <div className="absolute inset-0 z-30 flex items-stretch justify-center bg-black/30 p-3 pt-16" onMouseDown={(e) => e.target === e.currentTarget && setView('graph')} role="dialog" aria-label="Projects">
+    <div ref={board} className="absolute inset-0 z-30 flex items-stretch justify-center bg-black/30 p-3 pt-16" onMouseDown={(e) => e.target === e.currentTarget && setView('graph')} role="dialog" aria-label="Projects">
       <div className="panel rise flex w-full max-w-[1180px] overflow-hidden">
         {/* Left: project cards */}
         <div className="flex w-[340px] shrink-0 flex-col border-r border-[var(--line)]">
@@ -144,13 +290,15 @@ export function ProjectsView() {
           <div className="scroll flex-1 p-2">
             {rows.length === 0 && (
               <div className="p-4 text-center text-[12.5px] text-dim">
-                No projects yet. A project is any note in <code>Projects/</code> or with <code>type: project</code>.
+                No projects yet. A project is a note directly in <code>Projects/</code>, a folder note like <code>Projects/X/X.md</code>, or any note with{' '}
+                <code>type: project</code>.
               </div>
             )}
             {rows.map((r) => {
               const m = r.note.meta
               const active = current?.note.meta.id === m.id
               const next = r.open[0]
+              const planetCount = r.home ? (childCounts.get(r.home) ?? 0) : 0
               return (
                 <button
                   type="button"
@@ -178,6 +326,7 @@ export function ProjectsView() {
                   <div className="mt-1 truncate text-[11.5px] text-dim">{next ? `next: ${next.text}` : r.tasks.length ? 'all done ✓' : 'no tasks yet'}</div>
                   <div className="mt-1 flex items-center gap-2 text-[10.5px] text-faint">
                     <span>✎ {relativeTime(m.updated)}</span>
+                    {planetCount > 0 && <span title="Folders inside the project folder">● {plural(planetCount, 'planet')}</span>}
                     {m.tags.slice(0, 3).map((t) => (
                       <span key={t}>#{t}</span>
                     ))}
@@ -186,12 +335,13 @@ export function ProjectsView() {
               )
             })}
           </div>
-          <div className="border-t border-[var(--line)] px-3 py-1.5 text-[11px] text-faint">
-            <kbd>j</kbd>/<kbd>k</kbd> move · <kbd>Enter</kbd> open · <kbd>n</kbd> new task · <kbd>⇧N</kbd> new project · <kbd>x</kbd> done list
+          <div className="border-t border-[var(--line)] px-3 py-1.5 text-[11px] leading-relaxed text-faint">
+            <kbd>j</kbd>/<kbd>k</kbd> move · <kbd>Enter</kbd> open · <kbd>e</kbd> rename · <kbd>s</kbd> status · <kbd>f</kbd> folder · <kbd>n</kbd> task · <kbd>⇧N</kbd> new
+            project · <kbd>x</kbd> done list
           </div>
         </div>
 
-        {/* Right: to-do panel */}
+        {/* Right: the selected project */}
         <div className="flex min-w-0 flex-1 flex-col">
           {creating ? (
             <form
@@ -202,8 +352,24 @@ export function ProjectsView() {
               }}
             >
               <div className="text-[15px] font-semibold text-white">New project</div>
-              <input autoFocus className="input" placeholder="Name (becomes Projects/Name.md)" value={newName} onChange={(e) => setNewName(e.target.value)} onKeyDown={(e) => e.key === 'Escape' && (e.stopPropagation(), setCreating(false))} aria-label="Project name" />
-              <input className="input" placeholder="One line: what done looks like (optional)" value={newSummary} onChange={(e) => setNewSummary(e.target.value)} onKeyDown={(e) => e.key === 'Escape' && (e.stopPropagation(), setCreating(false))} aria-label="Project summary" />
+              <input
+                key={asked}
+                autoFocus
+                className="input"
+                placeholder={`Name (becomes ${homePrefix()}Projects/Name.md)`}
+                value={newName}
+                onChange={(e) => setNewName(e.target.value)}
+                onKeyDown={(e) => e.key === 'Escape' && (e.stopPropagation(), setCreating(false))}
+                aria-label="Project name"
+              />
+              <input
+                className="input"
+                placeholder="One line: what done looks like (optional)"
+                value={newSummary}
+                onChange={(e) => setNewSummary(e.target.value)}
+                onKeyDown={(e) => e.key === 'Escape' && (e.stopPropagation(), setCreating(false))}
+                aria-label="Project summary"
+              />
               <div className="flex gap-2">
                 <button type="submit" className="hud-btn primary" disabled={!newName.trim()}>
                   Create
@@ -219,41 +385,107 @@ export function ProjectsView() {
             </div>
           ) : (
             <>
-              <div className="border-b border-[var(--line)] px-5 py-3">
-                <div className="flex items-start gap-3">
-                  <div className="min-w-0 flex-1">
-                    <button type="button" className="block max-w-full truncate text-left text-[18px] font-semibold text-white hover:text-accent2" onClick={() => openNote(current.note.meta.id, { fly: true, view: 'editor' })} title="Open in editor (Enter)">
-                      {current.note.meta.title}
-                    </button>
-                    <div className="mt-0.5 font-mono text-[10.5px] text-faint">{current.note.meta.path}</div>
-                  </div>
-                  <StatusChip status={current.note.meta.status} />
-                  <button type="button" className="hud-btn" onClick={() => openNote(current.note.meta.id, { fly: true, view: 'editor' })}>
-                    Open note <kbd>Enter</kbd>
-                  </button>
-                </div>
-                <Summary note={current.note} />
-              </div>
+              <ProjectHeader
+                key={current.note.meta.id}
+                row={current}
+                readOnly={readOnly}
+                edit={edit}
+                setEdit={setEdit}
+                onOpen={() => openNote(current.note.meta.id, { fly: true, view: 'editor' })}
+                onUpdate={(patch) => void updateProject(current.note.meta.id, patch)}
+                onArchive={() => void archiveProject(current.note.meta.id)}
+                onDelete={() => {
+                  const extra = current.home ? ` Its folder ${current.home}/ stays on disk.` : ''
+                  if (window.confirm(`Delete the project note "${current.note.meta.title}"? This removes ${current.note.meta.path} from the vault.${extra}`)) {
+                    void deleteProject(current.note.meta.id)
+                  }
+                }}
+              />
 
               <div className="scroll flex-1 px-5 py-3">
-                <div className="section-title mb-2">
-                  To do · {current.open.length}
-                </div>
+                <HomeFolder
+                  row={current}
+                  folders={folders}
+                  readOnly={readOnly}
+                  canCreate={!readOnly && canMkdir}
+                  picking={picking}
+                  setPicking={setPicking}
+                  totalNotes={planets.total}
+                  onShow={flyToFolder}
+                  onCreate={(path) => void makeHome(path)}
+                  onLink={(path) => void updateProject(current.note.meta.id, { folder: path })}
+                />
+
+                {current.home && planets.list.length > 0 && (
+                  <div className="mb-3 flex flex-wrap gap-1.5">
+                    {planets.list.map((p) => (
+                      <button
+                        type="button"
+                        key={p.path}
+                        className="chip"
+                        onClick={() => flyToFolder(p.path)}
+                        title={`${p.path} · ${plural(p.notes, 'note')}${p.sub ? ` · ${plural(p.sub, 'folder')}` : ''} — fly there`}
+                      >
+                        <span className="dot" style={{ background: 'var(--accent-2)', color: 'var(--accent-2)' }} />
+                        {p.name}
+                        <span className="opacity-60">{p.notes}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {!readOnly && canMkdir && (
+                  <form
+                    className="mb-5 flex items-center gap-2"
+                    onSubmit={(e) => {
+                      e.preventDefault()
+                      void addPlanet()
+                    }}
+                  >
+                    <input
+                      ref={folderInput}
+                      className="input !py-1.5 !text-[12.5px]"
+                      placeholder={`Add folder (planet) inside ${current.home ?? defaultProjectFolder(current.note)}/ …`}
+                      value={newFolder}
+                      onChange={(e) => setNewFolder(e.target.value)}
+                      onKeyDown={(e) => e.key === 'Escape' && (e.stopPropagation(), setNewFolder(''), e.currentTarget.blur())}
+                      aria-label="New folder name"
+                    />
+                    <button type="submit" className="hud-btn" disabled={!newFolder.trim()}>
+                      + Folder <kbd>f</kbd>
+                    </button>
+                  </form>
+                )}
+
+                <div className="section-title mb-2">To do · {current.open.length}</div>
                 {current.open.length === 0 && <div className="mb-3 text-[12.5px] text-dim">Nothing open. Add one below.</div>}
-                <ul className="mb-4">
-                  {current.open.map((t) => (
-                    <TaskRow key={t.line} task={t} readOnly={readOnly} onToggle={(done) => void toggleTask(current.note.meta.id, t.line, done)} />
-                  ))}
-                </ul>
+                <TaskList
+                  tasks={current.open}
+                  row={current}
+                  readOnly={readOnly}
+                  editingLine={editingLine}
+                  setEditingLine={setEditingLine}
+                  setFocusLine={setFocusLine}
+                  onToggle={(t, done) => toggleTask(current.note.meta.id, t.line, done, current.note.raw)}
+                  onEdit={(t, text) => editTask(current.note.meta.id, t.line, text, current.note.raw)}
+                  onDelete={(t) => deleteTask(current.note.meta.id, t.line, current.note.raw)}
+                  onMove={(t, dir) => moveTask(current.note.meta.id, t.line, dir, current.note.raw)}
+                />
                 <button type="button" className="section-title mb-2 flex items-center gap-1 hover:text-ink" onClick={() => setShowDone((v) => !v)} aria-expanded={showDone}>
                   <span>{showDone ? '▾' : '▸'}</span> Done · {current.done.length}
                 </button>
                 {showDone && (
-                  <ul className="mb-4">
-                    {current.done.map((t) => (
-                      <TaskRow key={t.line} task={t} readOnly={readOnly} onToggle={(done) => void toggleTask(current.note.meta.id, t.line, done)} />
-                    ))}
-                  </ul>
+                  <TaskList
+                    tasks={current.done}
+                    row={current}
+                    readOnly={readOnly}
+                    editingLine={editingLine}
+                    setEditingLine={setEditingLine}
+                    setFocusLine={setFocusLine}
+                    onToggle={(t, done) => toggleTask(current.note.meta.id, t.line, done, current.note.raw)}
+                    onEdit={(t, text) => editTask(current.note.meta.id, t.line, text, current.note.raw)}
+                    onDelete={(t) => deleteTask(current.note.meta.id, t.line, current.note.raw)}
+                    onMove={(t, dir) => moveTask(current.note.meta.id, t.line, dir, current.note.raw)}
+                  />
                 )}
               </div>
 
@@ -287,6 +519,541 @@ export function ProjectsView() {
         </div>
       </div>
     </div>
+  )
+}
+
+/**
+ * A one-line text field for an inline edit: Enter (or leaving the field)
+ * saves, Esc cancels. Esc never reaches the board, so it stays open.
+ */
+function InlineInput({
+  initial,
+  onSave,
+  onCancel,
+  label,
+  placeholder,
+  className,
+}: {
+  initial: string
+  onSave: (value: string) => void
+  onCancel: () => void
+  label: string
+  placeholder?: string
+  className?: string
+}) {
+  const [value, setValue] = useState(initial)
+  const done = useRef(false)
+  const finish = (save: boolean) => {
+    if (done.current) return
+    done.current = true
+    if (save) onSave(value)
+    else onCancel()
+  }
+  return (
+    <input
+      autoFocus
+      className={cx('input', className)}
+      value={value}
+      placeholder={placeholder}
+      aria-label={label}
+      onChange={(e) => setValue(e.target.value)}
+      onFocus={(e) => e.currentTarget.select()}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault()
+          e.stopPropagation()
+          finish(true)
+        } else if (e.key === 'Escape') {
+          e.preventDefault()
+          e.stopPropagation()
+          finish(false)
+        }
+      }}
+      onBlur={() => finish(true)}
+    />
+  )
+}
+
+/** Name, status, tags and summary of a project, each editable in place, plus its actions. */
+function ProjectHeader({
+  row,
+  readOnly,
+  edit,
+  setEdit,
+  onOpen,
+  onUpdate,
+  onArchive,
+  onDelete,
+}: {
+  row: ProjectRow
+  readOnly: boolean
+  edit: EditField | null
+  setEdit: (f: EditField | null) => void
+  onOpen: () => void
+  onUpdate: (patch: { title?: string; status?: string | null; summary?: string | null; tags?: string[]; renameFile?: boolean }) => void
+  onArchive: () => void
+  onDelete: () => void
+}) {
+  const m = row.note.meta
+  const summary = useMemo(() => projectSummary(row.note), [row.note])
+  const summarySource = useMemo(() => summaryQuote(row.note) ?? summary, [row.note, summary])
+  const tags = useMemo(() => asStringArray(row.note.frontmatter['tags']).map(normalizeTag).filter(Boolean), [row.note])
+  const status = m.status
+  const options = status && !STATUSES.includes(status.toLowerCase()) ? [...STATUSES, status] : STATUSES
+  return (
+    <div className="border-b border-[var(--line)] px-5 py-3">
+      <div className="flex items-start gap-3">
+        <div className="min-w-0 flex-1">
+          {edit === 'title' ? (
+            <InlineInput
+              initial={m.title}
+              label="Project name"
+              className="!py-1 !text-[17px] font-semibold"
+              onSave={(v) => {
+                setEdit(null)
+                if (v.trim() && v.trim() !== m.title) onUpdate({ title: v, renameFile: true })
+              }}
+              onCancel={() => setEdit(null)}
+            />
+          ) : (
+            <button
+              type="button"
+              className="block max-w-full truncate text-left text-[18px] font-semibold text-white hover:text-accent2 disabled:hover:text-white"
+              onClick={() => setEdit('title')}
+              disabled={readOnly}
+              title="Rename the project (e) — the file follows unless it is the folder's own note"
+            >
+              {m.title}
+            </button>
+          )}
+          <div className="mt-0.5 font-mono text-[10.5px] text-faint">{m.path}</div>
+        </div>
+        <select
+          className="input !w-auto !py-1 !pr-2 !pl-2 !text-[11.5px] font-semibold uppercase tracking-wider"
+          value={status?.toLowerCase() && STATUSES.includes(status.toLowerCase()) ? status.toLowerCase() : (status ?? '')}
+          disabled={readOnly}
+          onChange={(e) => onUpdate({ status: e.target.value || null })}
+          aria-label="Status (s cycles)"
+          title="Status (s cycles)"
+        >
+          {!status && <option value="">— status</option>}
+          {options.map((o) => (
+            <option key={o} value={o}>
+              {o}
+            </option>
+          ))}
+        </select>
+        <button type="button" className="hud-btn" onClick={onOpen}>
+          Open note <kbd>Enter</kbd>
+        </button>
+      </div>
+
+      {edit === 'summary' ? (
+        <InlineInput
+          initial={summarySource}
+          label="Project summary"
+          placeholder="One line: what this project is and what done looks like"
+          className="mt-2 !py-1.5 !text-[12.5px]"
+          onSave={(v) => {
+            setEdit(null)
+            if (v.replace(/\s+/g, ' ').trim() !== summarySource) onUpdate({ summary: v })
+          }}
+          onCancel={() => setEdit(null)}
+        />
+      ) : (
+        <button
+          type="button"
+          className="mt-2 line-clamp-2 block w-full text-left text-[12.5px] leading-relaxed text-dim hover:text-ink disabled:hover:text-dim"
+          onClick={() => setEdit('summary')}
+          disabled={readOnly}
+          title="Edit the summary (the > line under the title)"
+        >
+          {summary || <span className="text-faint">{readOnly ? 'No summary' : '+ Add a one-line summary'}</span>}
+        </button>
+      )}
+
+      <div className="mt-2 flex flex-wrap items-center gap-1.5">
+        {edit === 'tags' ? (
+          <InlineInput
+            initial={tags.join(', ')}
+            label="Project tags"
+            placeholder="tags, separated by commas"
+            className="!py-1 !text-[12px]"
+            onSave={(v) => {
+              setEdit(null)
+              const next = v
+                .split(/[,\s]+/)
+                .map(normalizeTag)
+                .filter(Boolean)
+              if (next.join(',') !== tags.join(',')) onUpdate({ tags: next })
+            }}
+            onCancel={() => setEdit(null)}
+          />
+        ) : (
+          <>
+            {tags.map((t) => (
+              <span key={t} className="chip !cursor-default">
+                #{t}
+              </span>
+            ))}
+            {!readOnly && (
+              <button type="button" className="text-[11px] text-faint hover:text-accent2" onClick={() => setEdit('tags')}>
+                {tags.length ? '✎ tags' : '+ tags'}
+              </button>
+            )}
+          </>
+        )}
+        <span className="flex-1" />
+        <button type="button" className="hud-btn !h-7" onClick={onArchive} disabled={readOnly} title="Move the project note to Archive/">
+          Archive
+        </button>
+        <button type="button" className="hud-btn !h-7 hover:!text-danger" onClick={onDelete} disabled={readOnly} title="Delete the project note (asks first)">
+          Delete…
+        </button>
+      </div>
+    </div>
+  )
+}
+
+/** The project's home folder (its star in the system layout): show, create, change or unlink it. */
+function HomeFolder({
+  row,
+  folders,
+  readOnly,
+  canCreate,
+  picking,
+  setPicking,
+  totalNotes,
+  onShow,
+  onCreate,
+  onLink,
+}: {
+  row: ProjectRow
+  folders: Set<string>
+  readOnly: boolean
+  canCreate: boolean
+  picking: boolean
+  setPicking: (v: boolean) => void
+  totalNotes: number
+  onShow: (path: string) => void
+  onCreate: (path: string) => void
+  onLink: (path: string | null) => void
+}) {
+  const home = row.home
+  const exists = home !== null && folders.has(home)
+  const explicit = !!asString(row.note.frontmatter['folder'])
+  const fallback = defaultProjectFolder(row.note)
+  return (
+    <div className="mb-3">
+      <div className="section-title mb-1.5">Home folder · the star</div>
+      <div className="flex flex-wrap items-center gap-2 text-[12.5px]">
+        {home ? (
+          <>
+            <span className="text-[#ffcf6b]">★</span>
+            <code className="min-w-0 truncate text-ink" title={explicit ? 'Linked with folder: in the frontmatter' : 'Found by name'}>
+              {home}/
+            </code>
+            {exists ? (
+              <span className="text-[11.5px] text-faint">{plural(totalNotes, 'note')}</span>
+            ) : (
+              <span className="text-[11.5px] text-inbox">not on disk yet</span>
+            )}
+            <span className="flex-1" />
+            {exists ? (
+              <button type="button" className="hud-btn !h-7" onClick={() => onShow(home)} title="Fly to the star in the system layout">
+                Show in space
+              </button>
+            ) : (
+              <button type="button" className="hud-btn !h-7" onClick={() => onCreate(home)} disabled={!canCreate}>
+                Create it
+              </button>
+            )}
+            <button type="button" className="hud-btn !h-7" onClick={() => setPicking(!picking)} disabled={readOnly} aria-expanded={picking}>
+              Change…
+            </button>
+            {explicit && (
+              <button type="button" className="hud-btn !h-7" onClick={() => onLink(null)} disabled={readOnly} title="Remove folder: from the frontmatter">
+                Unlink
+              </button>
+            )}
+          </>
+        ) : (
+          <>
+            <span className="text-dim">None yet — the project's files can live in a folder of their own.</span>
+            <span className="flex-1" />
+            <button type="button" className="hud-btn !h-7" onClick={() => onCreate(fallback)} disabled={!canCreate} title={`Create ${fallback}/`}>
+              Create folder
+            </button>
+            <button type="button" className="hud-btn !h-7" onClick={() => setPicking(!picking)} disabled={readOnly} aria-expanded={picking}>
+              Link existing…
+            </button>
+          </>
+        )}
+      </div>
+      {picking && (
+        <FolderPicker
+          folders={folders}
+          near={row.note.meta.folder}
+          onPick={(p) => {
+            setPicking(false)
+            onLink(p)
+          }}
+          onCancel={() => setPicking(false)}
+        />
+      )}
+    </div>
+  )
+}
+
+/** Search the vault's folders; Enter links the highlighted one. */
+function FolderPicker({ folders, near, onPick, onCancel }: { folders: Set<string>; near: string; onPick: (path: string) => void; onCancel: () => void }) {
+  const [q, setQ] = useState('')
+  const [index, setIndex] = useState(0)
+  const matches = useMemo(() => {
+    const query = q.trim().toLowerCase()
+    const out: { path: string; rank: number }[] = []
+    for (const f of folders) {
+      if (!query) {
+        // Nothing typed yet: the folders next to the project note.
+        if (folderOf(f) === near) out.push({ path: f, rank: 0 })
+        continue
+      }
+      const lower = f.toLowerCase()
+      const name = lower.slice(lower.lastIndexOf('/') + 1)
+      const rank = name === query ? 0 : name.startsWith(query) ? 1 : name.includes(query) ? 2 : lower.includes(query) ? 3 : -1
+      if (rank >= 0) out.push({ path: f, rank })
+    }
+    return out
+      .sort((a, b) => a.rank - b.rank || a.path.length - b.path.length || a.path.localeCompare(b.path))
+      .slice(0, 12)
+      .map((x) => x.path)
+  }, [q, folders, near])
+  useEffect(() => setIndex(0), [q])
+  return (
+    <div className="mt-2 rounded-xl border border-[var(--panel-border)] bg-black/20 p-2">
+      <input
+        autoFocus
+        className="input !py-1.5 !text-[12.5px]"
+        placeholder="Search folders by name or path…"
+        value={q}
+        onChange={(e) => setQ(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'ArrowDown') (e.preventDefault(), setIndex((i) => Math.min(matches.length - 1, i + 1)))
+          else if (e.key === 'ArrowUp') (e.preventDefault(), setIndex((i) => Math.max(0, i - 1)))
+          else if (e.key === 'Enter') {
+            e.preventDefault()
+            e.stopPropagation()
+            const pick = matches[index]
+            if (pick) onPick(pick)
+          } else if (e.key === 'Escape') (e.preventDefault(), e.stopPropagation(), onCancel())
+        }}
+        aria-label="Find a folder"
+        aria-activedescendant={matches[index] ? `folder-pick-${index}` : undefined}
+      />
+      <div className="scroll mt-1 max-h-48" role="listbox">
+        {matches.length === 0 && <div className="px-2 py-2 text-[12px] text-faint">{q.trim() ? 'No folder matches.' : 'Type to search every folder.'}</div>}
+        {matches.map((p, i) => (
+          <button
+            type="button"
+            key={p}
+            id={`folder-pick-${i}`}
+            role="option"
+            aria-selected={i === index}
+            className={cx('block w-full truncate rounded-md px-2 py-1 text-left font-mono text-[11.5px]', i === index ? 'bg-accent/20 text-ink' : 'text-dim hover:bg-white/5')}
+            onMouseEnter={() => setIndex(i)}
+            onClick={() => onPick(p)}
+          >
+            {p}/
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+/** Task rows; each is focusable and keeps its keys (Enter edit, Alt ↑↓ move, Del delete, Space tick, ↑↓ focus). */
+function TaskList({
+  tasks,
+  row,
+  readOnly,
+  editingLine,
+  setEditingLine,
+  setFocusLine,
+  onToggle,
+  onEdit,
+  onDelete,
+  onMove,
+}: {
+  tasks: TaskItem[]
+  row: ProjectRow
+  readOnly: boolean
+  editingLine: number | null
+  setEditingLine: (line: number | null) => void
+  setFocusLine: (line: number | null) => void
+  onToggle: (t: TaskItem, done: boolean) => Promise<void>
+  onEdit: (t: TaskItem, text: string) => Promise<void>
+  onDelete: (t: TaskItem) => Promise<void>
+  onMove: (t: TaskItem, dir: -1 | 1) => Promise<void>
+}) {
+  if (tasks.length === 0) return null
+  /** The row to focus after `t` leaves this list (the next one, else the previous), as a line after `shift` lines went at `t`. */
+  const neighborLine = (t: TaskItem, shift: number): number | null => {
+    const i = tasks.indexOf(t)
+    const n = tasks[i + 1] ?? tasks[i - 1]
+    if (!n) return null
+    return n.line > t.line ? n.line - shift : n.line
+  }
+  return (
+    <ul className="mb-4">
+      {tasks.map((t) => (
+        <TaskRow
+          key={t.line}
+          task={t}
+          readOnly={readOnly}
+          editing={editingLine === t.line}
+          onStartEdit={() => setEditingLine(t.line)}
+          onSaveEdit={async (text) => {
+            setEditingLine(null)
+            if (text.trim() && text.trim() !== t.text) await onEdit(t, text)
+            setFocusLine(t.line)
+          }}
+          onCancelEdit={() => {
+            setEditingLine(null)
+            setFocusLine(t.line)
+          }}
+          onToggle={async (done) => {
+            const next = neighborLine(t, 0)
+            await onToggle(t, done)
+            if (next !== null) setFocusLine(next)
+          }}
+          onDelete={async () => {
+            const next = neighborLine(t, 1)
+            await onDelete(t)
+            if (next !== null) setFocusLine(next)
+          }}
+          onMove={async (dir) => {
+            // Where the task lands (moveTask keeps every other line's content; `updated` is stamped in place).
+            const to = moveTaskInNote(row.note.raw, t.line, dir).line
+            await onMove(t, dir)
+            setFocusLine(to)
+          }}
+        />
+      ))}
+    </ul>
+  )
+}
+
+function TaskRow({
+  task,
+  readOnly,
+  editing,
+  onStartEdit,
+  onSaveEdit,
+  onCancelEdit,
+  onToggle,
+  onDelete,
+  onMove,
+}: {
+  task: TaskItem
+  readOnly: boolean
+  editing: boolean
+  onStartEdit: () => void
+  onSaveEdit: (text: string) => void
+  onCancelEdit: () => void
+  onToggle: (done: boolean) => void
+  onDelete: () => void
+  onMove: (dir: -1 | 1) => void
+}) {
+  return (
+    <li
+      tabIndex={editing ? -1 : 0}
+      data-task={task.line}
+      className="group flex items-start gap-2.5 rounded-lg py-1 pr-1 focus:bg-white/5 focus:outline-none"
+      style={{ paddingLeft: task.indent * 6 + 4 }}
+      onDoubleClick={(e) => {
+        if (readOnly || editing || (e.target as HTMLElement).closest('a, button, input')) return
+        onStartEdit()
+      }}
+      onKeyDown={(e) => {
+        if (e.target !== e.currentTarget) return
+        let handled = true
+        if (e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+          if (!readOnly) onMove(e.key === 'ArrowUp' ? -1 : 1)
+        } else if (e.altKey || e.ctrlKey || e.metaKey) {
+          handled = false
+        } else if (e.key === 'Enter') {
+          if (!readOnly) onStartEdit()
+        } else if (e.key === ' ') {
+          if (!readOnly) onToggle(!task.done)
+        } else if (e.key === 'Delete' || e.key === 'Backspace') {
+          if (!readOnly) onDelete()
+        } else if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+          const rows = [...(e.currentTarget.closest('[role="dialog"]')?.querySelectorAll<HTMLElement>('[data-task]') ?? [])]
+          rows[rows.indexOf(e.currentTarget) + (e.key === 'ArrowUp' ? -1 : 1)]?.focus()
+        } else handled = false
+        if (handled) {
+          e.preventDefault()
+          e.stopPropagation()
+        }
+      }}
+    >
+      <input
+        type="checkbox"
+        tabIndex={-1}
+        className="mt-[3px] h-4 w-4 shrink-0 cursor-pointer accent-[var(--accent)]"
+        checked={task.done}
+        disabled={readOnly}
+        onChange={(e) => onToggle(e.target.checked)}
+        aria-label={task.text}
+      />
+      {editing ? (
+        <span className="min-w-0 flex-1">
+          <InlineInput initial={task.text} label="Edit task" className="!py-1 !text-[13px]" onSave={onSaveEdit} onCancel={onCancelEdit} />
+        </span>
+      ) : (
+        <span className="min-w-0 flex-1">
+          <TaskText text={task.text} done={task.done} />
+        </span>
+      )}
+      {task.section && task.section.toLowerCase() !== 'to do' && <span className="shrink-0 text-[10px] text-faint">{task.section}</span>}
+      {task.doneAt && (
+        <span className="shrink-0 text-[10.5px] tabular-nums text-faint" title={`Done ${task.doneAt}`}>
+          ✅ {task.doneAt}
+        </span>
+      )}
+      {!readOnly && !editing && (
+        <span className="flex shrink-0 items-center opacity-0 transition group-hover:opacity-100 group-focus:opacity-100">
+          <RowButton label="Move up (Alt ↑)" onClick={() => onMove(-1)}>
+            ▲
+          </RowButton>
+          <RowButton label="Move down (Alt ↓)" onClick={() => onMove(1)}>
+            ▼
+          </RowButton>
+          <RowButton label="Edit (Enter · double-click)" onClick={onStartEdit}>
+            ✎
+          </RowButton>
+          <RowButton label="Delete (Del) — the toast can undo" onClick={onDelete} danger>
+            ✕
+          </RowButton>
+        </span>
+      )}
+    </li>
+  )
+}
+
+/** A small icon button on a task row (the row's own keys do the same, so it stays out of the Tab order). */
+function RowButton({ label, onClick, danger, children }: { label: string; onClick: () => void; danger?: boolean; children: React.ReactNode }) {
+  return (
+    <button
+      type="button"
+      tabIndex={-1}
+      className={cx('grid h-6 w-6 place-items-center rounded-md text-[11px] text-faint hover:bg-white/10', danger ? 'hover:text-danger' : 'hover:text-ink')}
+      onClick={onClick}
+      title={label}
+      aria-label={label}
+    >
+      {children}
+    </button>
   )
 }
 
@@ -345,45 +1112,9 @@ function TaskText({ text, done }: { text: string; done: boolean }) {
   return <span className={cx('md !max-w-none !p-0 text-[13.5px] leading-snug', done ? 'text-faint line-through' : 'text-ink')}>{parts}</span>
 }
 
-function TaskRow({ task, readOnly, onToggle }: { task: TaskItem; readOnly: boolean; onToggle: (done: boolean) => void }) {
-  return (
-    <li className="group flex items-start gap-2.5 py-1" style={{ paddingLeft: task.indent * 6 }}>
-      <input
-        type="checkbox"
-        className="mt-[3px] h-4 w-4 shrink-0 cursor-pointer accent-[var(--accent)]"
-        checked={task.done}
-        disabled={readOnly}
-        onChange={(e) => onToggle(e.target.checked)}
-        aria-label={task.text}
-      />
-      <span className="min-w-0 flex-1">
-        <TaskText text={task.text} done={task.done} />
-      </span>
-      {task.section && task.section.toLowerCase() !== 'to do' && <span className="shrink-0 text-[10px] text-faint">{task.section}</span>}
-      {task.doneAt && (
-        <span className="shrink-0 text-[10.5px] tabular-nums text-faint" title={`Done ${task.doneAt}`}>
-          ✅ {task.doneAt}
-        </span>
-      )}
-    </li>
-  )
-}
-
 function StatusChip({ status }: { status: string | null }) {
   if (!status) return null
   const s = status.toLowerCase()
   const color = s === 'active' || s === 'in progress' ? 'text-untagged' : s === 'done' ? 'text-faint' : s === 'paused' ? 'text-inbox' : 'text-dim'
   return <span className={cx('shrink-0 rounded-full border border-[var(--panel-border)] px-2 py-0.5 text-[10.5px] font-semibold uppercase tracking-wider', color)}>{status}</span>
-}
-
-/** The note's blockquote or first paragraph, as the card's one-line brief. */
-function Summary({ note }: { note: ParsedNote }) {
-  const text = useMemo(() => {
-    const body = note.body.replace(/^#.*$/m, '')
-    const quote = /^>\s*(.+)$/m.exec(body)
-    const para = quote?.[1] ?? body.split(/\n\s*\n/).map((p) => p.trim()).find((p) => p && !p.startsWith('#') && !p.startsWith('-') && !p.startsWith('|'))
-    return (para ?? '').replace(/!?\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (_m, a: string, b?: string) => b ?? a).replace(/[*_`]/g, '')
-  }, [note])
-  if (!text) return null
-  return <p className="mt-2 line-clamp-2 text-[12.5px] leading-relaxed text-dim">{text}</p>
 }

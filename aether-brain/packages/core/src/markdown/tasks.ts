@@ -175,8 +175,12 @@ function blockEnd(lines: string[], task: TaskItem): number {
  * deeper sub-tasks in between are skipped; a heading or a shallower (parent)
  * task is an edge, where the move is a no-op. Sub-tasks travel with their
  * parent. Returns the new raw text and the task's new line index.
+ *
+ * `sameState` also skips tasks whose done state differs, for lists that show
+ * open and done tasks apart (the Projects board): moving an open task up
+ * passes it over the next open task above it, not a hidden done one.
  */
-export function moveTask(raw: string, line: number, dir: -1 | 1): { raw: string; line: number } {
+export function moveTask(raw: string, line: number, dir: -1 | 1, opts: { sameState?: boolean } = {}): { raw: string; line: number } {
   const lines = raw.split('\n')
   const { tasks, headings } = scan(lines)
   const k = tasks.findIndex((t) => t.line === line)
@@ -189,7 +193,7 @@ export function moveTask(raw: string, line: number, dir: -1 | 1): { raw: string;
     const lo = Math.min(c.line, task.line)
     const hi = Math.max(c.line, task.line)
     if (headings.some((h) => h > lo && h < hi) || c.indent < task.indent) break
-    if (c.indent === task.indent) {
+    if (c.indent === task.indent && (!opts.sameState || c.done === task.done)) {
       other = c
       break
     }
@@ -211,8 +215,10 @@ export function moveTask(raw: string, line: number, dir: -1 | 1): { raw: string;
 
 /**
  * Append a task under the `## <section>` heading (created at the end of the
- * note if missing). New tasks go after the last task already in the section
- * so lists read in the order they were written.
+ * note if missing). A new task goes right after the last open top-level task
+ * of the section (with its sub-tasks), so open tasks stay together, in the
+ * order they were written, above the ones already ticked off. With no open
+ * task it goes after the last task of the section.
  */
 export function addTask(raw: string, text: string, section = 'To do'): string {
   const clean = text.trim().replace(/^[-*+]\s+\[[ xX]\]\s*/, '')
@@ -250,6 +256,10 @@ export function addTask(raw: string, text: string, section = 'To do'): string {
   for (let i = headingIdx + 1; i < end; i++) {
     if (TASK_RE.test(plain[i] ?? '')) insertAt = i + 1
   }
+  const inSection = scan(lines).tasks.filter((t) => t.line > headingIdx && t.line < end)
+  const top = Math.min(...inSection.map((t) => t.indent))
+  const lastOpen = inSection.filter((t) => t.indent === top && !t.done).pop()
+  if (lastOpen) insertAt = blockEnd(lines, lastOpen)
   const taskLine = `- [ ] ${clean}`
   if (insertAt === headingIdx + 1) {
     // No tasks yet: keep one blank line after the heading.

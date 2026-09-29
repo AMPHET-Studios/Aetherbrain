@@ -43,13 +43,14 @@ Builds are unsigned, so Windows SmartScreen will show "Windows protected your PC
 | **Connect**  | Editor with `[[` autocomplete, live preview, backlinks, and _unlinked mentions_ with a one-click "link it". Ghost neurons for links whose target doesn't exist yet — select one to create it. |
 | **Retrieve** | `⌘/Ctrl K` searches titles, headings, tags, body and paths (MiniSearch, fuzzy + prefix). `⌘Enter` turns the query into a graph filter that dims everything else. |
 | **Review**   | Orphans, stale notes (90+ days) and spaced-review items resurface in the queue. `1` keeps a note (interval doubles), `2` snoozes, `3` archives. |
-| **Projects** | `p` opens the board: one card per project note with a progress bar and its to-do list. Tick a task and the note gets `- [x] … ✅ 2026-09-24`; add one and it lands under `## To do`. Plain markdown checkboxes, so Obsidian and git see the same memory. |
-| **Wander**   | Drag to orbit, scroll to zoom, click to select, double-click to open, drag a neuron to pin it. `Tab` hops between neighbors. `t` switches to the **orbit** layout where rings are age. `m` cycles color by area / type / tag / age. |
+| **Projects** | `p` opens the board: one card per project with a progress bar and its to-do list. Everything is editable — rename (`e`), status (`s`), summary, tags, archive, delete; tasks can be ticked, edited, reordered (`Alt ↑/↓`) and deleted (with undo). Each project has a **home folder** (its star) whose subfolders are its **planets**: add one (`f`) and a real folder is created on disk. Tasks are plain `- [ ] …` / `- [x] … ✅ 2026-09-24` lines, so Obsidian and git see the same memory. |
+| **Wander**   | Drag to orbit, scroll to zoom, click to select, double-click to open (or expand a folder), drag a neuron to move it. `Tab` hops between neighbors. `t` cycles the layouts: **constellation** (by area) → **orbit** (rings are age) → **system** (your folders as solar systems). `m` cycles color by area / type / tag / age. |
+| **Ask your AI** | Claude and ChatGPT can search, read and write the vault directly through the built-in MCP server — see [AI link](#ai-link-claude--chatgpt). |
 
 ## The 3D view
 
 - One `InstancedMesh` for neuron cores (fresnel shader, HDR output), one for additive halos, one `LineSegments` for every synapse with travelling pulses on the selected node's edges. A 2D canvas overlay draws crisp labels for hubs, the selection and its neighborhood.
-- Layout is `d3-force-3d` in a **Web Worker**: clustered by PARA area in constellation mode, radial rings by age in orbit mode. The main thread only copies a `Float32Array` per tick.
+- Layout runs in a **Web Worker**: `d3-force-3d` clusters by PARA area in constellation mode and makes radial rings by age in orbit mode. The **system** layout (the default) is analytic: every folder is a body orbiting its parent folder — the vault (or each drive) is a sun, a project's home folder is a gold ★ star, its subfolders are planets, deeper folders are moons, and notes are satellites. Planets slowly orbit (`o` pauses), faint rings trace each orbit, `[` / `]` change how deep folders unfold, `x` expands a collapsed folder. The main thread only copies a `Float32Array` per frame.
 - Selective bloom (`postprocessing`) with a luminance threshold: only the neurons bloom, never the UI, edges or stars.
 - 1,000 neurons / 2,500 synapses is the design budget: `http://localhost:5173/?stress=1000` opens a synthetic vault; the top bar shows live fps.
 
@@ -57,11 +58,21 @@ Builds are unsigned, so Windows SmartScreen will show "Windows protected your PC
 
 | Where                | Adapter                                                                                                  |
 | -------------------- | -------------------------------------------------------------------------------------------------------- |
-| Desktop app          | `ElectronVaultAdapter` — folder on disk via IPC; `chokidar` streams debounced changes; writes are atomic. `aether-brain ~/notes` or `AETHER_VAULT=~/notes` opens a vault directly. |
+| Desktop app          | `ElectronVaultAdapter` — one or more folders on disk via IPC; a native recursive file watcher streams debounced changes (new folders become planets live); writes are atomic. **Whole drives work**: press `v` (Vault folders) and tick `D:\` and `F:\` — each root becomes a top-level system and the brain mirrors its real directory tree. System, build and cache folders (`Windows`, `Program Files`, `AppData`, `$RECYCLE.BIN`, `node_modules`, `Intermediate`, `Saved`, `DerivedDataCache`, …) are skipped, and you can add your own. `AetherBrain.exe D:\ F:\` or `AETHER_VAULT` opens roots directly. |
 | Browser (Chromium)   | `FsAccessVaultAdapter` — File System Access API, polls mtimes for external edits.                        |
 | Browser (any)        | Bundled demo vault; edits persist in IndexedDB, "Reset demo vault" forgets them.                          |
 
 Folder → area mapping is PARA: `Inbox/`, `Projects/`, `Areas/`, `Resources/`, `Archive/`; everything else is _untagged_. Note type comes from `type:` frontmatter or the nearest folder name (`Daily/`, `People/`, `Maps/` …). See [docs/SPEC.md](docs/SPEC.md) for the data model and [docs/KEYBOARD.md](docs/KEYBOARD.md) for every key.
+
+## AI link (Claude + ChatGPT)
+
+The desktop app ships an [MCP](https://modelcontextprotocol.io) server, so your AI assistant can work with the brain directly: search and read notes, list projects and their to-dos, add or tick tasks, write notes, capture ideas, and create planet folders. Changes appear live in the 3D view.
+
+- **Claude Desktop** — install `aether-brain-<version>.mcpb` from the Releases page (double-click it, or Settings → Extensions → Install Extension) and pick your folders or drives. Or press `a` in the app and paste the generated config.
+- **Claude Code** — press `a` in the app and copy the `claude mcp add …` command.
+- **ChatGPT** (and claude.ai on the web) — press `a`, switch the link on, expose it with a tunnel (`cloudflared tunnel --url http://127.0.0.1:7457`), and add the `https://…/mcp/<token>` URL as a developer-mode app / custom connector.
+
+The AI can only touch markdown notes and folders inside your vault roots, never deletes files, and can be set to read-only. Full guide, tool list and security notes: [docs/AI-LINK.md](docs/AI-LINK.md).
 
 ## Repo
 
@@ -69,8 +80,8 @@ Folder → area mapping is PARA: `Inbox/`, `Projects/`, `Areas/`, `Resources/`, 
 apps/web · apps/desktop · packages/core · packages/graph · packages/ui · vault-demo · docs
 ```
 
-pnpm workspace, Vite 8, React 19, TypeScript strict, three + @react-three/fiber + drei, d3-force-3d, MiniSearch, unified/remark, Zustand, Tailwind v4, Electron 44. Tests: `pnpm test` (vitest, core parsing/graph/search). Type checks: `pnpm typecheck`.
+pnpm workspace, Vite 8, React 19, TypeScript strict, three + @react-three/fiber + drei, d3-force-3d, MiniSearch, unified/remark, Zustand, Tailwind v4, Electron 44, `@modelcontextprotocol/sdk` (bundled into the MCP server). Tests: `pnpm test` (vitest: core parsing/graph/folders/projects, the system layout, the store, the file layer and watcher, the MCP tools). Type checks: `pnpm typecheck`. Design notes for the folder solar systems and the AI link: [docs/design/solar-system-and-ai-link.md](docs/design/solar-system-and-ai-link.md).
 
 ## Status
 
-MVP. Not yet: SQLite FTS for very large vaults, AI embeddings, WebXR, packaged installers (the Electron app runs from source with `pnpm dev:desktop` / `pnpm --filter @aether/desktop start`).
+Working, early. Not yet: SQLite FTS for very large vaults, AI embeddings, WebXR, code-signed installers.

@@ -1,5 +1,8 @@
+import type { LayoutMode } from '@aether/graph'
 import { useAether, type View } from '../store'
 import { cx, MOD } from '../util'
+
+const LAYOUT_LABEL: Record<LayoutMode, string> = { constellation: '✧ Constellation', orbit: '◎ Orbit', system: '☀ System' }
 
 const VIEWS: { id: View; label: string; key: string }[] = [
   { id: 'graph', label: 'Graph', key: '1' },
@@ -25,8 +28,15 @@ export function TopBar({ onPickVault }: { onPickVault?: (() => void) | undefined
   const dirty = useAether((s) => s.dirty)
   const status = useAether((s) => s.status)
 
-  const nodes = graph?.nodes.filter((n) => !n.ghost).length ?? 0
-  const ghosts = (graph?.nodes.length ?? 0) - nodes
+  // Neurons are notes; folder nodes (system layout) are counted apart.
+  let nodes = 0
+  let ghosts = 0
+  let folders = 0
+  for (const n of graph?.nodes ?? []) {
+    if (n.kind === 'note') nodes++
+    else if (n.kind === 'ghost') ghosts++
+    else folders++
+  }
   const edges = graph?.edges.length ?? 0
 
   return (
@@ -61,8 +71,8 @@ export function TopBar({ onPickVault }: { onPickVault?: (() => void) | undefined
       <button type="button" className="hud-btn" onClick={() => setPalette(true)} title={`Search (${MOD}+K)`}>
         ⌕ Search <kbd>{MOD} K</kbd>
       </button>
-      <button type="button" className="hud-btn" aria-pressed={settings.layoutMode === 'orbit'} onClick={toggleLayout} title="Toggle constellation / orbit layout (t)">
-        {settings.layoutMode === 'orbit' ? '◎ Orbit' : '✧ Constellation'}
+      <button type="button" className="hud-btn" aria-pressed={settings.layoutMode !== 'constellation'} onClick={toggleLayout} title="Layout: constellation → orbit (time) → system (folders) (t)">
+        {LAYOUT_LABEL[settings.layoutMode] ?? LAYOUT_LABEL.system}
       </button>
       <button type="button" className="hud-btn" onClick={cycleColorMode} title="Cycle color mode (m)">
         ◐ {settings.colorMode}
@@ -79,8 +89,12 @@ export function TopBar({ onPickVault }: { onPickVault?: (() => void) | undefined
           <span className="max-w-[160px] truncate">{adapter?.name ?? 'No vault'}</span>
           {adapter?.readOnly && <span className="text-inbox">·ro</span>}
         </button>
-        <span title="Neurons / synapses / missing">
-          {status === 'ready' ? `${nodes}n · ${edges}s${ghosts ? ` · ${ghosts}?` : ''}` : status === 'loading' ? 'loading…' : ''}
+        <span title={`Neurons (notes) / synapses / missing${settings.layoutMode === 'system' ? ' / folders shown' : ''}`}>
+          {status === 'ready'
+            ? `${nodes}n · ${edges}s${ghosts ? ` · ${ghosts}?` : ''}${settings.layoutMode === 'system' && folders ? ` · ${folders}f` : ''}`
+            : status === 'loading'
+              ? 'loading…'
+              : ''}
         </span>
         <span className={cx('tabular-nums', fps && fps < 45 ? 'text-inbox' : '')} title="Frames per second">
           {fps ? `${fps} fps` : ''}
