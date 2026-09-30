@@ -6,7 +6,7 @@ import { toString as mdToString } from 'mdast-util-to-string'
 import type { Root, Heading as MdHeading, Text } from 'mdast'
 import type { Heading, Link, NoteMeta, ParsedNote, VaultFile } from '../types'
 import { asIsoDate, asString, asStringArray, splitFrontmatter } from './frontmatter'
-import { tokenizeWikilinks } from './wikilink'
+import { textTags, textWikilinks } from './wikilink'
 import {
   areaFromFolder,
   basenameOf,
@@ -23,7 +23,46 @@ const processor = unified().use(remarkParse).use(remarkGfm)
 
 /** Parse markdown into an mdast tree (cached processor, no stringify). */
 export function parseMarkdown(body: string): Root {
-  return processor.parse(tameNesting(body)) as Root
+  return processor.parse(tameDelimiters(tameNesting(body))) as Root
+}
+
+/** Most emphasis delimiters (`*`, `_`) a paragraph keeps for parsing (see `tameDelimiters`). */
+export const PARSE_MAX_DELIMITERS = 2000
+
+/**
+ * micromark takes quadratic time on long runs of emphasis delimiters in one
+ * paragraph (4,000 unmatched `*` or `_`: most of a second; 40,000: minutes,
+ * with the app frozen). In a paragraph (a run of lines without a blank one)
+ * holding more than PARSE_MAX_DELIMITERS of them, each is swapped for a
+ * look-alike that is no delimiter (`∗`, `＿`): same length, so every offset
+ * stays true; that paragraph just loses its emphasis. Real notes stay far
+ * below the limit.
+ */
+export function tameDelimiters(body: string): string {
+  let count = 0
+  for (let i = 0; i < body.length; i++) {
+    const c = body.charCodeAt(i)
+    if (c === 42 || c === 95) count++
+  }
+  if (count <= PARSE_MAX_DELIMITERS) return body
+  const lines = body.split('\n')
+  let start = 0
+  let changed = false
+  const paragraph = (end: number) => {
+    let n = 0
+    for (let i = start; i < end; i++) for (const ch of lines[i]!) if (ch === '*' || ch === '_') n++
+    if (n <= PARSE_MAX_DELIMITERS) return
+    changed = true
+    for (let i = start; i < end; i++) lines[i] = lines[i]!.replace(/\*/g, '\u2217').replace(/_/g, '\uff3f')
+  }
+  for (let i = 0; i < lines.length; i++) {
+    if (!lines[i]!.trim()) {
+      paragraph(i)
+      start = i + 1
+    }
+  }
+  paragraph(lines.length)
+  return changed ? lines.join('\n') : body
 }
 
 /** Deepest list / blockquote nesting kept for parsing; real notes stay far below it. */
@@ -83,6 +122,19 @@ export function extractInlineTags(text: string): string[] {
   return [...out]
 }
 
+/** Offsets of the `#` of every inline tag in `text` (what `extractInlineTags` would read). */
+export function inlineTagOffsets(text: string): number[] {
+  const out: number[] = []
+  INLINE_TAG_RE.lastIndex = 0
+  let m: RegExpExecArray | null
+  while ((m = INLINE_TAG_RE.exec(text))) {
+    const tag = m[2] ?? ''
+    if (tag && !/^\d+$/.test(tag)) out.push(m.index + (m[1] ?? '').length)
+  }
+  return out
+}
+
+
 export function normalizeTag(tag: string): string {
   return tag.replace(/^#/, '').trim().toLowerCase()
 }
@@ -106,6 +158,7 @@ export function parseNote(file: VaultFile): ParsedNote {
   const headings: Heading[] = []
   let firstH1: string | null = null
   const textChunks: string[] = []
+  const tagSet = new Set<string>()
   const links: Link[] = []
 
   visit(tree, (node) => {
@@ -120,8 +173,14 @@ export function parseNote(file: VaultFile): ParsedNote {
     if (node.type === 'text') {
       const t = node as Text
       textChunks.push(t.value)
-      const base = t.position?.start.offset ?? 0
-      for (const tok of tokenizeWikilinks(t.value)) {
+      const start = t.position?.start.offset
+      const end = t.position?.end.offset
+      // Links and tags are read from the markdown as written, so escaped
+      // brackets and hashes (`[\[x]]`, `\#word`) stay plain text.
+      const source = start !== undefined && end !== undefined ? body.slice(start, end) : null
+      for (const { tag } of textTags(t.value, source)) tagSet.add(tag)
+      const base = start ?? 0
+      for (const tok of textWikilinks(t.value, source)) {
         const link: Link = {
           from: id,
           to: tok.target,
@@ -137,6 +196,18 @@ export function parseNote(file: VaultFile): ParsedNote {
     }
   })
 
+  // A paragraph `tameDelimiters` guarded holds look-alikes for its * and _ : links and search text get them back.
+  if (tameDelimiters(body) !== body) {
+    const back = (x: string) => x.replace(/\u2217/g, '*').replace(/\uff3f/g, '_')
+    for (const l of links) {
+      l.to = back(l.to)
+      l.raw = back(l.raw)
+      if (l.alias) l.alias = back(l.alias)
+      if (l.heading) l.heading = back(l.heading)
+    }
+    for (let i = 0; i < textChunks.length; i++) textChunks[i] = back(textChunks[i]!)
+  }
+
   // Plain text for search/mentions: strip wikilink syntax but keep the words.
   // `[^[\]]` like WIKILINK_RE: a long run of `[[` must not make this quadratic.
   const plain = textChunks
@@ -149,7 +220,7 @@ export function parseNote(file: VaultFile): ParsedNote {
     .trim()
 
   const fmTags = asStringArray(frontmatter['tags']).map(normalizeTag).filter(Boolean)
-  const inlineTags = extractInlineTags(textChunks.join('\n'))
+  const inlineTags = [...tagSet]
   const tags = uniq([...fmTags, ...inlineTags])
 
   const fmTitle = asString(frontmatter['title'])

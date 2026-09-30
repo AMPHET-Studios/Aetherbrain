@@ -22,13 +22,18 @@ import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
   LinkResolver,
+  MAX_MESSAGE_CHARS,
   SearchIndex,
+  TRANSCRIPT_END,
+  TRANSCRIPT_HEADING,
   addTask,
   applyChanges,
+  applyChatUpdate,
   areaFromFolder,
   basenameOf,
   blankNote,
   buildGraph,
+  chatBaseName,
   dailyBrief,
   defaultProjectFolder,
   deleteTask,
@@ -38,9 +43,12 @@ import {
   folderProjectNote,
   homePrefix,
   idFromPath,
+  importedNotes,
   inboxNote,
   isExistsError,
   isIgnoredPath,
+  chatUrlOf,
+  isChatNote,
   isImagePath,
   isProjectNote,
   joinFrontmatter,
@@ -53,6 +61,11 @@ import {
   projectFolderOf,
   projectNote,
   projectSummary,
+  renderChatNote,
+  renderTranscript,
+  replaceSummary,
+  sectionOf,
+  transcriptCount,
   setProjectFields,
   setTaskDone,
   slugifyTitle,
@@ -66,6 +79,8 @@ import {
 import type {
   BriefReason,
   BriefTask,
+  ChatConversation,
+  ChatSource,
   GraphData,
   NoteId,
   NoteType,
@@ -1051,6 +1066,105 @@ export class Brain {
       const content = joinFrontmatter(fm, /^#\s/.test(text) ? `${text}\n` : `# ${title}\n\n${text ? `${text}\n` : ''}`)
       const note = await this.addNote(d, dir, base, content)
       return { ...this.ref(note), folder: note.meta.folder }
+    })
+  }
+
+  /**
+   * Save a conversation as a chat note (the AI link's save_chat), in the
+   * format an export import writes: a summary on top (live markdown), then an
+   * inert transcript. It goes to `<home>Resources/AI Chats/<Claude|ChatGPT>`
+   * (or `AI Chats` when there is no Resources folder), a project's
+   * `AI Chats` planet with `project`, or `folder`. With the chat's web
+   * address (`url`), a later save — or an import of the data export — finds
+   * the same note and rewrites its transcript; the text above it stays.
+   */
+  saveChat(input: {
+    title: string
+    messages: { role: 'user' | 'assistant'; text: string }[]
+    source: ChatSource
+    summary?: string
+    url?: string
+    project?: string
+    folder?: string
+  }) {
+    return this.exclusive(async () => {
+      const d = await this.state()
+      const title = input.title.replace(/\s+/g, ' ').trim()
+      if (!noteBase(title)) throw new Error('Give the chat a title with at least one letter or number')
+      // One spelling per chat (chat.openai.com is chatgpt.com), as an import of the export writes it.
+      const url = input.url?.trim() ? chatUrlOf(input.url) : ''
+      if (url === null) throw new Error('url must be the chat\'s web address, like https://claude.ai/chat/… or https://chatgpt.com/c/…')
+      const messages = input.messages.filter((m) => m.text.trim())
+      // Messages longer than a note keeps are cut (with a mark in the note); the reply says how many.
+      const cut = messages.filter((m) => m.text.length > MAX_MESSAGE_CHARS).length
+      if (!messages.length && !input.summary?.trim()) throw new Error('Nothing to save: pass the messages, a summary, or both')
+      const now = new Date().toISOString()
+      const conv: ChatConversation = {
+        source: input.source,
+        id: url.slice(url.lastIndexOf('/') + 1),
+        title,
+        created: now,
+        updated: now,
+        url,
+        projectId: null,
+        gptId: null,
+        model: null,
+        messages: messages.map((m) => ({ role: m.role, time: null, text: m.text, attachments: [], images: [], artifacts: [] })),
+      }
+      let project: ParsedNote | null = null
+      if (input.project?.trim()) project = this.resolveProject(d, input.project)
+      const aetherProject = project ? project.meta.title : null
+
+      // Saved before under this address (a chat note: never a note of the user's that quotes it):
+      // the summary is refreshed, and the transcript only when this one has more messages.
+      const before = url ? importedNotes(this.notes.values()).get(url) : undefined
+      if (before && isChatNote(before)) {
+        const raw = await this.current(before)
+        let next = raw
+        const shown = sectionOf(raw, TRANSCRIPT_HEADING, TRANSCRIPT_END)
+        const had = shown === null ? null : transcriptCount(shown)
+        const grew = messages.length > 0 && (had === null || messages.length > had)
+        if (grew) {
+          const updated = applyChatUpdate(next, { heading: TRANSCRIPT_HEADING, section: renderTranscript(conv), updated: todayIso() })
+          if (updated === null) throw new Error(`${before.meta.path} has no "${TRANSCRIPT_HEADING}" heading any more; save under a new title instead`)
+          next = updated
+        }
+        if (input.summary?.trim()) next = replaceSummary(next, input.summary) ?? next
+        if (next === raw) return { ...this.ref(before), folder: before.meta.folder, updated: false, kept: true, transcript: 'kept' as const, cut }
+        const note = await this.writeNote(before.meta.path, touchUpdated(next))
+        return { ...this.ref(note), folder: note.meta.folder, updated: true, kept: false, transcript: grew ? ('rewritten' as const) : ('kept' as const), cut }
+      }
+
+      let dir: string
+      if (input.folder?.trim()) dir = this.targetFolder(d, input.folder)
+      else if (project) dir = this.canonical(d, `${d.homeOf.get(project.meta.id) ?? defaultProjectFolder(project)}/AI Chats`)
+      else {
+        const resources = this.canonical(d, `${this.home}Resources`)
+        const base = this.folders.has(resources) ? `${resources}/AI Chats` : `${this.home}AI Chats`
+        dir = this.canonical(d, `${base}/${input.source === 'chatgpt' ? 'ChatGPT' : 'Claude'}`)
+      }
+      // The note's title is its file name (numbered when taken), as an import names chats. A name is
+      // taken when any note answers to it (title, file name or alias): links resolve by those.
+      const names = new Set<string>()
+      for (const x of this.notes.values()) {
+        names.add(x.meta.title.trim().toLowerCase())
+        names.add(basenameOf(x.meta.path).toLowerCase())
+        for (const a of x.meta.aliases) names.add(a.trim().toLowerCase())
+      }
+      const base = noteBase(chatBaseName(conv))
+      for (let n = 1; n <= 500; n++) {
+        const name = n === 1 ? base : `${base} ${n}`
+        const p = dir ? `${dir}/${name}.md` : `${name}.md`
+        if (WIN_RESERVED.test(`${name}.md`) || isIgnoredPath(p) || this.vault.isIgnored(p)) continue
+        if (d.byId.has(idFromPath(p).toLowerCase()) || names.has(name.toLowerCase())) continue
+        try {
+          const note = await this.createFile(p, renderChatNote(conv, name, { aetherProject, summary: input.summary ?? null }))
+          return { ...this.ref(note), folder: note.meta.folder, updated: false, kept: false, transcript: 'new' as const, cut }
+        } catch (err) {
+          if (!isExistsError(err)) throw err
+        }
+      }
+      throw new Error(`No free file name for "${base}" in ${dir || 'the vault root'}`)
     })
   }
 

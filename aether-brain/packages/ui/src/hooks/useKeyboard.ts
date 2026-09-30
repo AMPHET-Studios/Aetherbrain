@@ -1,6 +1,7 @@
 import { useEffect } from 'react'
 import { folderPathOf, imagePathOf, isFolderId, isImageId, isTodayId } from '@aether/core'
 import { selectedProject } from '../commands'
+import { importChatsFromDialog } from '../components/chats'
 import { focusBrief } from '../components/Inspector'
 import { useAether } from '../store'
 import { isControl, isTyping } from '../util'
@@ -129,6 +130,10 @@ export function handleKey(e: KeyboardEvent): void {
       return
     case 'd':
       void s.openDaily()
+      return
+    case 'i':
+      // Import AI chats: the system file dialog (the key press is the gesture it needs).
+      if (s.adapter && !s.adapter.readOnly) importChatsFromDialog()
       return
     case 'f':
       if (s.selectedId) s.controller.flyTo(s.selectedId)

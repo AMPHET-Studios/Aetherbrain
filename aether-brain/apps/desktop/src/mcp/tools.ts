@@ -10,7 +10,7 @@ import { McpServer, type ToolCallback } from '@modelcontextprotocol/sdk/server/m
 import type { ShapeOutput, ZodRawShapeCompat } from '@modelcontextprotocol/sdk/server/zod-compat.js'
 import type { CallToolResult, ToolAnnotations } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
-import { NOTE_TYPES } from '@aether/core'
+import { MAX_MESSAGE_CHARS, NOTE_TYPES } from '@aether/core'
 import type { Brain } from './brain.js'
 
 /** One tool call, for the host's activity feed. */
@@ -45,9 +45,10 @@ How to work with it:
 - Name notes by title, alias, id or vault path (e.g. Projects/PORTALz.md). When a title is ambiguous the error lists the paths to use.
 - get_project and read_note list tasks with their line numbers; set_task_done, edit_task and delete_task take that line or the task's text. Adding or deleting a task moves the lines below it: use the tasks list add_task and delete_task return, or pass the text with the line.
 - daily_brief is the user's Today: overdue tasks, tasks due or scheduled today (📅 / ⏳ dates, #today, today's daily note) and the next task of each active project. Tick one off with set_task_done, passing the row's path as project and its line.
-- New notes go to the Inbox unless you give a folder. Nothing is overwritten (a taken name gets " 2"), only .md notes and folders are created, and no tool deletes a note.
+- New notes go to the Inbox unless you give a folder. A new note never overwrites anything (a taken name gets " 2"), only .md notes and folders are created, and no tool deletes a note.
 - A planet is a folder inside a project's home folder: create_folder with project and path.
-- Prefer small edits (edit_note, append_to_note, add_task) over rewriting whole notes, and keep the user's own words.`
+- Prefer small edits (edit_note, append_to_note, add_task) over rewriting whole notes, and keep the user's own words.
+- When the user asks to save or remember this conversation, call save_chat: a title, a short summary (next steps as tasks) and the messages as faithfully as you can. With the chat's url it refreshes that chat note instead of making a new one.`
 
 /** Every tool: title, description (also used for the Claude Desktop extension manifest) and whether it writes. */
 export const TOOLS = {
@@ -137,6 +138,12 @@ export const TOOLS = {
     write: true,
     description: 'Use this when setting or removing frontmatter (YAML) properties of a note, such as status, tags, area, type or aliases. A null value removes the key.',
   },
+  save_chat: {
+    title: 'Save this chat',
+    write: true,
+    description:
+      "Use this when the user asks to save, keep or remember this conversation in their brain: writes it as a chat note, a short summary on top (live markdown: [[links]] and \"- [ ] next step\" tasks count) and then the transcript, under AI Chats (or a project's AI Chats planet). Pass the messages as faithfully as you can. With the chat's web address as url, saving again updates that chat note: its summary is replaced by the new one, and its transcript only when you pass more messages than it holds; nothing else in the vault changes.",
+  },
   capture: {
     title: 'Quick capture',
     write: true,
@@ -209,6 +216,13 @@ export const MAX_TEXT_ARG = 200_000
 export const MAX_LINE_ARG = 4_000
 /** Longest list argument (tags, first tasks, keys to remove). */
 export const MAX_LIST_ARG = 200
+/**
+ * Most messages one save_chat call takes, and most characters in all
+ * (messages + summary): below the HTTP link's 1 MiB request cap, so a too
+ * long chat gets this tool's own answer, not a transport error.
+ */
+export const MAX_CHAT_MESSAGES = 2_000
+export const MAX_CHAT_CHARS = 800_000
 
 /** A markdown text argument. */
 const mdText = () => z.string().max(MAX_TEXT_ARG)
@@ -479,6 +493,52 @@ export function createMcpServer(brain: Brain, opts: McpServerOptions): McpServer
     async ({ title, folder, content, tags, type }) => {
       const n = await brain.createNote({ title, ...(folder ? { folder } : {}), ...(content ? { content } : {}), ...(tags ? { tags } : {}), ...(type ? { type } : {}) })
       return { text: reply(`Created ${n.path}.`, n), summary: `created ${quote(n.title)}`, path: n.path }
+    },
+  )
+
+  tool(
+    'save_chat',
+    {
+      title: oneLine().min(1).describe('What the chat was about, e.g. "Portal lighting". The note is named "<today> <title>".'),
+      messages: z
+        .array(
+          z.object({
+            role: z.enum(['user', 'assistant']).describe('user: the person; assistant: you.'),
+            text: mdText().describe('The message, as written (markdown).'),
+          }),
+        )
+        .max(MAX_CHAT_MESSAGES)
+        .default([])
+        .describe('The conversation, oldest first.'),
+      summary: mdText().optional().describe('A short summary for the top of the note: decisions, ideas, next steps as "- [ ] task" lines.'),
+      source: z.enum(['claude', 'chatgpt']).optional().describe('Who you are (default: from the client name).'),
+      url: oneLine().optional().describe('The chat\'s web address (https://claude.ai/chat/… or https://chatgpt.com/c/…), if you know it.'),
+      project: oneLine().optional().describe('Save into this project\'s "AI Chats" planet and link it.'),
+      folder: oneLine().optional().describe('Or a folder vault path to save into.'),
+    },
+    CHANGES,
+    async ({ title, messages, summary, source, url, project, folder }) => {
+      const total = messages.reduce((n, m) => n + m.text.length, 0) + (summary?.length ?? 0)
+      if (total > MAX_CHAT_CHARS) {
+        throw new Error(
+          `The chat is too long to save in one call (${total.toLocaleString('en-US')} characters, at most ${MAX_CHAT_CHARS.toLocaleString('en-US')}). Save a summary and the most important messages instead.`,
+        )
+      }
+      const name = client()
+      const who = source ?? (/gpt|openai/i.test(name) ? 'chatgpt' : /claude|anthropic/i.test(name) ? 'claude' : null)
+      if (!who) throw new Error('Say which assistant you are: pass source "claude" or "chatgpt"')
+      const n = await brain.saveChat({ title, messages, source: who, ...(summary ? { summary } : {}), ...(url ? { url } : {}), ...(project ? { project } : {}), ...(folder ? { folder } : {}) })
+      const cut = n.cut ? ` ${plural(n.cut, 'message was', 'messages were')} longer than ${MAX_MESSAGE_CHARS.toLocaleString('en-US')} characters and cut.` : ''
+      const line = n.kept
+        ? `${n.path} already has this: nothing changed (a transcript is only rewritten when it gets more messages).`
+        : n.updated
+          ? `Updated ${n.path}: summary ${summary?.trim() ? 'replaced' : 'kept'}, transcript ${n.transcript}.`
+          : `Saved ${n.path}.`
+      return {
+        text: reply(`${line}${cut}`, n),
+        summary: `${n.updated || n.kept ? 'updated' : 'saved'} the chat ${quote(n.title)}`,
+        path: n.path,
+      }
     },
   )
 

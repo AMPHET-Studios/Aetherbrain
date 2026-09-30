@@ -32,6 +32,7 @@ The link runs on your own computer and reads the folders you chose.
 - add tasks, tick them off (a done task gets a date, like `- [x] Block out the gate chamber ✅ 2026-09-29`), reword them and remove task lines
 - create projects, rename them and change their status, summary, tags or folder
 - create folders, for example a new planet `Sound` inside your `PORTALz` project folder
+- save the conversation you're having as a chat note (*"save this chat to my brain"*), see [AI-CHATS.md](AI-CHATS.md)
 
 **It cannot:**
 
@@ -216,6 +217,7 @@ This uses the same link and tunnel as ChatGPT:
 - *"Find my notes about value studies and link the best one to Map of Drawing"*
 - *"Rename the project Monolith Generator Asset to Monolith Kit and mark it paused"*
 - *"Show me how my F drive is organized, two levels deep"*
+- *"Save this chat to my brain, in PORTALz"*
 
 ## Every tool
 
@@ -251,6 +253,7 @@ Write tools (hidden when the link is read-only):
 | `update_project` | Rename (the old name stays as an alias, so links keep working), status, summary, tags, folder |
 | `create_folder` | A new folder, such as a planet inside a project's folder |
 | `link_notes` | Add `- Related: [[other note]]` to a note |
+| `save_chat` | Save the conversation as a chat note: a summary on top (its links and `- [ ]` tasks count), then the transcript, under `AI Chats` or a project's `AI Chats` planet. Given the chat's web address, saving again updates that chat note: a new summary, and a new transcript only when there are more messages ([AI-CHATS.md](AI-CHATS.md)) |
 
 The task tools name a task by its line number or its text. If the note changed
 after the AI listed its tasks (you edited it in the app, for example), a task

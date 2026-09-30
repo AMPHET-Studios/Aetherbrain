@@ -10,6 +10,7 @@ Every feature has a key. `⌘` is `Ctrl` on Windows/Linux. Single keys are ignor
 | `⌘ N` · `c`    | Quick capture → Inbox                             |
 | `y` · `7`      | Today: fly to the ☀ Today hub and show the daily brief (turns the hub on if it was off) |
 | `d`            | Open (or create) today's daily note               |
+| `i`            | Import your AI chats: pick the Claude / ChatGPT data export (.zip) — see [AI-CHATS.md](AI-CHATS.md) |
 | `1` `2` `3` `4` `5` `6` | Graph · Editor · Capture · Search · Review · Projects |
 | `p`            | Projects board (with a ★ project star selected: that project's board) |
 | `u`            | The newest toast's action: *Undo* (a ticked brief task, a deleted task) or *Show* (pictures just imported, a Concept Forge critique) |
@@ -170,4 +171,4 @@ Inside a panel: `Esc` closes it, its own key closes it too, the other panel's ke
 
 ## Commands (palette `>`)
 
-Today — daily brief · Toggle Today hub · Import pictures… · Open the selected picture · Copy the embed of the selected picture · Toggle image moons · Toggle picture thumbnails · Move note → Projects / Areas / Resources / Archive · Set status → evergreen / seedling · Delete note · New project · New folder / new note in the selected folder · Make the selected folder a project · Open the selected star's project board · Show in the file manager (a note, folder or picture) · Cycle layout · Orbits moving / paused · Folder levels − / + · Expand / collapse folder · Reload vault from disk · Re-run layout physics · Vault folders · AI link · Concept Forge — open · Concept Forge — choose file… (desktop) · everything above.
+Today — daily brief · Toggle Today hub · Import AI chats (Claude / ChatGPT export)… (`i`) · Import pictures… · Open the selected picture · Copy the embed of the selected picture · Toggle image moons · Toggle picture thumbnails · Move note → Projects / Areas / Resources / Archive · Set status → evergreen / seedling · Delete note · New project · New folder / new note in the selected folder · Make the selected folder a project · Open the selected star's project board · Show in the file manager (a note, folder or picture) · Cycle layout · Orbits moving / paused · Folder levels − / + · Expand / collapse folder · Reload vault from disk · Re-run layout physics · Vault folders · AI link · Concept Forge — open · Concept Forge — choose file… (desktop) · everything above.

@@ -419,6 +419,11 @@ kbd {
   color: var(--text-dim);
   font-style: italic;
 }
+/* A quote right under a heading is a body of text (a message of an imported AI chat, a knowledge doc), not an aside. */
+.md :is(h2, h3) + blockquote {
+  color: inherit;
+  font-style: normal;
+}
 .md code {
   font-family: var(--mono);
   font-size: 0.88em;

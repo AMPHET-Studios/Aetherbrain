@@ -12,6 +12,7 @@ import {
   isImagePath,
   remarkWikilink,
   splitFrontmatter,
+  tameDelimiters,
   type NoteId,
   type ParsedNote,
   type VaultAsset,
@@ -50,7 +51,8 @@ export function MarkdownPreview({ source, selfId = null, depth = 0, className }:
     const split = splitFrontmatter(source)
     // Lines the frontmatter block occupies, so preview line numbers map back to the raw file.
     const fm = (source.slice(0, split.bodyOffset).match(/\n/g) ?? []).length
-    return { body: split.body, fmLines: fm }
+    // A paragraph with a pathological run of * or _ would freeze the renderer: same guard as the brain's parser.
+    return { body: tameDelimiters(split.body), fmLines: fm }
   }, [source])
   const plugins = useMemo(() => {
     const pictures = picturesOf(assets)
