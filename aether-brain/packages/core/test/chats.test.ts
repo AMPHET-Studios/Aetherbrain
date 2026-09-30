@@ -248,6 +248,12 @@ describe('inert chat text', () => {
     const out = JSON.stringify(hashes.runSync(hashes.parse(doc), doc))
     expect(out.match(/"type":"literalHash"/g)).toHaveLength(1)
     expect(out).toContain('"value":"portal and #real, \\\\#not-escaped"')
+    // Next to a live link, in the preview's own plugin (the pieces of its split have no position).
+    const both = unified().use(remarkParse).use(remarkWikilink)
+    const mixed = 'See [[Gate]] and \\#notatag, [\\[Not]]'
+    const tree2 = JSON.stringify(both.runSync(both.parse(mixed), mixed))
+    expect(tree2.match(/"type":"literalHash"/g)).toHaveLength(1)
+    expect(tree2.match(/"type":"wikilink"/g)).toHaveLength(1)
   })
 
   it('makes links, tags, tasks and swallowing HTML inert, and leaves code alone', () => {

@@ -45,7 +45,7 @@ import {
   inboxNote,
   isExistsError,
   isIgnoredPath,
-  isChatUrl,
+  chatUrlOf,
   isImagePath,
   isProjectNote,
   joinFrontmatter,
@@ -1085,8 +1085,9 @@ export class Brain {
       const d = await this.state()
       const title = input.title.replace(/\s+/g, ' ').trim()
       if (!noteBase(title)) throw new Error('Give the chat a title with at least one letter or number')
-      const url = input.url?.trim() ?? ''
-      if (url && !isChatUrl(url)) throw new Error('url must be the chat\'s web address, like https://claude.ai/chat/… or https://chatgpt.com/c/…')
+      // One spelling per chat (chat.openai.com is chatgpt.com), as an import of the export writes it.
+      const url = input.url?.trim() ? chatUrlOf(input.url) : ''
+      if (url === null) throw new Error('url must be the chat\'s web address, like https://claude.ai/chat/… or https://chatgpt.com/c/…')
       const messages = input.messages.filter((m) => m.text.trim())
       if (!messages.length && !input.summary?.trim()) throw new Error('Nothing to save: pass the messages, a summary, or both')
       const now = new Date().toISOString()

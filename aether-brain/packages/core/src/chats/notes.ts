@@ -68,16 +68,20 @@ function linkTitle(text: string): string {
     .replace(/[\u0000-\u001f\u007f]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim()
-    .replace(/[. ]+$/, '')
+    .replace(/^[. ]+|[. ]+$/g, '')
 }
 
-/** A file or folder name every OS takes (no separators, no trailing dot, not too long). */
+/**
+ * A file or folder name every OS takes and the brain shows: no separators,
+ * no leading dot (hidden, skipped: `.NET migration` → `NET migration`), no
+ * trailing dot, not a reserved or skipped name, not too long.
+ */
 function safeName(text: string, max = 80): string {
   const name = slugifyTitle(text.replace(/[\u0000-\u001f\u007f]+/g, ' '))
     .slice(0, max)
-    .replace(/[. ]+$/, '')
+    .replace(/^[. ]+|[. ]+$/g, '')
     .trim()
-  return /^(con|prn|aux|nul|com\d|lpt\d)$/i.test(name) ? `${name} chat` : name
+  return /^(con|prn|aux|nul|com\d|lpt\d|node_modules|__macosx)$/i.test(name) ? `${name} chat` : name
 }
 
 /**
@@ -204,9 +208,16 @@ export interface ChatRenderOptions {
   summary?: string | null
 }
 
-/** Web addresses of a chat that `Source:` lines may carry (the note's identity on re-import). */
-export function isChatUrl(url: string): boolean {
-  return /^https:\/\/(claude\.ai\/chat|chatgpt\.com\/c|chat\.openai\.com\/c)\/[A-Za-z0-9_-]{6,80}$/.test(url)
+/**
+ * The web address of a chat as a `Source:` line carries it (the note's
+ * identity on re-import), or null: `https://claude.ai/chat/<id>` or
+ * `https://chatgpt.com/c/<id>` (`chat.openai.com` is ChatGPT's old address
+ * for the same chat; a trailing slash, query or fragment is dropped).
+ */
+export function chatUrlOf(url: string): string | null {
+  const m = /^https:\/\/(claude\.ai\/chat|chatgpt\.com\/c|chat\.openai\.com\/c)\/([A-Za-z0-9_-]{6,80})\/?(?:[?#][^\s]*)?$/.exec(url.trim())
+  if (!m) return null
+  return m[1] === 'claude.ai/chat' ? `https://claude.ai/chat/${m[2]}` : `https://chatgpt.com/c/${m[2]}`
 }
 
 /** `2026-03-02 Portal lighting`: the file name (and title) of a chat's note. */
@@ -244,7 +255,7 @@ function messageBlock(m: ChatMessage, speaker: string, day: { last: string | nul
   if (m.text) out.push(closeFences(cleanText(m.text, MAX_MESSAGE_CHARS)), '')
   for (const img of m.images) {
     const file = opts.pictures?.get(img.fileId)
-    out.push(file ? live.add(`![[${file}]]`) : '🖼 *picture not in the export*', '')
+    out.push(file ? live.add(`![[${file}]]`) : '🖼 *picture not imported*', '')
     if (img.prompt && !m.text.includes(img.prompt)) out.push(`*Prompt:* ${inlineText(img.prompt, 1000)}`, '')
   }
   for (const a of m.artifacts) {

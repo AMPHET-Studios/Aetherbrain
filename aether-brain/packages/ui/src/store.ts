@@ -45,6 +45,7 @@ import {
   normalizeFolderPath,
   normalizeGrade,
   normalizePath,
+  parseNote,
   parseWikilinkRaw,
   planChatImport,
   portableFolderRef,
@@ -144,6 +145,10 @@ const COVERING_VIEWS: ReadonlySet<View> = new Set<View>(['projects', 'review', '
 const MAX_SUFFIX = 1000
 /** Largest picture the app writes (an imported file, a Concept Forge drawing). */
 export const MAX_IMAGE_BYTES = 40 * 1024 * 1024
+/** New notes of a chat import written per held batch (one graph rebuild each). */
+const NOTE_CHUNK = 100
+/** Picture bytes of a chat import held in memory and written per batch. */
+const PICTURE_CHUNK_BYTES = 64 * 1024 * 1024
 const LAYOUTS: LayoutMode[] = ['constellation', 'orbit', 'system']
 const LAYOUT_TOASTS: Record<LayoutMode, string> = {
   constellation: 'Constellation layout — clustered by area',
@@ -594,6 +599,10 @@ export interface ChatImportResult {
   pictures: number
   /** Files that could not be written, with the reason. */
   failed: string[]
+  /** The first chat written or updated (what Show flies to), or null. */
+  first: NoteId | null
+  /** True when another vault was opened while it ran (the rest was not written). */
+  stopped: boolean
 }
 
 /** A project a graded drawing can go to (the Forge window's picker). */
@@ -844,6 +853,8 @@ export const useAether = create<AetherState>()((set, get) => {
    */
   let holding = 0
   let held: VaultChange[] = []
+  /** An import of AI chats is under way (one at a time: two would plan the same notes twice). */
+  let chatImportRunning = false
   const batched = async <T>(fn: () => Promise<T>): Promise<T> => {
     holding++
     try {
@@ -933,79 +944,127 @@ export const useAether = create<AetherState>()((set, get) => {
   }
 
   /**
-   * The writing half of `importChats`, inside `batched`: folders, new notes
-   * and pictures are written create-only and applied together at the end;
-   * transcripts of grown chats go through `rewriteNote` (draft saved first,
-   * the file on disk as the starting point).
+   * The writing half of `importChats`. Changes are held (`batched`) only
+   * around short runs of writes, never across a whole import: while they are
+   * held the store's copy of a note is not the disk's, so a long hold would
+   * let edits made meanwhile start from old text. Folders and new notes go in
+   * chunks (one rebuild each); pictures are read with nothing held, then
+   * written in chunks; transcripts of grown chats go through `rewriteNote`
+   * (draft saved first, the file on disk as the starting point). Stops when
+   * another vault is opened.
    */
-  const writeChatImport = async (plan: ChatImportPlan, input: ChatImportInput, base: string): Promise<ChatImportResult> => {
-    const { adapter } = get()
-    const result: ChatImportResult = { base, created: 0, updated: 0, unchanged: plan.unchanged, pictures: 0, failed: [] }
-    if (!adapter) return result
-    const changes: VaultChange[] = []
-    const mtime = Date.now()
-    // Every folder spelled the vault's way (a Claude/ folder on disk as claude/ is the same folder).
-    const dirOf = new Map<string, string>()
+  const writeChatImport = async (plan: ChatImportPlan, input: ChatImportInput, base: string, adapter: VaultAdapter): Promise<ChatImportResult> => {
+    const result: ChatImportResult = { base, created: 0, updated: 0, unchanged: plan.unchanged, pictures: 0, failed: [], first: null, stopped: false }
+    const current = () => {
+      if (get().adapter === adapter) return true
+      result.stopped = true
+      return false
+    }
+    // Every folder spelled the vault's way, and one spelling per folder within this import too
+    // (a Claude/ folder on disk as claude/ is the same folder; so are two projects "Art" and "art").
+    const spelled = new Map<string, string>()
     const spell = (dir: string): string => {
-      let out = dirOf.get(dir)
-      if (out === undefined) {
-        out = canonicalFolder(dir)
-        dirOf.set(dir, out)
+      let out = ''
+      for (const seg of normalizeFolderPath(dir).split('/').filter(Boolean)) {
+        const next = out ? `${out}/${seg}` : seg
+        out = spelled.get(next.toLowerCase()) ?? folderSpelling(next) ?? next
+        spelled.set(out.toLowerCase(), out)
       }
       return out
     }
-    const made = new Set<string>()
-    const ensure = async (dir: string): Promise<boolean> => {
-      if (!dir || get().folders.has(dir) || made.has(dir)) return true
-      if (!adapter.createFolder) return true
-      try {
-        await adapter.createFolder(dir)
-        made.add(dir)
-        changes.push({ kind: 'addDir', path: dir })
-        return true
-      } catch (err) {
-        result.failed.push(`${dir}: ${errText(err)}`)
-        return false
-      }
-    }
-    for (const dir of plan.folders) await ensure(spell(dir))
-
-    for (const note of plan.create) {
-      const dir = spell(folderOf(note.path))
-      const path = `${dir ? `${dir}/` : ''}${note.path.slice(note.path.lastIndexOf('/') + 1)}`
-      try {
-        const done = await createNew(path, note.content)
-        if (done) {
-          changes.push({ kind: 'add', path: done.path, content: done.content, mtime })
-          result.created++
-        }
-      } catch (err) {
-        result.failed.push(`${path}: ${errText(err)}`)
-      }
+    const place = (path: string): string => {
+      const dir = spell(folderOf(path))
+      return `${dir ? `${dir}/` : ''}${path.slice(path.lastIndexOf('/') + 1)}`
     }
 
-    if (plan.pictures.length && input.pictures && adapter.createAsset) {
-      const taken = takenImages()
-      for (const pic of plan.pictures) {
-        const dir = spell(folderOf(pic.path))
-        const file = pic.path.slice(pic.path.lastIndexOf('/') + 1)
-        const m = IMAGE_NAME.exec(file)
+    // Folders and notes, a chunk at a time.
+    const taken = new Set([...get().notes.keys()].map((k) => k.toLowerCase()))
+    const folders = plan.folders.map(spell)
+    const notes = plan.create.map((n) => ({ ...n, path: place(n.path) }))
+    await batched(async () => {
+      const changes: VaultChange[] = []
+      for (const dir of folders) {
+        if (!dir || get().folders.has(dir) || !adapter.createFolder || !current()) continue
         try {
-          const data = await input.pictures.read(pic.from)
-          if (data.byteLength > MAX_IMAGE_BYTES) throw new Error('larger than 40 MB')
-          const path = await createAssetNew(dir, m?.[1] ?? file, m?.[2] ?? '', data, taken)
-          changes.push({ kind: 'add', path, mtime, size: data.byteLength })
-          result.pictures++
+          await adapter.createFolder(dir)
+          changes.push({ kind: 'addDir', path: dir })
         } catch (err) {
-          result.failed.push(`${file}: ${errText(err)}`)
+          result.failed.push(`${dir}: ${errText(err)}`)
         }
       }
+      if (changes.length) get().applyExternal(changes)
+    })
+    for (let i = 0; i < notes.length && current(); i += NOTE_CHUNK) {
+      await batched(async () => {
+        const changes: VaultChange[] = []
+        const mtime = Date.now()
+        for (const note of notes.slice(i, i + NOTE_CHUNK)) {
+          if (!current()) break
+          try {
+            const done = await createNew(note.path, note.content, { taken })
+            if (done) {
+              changes.push({ kind: 'add', path: done.path, content: done.content, mtime })
+              result.created++
+              if (note.kind === 'chat') result.first ??= idFromPath(done.path)
+            }
+          } catch (err) {
+            result.failed.push(`${note.path}: ${errText(err)}`)
+          }
+        }
+        if (changes.length) get().applyExternal(changes)
+      })
     }
-    if (changes.length) get().applyExternal(changes)
+
+    // Pictures: read with nothing held, written a chunk at a time under the exact
+    // name the chat's note embeds (one already there is taken as that picture).
+    if (plan.pictures.length && input.pictures && adapter.createAsset) {
+      const read = input.pictures.read
+      const create = adapter.createAsset.bind(adapter)
+      let chunk: { path: string; data: Uint8Array }[] = []
+      let bytes = 0
+      const flush = async () => {
+        const batch = chunk
+        chunk = []
+        bytes = 0
+        if (!batch.length || !current()) return
+        await batched(async () => {
+          const changes: VaultChange[] = []
+          const mtime = Date.now()
+          for (const pic of batch) {
+            try {
+              await create(pic.path, pic.data)
+              changes.push({ kind: 'add', path: pic.path, mtime, size: pic.data.byteLength })
+              result.pictures++
+            } catch (err) {
+              if (!isExistsError(err)) result.failed.push(`${pic.path.slice(pic.path.lastIndexOf('/') + 1)}: ${errText(err)}`)
+            }
+          }
+          if (changes.length) get().applyExternal(changes)
+        })
+      }
+      for (const pic of plan.pictures) {
+        if (!current()) break
+        const path = place(pic.path)
+        try {
+          const data = await read(pic.from)
+          if (data.byteLength > MAX_IMAGE_BYTES) throw new Error('larger than 40 MB')
+          if (bytes > 0 && bytes + data.byteLength > PICTURE_CHUNK_BYTES) await flush()
+          chunk.push({ path, data })
+          bytes += data.byteLength
+        } catch (err) {
+          result.failed.push(`${path.slice(path.lastIndexOf('/') + 1)}: ${errText(err)}`)
+        }
+      }
+      await flush()
+    }
 
     for (const u of plan.update) {
+      if (!current()) break
       const done = await rewriteNote(u.noteId, (raw) => applyChatUpdate(raw, u) ?? raw, `update ${basenameOf(u.path)}`)
-      if (done) result.updated++
+      if (done) {
+        result.updated++
+        result.first ??= u.noteId
+      }
     }
     return result
   }
@@ -1053,12 +1112,13 @@ export const useAether = create<AetherState>()((set, get) => {
   const createNew = async (
     path: string,
     content: string | ((path: string) => string),
-    opts: { suffix?: boolean } = {},
+    opts: { suffix?: boolean; taken?: Set<string> } = {},
   ): Promise<{ path: string; content: string } | null> => {
     const { adapter } = get()
     if (!adapter) throw new Error('No vault open')
     const base = normalizePath(path)
-    const taken = new Set([...get().notes.keys()].map((k) => k.toLowerCase()))
+    // Lowercased ids of the notes there are; a caller making many notes passes one set (each id made is added).
+    const taken = opts.taken ?? new Set([...get().notes.keys()].map((k) => k.toLowerCase()))
     const tries = opts.suffix === false ? 1 : MAX_SUFFIX
     for (let n = 1; n <= tries; n++) {
       const p = n === 1 ? base : base.replace(/(\.md)?$/i, ` ${n}.md`)
@@ -1073,6 +1133,7 @@ export const useAether = create<AetherState>()((set, get) => {
         if (adapter.create) await adapter.create(p, text)
         else if ((await adapter.read(p)) !== null) continue
         else await adapter.write(p, text)
+        taken.add(idFromPath(p).toLowerCase())
         return { path: p, content: text }
       } catch (err) {
         if (!isExistsError(err)) throw err
@@ -1144,7 +1205,11 @@ export const useAether = create<AetherState>()((set, get) => {
       get().toast(`Could not ${what}: ${note.meta.path} is no longer on disk`, 'error')
       return null
     }
-    if (disk !== note.raw) get().applyExternal([{ kind: 'change', path: note.meta.path, content: disk, mtime: Date.now() }])
+    if (disk !== note.raw) {
+      get().applyExternal([{ kind: 'change', path: note.meta.path, content: disk, mtime: Date.now() }])
+      // Held while a batch of writes runs: the store still has the old text, so answer with the disk's.
+      if (holding > 0) return parseNote({ path: note.meta.path, content: disk, mtime: Date.now() })
+    }
     return get().notes.get(id) ?? null
   }
 
@@ -2383,45 +2448,63 @@ export const useAether = create<AetherState>()((set, get) => {
         get().toast('This vault is read-only', 'error')
         return null
       }
+      if (chatImportRunning) {
+        get().toast('An import of AI chats is already running; wait for it to finish', 'error')
+        return null
+      }
       const { archive } = input
       if (!archive.conversations.length && !archive.projects.length) {
         get().toast('No Claude or ChatGPT chats found in that file (use the data export zip, or its conversations.json)', 'error')
         return null
       }
-      const base = get().chatImportBase()
-      const projects = [...get().notes.values()]
-        .filter((n) => n.meta.area !== 'archive' && isProjectNote(n))
-        .map((n) => ({ title: n.meta.title, home: projectHomeOf(n) }))
-      const plan = planChatImport(archive, get().notes.values(), {
-        base,
-        projects,
-        pictureFiles: adapter.createAsset ? (input.pictures?.files ?? []) : [],
-        existingPictures: get().assets.keys(),
-      })
-      if (!plan.create.length && !plan.update.length && !plan.pictures.length) {
-        get().toast(`Nothing new: ${plural(plan.unchanged, 'chat')} already in your brain`)
-        return null
-      }
-      if (input.confirm && !(await input.confirm(plan, base))) return null
-      const total = plan.create.length + plan.pictures.length + plan.update.length
-      if (total > 20) get().toast(`Importing ${total.toLocaleString('en-US')} files…`)
-      const result = await batched(() => writeChatImport(plan, input, base))
-      const what = [
-        result.created ? plural(result.created, 'note') : '',
-        result.pictures ? plural(result.pictures, 'picture') : '',
-        result.updated ? `${result.updated.toLocaleString('en-US')} updated` : '',
-      ].filter(Boolean)
-      if (what.length) {
-        const show = () => {
-          get().showFolder(base)
-          if (get().graph?.index.has(folderKey(base))) showNode(folderKey(base))
+      chatImportRunning = true
+      try {
+        const base = get().chatImportBase()
+        const projects = [...get().notes.values()]
+          .filter((n) => n.meta.area !== 'archive' && isProjectNote(n))
+          .map((n) => ({ title: n.meta.title, home: projectHomeOf(n) }))
+        const plan = planChatImport(archive, get().notes.values(), {
+          base,
+          projects,
+          pictureFiles: adapter.createAsset ? (input.pictures?.files ?? []) : [],
+          existingPictures: get().assets.keys(),
+        })
+        if (!plan.create.length && !plan.update.length && !plan.pictures.length) {
+          get().toast(plan.unchanged ? `Nothing new: ${plural(plan.unchanged, 'chat')} already in your brain` : 'Nothing new: everything in that export is already in your brain')
+          return null
         }
-        get().toast(`AI chats imported: ${what.join(', ')} → ${base || 'the vault root'}`, 'success', { label: 'Show', run: show })
+        if (input.confirm && !(await input.confirm(plan, base))) return null
+        if (get().adapter !== adapter) return null
+        const total = plan.create.length + plan.pictures.length + plan.update.length
+        if (total > 20) get().toast(`Importing ${total.toLocaleString('en-US')} files…`)
+        const result = await writeChatImport(plan, input, base, adapter)
+        if (result.stopped) {
+          get().toast('Another vault was opened, so the import of AI chats stopped; import again in that vault to finish', 'error')
+          return result
+        }
+        const what = [
+          result.created ? plural(result.created, 'note') : '',
+          result.pictures ? plural(result.pictures, 'picture') : '',
+          result.updated ? `${result.updated.toLocaleString('en-US')} updated` : '',
+        ].filter(Boolean)
+        if (what.length) {
+          const home = plan.create.every((p) => p.path === base || p.path.startsWith(`${base}/`))
+          const show = () => {
+            if (get().folders.has(base) && home) {
+              get().showFolder(base)
+              if (get().graph?.index.has(folderKey(base))) showNode(folderKey(base))
+            } else if (result.first && get().notes.has(result.first)) showNode(result.first)
+          }
+          const where = home ? base || 'the vault root' : `${base || 'the vault root'} and project planets`
+          get().toast(`AI chats imported: ${what.join(', ')} → ${where}`, 'success', { label: 'Show', run: show })
+        }
+        if (result.failed.length) {
+          get().toast(`Could not write ${truncate(result.failed[0] ?? '', 80)}${result.failed.length > 1 ? ` (and ${result.failed.length - 1} more)` : ''}`, 'error')
+        }
+        return result
+      } finally {
+        chatImportRunning = false
       }
-      if (result.failed.length) {
-        get().toast(`Could not write ${truncate(result.failed[0] ?? '', 80)}${result.failed.length > 1 ? ` (and ${result.failed.length - 1} more)` : ''}`, 'error')
-      }
-      return result
     },
   }
 })

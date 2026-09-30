@@ -62,6 +62,11 @@ export async function readChatFiles(files: readonly File[]): Promise<ChatImportI
     return null
   }
   const archive = readChatExport(json)
+  // A file that did not read (cut off, not JSON) is said, not skipped in silence: its chats are missing.
+  if (archive.warnings.length) {
+    const first = truncate(archive.warnings[0] ?? '', 90)
+    s.toast(`${first}${archive.warnings.length > 1 ? ` (and ${archive.warnings.length - 1} more)` : ''} — was the export cut off? Its chats are not imported`, 'error')
+  }
   const input: ChatImportInput = { archive }
   if (pictures.size) {
     input.pictures = {
@@ -83,7 +88,10 @@ function confirmImport(input: ChatImportInput): ChatImportInput {
     confirm: (plan, base) => {
       if (typeof window === 'undefined' || typeof window.confirm !== 'function') return true
       const lines = describeChatImport(plan, base)
-      return window.confirm(`Import your AI chats into Aether Brain?\n\n${lines.join('\n')}\n\nEverything is written as plain markdown; nothing in your vault is overwritten.`)
+      const safe = plan.update.length
+        ? 'Everything is written as plain markdown. New notes never replace a file; the updated chats get a new transcript, and what you wrote above it stays.'
+        : 'Everything is written as plain markdown; nothing in your vault is overwritten.'
+      return window.confirm(`Import your AI chats into Aether Brain?\n\n${lines.join('\n')}\n\n${safe}`)
     },
   }
 }

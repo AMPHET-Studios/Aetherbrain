@@ -219,3 +219,96 @@ describe('importing AI chats', () => {
     expect(s().graph?.index.has(folderKey('AI Chats'))).toBe(false)
   })
 })
+
+/** A memory vault whose picture writes wait for `release()` (a write in progress while the store holds changes). */
+class SlowPictures extends MemoryVaultAdapter {
+  private gate: Promise<void> | null = null
+  release = () => {}
+  hold(): void {
+    this.gate = new Promise((r) => (this.release = r))
+  }
+  override async createAsset(path: string, data: Uint8Array): Promise<void> {
+    if (this.gate) await this.gate
+    return super.createAsset(path, data)
+  }
+}
+
+const tick = () => new Promise((r) => setTimeout(r, 0))
+
+describe('importing AI chats: edits made meanwhile, one import at a time, another vault', () => {
+  it('edits made while changes are held start from the disk (two tasks added during a picture write both stay)', async () => {
+    const { s } = await freshStore()
+    const v = new SlowPictures([{ path: 'Projects/PORTALz.md', content: project('PORTALz') }], { folders: ['Projects/PORTALz'] })
+    await s().openVault(v)
+    v.hold()
+    const drop = s().importImages([{ name: 'gate.png', data: PNG }], 'Projects/PORTALz')
+    await tick()
+    await s().addTask('Projects/PORTALz', 'Task A')
+    await s().addTask('Projects/PORTALz', 'Task B')
+    v.release()
+    await drop
+    const disk = (await v.read('Projects/PORTALz.md'))!
+    expect(disk).toContain('- [ ] Task A')
+    expect(disk).toContain('- [ ] Task B')
+    expect(s().notes.get('Projects/PORTALz')?.raw).toBe(disk)
+  })
+
+  it('a chat open with unsaved edits: the draft is saved first and kept when its transcript is updated', async () => {
+    const { s } = await freshStore()
+    const v = vault()
+    await s().openVault(v)
+    await s().importChats({ archive: archiveOf() })
+    const id = 'Resources/AI Chats/Claude/2026-03-02 Portal lighting'
+    s().openNote(id)
+    s().setDraft(s().draft.replace(TRANSCRIPT_HEADING, `Draft thought.\n\n${TRANSCRIPT_HEADING}`))
+    const grown = archiveOf(claude([{ uuid: 'm3', sender: 'human', created_at: '2026-03-05T10:00:00Z', text: 'And the fog?', content: [] }]))
+    expect(await s().importChats({ archive: grown })).toMatchObject({ updated: 1 })
+    const disk = (await v.read(`${id}.md`))!
+    expect(disk).toContain('Draft thought.')
+    expect(disk).toContain('And the fog?')
+  })
+
+  it('runs one import at a time: a second one while the first runs is refused, not doubled', async () => {
+    const { s } = await freshStore()
+    const v = vault()
+    await s().openVault(v)
+    let release = () => {}
+    const gate = new Promise<void>((r) => (release = r))
+    const first = s().importChats({ archive: archiveOf(), confirm: () => gate.then(() => true) })
+    await tick()
+    expect(await s().importChats({ archive: archiveOf() })).toBeNull()
+    expect(s().toasts.at(-1)?.text).toMatch(/already running/)
+    release()
+    expect(await first).toMatchObject({ created: 4 })
+    const paths = [...s().notes.keys()].filter((k) => k.includes('Portal lighting'))
+    expect(paths).toEqual(['Resources/AI Chats/Claude/2026-03-02 Portal lighting'])
+  })
+
+  it('stops when another vault is opened, and writes nothing into it', async () => {
+    const { s } = await freshStore()
+    const v1 = vault()
+    const v2 = new MemoryVaultAdapter([{ path: 'Other.md', content: '# Other' }], { folders: ['Resources'] })
+    await s().openVault(v1)
+    let release = () => {}
+    const gate = new Promise<void>((r) => (release = r))
+    const run = s().importChats({ archive: archiveOf(), confirm: () => gate.then(() => true) })
+    await tick()
+    await s().openVault(v2)
+    release()
+    expect(await run).toBeNull()
+    expect((await v2.list()).map((f) => f.path)).toEqual(['Other.md'])
+    expect([...s().notes.keys()]).toEqual(['Other'])
+  })
+
+  it('a project whose name starts with a dot (.NET) is still imported, under a name the brain shows', async () => {
+    const { s } = await freshStore()
+    await s().openVault(vault())
+    const archive = readChatExport([{ name: 'projects.json', text: JSON.stringify([{ uuid: 'p-9', name: '.NET migration', prompt_template: 'x', docs: [{ filename: '.env notes.md', content: 'hi' }] }]) }])
+    expect(await s().importChats({ archive })).toMatchObject({ created: 2, failed: [] })
+    expect([...s().notes.keys()].filter((k) => k.startsWith('Resources/AI Chats')).sort()).toEqual([
+      'Resources/AI Chats/Claude/NET migration/Knowledge/NET migration – env notes',
+      'Resources/AI Chats/Claude/NET migration/NET migration (Claude project)',
+    ])
+  })
+})
+

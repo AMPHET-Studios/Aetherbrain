@@ -132,7 +132,9 @@ export interface RemarkWikilinkOptions {
 
 /**
  * remark plugin: splits text nodes containing [[wikilinks]] into `wikilink`
- * nodes rendered as `<a class="wikilink" data-target=...>`.
+ * nodes rendered as `<a class="wikilink" data-target=...>`, and sets apart
+ * escaped hashes as `remarkLiteralHashes` does (both need the node's source
+ * position, which the pieces of a split no longer have).
  */
 export const remarkWikilink: Plugin<[RemarkWikilinkOptions?], Root> = (options = {}) => {
   const resolve = options.resolve
@@ -142,12 +144,13 @@ export const remarkWikilink: Plugin<[RemarkWikilinkOptions?], Root> = (options =
       if (!parent || index === undefined) return
       const start = node.position?.start.offset
       const end = node.position?.end.offset
-      const tokens = textWikilinks(node.value, doc !== null && start !== undefined && end !== undefined ? doc.slice(start, end) : null)
-      if (tokens.length === 0) return
-      const pieces: PhrasingContent[] = []
-      let cursor = 0
+      const source = doc !== null && start !== undefined && end !== undefined ? doc.slice(start, end) : null
+      const tokens = textWikilinks(node.value, source)
+      // Escaped hashes are split out here too, in the same pass: the pieces a split leaves have no position.
+      const hashes = source === null ? [] : literalHashes(node.value, source).filter((at) => !tokens.some((t) => at >= t.index && at < t.index + t.match.length))
+      if (tokens.length === 0 && hashes.length === 0) return
+      const cuts: ({ at: number; len: number; node: PhrasingContent })[] = []
       for (const t of tokens) {
-        if (t.index > cursor) pieces.push({ type: 'text', value: node.value.slice(cursor, t.index) })
         const resolved = resolve ? resolve(t.target) : null
         const label = t.alias ?? (t.heading && !t.target ? `#${t.heading}` : t.heading ? `${t.target} › ${t.heading}` : t.target)
         const props: Record<string, string | boolean> = {
@@ -168,14 +171,55 @@ export const remarkWikilink: Plugin<[RemarkWikilinkOptions?], Root> = (options =
         }
         if (t.heading) wl.heading = t.heading
         if (t.alias) wl.alias = t.alias
-        pieces.push(wl)
-        cursor = t.index + t.match.length
+        cuts.push({ at: t.index, len: t.match.length, node: wl })
+      }
+      for (const at of hashes) cuts.push({ at, len: 1, node: literalHashNode() })
+      cuts.sort((a, b) => a.at - b.at)
+      const pieces: PhrasingContent[] = []
+      let cursor = 0
+      for (const c of cuts) {
+        if (c.at > cursor) pieces.push({ type: 'text', value: node.value.slice(cursor, c.at) })
+        pieces.push(c.node)
+        cursor = c.at + c.len
       }
       if (cursor < node.value.length) pieces.push({ type: 'text', value: node.value.slice(cursor) })
       parent.children.splice(index, 1, ...pieces)
       return index + pieces.length
     })
   }
+}
+
+/**
+ * Indices in a text node's `value` of the hashes its `source` writes escaped
+ * (`\#word`). Escapes never add or drop a `#`, so the value's hashes are the
+ * source's, in order; when the counts differ (a `&#35;` entity) nothing is
+ * reported.
+ */
+function literalHashes(value: string, source: string): number[] {
+  if (!source.includes('\\#')) return []
+  const escaped: boolean[] = []
+  for (let i = 0; i < source.length; i++) {
+    if (source[i] !== '#') continue
+    let slashes = 0
+    for (let j = i - 1; j >= 0 && source[j] === '\\'; j--) slashes++
+    escaped.push(slashes % 2 === 1)
+  }
+  const out: number[] = []
+  let k = 0
+  for (let i = 0; i < value.length; i++) {
+    if (value[i] !== '#') continue
+    if (escaped[k]) out.push(i)
+    k++
+  }
+  return k === escaped.length ? out : []
+}
+
+function literalHashNode(): PhrasingContent {
+  return {
+    type: 'literalHash',
+    data: { hName: 'span', hProperties: { className: 'literal-hash' } },
+    children: [{ type: 'text', value: '#' }],
+  } as unknown as PhrasingContent
 }
 
 /**
@@ -193,32 +237,15 @@ export const remarkLiteralHashes: Plugin<[], Root> = () => {
       const start = node.position?.start.offset
       const end = node.position?.end.offset
       if (start === undefined || end === undefined) return
-      const src = doc.slice(start, end)
-      if (!src.includes('\\#')) return
-      // Escapes never add or drop a `#`: the value's hashes are the source's, in order.
-      const escaped: boolean[] = []
-      for (let i = 0; i < src.length; i++) {
-        if (src[i] !== '#') continue
-        let slashes = 0
-        for (let j = i - 1; j >= 0 && src[j] === '\\'; j--) slashes++
-        escaped.push(slashes % 2 === 1)
-      }
-      const hashes: number[] = []
-      for (let i = 0; i < node.value.length; i++) if (node.value[i] === '#') hashes.push(i)
-      if (hashes.length !== escaped.length) return
+      const hashes = literalHashes(node.value, doc.slice(start, end))
+      if (!hashes.length) return
       const pieces: PhrasingContent[] = []
       let cursor = 0
-      hashes.forEach((at, k) => {
-        if (!escaped[k]) return
+      for (const at of hashes) {
         if (at > cursor) pieces.push({ type: 'text', value: node.value.slice(cursor, at) })
-        pieces.push({
-          type: 'literalHash',
-          data: { hName: 'span', hProperties: { className: 'literal-hash' } },
-          children: [{ type: 'text', value: '#' }],
-        } as unknown as PhrasingContent)
+        pieces.push(literalHashNode())
         cursor = at + 1
-      })
-      if (!pieces.length) return
+      }
       if (cursor < node.value.length) pieces.push({ type: 'text', value: node.value.slice(cursor) })
       parent.children.splice(index, 1, ...pieces)
       return index + pieces.length
