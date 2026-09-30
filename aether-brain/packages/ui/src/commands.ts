@@ -1,4 +1,5 @@
-import { folderPathOf, isFolderId, type NoteId } from '@aether/core'
+import { folderPathOf, imagePathOf, isFolderId, isImageId, type NoteId } from '@aether/core'
+import { copyEmbed, importPicturesFromDialog } from './components/pictures'
 import type { AetherState } from './store'
 import { MOD } from './util'
 
@@ -24,6 +25,11 @@ export function selectedFolder(s: AetherState): string | null {
   return s.selectedId && isFolderId(s.selectedId) ? folderPathOf(s.selectedId) : null
 }
 
+/** Vault path of the selected picture, or null when the selection is not a picture. */
+export function selectedImage(s: AetherState): string | null {
+  return s.selectedId && isImageId(s.selectedId) ? imagePathOf(s.selectedId) : null
+}
+
 /** The selected folder when it is a folder on disk (not the vault root that joins several drives). */
 function diskFolder(s: AetherState): string | null {
   const f = selectedFolder(s)
@@ -42,6 +48,7 @@ const writable = (s: AetherState) => !!s.adapter && !s.adapter.readOnly
 /** Every keyboard path has a palette twin, and vice versa. */
 export const COMMANDS: Command[] = [
   { id: 'capture', title: 'Quick capture → Inbox', keys: `${MOD}+N · c`, group: 'note', run: (s) => s.setView('capture') },
+  { id: 'today', title: 'Today — daily brief', keys: 'y · 7', group: 'navigate', run: (s) => s.showToday() },
   { id: 'daily', title: "Open today's daily note", keys: 'd', group: 'note', run: (s) => s.openDaily() },
   {
     id: 'open-selected',
@@ -50,6 +57,28 @@ export const COMMANDS: Command[] = [
     group: 'note',
     when: (s) => !!s.selectedId && s.notes.has(s.selectedId),
     run: (s) => s.selectedId && s.openNote(s.selectedId, { fly: true }),
+  },
+  {
+    id: 'picture-open',
+    title: 'Open the selected picture in your image app',
+    keys: 'e · Enter',
+    group: 'note',
+    when: (s) => selectedImage(s) !== null,
+    run: (s) => s.openImage(selectedImage(s)!),
+  },
+  {
+    id: 'picture-embed',
+    title: 'Copy the embed of the selected picture (![[…]])',
+    group: 'note',
+    when: (s) => selectedImage(s) !== null,
+    run: (s) => copyEmbed(selectedImage(s)!),
+  },
+  {
+    id: 'import-pictures',
+    title: 'Import pictures…',
+    group: 'vault',
+    when: (s) => writable(s) && !!s.adapter?.createAsset,
+    run: () => importPicturesFromDialog(),
   },
   {
     id: 'close-editor',
@@ -185,17 +214,46 @@ export const COMMANDS: Command[] = [
     id: 'reveal',
     title: 'Show in the file manager',
     group: 'vault',
-    when: (s) => !!s.adapter?.reveal && (selectedFolder(s) !== null || !!noteTarget(s)),
+    when: (s) => !!s.adapter?.reveal && (selectedFolder(s) !== null || selectedImage(s) !== null || !!noteTarget(s)),
     run: (s) => {
-      const folder = selectedFolder(s)
       const note = noteTarget(s)
-      const path = folder ?? (note ? s.notes.get(note)?.meta.path : undefined)
+      const path = selectedFolder(s) ?? selectedImage(s) ?? (note ? s.notes.get(note)?.meta.path : undefined)
       if (path !== undefined) void s.reveal(path)
     },
   },
   { id: 'color', title: 'Cycle color mode: area → type → tag → age', keys: 'm', group: 'view', run: (s) => s.cycleColorMode() },
   { id: 'bloom', title: 'Toggle bloom', keys: 'b', group: 'view', run: (s) => s.setSettings({ bloom: !s.settings.bloom }) },
   { id: 'labels', title: 'Toggle hub labels', keys: 'l', group: 'view', run: (s) => s.setSettings({ hubLabels: !s.settings.hubLabels }) },
+  {
+    id: 'today-hub',
+    title: 'Toggle Today hub',
+    group: 'view',
+    run: (s) => {
+      const on = !s.settings.todayHub
+      s.setSettings({ todayHub: on })
+      s.toast(on ? 'Today hub on — y flies to it' : 'Today hub off')
+    },
+  },
+  {
+    id: 'picture-moons',
+    title: 'Toggle image moons',
+    group: 'view',
+    run: (s) => {
+      const on = !s.settings.imageMoons
+      s.setSettings({ imageMoons: on })
+      s.toast(on ? `Image moons on${s.settings.layoutMode === 'system' ? '' : ' — they orbit their folders in the system layout (t)'}` : 'Image moons off — embedded pictures stay')
+    },
+  },
+  {
+    id: 'picture-thumbnails',
+    title: 'Toggle picture thumbnails',
+    group: 'view',
+    run: (s) => {
+      const on = !s.settings.thumbnails
+      s.setSettings({ thumbnails: on })
+      s.toast(on ? 'Picture thumbnails on' : 'Picture thumbnails off — pictures are plain moons')
+    },
+  },
   { id: 'help', title: 'Keyboard shortcuts', keys: '?', group: 'view', run: (s) => s.setHelp(true) },
 
   { id: 'reload', title: 'Reload vault from disk', group: 'vault', run: (s) => s.reload() },

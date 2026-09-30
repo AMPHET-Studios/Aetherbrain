@@ -1,4 +1,5 @@
-import type { LayoutMode } from '@aether/graph'
+import { TODAY_ID } from '@aether/core'
+import { TODAY_COLOR, type LayoutMode } from '@aether/graph'
 import { useAether, type View } from '../store'
 import { cx, MOD } from '../util'
 
@@ -27,17 +28,23 @@ export function TopBar({ onPickVault }: { onPickVault?: (() => void) | undefined
   const fps = useAether((s) => s.fps)
   const dirty = useAether((s) => s.dirty)
   const status = useAether((s) => s.status)
+  const brief = useAether((s) => s.brief)
+  const todaySelected = useAether((s) => s.selectedId === TODAY_ID)
+  const showToday = useAether((s) => s.showToday)
 
-  // Neurons are notes; folder nodes (system layout) are counted apart.
+  // Neurons are notes; folder nodes (system layout) and pictures are counted apart, the Today hub not at all.
   let nodes = 0
   let ghosts = 0
   let folders = 0
+  let pictures = 0
   for (const n of graph?.nodes ?? []) {
     if (n.kind === 'note') nodes++
     else if (n.kind === 'ghost') ghosts++
-    else folders++
+    else if (n.kind === 'folder') folders++
+    else if (n.kind === 'image') pictures++
   }
   const edges = graph?.edges.length ?? 0
+  const late = brief?.overdue.length ?? 0
 
   return (
     <header className="panel flex items-center gap-1 px-2 py-1.5" role="banner">
@@ -66,6 +73,24 @@ export function TopBar({ onPickVault }: { onPickVault?: (() => void) | undefined
         ))}
       </nav>
 
+      {status === 'ready' && brief && (
+        <button
+          type="button"
+          className="hud-btn ml-1"
+          aria-pressed={todaySelected}
+          onClick={showToday}
+          title={`Today — daily brief (y): ${late} overdue · ${brief.today.length} today · ${brief.next.length} next up`}
+        >
+          <span style={{ color: TODAY_COLOR, textShadow: `0 0 8px ${TODAY_COLOR}` }} aria-hidden>
+            ☀
+          </span>
+          Today
+          <span className="tabular-nums text-ink">{brief.total}</span>
+          {late > 0 && <span className="h-1.5 w-1.5 rounded-full bg-danger" style={{ boxShadow: '0 0 6px var(--danger)' }} aria-label={`${late} overdue`} role="img" />}
+          <kbd>y</kbd>
+        </button>
+      )}
+
       <span className="flex-1" />
 
       <button type="button" className="hud-btn" onClick={() => setPalette(true)} title={`Search (${MOD}+K)`}>
@@ -89,14 +114,18 @@ export function TopBar({ onPickVault }: { onPickVault?: (() => void) | undefined
           <span className="max-w-[160px] truncate">{adapter?.name ?? 'No vault'}</span>
           {adapter?.readOnly && <span className="text-inbox">·ro</span>}
         </button>
-        <span title={`Neurons (notes) / synapses / missing${settings.layoutMode === 'system' ? ' / folders shown' : ''}`}>
+        {/* The counts need room: on narrower windows they give way to the views and the Today chip (the legend has them too). */}
+        <span
+          className="hidden whitespace-nowrap min-[1600px]:inline"
+          title={`Neurons (notes) / synapses / missing${settings.layoutMode === 'system' ? ' / folders shown' : ''} / pictures shown`}
+        >
           {status === 'ready'
-            ? `${nodes}n · ${edges}s${ghosts ? ` · ${ghosts}?` : ''}${settings.layoutMode === 'system' && folders ? ` · ${folders}f` : ''}`
+            ? `${nodes}n · ${edges}s${ghosts ? ` · ${ghosts}?` : ''}${settings.layoutMode === 'system' && folders ? ` · ${folders}f` : ''}${pictures ? ` · ${pictures}🖼` : ''}`
             : status === 'loading'
               ? 'loading…'
               : ''}
         </span>
-        <span className={cx('tabular-nums', fps && fps < 45 ? 'text-inbox' : '')} title="Frames per second">
+        <span className={cx('whitespace-nowrap tabular-nums', fps && fps < 45 ? 'text-inbox' : '')} title="Frames per second">
           {fps ? `${fps} fps` : ''}
         </span>
         {dirty && <span className="text-inbox">●</span>}

@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest'
 import {
   MemoryVaultAdapter,
   buildGraph,
+  isImagePath,
   isProjectNote,
   loadVault,
   parseNote,
@@ -449,18 +450,19 @@ describe('buildGraph with folders, edge cases', () => {
 
 describe('demo vault as a solar system', () => {
   const root = fileURLToPath(new URL('../../../vault-demo', import.meta.url))
-  const walk = (dir: string): VaultFile[] =>
+  const walk = (dir: string, keep: (name: string) => boolean): string[] =>
     readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
-      e.isDirectory()
-        ? walk(join(dir, e.name))
-        : e.name.endsWith('.md')
-          ? [{ path: relative(root, join(dir, e.name)).split('\\').join('/'), content: readFileSync(join(dir, e.name), 'utf8') }]
-          : [],
+      e.isDirectory() ? walk(join(dir, e.name), keep) : keep(e.name) ? [relative(root, join(dir, e.name)).split('\\').join('/')] : [],
     )
+  const files = (): VaultFile[] => walk(root, (n) => n.endsWith('.md')).map((path) => ({ path, content: readFileSync(join(root, path), 'utf8') }))
+  // The demo's pictures too: its notes embed them (`![[portal-ring.png]]`, the critique's drawing).
+  const pictures = () => walk(root, isImagePath).map((path) => ({ path, data: new Uint8Array(readFileSync(join(root, path))) }))
 
   it('gives PORTALz and ConceptForge stars with planets, and every planet note links home', async () => {
-    const { notes, graph } = await loadVault(new MemoryVaultAdapter(walk(root)), undefined, undefined, (folders) => ({
+    const vault = new MemoryVaultAdapter(files(), { assets: pictures() })
+    const { notes, graph } = await loadVault(vault, undefined, undefined, (folders, _notes, assets) => ({
       folders: { multiRoot: false, all: folders, rootTitle: 'Demo vault' },
+      images: { all: assets },
     }))
     const planets = (star: string) => graph.nodes.filter((n) => n.parent === `folder:${star}` && n.kind === 'folder').map((n) => n.title)
     expect(node(graph, 'folder:Projects/PORTALz').folder).toMatchObject({ role: 'project', projectId: 'Projects/PORTALz' })
@@ -471,7 +473,8 @@ describe('demo vault as a solar system', () => {
     expect(inside.length).toBeGreaterThanOrEqual(6)
     for (const n of inside) {
       expect(isProjectNote(n)).toBe(false)
-      expect(n.meta.type).not.toBe('project')
+      // Written by hand with a `type:`; a saved critique (critiqueNote) takes its folder's type.
+      if (!n.meta.tags.includes('critique')) expect(n.meta.type).not.toBe('project')
       expect(n.links.filter((l) => !l.resolved).map((l) => l.raw)).toEqual([])
       const project = n.meta.path.split('/')[1] ?? ''
       expect(graph.outlinks.get(n.meta.id)?.has(`Projects/${project}`)).toBe(true)

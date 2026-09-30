@@ -285,7 +285,9 @@ describe('linear-time parsing (text can come from an AI client)', () => {
         const body = stamp ? (m[4] ?? '').slice(0, stamp.index) : (m[4] ?? '')
         want = [{ line: 0, text: body.trim(), done: m[3] !== ' ', doneAt: stamp?.[1] ?? null, section: '', indent: (m[1] ?? '').length }]
       }
-      expect(extractTasks(line), JSON.stringify(line)).toEqual(want)
+      // The fields the old regexes produced (due / scheduled / tags are newer).
+      const got = extractTasks(line).map(({ line, text, done, doneAt, section, indent }) => ({ line, text, done, doneAt, section, indent }))
+      expect(got, JSON.stringify(line)).toEqual(want)
     }
   })
 

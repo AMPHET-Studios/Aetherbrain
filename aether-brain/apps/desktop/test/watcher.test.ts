@@ -51,7 +51,7 @@ async function open(roots: string[], probe = 'probe.md'): Promise<FsVault> {
   const scan = await vault.scan()
   watcher = new VaultWatcher(
     vault,
-    { files: scan.files.map((f) => f.path), folders: scan.folders },
+    { files: scan.files.map((f) => f.path), folders: scan.folders, images: scan.assets.map((a) => a.path) },
     (batch) => changes.push(...batch),
     { debounceMs: 60 },
   )
@@ -123,6 +123,16 @@ describe('VaultWatcher', () => {
     await open([root])
     await fs.rm(path.join(root, 'known.md'))
     await waitChange('unlink', 'known.md')
+  })
+
+  it('reports a new picture with its size and without content', async () => {
+    await open([root])
+    await put('vault/Art/gate.png', 'pixels')
+    const c = await waitChange('add', 'Art/gate.png')
+    expect(c.content).toBeUndefined()
+    expect(c.size).toBe(6)
+    await fs.rm(path.join(root, 'Art', 'gate.png'))
+    await waitChange('unlink', 'Art/gate.png')
   })
 
   it('reports addDir for a new empty folder', async () => {
@@ -232,7 +242,9 @@ describe('VaultWatcher', () => {
     await put('vault/Folder/AppData/x.md', 'x')
     await put('vault/draft.md.aether-tmp', 'x')
     await fs.mkdir(path.join(root, '.git', 'objects'), { recursive: true })
-    await put('vault/picture.png', 'x')
+    await put('vault/sketch.psd', 'x')
+    await put('vault/.thumbs/gate.png', 'x')
+    await put('vault/node_modules/pkg/logo.png', 'x')
     await put('vault/LICENSE.md', 'x')
     await put('vault/sentinel.md', 's')
     await waitChange('add', 'sentinel.md')
@@ -564,5 +576,181 @@ describe('VaultWatcher and a note being created', () => {
     await put('vault/Inbox/New.md', 'edited elsewhere')
     fake.of(root).listener('change', path.join('Inbox', 'New.md'))
     expect((await waitChange('change', 'Inbox/New.md')).content).toBe('edited elsewhere')
+  })
+})
+
+describe('VaultWatcher pictures', () => {
+  let fake: ReturnType<typeof fakeWatch>
+
+  beforeEach(async () => {
+    await put('vault/known.md', 'old')
+    await put('vault/keep.png', 'keep')
+    await put('vault/Folder/inner.md', 'inner')
+    await put('vault/Folder/Sub/old.png', 'old')
+    fake = fakeWatch()
+  })
+
+  /** A watcher on `root` seeded from a scan (pictures included), fed by the fake fs.watch. */
+  async function watched(opts: { images?: boolean; maxAssets?: number; known?: string[] } = {}) {
+    const vault = new FsVault([root], opts.maxAssets ? { maxAssets: opts.maxAssets } : {})
+    const scan = await vault.scan()
+    watcher = new VaultWatcher(
+      vault,
+      { files: scan.files.map((f) => f.path), folders: scan.folders, images: opts.known ?? scan.assets.map((a) => a.path) },
+      (batch) => changes.push(...batch),
+      { debounceMs: 20, resyncMs: 20, watch: fake.fn, ...(opts.images === false ? { images: false } : {}) },
+    )
+    await watcher.start()
+    return vault
+  }
+
+  /** Deliver an event for a vault path (null: the OS lost events). */
+  const fire = (rel: string | null) => fake.of(root).listener('rename', rel === null ? null : rel.split('/').join(path.sep))
+
+  /** Wait until a flush that also reported `sentinel` is done, so "nothing else was reported" can be checked. */
+  async function settle(sentinel: string): Promise<void> {
+    await put(`vault/${sentinel}`, 's')
+    fire(sentinel)
+    await waitChange('add', sentinel)
+  }
+
+  it('reports a new picture with mtime and size (no content), a rewrite as a change, and a deletion', async () => {
+    await watched()
+    await put('vault/Art/gate.png', 'x'.repeat(10))
+    fire('Art/gate.png')
+    const add = await waitChange('add', 'Art/gate.png')
+    expect(add.content).toBeUndefined()
+    expect(add.size).toBe(10)
+    expect(add.mtime).toBeGreaterThan(0)
+    await waitChange('addDir', 'Art')
+    // Another event with nothing changed (Windows reports reads as changes too) reports nothing.
+    fire('Art/gate.png')
+    await settle('sentinel-1.md')
+    expect(changes.filter((c) => c.path === 'Art/gate.png')).toHaveLength(1)
+    await put('vault/Art/gate.png', 'y'.repeat(20))
+    fire('Art/gate.png')
+    const change = await waitChange('change', 'Art/gate.png')
+    expect(change.size).toBe(20)
+    expect(change.content).toBeUndefined()
+    await fs.rm(path.join(root, 'Art', 'gate.png'))
+    fire('Art/gate.png')
+    await waitChange('unlink', 'Art/gate.png')
+  })
+
+  it('reports a change, not an add, for a picture the scan saw', async () => {
+    await watched()
+    await put('vault/keep.png', 'repainted')
+    fire('keep.png')
+    const c = await waitChange('change', 'keep.png')
+    expect(c.size).toBe('repainted'.length)
+    expect(count('add', 'keep.png')).toBe(0)
+  })
+
+  it('unlinks the pictures of a removed folder with its notes', async () => {
+    await watched()
+    await fs.rm(path.join(root, 'Folder'), { recursive: true })
+    fire('Folder')
+    await waitChange('unlinkDir', 'Folder')
+    await waitChange('unlink', 'Folder/Sub/old.png')
+    await waitChange('unlink', 'Folder/inner.md')
+    await waitChange('unlinkDir', 'Folder/Sub')
+    expect(count('unlink', 'Folder/Sub/old.png')).toBe(1)
+    // Unlinks come before the folders they were in go.
+    const at = (kind: VaultChangeDto['kind'], p: string) => changes.findIndex((c) => c.kind === kind && c.path === p)
+    expect(at('unlink', 'Folder/Sub/old.png')).toBeLessThan(at('unlinkDir', 'Folder/Sub'))
+  })
+
+  it('reports every picture of a folder moved in, with sizes, and nothing that is not a picture', async () => {
+    await put('outside/Renders/r1.png', '1')
+    await put('outside/Renders/r2.JPG', '22')
+    await put('outside/Renders/Deep/r3.webp', '333')
+    await put('outside/Renders/notes.txt', 'x')
+    await put('outside/Renders/icon.svg', '<svg/>')
+    await put('outside/Renders/.cache/hidden.png', 'x')
+    await watched()
+    await fs.rename(path.join(tmp, 'outside', 'Renders'), path.join(root, 'Renders'))
+    fire('Renders')
+    expect((await waitChange('add', 'Renders/r1.png')).size).toBe(1)
+    expect((await waitChange('add', 'Renders/r2.JPG')).size).toBe(2)
+    expect((await waitChange('add', 'Renders/Deep/r3.webp')).size).toBe(3)
+    await waitChange('addDir', 'Renders/Deep')
+    await settle('sentinel.md')
+    expect(changes.map((c) => c.path).filter((p) => /notes\.txt|icon\.svg|hidden/.test(p))).toEqual([])
+    // Known now: a later event for one is not a second add.
+    fire('Renders/r1.png')
+    await settle('sentinel-2.md')
+    expect(count('add', 'Renders/r1.png')).toBe(1)
+  })
+
+  it('rescans pictures after lost events: new ones are added, gone ones unlinked, the rest left alone', async () => {
+    await watched()
+    await put('vault/Fresh/new.png', 'new')
+    await fs.rm(path.join(root, 'Folder', 'Sub', 'old.png'))
+    fire(null)
+    expect((await waitChange('add', 'Fresh/new.png')).size).toBe(3)
+    await waitChange('unlink', 'Folder/Sub/old.png')
+    await waitChange('addDir', 'Fresh')
+    await sleep(100)
+    expect(changes.some((c) => c.path === 'keep.png')).toBe(false)
+  })
+
+  it('never takes the pictures a capped rescan did not list for gone', async () => {
+    await put('vault/b.png', 'b')
+    await watched({ maxAssets: 1, known: ['keep.png', 'b.png', 'Folder/Sub/old.png'] })
+    await put('vault/late.md', 'late')
+    fire(null)
+    await waitChange('add', 'late.md')
+    await sleep(100)
+    expect(changes.filter((c) => c.kind === 'unlink')).toEqual([])
+  })
+
+  it('never adds back, on a resync of one root, the pictures the shared cap of a multi-root scan left out', async () => {
+    const other = path.join(tmp, 'Other')
+    await put('vault/a2.png', 'a')
+    await put('Other/b1.png', 'b')
+    await put('Other/b2.png', 'b')
+    await put('Other/b3.png', 'b')
+    // One cap for both roots (breadth first: vault's two top pictures, then two of Other's).
+    const vault = new FsVault([root, other], { maxAssets: 4 })
+    const scan = await vault.scan()
+    expect(scan.assetsTruncated).toBe(true)
+    const known = scan.assets.map((a) => a.path)
+    expect(known.filter((p) => p.startsWith('Other/'))).toHaveLength(2)
+    watcher = new VaultWatcher(
+      vault,
+      { files: scan.files.map((f) => f.path), folders: scan.folders, images: known, imagesCapped: scan.assetsTruncated },
+      (batch) => changes.push(...batch),
+      { debounceMs: 20, resyncMs: 20, watch: fake.fn },
+    )
+    await watcher.start()
+    // Events on Other are lost; its rescan (a cap of four for Other alone) lists all three of its pictures.
+    await put('Other/late.md', 'late')
+    fake.of(other).listener('rename', null)
+    await waitChange('add', 'Other/late.md')
+    await sleep(100)
+    expect(changes.filter((c) => /\.png$/.test(c.path))).toEqual([])
+    // A picture really made now still arrives through its own event.
+    await put('Other/b4.png', 'new')
+    fake.of(other).listener('rename', 'b4.png')
+    expect((await waitChange('add', 'Other/b4.png')).size).toBe(3)
+  })
+
+  it('reports no pictures when told not to (the AI link brain)', async () => {
+    await watched({ images: false })
+    await put('vault/Art/gate.png', 'x')
+    fire('Art/gate.png')
+    await fs.rm(path.join(root, 'keep.png'))
+    fire('keep.png')
+    await put('outside/Renders/r1.png', '1')
+    await fs.rename(path.join(tmp, 'outside', 'Renders'), path.join(root, 'Renders'))
+    fire('Renders')
+    await settle('sentinel.md')
+    // A rescan does not bring them back either.
+    await put('vault/late.md', 'late')
+    fire(null)
+    await waitChange('add', 'late.md')
+    expect(changes.filter((c) => /\.png$/.test(c.path))).toEqual([])
+    // Their folders still come and go as folders.
+    await waitChange('addDir', 'Renders')
   })
 })

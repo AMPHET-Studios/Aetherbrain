@@ -1,4 +1,17 @@
-import { ancestorsOf, folderOf, isIgnoredPath, isMarkdownPath, normalizeFolderPath, normalizePath, type VaultAdapter, type VaultChange, type VaultFile } from '@aether/core'
+import {
+  ancestorsOf,
+  folderOf,
+  isIgnoredPath,
+  isImagePath,
+  isMarkdownPath,
+  normalizeFolderPath,
+  normalizePath,
+  type VaultAdapter,
+  type VaultAsset,
+  type VaultChange,
+  type VaultFile,
+} from '@aether/core'
+import { resizeImage } from '../util'
 
 /* Minimal File System Access API typings (Chromium). */
 interface FSHandle {
@@ -10,7 +23,7 @@ interface FSHandle {
 interface FSFileHandle extends FSHandle {
   kind: 'file'
   getFile(): Promise<File>
-  createWritable(): Promise<{ write(data: string): Promise<void>; close(): Promise<void> }>
+  createWritable(): Promise<{ write(data: string | Uint8Array): Promise<void>; close(): Promise<void> }>
 }
 interface FSDirHandle extends FSHandle {
   kind: 'directory'
@@ -61,6 +74,8 @@ export class FsAccessVaultAdapter implements VaultAdapter {
   private selfWrites = new Map<string, number>()
   /** Every folder seen by the last walk (vault paths, root excluded). */
   private folders = new Set<string>()
+  /** Every picture seen by the last walk (or written since): listed without reading a byte of them. */
+  private images = new Set<string>()
   private walked = false
 
   constructor(private root: FSDirHandle) {
@@ -78,22 +93,31 @@ export class FsAccessVaultAdapter implements VaultAdapter {
     }
   }
 
-  private async walk(dir: FSDirHandle, prefix: string, out: { path: string; handle: FSFileHandle }[], folders: Set<string>): Promise<void> {
+  private async walk(
+    dir: FSDirHandle,
+    prefix: string,
+    out: { path: string; handle: FSFileHandle }[],
+    folders: Set<string>,
+    images: Set<string>,
+  ): Promise<void> {
     for await (const entry of dir.values()) {
       const path = prefix ? `${prefix}/${entry.name}` : entry.name
       if (isIgnoredPath(path)) continue
       if (entry.kind === 'directory') {
         folders.add(path)
-        await this.walk(entry, path, out, folders)
+        await this.walk(entry, path, out, folders, images)
       } else if (isMarkdownPath(path)) out.push({ path, handle: entry })
+      else if (isImagePath(path)) images.add(path)
     }
   }
 
   async list(): Promise<VaultFile[]> {
     const entries: { path: string; handle: FSFileHandle }[] = []
     const folders = new Set<string>()
-    await this.walk(this.root, '', entries, folders)
+    const images = new Set<string>()
+    await this.walk(this.root, '', entries, folders, images)
     this.folders = folders
+    this.images = images
     this.walked = true
     const files = await Promise.all(
       entries.map(async ({ path, handle }) => {
@@ -117,6 +141,52 @@ export class FsAccessVaultAdapter implements VaultAdapter {
   async listFolders(): Promise<string[]> {
     if (!this.walked) await this.list()
     return [...this.folders].sort()
+  }
+
+  /** Every picture from the last walk; no file is opened for it (mtime and size stay unknown). */
+  async listAssets(): Promise<VaultAsset[]> {
+    if (!this.walked) await this.list()
+    return [...this.images].map((path) => ({ path }))
+  }
+
+  /** A preview of a picture, at most `size` px on its longer side (see `resizeImage`), or null. */
+  async thumbnail(path: string, size: number): Promise<Blob | null> {
+    const p = normalizePath(path)
+    if (!isImagePath(p)) return null
+    try {
+      const { dir, name } = await this.resolve(p)
+      return await resizeImage(await (await dir.getFileHandle(name)).getFile(), size)
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * Write a NEW picture from its bytes; fails with an `EEXIST` error when
+   * anything is at the path (on Windows and macOS also another letter case),
+   * like `create`. Picture paths only. Reports an 'add'.
+   */
+  async createAsset(path: string, data: Uint8Array): Promise<void> {
+    const p = normalizePath(path)
+    if (!isImagePath(p)) throw new Error(`Not a picture: ${p}`)
+    if (isIgnoredPath(p)) throw new Error(`Path is ignored: ${p}`)
+    if (await this.entry(p)) throw existsError(p)
+    const { dir, name } = await this.resolve(p, true)
+    const fh = await dir.getFileHandle(name, { create: true })
+    try {
+      const w = await fh.createWritable()
+      await w.write(data)
+      await w.close()
+    } catch (err) {
+      // The file this call just made: an empty picture must not stay behind.
+      await dir.removeEntry(name).catch(() => undefined)
+      throw err
+    }
+    const f = await fh.getFile()
+    this.images.add(p)
+    this.selfWrites.set(p, Date.now())
+    const added: VaultChange[] = [{ kind: 'add', path: p, mtime: f.lastModified, size: f.size }]
+    for (const l of this.listeners) l(added)
   }
 
   /** Create a folder and any missing parents; emits 'addDir' for each one that is new. */
@@ -192,6 +262,7 @@ export class FsAccessVaultAdapter implements VaultAdapter {
     const { dir, name } = await this.resolve(path)
     await dir.removeEntry(name)
     this.mtimes.delete(normalizePath(path))
+    this.images.delete(normalizePath(path))
     this.selfWrites.set(normalizePath(path), Date.now())
   }
 
@@ -262,7 +333,8 @@ export class FsAccessVaultAdapter implements VaultAdapter {
     try {
       const entries: { path: string; handle: FSFileHandle }[] = []
       const folders = new Set<string>()
-      await this.walk(this.root, '', entries, folders)
+      const images = new Set<string>()
+      await this.walk(this.root, '', entries, folders, images)
       const seen = new Set<string>()
       const changes: VaultChange[] = []
       const now = Date.now()
@@ -293,6 +365,16 @@ export class FsAccessVaultAdapter implements VaultAdapter {
         if (self && now - self < POLL_MS * 2) continue
         changes.push({ kind: 'unlink', path })
       }
+      // Pictures come and go by name only: opening every one on every poll would crawl on a big drive.
+      for (const path of images) if (!this.images.has(path)) changes.push({ kind: 'add', path })
+      for (const path of this.images) {
+        if (images.has(path)) continue
+        // Written by us while this walk was already under way: still there.
+        const self = this.selfWrites.get(path)
+        if (self && now - self < POLL_MS * 2) images.add(path)
+        else changes.push({ kind: 'unlink', path })
+      }
+      this.images = images
       if (changes.length) for (const l of this.listeners) l(changes)
     } catch (err) {
       console.warn('[aether] poll failed', err)

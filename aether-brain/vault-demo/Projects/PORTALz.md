@@ -21,11 +21,11 @@ This board is the umbrella; the playable proof is the [[Portal Game Vertical Sli
 ## To do
 
 - [ ] Hero monolith high-poly pass in Blender ([[Hard-Surface Modeling]], then the [[Monolith Generator Asset]] bake)
-- [ ] Portal opening VFX: iris of light, dust lift, then the hum ([[Idea - Portal hum as audio motif]])
+- [ ] Portal opening VFX: iris of light, dust lift, then the hum ([[Idea - Portal hum as audio motif]]) 📅 2026-10-01
 - [ ] Pet drone concept sheet — front / side / back turnaround, [[Shape Language]] locked to soft-square
 - [ ] PCG forest density pass on the terrace ([[Unreal PCG Vegetation]])
 - [ ] Monolith material set: mossy basalt, brass inlay, emissive glyphs ([[PBR Materials]])
-- [ ] Lighting pass: god rays through the canopy, bloom on the glyphs only
+- [ ] Lighting pass: god rays through the canopy, bloom on the glyphs only ⏳ 2026-09-30
 - [ ] Cold playtest with someone who has never seen it
 - [ ] Trailer shot list (12 shots, 45 seconds)
 - [x] Mood boards and three key thumbnails ✅ 2026-03-02

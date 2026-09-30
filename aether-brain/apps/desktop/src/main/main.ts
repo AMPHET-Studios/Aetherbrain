@@ -4,17 +4,20 @@
  * Responsibilities, and nothing more:
  *   - remember the vault roots (one folder, or several such as whole drives)
  *   - read, write, create, rename, delete markdown notes and create folders in them (FsVault, path-jailed)
+ *   - list the pictures in them, make thumbnails, create new pictures (never replacing anything) and open one in the OS
  *   - watch them (VaultWatcher) and stream debounced change batches to the renderer and the AI link
  *   - run the AI link (the in-app MCP server on 127.0.0.1) when the user switches it on
+ *   - open the user's Concept Forge page in a window of its own and relay its saves to the brain (ForgeHost)
  *
  * No telemetry. The renderer is sandboxed with context isolation and makes no network requests.
  */
-import { app, BrowserWindow, clipboard, dialog, ipcMain, shell, nativeTheme, session } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, shell, nativeTheme, screen, session } from 'electron'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   IPC,
+  type AssetListDto,
   type FolderListDto,
   type VaultChangeDto,
   type VaultFileDto,
@@ -23,7 +26,10 @@ import {
 } from '../shared/ipc.js'
 import { FsVault, within } from './fsvault.js'
 import { VaultWatcher } from './watcher.js'
+import { MAX_THUMB_FILE_BYTES, ThumbCache, assetBytes, assetPath, readUpTo, thumbPx, thumbTarget } from './assets.js'
+import { THUMB_IPC, Thumbnailer } from './thumbnailer.js'
 import { AiLinkHost, aiSettings, cleanPatch, type AiLinkSettings } from './ai-link.js'
+import { ForgeHost, forgeSettings, type ForgeSettings } from './forge.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const isDev = !!process.env['VITE_DEV_SERVER_URL']
@@ -41,6 +47,8 @@ interface Settings {
   /** Extra folder names skipped while scanning. */
   exclude?: string[]
   ai?: Partial<AiLinkSettings>
+  /** The Concept Forge link (the remembered concept-forge.html). */
+  forge?: ForgeSettings
 }
 
 let settings: Settings = {}
@@ -217,6 +225,7 @@ async function openVault(input: string[]): Promise<VaultInfo> {
   watcher?.stop()
   watcher = null
   aiHeld = null
+  thumbs.clear()
   vault = next
   opened = true
   settings.roots = wanted
@@ -256,7 +265,9 @@ async function listFiles(): Promise<VaultFileDto[]> {
         }
         throw err
       })
-    if (latest()) w.seed({ files: scan.files.map((f) => f.path), folders: scan.folders })
+    if (latest()) {
+      w.seed({ files: scan.files.map((f) => f.path), folders: scan.folders, images: scan.assets.map((a) => a.path), imagesCapped: scan.assetsTruncated })
+    }
     const found = scan.files.length
     const files = await v.readAll(scan.files, (done) => progress({ phase: 'reading', files: done, found, dirs: scan.dirs, done: false }))
     progress({ phase: 'done', files: files.length, found, dirs: scan.dirs, done: true })
@@ -366,6 +377,108 @@ async function reveal(p: unknown): Promise<void> {
   shell.showItemInFolder(v.abs(rel))
 }
 
+/* ------------------------------------------------------------------ */
+/* Pictures                                                           */
+/* ------------------------------------------------------------------ */
+
+/** Thumbnails already made, and the ones being made (two requests for the same one share the work). */
+const thumbs = new ThumbCache()
+const thumbsInFlight = new Map<string, Promise<Uint8Array | null>>()
+/** Decodes pictures in a hidden helper renderer, never in this process (see thumbnailer.ts). */
+const thumbnailer = new Thumbnailer({
+  electron: { BrowserWindow, session },
+  preload: path.join(__dirname, '..', 'preload', 'thumb-preload.cjs'),
+})
+/**
+ * Longest wait for one thumbnail: a share that stopped answering must not hold
+ * the renderer's few requests in flight forever (it gets null, a plain moon).
+ */
+const THUMB_TIMEOUT = 20_000
+
+/** Every picture the last scan found, with mtime and size where a stat got to them in time. */
+async function listAssets(): Promise<AssetListDto> {
+  const v = requireVault()
+  const scan = v.lastScan
+  if (!scan) return { assets: [], truncated: false }
+  return { assets: await v.statAssets(scan.assets), truncated: scan.assetsTruncated }
+}
+
+/**
+ * PNG bytes of a picture at most `size` px on its longer side, or null when
+ * it is not a picture of the vault, too big, or cannot be decoded.
+ */
+async function thumbnail(p: unknown, size: unknown): Promise<Uint8Array | null> {
+  const v = requireVault()
+  const px = thumbPx(size)
+  const abs = await v.assetAbs(String(p))
+  if (!abs) return null
+  const st = await fs.stat(abs).catch(() => null)
+  if (!st?.isFile() || st.size === 0 || st.size > MAX_THUMB_FILE_BYTES) return null
+  const key = ThumbCache.key(abs, st.mtimeMs, st.size, px)
+  const hit = thumbs.get(key)
+  if (hit !== undefined) return hit
+  let job = thumbsInFlight.get(key)
+  if (!job) {
+    job = renderThumb(abs, px)
+      .then(
+        (png) => {
+          // A picture that cannot be decoded is an answer too (null, cached for this version of the
+          // file): the renderer shows a plain moon, and asks again once the file changes.
+          thumbs.set(key, png)
+          return png
+        },
+        // No answer this time (the file could not be read, the helper was stopped): not remembered.
+        () => null,
+      )
+      .finally(() => thumbsInFlight.delete(key))
+    thumbsInFlight.set(key, job)
+  }
+  return job
+}
+
+/**
+ * Reads the picture here (asynchronously, never more than 64 MB) and has the
+ * thumbnail helper decode it, fitted to `px` from the size its header claims:
+ * decoding in this process would block the whole app (nativeImage decodes on
+ * the UI thread, Windows' thumbnailer too for a picture not in its cache).
+ */
+async function renderThumb(abs: string, px: number): Promise<Uint8Array | null> {
+  const bytes = await readUpTo(abs, MAX_THUMB_FILE_BYTES)
+  if (!bytes) return null
+  const target = thumbTarget(bytes, px)
+  return target ? thumbnailer.render({ bytes, ...target }) : null
+}
+
+/**
+ * A new picture (a dropped file, a Concept Forge drawing): a picture path,
+ * bytes that really are a picture, at most 40 MB, created without ever
+ * replacing anything (EEXIST, like notes). The watcher reports it to the
+ * renderer; the AI link hears about it (and a folder made for it) right away.
+ */
+async function createAsset(p: unknown, data: unknown): Promise<void> {
+  const v = requireVault()
+  const rel = assetPath(p)
+  const bytes = assetBytes(data)
+  const canonical = v.toVault(v.abs(rel))
+  if (canonical === null) throw new Error(`Not in the vault: ${rel}`)
+  const parent = canonical.includes('/') ? canonical.slice(0, canonical.lastIndexOf('/')) : ''
+  const madeFolder = parent !== '' && (await v.stat(parent)) === null
+  await v.createBinary(rel, bytes)
+  const changes: VaultChangeDto[] = madeFolder ? [{ kind: 'addDir', path: parent }] : []
+  changes.push({ kind: 'add', path: canonical, mtime: Date.now(), size: bytes.length })
+  toAi(changes)
+}
+
+/** Open a picture of the vault in the OS default app. Pictures only: shell.openPath would run a program just the same. */
+async function openAsset(p: unknown): Promise<void> {
+  const v = requireVault()
+  const rel = String(p)
+  const abs = await v.assetAbs(rel)
+  if (!abs) throw new Error(`Not a picture in the vault: ${rel}`)
+  const err = await shell.openPath(abs)
+  if (err) throw new Error(`Could not open ${rel}: ${err}`)
+}
+
 /** OS folder picker; null when cancelled. */
 async function chooseFolder(title: string, message: string): Promise<string | null> {
   const opts: Electron.OpenDialogOptions = { title, message, properties: ['openDirectory', 'createDirectory'] }
@@ -464,6 +577,33 @@ function requireAi(): AiLinkHost {
 }
 
 /* ------------------------------------------------------------------ */
+/* Concept Forge link                                                 */
+/* ------------------------------------------------------------------ */
+
+function createForge(): ForgeHost {
+  return new ForgeHost({
+    electron: { BrowserWindow, dialog, shell, session, screen },
+    settings: forgeSettings(settings.forge),
+    save: (s) => {
+      settings.forge = s
+      return saveSettings()
+    },
+    brain: () => win,
+    preload: path.join(__dirname, '..', 'preload', 'forge-preload.cjs'),
+    version: app.getVersion(),
+  })
+}
+
+/** The brain window opens the Forge window; the Forge window's requests go through the host to the brain window's store. */
+function registerForgeIpc(forge: ForgeHost): void {
+  ipcMain.handle(IPC.forgeOpen, (_e, opts: unknown) => forge.open(opts))
+  ipcMain.handle(IPC.forgeStatus, () => forge.status())
+  ipcMain.handle(IPC.forgeProjects, (e) => forge.projects(e.sender))
+  ipcMain.handle(IPC.forgeSave, (e, dto: unknown) => forge.save(e.sender, dto))
+  ipcMain.handle(IPC.forgeReply, (e, id: unknown, ok: unknown, value: unknown) => forge.reply(e.sender, id, ok, value))
+}
+
+/* ------------------------------------------------------------------ */
 /* IPC                                                                */
 /* ------------------------------------------------------------------ */
 
@@ -509,6 +649,13 @@ function registerIpc(): void {
   ipcMain.handle(IPC.rename, (_e, a: unknown, b: unknown) => renameNote(a, b))
   ipcMain.handle(IPC.mkdir, (_e, p: unknown) => createFolder(p))
   ipcMain.handle(IPC.reveal, (_e, p: unknown) => reveal(p))
+  ipcMain.handle(IPC.assets, () => listAssets())
+  ipcMain.handle(IPC.thumb, (_e, p: unknown, size: unknown) => within(thumbnail(p, size), THUMB_TIMEOUT, null))
+  // From the thumbnail helper only: the thumbnailer ignores every other sender.
+  ipcMain.on(THUMB_IPC.ready, (e) => thumbnailer.ready(e.sender))
+  ipcMain.on(THUMB_IPC.done, (e, id: unknown, png: unknown) => thumbnailer.done(e.sender, id, png))
+  ipcMain.handle(IPC.createAsset, (_e, p: unknown, data: unknown) => createAsset(p, data))
+  ipcMain.handle(IPC.openAsset, (_e, p: unknown) => openAsset(p))
   ipcMain.handle(IPC.aiStatus, () => requireAi().status())
   ipcMain.handle(IPC.aiConfigure, (_e, patch: unknown) => requireAi().configure(cleanPatch(patch)))
   ipcMain.handle(IPC.copy, (_e, text: unknown) => clipboard.writeText(String(text)))
@@ -558,7 +705,12 @@ function createWindow(): void {
   } else {
     void win.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'))
   }
-  win.on('closed', () => (win = null))
+  win.on('closed', () => {
+    win = null
+    // Nothing asks for thumbnails without the brain window, and a hidden helper left open
+    // would keep 'window-all-closed' from ever firing (the app would not quit).
+    thumbnailer.stop()
+  })
 }
 
 app.on('window-all-closed', () => {
@@ -572,6 +724,7 @@ app.on('activate', () => {
 app.on('before-quit', () => {
   watcher?.stop()
   watcher = null
+  thumbnailer.stop()
   void ai?.stop()
 })
 
@@ -587,5 +740,6 @@ void app.whenReady().then(async () => {
   ai = createAiLink()
   registerIpc()
   createWindow()
+  registerForgeIpc(createForge())
   started = true
 })

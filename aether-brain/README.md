@@ -44,6 +44,9 @@ Builds are unsigned, so Windows SmartScreen will show "Windows protected your PC
 | **Retrieve** | `⌘/Ctrl K` searches titles, headings, tags, body and paths (MiniSearch, fuzzy + prefix). `⌘Enter` turns the query into a graph filter that dims everything else. |
 | **Review**   | Orphans, stale notes (90+ days) and spaced-review items resurface in the queue. `1` keeps a note (interval doubles), `2` snoozes, `3` archives. |
 | **Projects** | `p` opens the board: one card per project with a progress bar and its to-do list. Everything is editable — rename (`e`), status (`s`), summary, tags, archive, delete; tasks can be ticked, edited, reordered (`Alt ↑/↓`) and deleted (with undo). Each project has a **home folder** (its star) whose subfolders are its **planets**: add one (`f`) and a real folder is created on disk. Tasks are plain `- [ ] …` / `- [x] … ✅ 2026-09-24` lines, so Obsidian and git see the same memory. |
+| **Today**    | `y` flies to the glowing **Today hub** above the sun: one brief of today's to-dos from every note — overdue and due-today tasks (`📅 2026-10-01`, `[due:: …]`, `@due(…)`), scheduled ones (`⏳ …`), anything tagged `#today`, today's daily note — plus the next task of every active project. Tick them right there (`Tab` into the list, `Space` ticks, `u` undoes). Nothing is copied: each task stays in its own note. |
+| **Pictures** | Concept art and references in your folders orbit them as **picture moons**: framed thumbnails of each folder's newest images (png, jpg, webp, gif, bmp, avif). Select one for a preview, `e` opens it in your image app, and `![[gate.png]]` embeds link notes to their pictures. Drop picture files on the window (or *Import pictures…*) to copy them into the selected folder. |
+| **Critique** | `g` opens your own **Concept Forge** (`concept-forge.html`) inside the desktop app. Its **🪐 Save to Brain** button (`Ctrl+Shift+B`) files the drawing and its grade into the project's **Critique** planet: a PNG plus a critique note with the scores and fixes, and the top fix becomes tomorrow's practice task on the Today hub. See [docs/FORGE-LINK.md](docs/FORGE-LINK.md). |
 | **Wander**   | Drag to orbit, scroll to zoom, click to select, double-click to open (or expand a folder), drag a neuron to move it. `Tab` hops between neighbors. `t` cycles the layouts: **constellation** (by area) → **orbit** (rings are age) → **system** (your folders as solar systems). `m` cycles color by area / type / tag / age. |
 | **Ask your AI** | Claude and ChatGPT can search, read and write the vault directly through the built-in MCP server — see [AI link](#ai-link-claude--chatgpt). |
 
@@ -51,6 +54,7 @@ Builds are unsigned, so Windows SmartScreen will show "Windows protected your PC
 
 - One `InstancedMesh` for neuron cores (fresnel shader, HDR output), one for additive halos, one `LineSegments` for every synapse with travelling pulses on the selected node's edges. A 2D canvas overlay draws crisp labels for hubs, the selection and its neighborhood.
 - Layout runs in a **Web Worker**: `d3-force-3d` clusters by PARA area in constellation mode and makes radial rings by age in orbit mode. The **system** layout (the default) is analytic: every folder is a body orbiting its parent folder — the vault (or each drive) is a sun, a project's home folder is a gold ★ star, its subfolders are planets, deeper folders are moons, and notes are satellites. Planets slowly orbit (`o` pauses), faint rings trace each orbit, `[` / `]` change how deep folders unfold, `x` expands a collapsed folder. The main thread only copies a `Float32Array` per frame.
+- The **Today hub** hangs still above the vault's sun, a cyan beacon with a beam to every note holding one of today's tasks (`☀ Today · 5 · 1 late`). **Picture moons** draw their thumbnails from one texture array (256 × 128² layers, filled for the pictures nearest the camera, decoded off the main thread) through one instanced billboard mesh.
 - Selective bloom (`postprocessing`) with a luminance threshold: only the neurons bloom, never the UI, edges or stars.
 - 1,000 neurons / 2,500 synapses is the design budget: `http://localhost:5173/?stress=1000` opens a synthetic vault; the top bar shows live fps.
 
@@ -72,7 +76,7 @@ The desktop app ships an [MCP](https://modelcontextprotocol.io) server, so your 
 - **Claude Code** — press `a` in the app and copy the `claude mcp add …` command.
 - **ChatGPT** (and claude.ai on the web) — press `a`, switch the link on, expose it with a tunnel (`cloudflared tunnel --url http://127.0.0.1:7457`), and add the `https://…/mcp/<token>` URL as a developer-mode app / custom connector.
 
-The AI can only touch markdown notes and folders inside your vault roots, never deletes files, and can be set to read-only. Full guide, tool list and security notes: [docs/AI-LINK.md](docs/AI-LINK.md).
+Ask it "what's on today?": the `daily_brief` tool returns the same brief as the Today hub. The AI can only touch markdown notes and folders inside your vault roots, never deletes files, and can be set to read-only. Full guide, tool list and security notes: [docs/AI-LINK.md](docs/AI-LINK.md).
 
 ## Repo
 
@@ -80,7 +84,7 @@ The AI can only touch markdown notes and folders inside your vault roots, never 
 apps/web · apps/desktop · packages/core · packages/graph · packages/ui · vault-demo · docs
 ```
 
-pnpm workspace, Vite 8, React 19, TypeScript strict, three + @react-three/fiber + drei, d3-force-3d, MiniSearch, unified/remark, Zustand, Tailwind v4, Electron 44, `@modelcontextprotocol/sdk` (bundled into the MCP server). Tests: `pnpm test` (vitest: core parsing/graph/folders/projects, the system layout, the store, the file layer and watcher, the MCP tools). Type checks: `pnpm typecheck`. Design notes for the folder solar systems and the AI link: [docs/design/solar-system-and-ai-link.md](docs/design/solar-system-and-ai-link.md).
+pnpm workspace, Vite 8, React 19, TypeScript strict, three + @react-three/fiber + drei, d3-force-3d, MiniSearch, unified/remark, Zustand, Tailwind v4, Electron 44, `@modelcontextprotocol/sdk` (bundled into the MCP server). Tests: `pnpm test` (vitest: core parsing/graph/folders/projects, the system layout, the store, the file layer and watcher, the MCP tools). Type checks: `pnpm typecheck`. Design notes: [docs/design/solar-system-and-ai-link.md](docs/design/solar-system-and-ai-link.md) (folder solar systems, the AI link) and [docs/design/today-images-forge.md](docs/design/today-images-forge.md) (the Today hub, picture moons, the Concept Forge link). The demo pictures are generated by `node scripts/demo-images.mjs`.
 
 ## Status
 

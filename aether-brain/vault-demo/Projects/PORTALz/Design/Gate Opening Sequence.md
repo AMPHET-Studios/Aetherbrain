@@ -10,6 +10,10 @@ status: active
 
 Beat sheet for the moment the portal wakes: the payoff of the [[Portal Game Vertical Slice]] and the core of [[PORTALz]].
 
+![[portal-ring.png]]
+
+Key frame for beat 2: the iris half open, light already spilling onto the terrace. More paintings orbit the Art planet.
+
 1. **Power arrives** — the glyph lines fill one group at a time, bottom to top (0–3 s)
 2. **Iris** — the stone ring rotates a quarter turn and a disc of light opens from the center (3–6 s)
 3. **Dust lift** — loose debris and moss spores drift toward the ring, camera shake at 20% (6–8 s)

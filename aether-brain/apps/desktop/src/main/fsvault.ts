@@ -44,6 +44,25 @@ export function isNoteName(name: string): boolean {
   return /\.md$/i.test(name) && !BOILERPLATE.has(name)
 }
 
+/**
+ * Picture extensions: the same list as `isImagePath` in @aether/core (which
+ * main cannot import). SVG is left out on purpose: it can carry scripts.
+ */
+const IMAGE_RE = /\.(png|jpe?g|webp|gif|bmp|avif)$/i
+/** Names Windows keeps for devices, alone or with an extension (`CON`, `nul.png`). */
+const WIN_DEVICE = /^(con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³])\s*(\.|$)/i
+
+/**
+ * True for a file name the vault treats as a picture: a picture extension
+ * (any case), not an Office owner file (`~$…`). On Windows never a device
+ * name (`nul.png`) or NTFS stream syntax (`tool.exe:x.png` names a stream of
+ * an executable): picture paths are handed to the OS to open.
+ */
+export function isImageName(name: string, platform: string = process.platform): boolean {
+  if (!IMAGE_RE.test(name) || name.startsWith('~$')) return false
+  return platform !== 'win32' || (!name.includes(':') && !WIN_DEVICE.test(name))
+}
+
 export interface MountedRoot {
   /** Absolute path on disk. */
   abs: string
@@ -61,6 +80,17 @@ export interface ScanResult {
   truncated: boolean
   /** Folders read. */
   dirs: number
+  /** Picture files (see isImageName), found by name only (no stat), at most `maxAssets`. */
+  assets: { path: string; abs: string }[]
+  /** True when more pictures were found than `maxAssets` (the list is partial). */
+  assetsTruncated: boolean
+}
+
+/** A picture with what a stat said about it (both unknown when it was not looked at). */
+export interface AssetInfo {
+  path: string
+  mtime?: number
+  size?: number
 }
 
 export interface ScanProgress {
@@ -136,7 +166,7 @@ function tempPath(full: string): string {
  * Write a file that must not exist yet (`wx`: EEXIST when anything is there).
  * A write that fails midway removes the file it created.
  */
-async function writeNew(full: string, content: string): Promise<void> {
+async function writeNew(full: string, content: string | Uint8Array): Promise<void> {
   const handle = await fs.open(full, 'wx')
   try {
     await handle.writeFile(content, 'utf8')
@@ -208,16 +238,18 @@ export class FsVault {
   readonly multi: boolean
   lastScan: ScanResult | null = null
   private readonly maxDirs: number
+  private readonly maxAssets: number
   private excludeNames: string[] = []
   private excludeSet = new Set<string>()
 
-  constructor(roots: string[], opts: { exclude?: string[]; maxDirs?: number } = {}) {
+  constructor(roots: string[], opts: { exclude?: string[]; maxDirs?: number; maxAssets?: number } = {}) {
     const unique = new Map<string, string>()
     for (const r of roots.map((x) => path.resolve(x))) if (!unique.has(pathKey(r))) unique.set(pathKey(r), r)
     if (!unique.size) throw new Error('A vault needs at least one root folder')
     this.roots = FsVault.mountNames([...unique.values()])
     this.multi = this.roots.length > 1
     this.maxDirs = opts.maxDirs ?? 250_000
+    this.maxAssets = opts.maxAssets ?? 200_000
     this.exclude = opts.exclude ?? []
   }
 
@@ -307,6 +339,11 @@ export class FsVault {
    * (`PROGRA~1`) can neither leave the root nor reach an ignored folder.
    */
   private async allowed(vaultPath: string): Promise<string> {
+    return (await this.resolved(vaultPath)).full
+  }
+
+  /** allowed(), also returning the path as resolved on disk (`real`: links and short names followed). */
+  private async resolved(vaultPath: string): Promise<{ full: string; real: string }> {
     const { root } = this.locate(vaultPath)
     const full = this.abs(vaultPath)
     if (this.isIgnored(vaultPath)) throw new Error(`Path is excluded from the vault: ${vaultPath}`)
@@ -316,7 +353,7 @@ export class FsVault {
     if (rel.split(path.sep).some((s) => s && this.ignoredName(s))) {
       throw new Error(`Path is excluded from the vault: ${vaultPath}`)
     }
-    return full
+    return { full, real }
   }
 
   /** allowed() for paths that name a file or folder inside a root (never a root itself). */
@@ -334,8 +371,9 @@ export class FsVault {
 
   /**
    * Breadth-first walk of every root (one shared queue), collecting markdown
-   * notes and folders. Stops after `maxDirs` folders (`truncated`). Symlinks
-   * are not followed; unreadable folders are skipped. Remembered as `lastScan`.
+   * notes, pictures (by name, up to `maxAssets`) and folders. Stops after
+   * `maxDirs` folders (`truncated`). Symlinks are not followed; unreadable
+   * folders are skipped. Remembered as `lastScan`.
    */
   async scan(onProgress?: (p: ScanProgress) => void): Promise<ScanResult> {
     const result = await this.walk(this.roots, onProgress)
@@ -353,6 +391,8 @@ export class FsVault {
 
   private async walk(roots: MountedRoot[], onProgress?: (p: ScanProgress) => void): Promise<ScanResult> {
     const files: ScanResult['files'] = []
+    const assets: ScanResult['assets'] = []
+    let assetsTruncated = false
     const folders: string[] = this.multi ? roots.map((r) => r.mount) : []
     // Every root, not only the walked ones: a root nested inside another is never walked as part of it.
     const rootDirs = new Set(this.roots.map((r) => pathKey(r.abs)))
@@ -381,8 +421,12 @@ export class FsVault {
         if (e.isDirectory()) {
           // A root nested inside another root is walked once, as itself.
           if (!rootDirs.has(pathKey(abs))) queue.push({ abs, vault, root: false })
-        } else if (e.isFile() && isNoteName(e.name)) {
-          files.push({ path: vault, abs })
+        } else if (e.isFile()) {
+          if (isNoteName(e.name)) files.push({ path: vault, abs })
+          else if (isImageName(e.name)) {
+            if (assets.length < this.maxAssets) assets.push({ path: vault, abs })
+            else assetsTruncated = true
+          }
         }
       }
       if (onProgress && Date.now() - lastReport >= 120) {
@@ -391,7 +435,7 @@ export class FsVault {
       }
     }
     onProgress?.({ dirs, found: files.length })
-    return { files, folders, truncated, dirs }
+    return { files, folders, truncated, dirs, assets, assetsTruncated }
   }
 
   /** Read scanned files with bounded concurrency (32); unreadable files are skipped. Keeps input order. */
@@ -423,6 +467,31 @@ export class FsVault {
     await Promise.all(Array.from({ length: Math.min(32, Math.max(1, files.length)) }, worker))
     onProgress?.(done)
     return out.filter((f): f is { path: string; content: string; mtime: number } => f !== null)
+  }
+
+  /**
+   * Scanned pictures with their mtime and size (newest-first moons, the
+   * inspector's date), stat'ed with bounded concurrency (32) for at most
+   * `budgetMs`: the scan itself never stats a picture, and a whole drive of
+   * them (or a share that stopped answering) must not hold up the load. What
+   * the budget did not reach, or a stat that failed, is listed without them.
+   * Keeps input order.
+   */
+  async statAssets(assets: ScanResult['assets'], budgetMs = 1500): Promise<AssetInfo[]> {
+    const out: AssetInfo[] = assets.map((a) => ({ path: a.path }))
+    const deadline = Date.now() + budgetMs
+    let next = 0
+    const worker = async () => {
+      while (next < assets.length && Date.now() < deadline) {
+        const i = next++
+        const st = await fs.lstat(assets[i]!.abs).catch(() => null)
+        if (st?.isFile()) out[i] = { path: assets[i]!.path, mtime: st.mtimeMs, size: st.size }
+      }
+    }
+    const all = Promise.all(Array.from({ length: Math.min(32, assets.length) }, worker))
+    // A stat that hangs past the budget is left behind; the copy below is what was known by then.
+    await within(all, budgetMs, undefined)
+    return out.slice()
   }
 
   /** File content, or null when missing, unreadable, excluded or not a valid vault path. */
@@ -465,7 +534,42 @@ export class FsVault {
    * shares) get the file created with `wx` and filled in place. A write that
    * fails midway leaves nothing behind.
    */
-  async create(p: string, content: string): Promise<void> {
+  create(p: string, content: string): Promise<void> {
+    return this.createNew(p, content)
+  }
+
+  /**
+   * Create a new picture from its bytes (a dropped file, a Concept Forge
+   * drawing) with exactly create()'s rules: EEXIST when anything is at the
+   * path in any letter case, never shown half written, parents made,
+   * excluded paths refused. Picture names only (isImageName).
+   */
+  async createBinary(p: string, data: Uint8Array): Promise<void> {
+    if (!isImageName(segmentsOf(p).at(-1) ?? '')) throw new Error(`Not a picture file name: ${p}`)
+    await this.createNew(p, data)
+  }
+
+  /**
+   * Absolute path of a picture in the visible vault (to thumbnail it or open
+   * it with the OS), or null: not a picture name, outside the vault or in a
+   * skipped folder, missing, or not a plain file (a folder, a link). The name
+   * is checked again as resolved on disk, so an 8.3 short name (`TOOL~1.PNG`
+   * for `tool.pngx`) never passes for a picture.
+   */
+  async assetAbs(p: string): Promise<string | null> {
+    // Lexical first: no fs call for anything that is not a picture name.
+    if (!isImageName(segmentsOf(p).at(-1) ?? '')) return null
+    try {
+      const { full, real } = await this.resolved(p)
+      if (this.isRoot(full) || !isImageName(path.basename(real))) return null
+      return (await fs.lstat(full)).isFile() ? full : null
+    } catch {
+      return null
+    }
+  }
+
+  /** create() and createBinary(): see create(). */
+  private async createNew(p: string, content: string | Uint8Array): Promise<void> {
     const full = await this.entry(p)
     const dir = path.dirname(full)
     try {

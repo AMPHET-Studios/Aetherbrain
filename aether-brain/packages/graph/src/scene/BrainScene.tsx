@@ -28,7 +28,18 @@ import {
 import type { CameraControlsImpl } from '@react-three/drei'
 import type { GraphData, GraphNode, NoteId } from '@aether/core'
 import { BrainController, DEFAULT_FAR, DEFAULT_MAX_DISTANCE, cameraRange } from '../BrainController'
-import { AREA_COLORS, GHOST_COLOR, STAR_COLOR, SUN_COLOR, nodeBaseColor, nodeRadius, planetColor, tagColor } from '../theme'
+import {
+  AREA_COLORS,
+  GHOST_COLOR,
+  IMAGE_COLOR,
+  STAR_COLOR,
+  SUN_COLOR,
+  TODAY_COLOR,
+  nodeBaseColor,
+  nodeRadius,
+  planetColor,
+  tagColor,
+} from '../theme'
 import {
   NEBULA_COLORS,
   createEdgeMaterial,
@@ -40,6 +51,9 @@ import {
   createStarMaterial,
 } from './materials'
 import { shiftTarget } from './follow'
+import { todayLabel } from './labels'
+import { ThumbLayer, thumbTargets, type ThumbTargets } from './thumbLayer'
+import { thumbHalf, thumbPickHit } from './thumbs'
 
 const HOME_POS: [number, number, number] = [0, 150, 460]
 const BG = '#04050d'
@@ -54,8 +68,9 @@ export interface BrainSceneProps {
 /**
  * The thought-space. One InstancedMesh for neuron cores, one for halos, one
  * LineSegments for every synapse, one instanced LineSegments for every orbit
- * ring (system layout), a starfield, selective bloom, a 2D label overlay and
- * screen-space picking. Nothing here allocates per frame.
+ * ring (system layout), one instanced billboard mesh for picture thumbnails,
+ * a starfield, selective bloom, a 2D label overlay and screen-space picking.
+ * Nothing here allocates per frame.
  */
 export function BrainScene({ controller, maxDpr = 1.5, className }: BrainSceneProps) {
   const overlayRef = useRef<HTMLCanvasElement | null>(null)
@@ -297,8 +312,14 @@ interface Buffers {
   labels: string[]
   /** Label color per node (depends on the color mode; set by recolor). */
   labelColors: string[]
-  /** Root, mounts and project stars: always labelled. */
+  /** Root, mounts, project stars and the Today hub: always labelled. */
   landmarks: number[]
+  /** 1 per landmark node. */
+  landmark: Uint8Array
+  /** 1 per edge that is a beam of the Today hub. */
+  edgeBeam: Uint8Array
+  /** Image nodes and which of them show their picture (see ThumbLayer). */
+  thumbs: ThumbTargets
   /** Orbit rings: one instanced LineSegments. */
   rings: LineSegments
   ringGeo: InstancedBufferGeometry
@@ -338,9 +359,11 @@ function buildBuffers(graph: GraphData): Buffers {
 
   const edgeCount = graph.edges.length
   const edgeIdx = new Uint32Array(edgeCount * 2)
+  const edgeBeam = new Uint8Array(edgeCount)
   graph.edges.forEach((e, i) => {
     edgeIdx[i * 2] = graph.index.get(e.from) ?? 0
     edgeIdx[i * 2 + 1] = graph.index.get(e.to) ?? 0
+    if (e.kind === 'today') edgeBeam[i] = 1
   })
   const eg = new BufferGeometry()
   const edgePos = new BufferAttribute(new Float32Array(edgeCount * 6), 3)
@@ -385,6 +408,7 @@ function buildBuffers(graph: GraphData): Buffers {
   // Note label colors follow the color mode (recolor); folders keep their body color.
   const labelColors: string[] = new Array<string>(count).fill('#e8ecff')
   const landmarks: number[] = []
+  const landmark = new Uint8Array(count)
   graph.nodes.forEach((n, i) => {
     const p = n.parent === null ? -1 : (graph.index.get(n.parent) ?? -1)
     parentIdx[i] = p
@@ -398,8 +422,16 @@ function buildBuffers(graph: GraphData): Buffers {
     let label = n.ghost ? `+ ${n.title}` : n.title
     if (f?.role === 'project') label = `★ ${label}`
     if (f && f.hiddenFolders > 0) label = `${label} +${f.hiddenFolders}`
+    if (n.today) {
+      landmarks.push(i)
+      labelColors[i] = TODAY_COLOR
+      label = todayLabel(n.today.total, n.today.overdue)
+    } else if (n.image) {
+      labelColors[i] = IMAGE_COLOR
+    }
     labels[i] = label
   })
+  for (const i of landmarks) landmark[i] = 1
   for (let i = 0; i < count; i++) childStart[i + 1] = childStart[i + 1]! + childStart[i]!
   const childList = new Int32Array(Math.max(1, childStart[count]!))
   const fill = childStart.slice(0, count)
@@ -466,6 +498,9 @@ function buildBuffers(graph: GraphData): Buffers {
     labels,
     labelColors,
     landmarks,
+    landmark,
+    edgeBeam,
+    thumbs: thumbTargets(graph),
     rings,
     ringGeo,
     ringCenter,
@@ -499,6 +534,9 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
   )
   const buffers = useMemo(() => (graph ? buildBuffers(graph) : null), [graph])
   useEffect(() => () => buffers?.dispose(), [buffers])
+  // Pictures outlive graphs (they are kept by path), so the thumbnail layer lives as long as the scene.
+  const thumbs = useMemo(() => new ThumbLayer(), [])
+  useEffect(() => () => thumbs.dispose(), [thumbs])
 
   const gl = useThree((s) => s.gl)
   const camera = useThree((s) => s.camera) as PerspectiveCamera
@@ -583,6 +621,7 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
     }
     const pick = (x: number, y: number): number => {
       const s = buffers.screen
+      const selI = controller.selected ? (buffers.graph.index.get(controller.selected) ?? -1) : -1
       let best = -1
       let bestD = Infinity
       for (let i = 0; i < buffers.count; i++) {
@@ -590,9 +629,7 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
         const sy = s[i * 4 + 1] ?? 0
         const depth = s[i * 4 + 2] ?? 2
         if (depth > 1 || depth < -1) continue
-        const rad = Math.max(9, (s[i * 4 + 3] ?? 0) + 5)
-        const d = Math.hypot(sx - x, sy - y)
-        if (d <= rad && depth < bestD) {
+        if (hits(buffers, i, sx - x, sy - y, selI, st.hovered) && depth < bestD) {
           bestD = depth
           best = i
         }
@@ -697,13 +734,12 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
       const s = buffers.screen
       const px = st.pointer.x
       const py = st.pointer.y
+      const sel = controller.selected ? (g.index.get(controller.selected) ?? -1) : -1
       let bestD = Infinity
       for (let i = 0; i < n; i++) {
         const depth = s[i * 4 + 2] ?? 2
         if (depth > 1 || depth < -1) continue
-        const rad = Math.max(9, (s[i * 4 + 3] ?? 0) + 5)
-        const d = Math.hypot((s[i * 4] ?? 0) - px, (s[i * 4 + 1] ?? 0) - py)
-        if (d <= rad && depth < bestD) {
+        if (hits(buffers, i, (s[i * 4] ?? 0) - px, (s[i * 4 + 1] ?? 0) - py, sel, st.hovered) && depth < bestD) {
           bestD = depth
           hoveredIndex = i
         }
@@ -736,8 +772,13 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
     const selI = controller.selected ? (g.index.get(controller.selected) ?? -1) : -1
     const hovI = st.hovered
 
-    if (positionsChanged || versionChanged) {
-      // Instance matrices for cores + halos.
+    // Pictures: pick, load and place them; a change in who shows one reshapes the cores below.
+    const thumbsChanged = thumbs.update(buffers, controller, pos, selI, hovI, size.width, size.height, performance.now())
+
+    if (positionsChanged || versionChanged || thumbsChanged) {
+      // Instance matrices for cores + halos. A node showing its picture keeps
+      // a small core behind it and no halo: the picture is the body.
+      const shown = buffers.thumbs.shown
       for (let i = 0; i < n; i++) {
         const x = pos[i * 3] ?? 0
         const y = pos[i * 3 + 1] ?? 0
@@ -745,10 +786,12 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
         let r = buffers.radii[i] ?? 1
         if (i === selI) r *= 1.35
         else if (i === hovI) r *= 1.2
-        m4.makeScale(r, r, r)
+        const pictured = shown[i] === 1
+        const core = pictured ? r * THUMB_CORE : r
+        m4.makeScale(core, core, core)
         m4.setPosition(x, y, z)
         buffers.nodes.setMatrixAt(i, m4)
-        const h = r * 3.2
+        const h = pictured ? 0 : r * 3.2
         m4.makeScale(h, h, h)
         m4.setPosition(x, y, z)
         buffers.halos.setMatrixAt(i, m4)
@@ -804,8 +847,19 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
       <primitive object={buffers.nodes} />
       <primitive object={buffers.halos} />
       <primitive object={buffers.field} />
+      <primitive object={thumbs.mesh} />
     </>
   )
+}
+
+/**
+ * True when the pointer, (dx, dy) px from node `i`'s projected centre, hits
+ * it: its body, or while it shows one, its picture as drawn (grown when
+ * hovered or selected).
+ */
+function hits(b: Buffers, i: number, dx: number, dy: number, selI: number, hovI: number): boolean {
+  const picture = b.thumbs.shown[i] === 1
+  return thumbPickHit(dx, dy, b.screen[i * 4 + 3] ?? 0, picture, picture ? thumbHalf(i, selI, hovI) : 1)
 }
 
 /* ------------------------------------------------------------------ */
@@ -820,9 +874,21 @@ const SELECTED_GLOW = 1.9
 const SUN_GLOW = 2.2
 const STAR_GLOW = 2.4
 const PLANET_GLOW = 0.95
+/** The Today hub outshines the stars (and breathes: the core pulses above glow 1.5). */
+const TODAY_GLOW = 2.6
+/** Picture moons are solid and stay under the bloom threshold: their pale color would smear. */
+const IMAGE_GLOW = 0.75
+/** Core radius of a node while its picture is drawn, relative to its radius (hidden behind the picture). */
+const THUMB_CORE = 0.35
 /** Link edges fade in the system layout: structure is shown by the orbits there. */
 const EDGE_BASE = 0.36
 const EDGE_BASE_SYSTEM = 0.12
+/**
+ * Highlight weight of the Today hub's beams in the system layout while they
+ * are in focus: the faint base there would hide them, and they should read
+ * as light (a highlighted link is weight 1).
+ */
+const BEAM_HI_SYSTEM = 1.6
 const RING_ALPHA = 0.13
 const RING_ALPHA_DIMMED = 0.07
 const RING_ALPHA_SIBLINGS = 0.3
@@ -869,7 +935,12 @@ function recolor(b: Buffers, c: BrainController, neighbors: Set<number>, labelSe
     const role = b.role[i]!
     let gl = IDLE_GLOW
     let solid = 0
-    if (role === ROLE_FOLDER) {
+    if (node.kind === 'today') {
+      gl = i === selI ? TODAY_GLOW + 0.4 : i === hovI ? TODAY_GLOW + 0.2 : TODAY_GLOW
+    } else if (node.kind === 'image') {
+      solid = 1
+      gl = i === selI ? IMAGE_GLOW + 0.25 : i === hovI ? IMAGE_GLOW + 0.15 : neighbors.has(i) ? IMAGE_GLOW + 0.07 : IMAGE_GLOW
+    } else if (role === ROLE_FOLDER) {
       solid = 1
       gl = i === selI ? 1.2 : i === hovI ? 1.1 : neighbors.has(i) ? 1.02 : PLANET_GLOW
     } else if (role >= 0) {
@@ -911,7 +982,7 @@ function recolor(b: Buffers, c: BrainController, neighbors: Set<number>, labelSe
       ec[v * 3 + 2] = base[ni * 3 + 2] ?? 1
     }
     let hi = 0
-    if (focusI >= 0 && (a === focusI || z === focusI)) hi = 1
+    if (focusI >= 0 && (a === focusI || z === focusI)) hi = system && b.edgeBeam[e] === 1 ? BEAM_HI_SYSTEM : 1
     else if (hasHighlight && !(highlight.has(g.nodes[a]!.id) && highlight.has(g.nodes[z]!.id))) hi = -1
     else if (focusI >= 0) hi = -1
     eh[e * 2] = hi
@@ -1073,13 +1144,15 @@ function drawLabels(
   const g = b.graph
   const highlight = c.highlight
 
-  /** emphasis: 0 zoom-adaptive, 1 candidate, 2 hovered/selected. `always`: landmarks (root, mounts, project stars). */
+  const shown = b.thumbs.shown
+  /** emphasis: 0 zoom-adaptive, 1 candidate, 2 hovered/selected. `always`: landmarks (root, mounts, project stars, the Today hub). */
   const draw = (i: number, emphasis: 0 | 1 | 2, always = false) => {
     const depth = s[i * 4 + 2] ?? 2
     if (depth > 1 || depth < -1) return
     const x = s[i * 4] ?? 0
     const y = s[i * 4 + 1] ?? 0
-    const r = s[i * 4 + 3] ?? 0
+    // Below the picture when the node shows one (it is wider than the core, and grows when hovered or selected).
+    const r = (s[i * 4 + 3] ?? 0) * (shown[i] === 1 ? thumbHalf(i, selI, hovI) + 0.1 : 1)
     if (x < -40 || x > width + 40 || y < -20 || y > height + 20) return
     const node = g.nodes[i]!
     const filtered = highlight !== null && !highlight.has(node.id) && emphasis < 2
@@ -1103,8 +1176,8 @@ function drawLabels(
   let planets = 0
   for (let i = 0; i < b.count; i++) {
     if (labelSet.has(i) || i === selI || i === hovI) continue
+    if (b.landmark[i] === 1) continue // landmarks are drawn below
     const role = b.role[i]!
-    if (role >= 0 && role !== ROLE_FOLDER) continue // landmarks are drawn below
     const px = s[i * 4 + 3] ?? 0
     if (role === ROLE_FOLDER) {
       if (px > PLANET_LABEL_MIN_PX && planets < ZOOM_LABELS) {
@@ -1117,7 +1190,7 @@ function drawLabels(
     }
   }
   for (const i of b.landmarks) if (!labelSet.has(i) && i !== selI && i !== hovI) draw(i, 1, true)
-  for (const i of labelSet) if (i !== selI && i !== hovI) draw(i, 1, b.role[i]! >= 0 && b.role[i] !== ROLE_FOLDER)
+  for (const i of labelSet) if (i !== selI && i !== hovI) draw(i, 1, b.landmark[i] === 1)
   if (hovI >= 0 && hovI !== selI) draw(hovI, 2)
   if (selI >= 0) draw(selI, 2)
   ctx.globalAlpha = 1

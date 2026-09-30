@@ -927,7 +927,7 @@ function TaskList({
   editing: TaskEdit | null
   setEditing: (edit: TaskEdit | null) => void
   setFocusLine: (line: number | null) => void
-  onToggle: (t: TaskItem, done: boolean) => Promise<void>
+  onToggle: (t: TaskItem, done: boolean) => Promise<unknown>
   /** Save an inline edit: against the note as it was when the edit started. */
   onEdit: (edit: TaskEdit, text: string) => Promise<void>
   onDelete: (t: TaskItem) => Promise<void>

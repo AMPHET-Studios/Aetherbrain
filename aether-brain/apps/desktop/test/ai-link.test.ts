@@ -6,7 +6,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { MemoryVaultAdapter, type VaultChange } from '@aether/core'
 import { IPC, type AetherBridge, type AiActivityDto, type VaultChangeDto, type VaultFileDto, type VaultInfo } from '../src/shared/ipc.js'
-import { ElectronVaultAdapter } from '../src/renderer/vault/electron.js'
+import { ElectronVaultAdapter, MAX_HELD } from '../src/renderer/vault/electron.js'
 import { FsVault } from '../src/main/fsvault.js'
 import {
   AI_DEFAULT_PORT,
@@ -434,6 +434,115 @@ describe('ElectronVaultAdapter', () => {
     f.failList(new Error('No vault open'))
     await expect(a.list()).rejects.toThrow(/No vault open/)
     expect(f.subs.size).toBe(0)
+  })
+
+  it('passes picture changes through untouched, while a load holds them and live', async () => {
+    const f = fakeBridge([])
+    const a = new ElectronVaultAdapter(f.bridge, INFO)
+    f.onList(() => f.emit([{ kind: 'add', path: 'Art/gate.png', mtime: 5, size: 1234 }]))
+    await a.list()
+    const got: VaultChange[][] = []
+    a.watch((c) => void got.push(c))
+    f.emit([{ kind: 'change', path: 'Art/gate.png', mtime: 6, size: 2048 }, { kind: 'unlink', path: 'Art/old.webp' }])
+    expect(got).toEqual([
+      [{ kind: 'add', path: 'Art/gate.png', mtime: 5, size: 1234 }],
+      [
+        { kind: 'change', path: 'Art/gate.png', mtime: 6, size: 2048 },
+        { kind: 'unlink', path: 'Art/old.webp' },
+      ],
+    ])
+  })
+
+  it('keeps every note change of a load behind a burst of pictures: pictures do not count against the budget', async () => {
+    const f = fakeBridge([])
+    const a = new ElectronVaultAdapter(f.bridge, INFO)
+    const pictures = (from: number, n: number): VaultChangeDto[] =>
+      Array.from({ length: n }, (_, i) => ({ kind: 'add' as const, path: `F/Refs/ref-${from + i}.png`, mtime: 1, size: 10 }))
+    f.onList(() => {
+      f.emit([{ kind: 'change', path: 'a.md', content: '# A2', mtime: 2 }])
+      // A 25 000-picture reference pack copied into F:\ while the load runs.
+      for (let i = 0; i < 25_000; i += 5000) f.emit(pictures(i, 5000))
+      f.emit([{ kind: 'addDir', path: 'F/Refs.png' }, { kind: 'add', path: 'b.md', content: '# B', mtime: 3 }])
+    })
+    await a.list()
+    const got: VaultChange[] = []
+    a.watch((c) => void got.push(...c))
+    expect(a.overflowed).toBe(false)
+    // Both notes and the folder (named like a picture, still a folder) are there; pictures only while there was room.
+    expect(got.filter((c) => !c.path.startsWith('F/Refs/'))).toEqual([
+      { kind: 'change', path: 'a.md', content: '# A2', mtime: 2 },
+      { kind: 'addDir', path: 'F/Refs.png' },
+      { kind: 'add', path: 'b.md', content: '# B', mtime: 3 },
+    ])
+    expect(got.filter((c) => c.path.startsWith('F/Refs/'))).toHaveLength(MAX_HELD - 1)
+    expect(got.at(-1)?.path).toBe('b.md')
+  })
+
+  it('gives up on a load that fell hopelessly behind on notes, and says so (overflowed) instead of dropping silently', async () => {
+    const f = fakeBridge([])
+    const a = new ElectronVaultAdapter(f.bridge, INFO)
+    const notes = (n: number): VaultChangeDto[] => Array.from({ length: n }, (_, i) => ({ kind: 'add' as const, path: `n${i}.md`, content: '', mtime: 1 }))
+    f.onList(() => {
+      f.emit(notes(MAX_HELD))
+      expect(a.overflowed).toBe(false)
+      f.emit([{ kind: 'unlinkDir', path: 'Old' }])
+    })
+    await a.list()
+    expect(a.overflowed).toBe(true)
+    // Nothing is held any more: the first watcher gets no stale half of it.
+    expect(f.subs.size).toBe(0)
+    const got: VaultChange[][] = []
+    const off = a.watch((c) => void got.push(c))
+    expect(got).toEqual([])
+    // A rescan (the store unwatches, then loads again) starts over.
+    off()
+    f.onList(() => f.emit([{ kind: 'add', path: 'c.md', content: '# C', mtime: 4 }]))
+    await a.list()
+    expect(a.overflowed).toBe(false)
+    a.watch((c) => void got.push(c))
+    expect(got).toEqual([[{ kind: 'add', path: 'c.md', content: '# C', mtime: 4 }]])
+  })
+
+  it('lists pictures, turns thumbnail bytes into PNG blobs, creates and opens pictures through main', async () => {
+    const f = fakeBridge([])
+    const calls: unknown[][] = []
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3])
+    Object.assign(f.bridge, {
+      listAssets: async () => ({ assets: [{ path: 'Art/gate.png', mtime: 1, size: 7 }, { path: 'b.jpg' }], truncated: true }),
+      thumbnail: async (p: string, size: number) => {
+        calls.push(['thumbnail', p, size])
+        return p === 'Art/gate.png' ? png : p === 'empty.png' ? new Uint8Array(0) : null
+      },
+      createAsset: async (p: string, data: Uint8Array) => {
+        calls.push(['createAsset', p, data.length])
+        if (p === 'Art/taken.png') throw new Error('EEXIST: something already exists at Art/taken.png')
+      },
+      openAsset: async (p: string) => void calls.push(['openAsset', p]),
+    })
+    const a = new ElectronVaultAdapter(f.bridge, INFO)
+    expect(await a.listAssets()).toEqual([{ path: 'Art/gate.png', mtime: 1, size: 7 }, { path: 'b.jpg' }])
+    expect(a.assetsTruncated).toBe(true)
+    const blob = await a.thumbnail('Art/gate.png', 128)
+    expect(blob?.type).toBe('image/png')
+    expect(new Uint8Array(await blob!.arrayBuffer())).toEqual(png)
+    expect(await a.thumbnail('missing.png', 128)).toBeNull()
+    expect(await a.thumbnail('empty.png', 128)).toBeNull()
+    // A new picture is reported to the app's watchers right away (main's watcher confirms it later).
+    const got: VaultChange[][] = []
+    a.watch((c) => void got.push(c))
+    await a.createAsset('Art/new.png', png)
+    expect(got).toEqual([[{ kind: 'add', path: 'Art/new.png', mtime: expect.any(Number), size: png.length }]])
+    await expect(a.createAsset('Art/taken.png', png)).rejects.toThrow(/EEXIST/)
+    expect(got).toHaveLength(1)
+    await a.openAsset('Art/gate.png')
+    expect(calls).toEqual([
+      ['thumbnail', 'Art/gate.png', 128],
+      ['thumbnail', 'missing.png', 128],
+      ['thumbnail', 'empty.png', 128],
+      ['createAsset', 'Art/new.png', png.length],
+      ['createAsset', 'Art/taken.png', png.length],
+      ['openAsset', 'Art/gate.png'],
+    ])
   })
 
   it("creates new notes through main's create-only path and never replaces a file the store has not loaded", async () => {

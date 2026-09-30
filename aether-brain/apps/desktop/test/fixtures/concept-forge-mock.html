@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Concept Forge (test mock)</title>
+    <!--
+      A stand-in for the user's concept-forge.html, for test/forge.test.ts: a
+      paper layer and a drawing layer stacked under a transparent grid overlay,
+      a hue ring widget, a drill nav with an active button, and the grade as a
+      classic script's top-level `let` (not a window property). The page keeps
+      its own keys in `pageKeys`, to check the link's dialog doesn't leak keys.
+    -->
+    <style>
+      html,
+      body {
+        margin: 0;
+        background: #1b1d2a;
+        color: #dde;
+        font: 14px system-ui, sans-serif;
+      }
+      nav.drills {
+        display: flex;
+        gap: 6px;
+        padding: 8px;
+      }
+      nav.drills button.active {
+        background: #8ff7ff;
+      }
+      .stage {
+        position: absolute;
+        left: 8px;
+        top: 48px;
+        width: 800px;
+        height: 500px;
+        background: rgb(243, 239, 230);
+      }
+      .stage canvas {
+        position: absolute;
+        left: 0;
+        top: 0;
+        width: 800px;
+        height: 500px;
+      }
+      #hueRing {
+        position: absolute;
+        left: 830px;
+        top: 48px;
+        width: 160px;
+        height: 160px;
+      }
+    </style>
+  </head>
+  <body>
+    <nav class="drills">
+      <button type="button">Warm-Up</button>
+      <button type="button" class="active" aria-pressed="true">Gesture</button>
+      <button type="button">Value Study</button>
+    </nav>
+    <div class="stage">
+      <canvas id="paperLayer" width="800" height="500"></canvas>
+      <canvas id="drawCanvas" width="800" height="500"></canvas>
+      <canvas id="gridOverlay" width="800" height="500"></canvas>
+    </div>
+    <canvas id="hueRing" width="160" height="160"></canvas>
+    <script>
+      const paper = document.getElementById('paperLayer').getContext('2d')
+      // A blue wash in the lower right.
+      paper.fillStyle = 'rgb(200, 220, 255)'
+      paper.fillRect(600, 350, 150, 100)
+
+      const ink = document.getElementById('drawCanvas').getContext('2d')
+      ink.strokeStyle = 'rgb(20, 20, 20)'
+      ink.lineWidth = 12
+      ink.lineCap = 'round'
+      ink.beginPath()
+      ink.moveTo(120, 80)
+      ink.lineTo(320, 280)
+      ink.stroke()
+      ink.beginPath()
+      ink.moveTo(100, 400)
+      ink.lineTo(500, 400)
+      ink.stroke()
+
+      const grid = document.getElementById('gridOverlay').getContext('2d')
+      grid.strokeStyle = 'rgb(255, 0, 0)'
+      grid.lineWidth = 3
+      for (let x = 50; x < 800; x += 50) {
+        grid.beginPath()
+        grid.moveTo(x, 0)
+        grid.lineTo(x, 500)
+        grid.stroke()
+      }
+      for (let y = 50; y < 500; y += 50) {
+        grid.beginPath()
+        grid.moveTo(0, y)
+        grid.lineTo(800, y)
+        grid.stroke()
+      }
+
+      const ring = document.getElementById('hueRing').getContext('2d')
+      ring.lineWidth = 24
+      for (let a = 0; a < 360; a += 10) {
+        ring.strokeStyle = `hsl(${a}, 90%, 55%)`
+        ring.beginPath()
+        ring.arc(80, 80, 60, (a * Math.PI) / 180, ((a + 11) * Math.PI) / 180)
+        ring.stroke()
+      }
+
+      let lastGrade = {
+        letter: 'B+',
+        overall: 82,
+        drill: 'Gesture',
+        breakdown: [
+          { label: 'Line of action', score: 88 },
+          { label: 'Proportion', score: 74, note: 'Torso runs long' },
+          { label: 'Rhythm', score: 81 },
+        ],
+        opportunities: ['Push the curve of the spine further', 'Simplify the hands into mitts'],
+        strengths: ['Confident, single strokes'],
+      }
+
+      window.pageKeys = []
+      window.addEventListener('keydown', (e) => window.pageKeys.push(e.key))
+    </script>
+  </body>
+</html>

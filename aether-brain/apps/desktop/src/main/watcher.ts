@@ -2,7 +2,8 @@
  * Watches every root of an FsVault with native recursive fs.watch
  * (Windows, macOS and Linux on Node ≥ 20) and turns raw events into
  * debounced batches of vault changes: note add/change/unlink with content,
- * folder addDir/unlinkDir. Pure Node, shared with the MCP server.
+ * picture add/change/unlink with mtime and size (no content), folder
+ * addDir/unlinkDir. Pure Node, shared with the MCP server.
  *
  * Nothing is lost silently:
  *   - Start it before the initial scan with `known` null: events are buffered
@@ -18,7 +19,7 @@
 import { promises as fs, watch as nodeWatch, type Dirent, type FSWatcher, type Stats } from 'node:fs'
 import path from 'node:path'
 import type { VaultChangeDto } from '../shared/ipc.js'
-import { isNoteName, within, type FsVault, type MountedRoot } from './fsvault.js'
+import { isImageName, isNoteName, within, type FsVault, type MountedRoot } from './fsvault.js'
 
 /** A write we made ourselves; its watcher echo is swallowed for SELF_WINDOW ms. */
 interface SelfWrite {
@@ -52,10 +53,19 @@ export type WatchFn = (
   listener: (event: string, filename: string | Buffer | null) => void,
 ) => FSWatcher
 
-/** What the watcher knows is on disk: note paths and folder paths (vault paths). */
+/** What the watcher knows is on disk: note, folder and picture paths (vault paths). */
 export interface KnownPaths {
   files: Iterable<string>
   folders: Iterable<string>
+  /** Picture files (the scan's assets); none when omitted. */
+  images?: Iterable<string>
+  /**
+   * The scan stopped at its picture cap (`assetsTruncated`): `images` is
+   * partial on purpose. A resync then takes no scanned picture it does not
+   * know for new, or it would add back what the cap left out (the scan's cap
+   * is shared by every root, a rescan's is one root's own).
+   */
+  imagesCapped?: boolean
 }
 
 export interface VaultWatcherOptions {
@@ -69,6 +79,8 @@ export interface VaultWatcherOptions {
   probeMs?: number
   /** fs.watch (default: node's). */
   watch?: WatchFn
+  /** Report picture files too (default true). The AI link's brain has no use for them. */
+  images?: boolean
 }
 
 /** Per-flush state: paths already reported, parent listings for exact-name checks. */
@@ -81,6 +93,15 @@ interface FlushCtx {
 export class VaultWatcher {
   private files: Set<string>
   private folders: Set<string>
+  /**
+   * Picture path → `mtime:size` of its last report ('' when only the scan saw
+   * it): a read that Windows reports as a change (last-access updates) or a
+   * repeated event reports nothing.
+   */
+  private images: Map<string, string>
+  private readonly trackImages: boolean
+  /** The known pictures are the scan's capped list: see KnownPaths.imagesCapped. */
+  private imagesCapped: boolean
   /** False until the known sets exist (constructed with `known` null, then seed()): events are only buffered. */
   private seeded: boolean
   private readonly debounceMs: number
@@ -122,14 +143,23 @@ export class VaultWatcher {
     private readonly sink: (changes: VaultChangeDto[]) => void,
     opts: VaultWatcherOptions = {},
   ) {
+    this.trackImages = opts.images !== false
     this.files = new Set(known?.files ?? [])
     this.folders = new Set(known?.folders ?? [])
+    this.images = this.knownImages(known)
+    this.imagesCapped = known?.imagesCapped ?? false
     this.seeded = known !== null
     this.debounceMs = opts.debounceMs ?? 250
     this.resyncMs = opts.resyncMs ?? 2000
     this.rearmMs = opts.rearmMs ?? 1000
     this.probeMs = opts.probeMs ?? 5000
     this.watchFn = opts.watch ?? nodeWatch
+  }
+
+  private knownImages(known: KnownPaths | null): Map<string, string> {
+    const out = new Map<string, string>()
+    if (this.trackImages) for (const p of known?.images ?? []) out.set(p, '')
+    return out
   }
 
   /**
@@ -162,11 +192,13 @@ export class VaultWatcher {
    * Hand over what the initial scan found (for a watcher constructed with
    * `known` null). Paths buffered since start() are then classified against
    * it: a note on disk the scan did not see is an add, a new folder an addDir,
-   * a scanned note that is gone an unlink.
+   * a scanned note that is gone an unlink (pictures alike).
    */
   seed(known: KnownPaths): void {
     this.files = new Set(known.files)
     this.folders = new Set(known.folders)
+    this.images = this.knownImages(known)
+    this.imagesCapped = known.imagesCapped ?? false
     this.seeded = true
     if (!this.running) return
     if (this.pending.size) this.schedule()
@@ -382,10 +414,13 @@ export class VaultWatcher {
 
   /**
    * Rescan `root` and queue every path where disk and the known sets may
-   * disagree: new notes and folders, known ones gone from a folder the rescan
-   * did read, and known notes modified since `since`. The normal flush then
-   * decides from what is on disk at that moment (so live events that raced
-   * the rescan are not undone). False when the root could not be read.
+   * disagree: new notes, pictures and folders, known ones gone from a folder
+   * the rescan did read, and known notes modified since `since` (pictures are
+   * not stat'ed: a whole drive can hold hundreds of thousands). New pictures
+   * only while the known ones are not a capped list (a picture made while
+   * events were lost then waits for the next full scan). The normal flush
+   * then decides from what is on disk at that moment (so live events that
+   * raced the rescan are not undone). False when the root could not be read.
    */
   private async reconcile(root: MountedRoot, since: number, gen: number): Promise<boolean> {
     const scan = await this.vault.scanRoot(root)
@@ -402,6 +437,17 @@ export class VaultWatcher {
     for (const d of scan.folders) if (!this.folders.has(d)) suspects.add(d)
     for (const d of this.folders) if (inRoot(d) && !dirs.has(d) && listed.has(parentOf(d))) suspects.add(d)
     for (const f of this.files) if (inRoot(f) && !onDisk.has(f) && listed.has(parentOf(f))) suspects.add(f)
+    if (this.trackImages) {
+      const pictures = new Set<string>()
+      for (const a of scan.assets) {
+        pictures.add(a.path)
+        if (!this.imagesCapped && !this.images.has(a.path)) suspects.add(a.path)
+      }
+      // A rescan that stopped at the picture cap did not list every picture: none is taken for gone.
+      if (!scan.assetsTruncated) {
+        for (const f of this.images.keys()) if (inRoot(f) && !pictures.has(f) && listed.has(parentOf(f))) suspects.add(f)
+      }
+    }
     const known: { path: string; abs: string }[] = []
     for (const f of scan.files) {
       if (this.files.has(f.path)) known.push(f)
@@ -470,10 +516,15 @@ export class VaultWatcher {
     const abs = this.vault.abs(p)
     const st = await this.present(abs, ctx)
     const isDir = st?.isDirectory() ?? false
-    const isNote = (st?.isFile() ?? false) && isNoteName(path.basename(abs))
+    const isFile = st?.isFile() ?? false
+    const name = path.basename(abs)
+    const isNote = isFile && isNoteName(name)
+    const isImage = isFile && this.trackImages && isImageName(name)
     if (!isDir && this.folders.has(p)) this.dropFolder(p, ctx)
     if (!isNote && this.files.has(p)) this.dropFile(p, ctx)
+    if (!isImage && this.images.has(p)) this.dropImage(p, ctx)
     if (isNote) await this.addFile(p, abs, ctx)
+    else if (isImage && st) this.addImage(p, st, ctx)
     else if (isDir && !this.folders.has(p)) await this.addTree(p, abs, ctx)
   }
 
@@ -534,12 +585,21 @@ export class VaultWatcher {
     else ctx.handled.add(p)
   }
 
-  /** A known folder is gone: unlink its known notes, then unlinkDir its folders deepest first, itself last. */
+  private dropImage(p: string, ctx: FlushCtx): void {
+    this.images.delete(p)
+    if (!this.isSelfDelete(p)) this.emit(ctx, { kind: 'unlink', path: p })
+    else ctx.handled.add(p)
+  }
+
+  /** A known folder is gone: unlink its known notes and pictures, then unlinkDir its folders deepest first, itself last. */
   private dropFolder(p: string, ctx: FlushCtx): void {
     const prefix = `${p}/`
     const quiet = this.isSelfDelete(p)
-    for (const f of [...this.files].filter((f) => f.startsWith(prefix)).sort()) {
+    const gone = [...this.files].filter((f) => f.startsWith(prefix))
+    for (const f of this.images.keys()) if (f.startsWith(prefix)) gone.push(f)
+    for (const f of gone.sort()) {
       this.files.delete(f)
+      this.images.delete(f)
       if (quiet) ctx.handled.add(f)
       else this.emit(ctx, { kind: 'unlink', path: f })
     }
@@ -582,6 +642,23 @@ export class VaultWatcher {
     else this.emit(ctx, { kind: known ? 'change' : 'add', path: p, content, mtime })
   }
 
+  /**
+   * Report a picture: an add when unknown, a change when its mtime or size
+   * moved. Nothing is read (pictures carry no content) and there is no echo
+   * to swallow: whoever wrote it applies an add anyway, and adds are idempotent.
+   */
+  private addImage(p: string, st: Stats, ctx: FlushCtx): void {
+    const sig = `${st.mtimeMs}:${st.size}`
+    const before = this.images.get(p)
+    if (before === sig) {
+      ctx.handled.add(p)
+      return
+    }
+    this.addAncestors(p, ctx)
+    this.images.set(p, sig)
+    this.emit(ctx, { kind: before === undefined ? 'add' : 'change', path: p, mtime: st.mtimeMs, size: st.size })
+  }
+
   /** addDir for parent folders we never heard about (events can be coalesced or missed). */
   private addAncestors(p: string, ctx: FlushCtx): void {
     const segs = p.split('/')
@@ -595,7 +672,7 @@ export class VaultWatcher {
 
   /**
    * A new folder: addDir for it, then walk its subtree (created or moved in
-   * before we could watch it) reporting every folder and note inside.
+   * before we could watch it) reporting every folder, note and picture inside.
    */
   private async addTree(p: string, abs: string, ctx: FlushCtx): Promise<void> {
     this.addAncestors(p, ctx)
@@ -610,6 +687,7 @@ export class VaultWatcher {
       } catch {
         continue
       }
+      const pictures: { abs: string; vault: string }[] = []
       for (const e of entries) {
         const vault = `${dir.vault}/${e.name}`
         if (this.vault.isIgnored(vault)) continue
@@ -620,8 +698,21 @@ export class VaultWatcher {
             this.emit(ctx, { kind: 'addDir', path: vault })
           }
           queue.push({ abs: child, vault })
-        } else if (e.isFile() && isNoteName(e.name) && !this.files.has(vault)) {
-          await this.addFile(vault, child, ctx)
+        } else if (!e.isFile()) {
+          continue
+        } else if (isNoteName(e.name)) {
+          if (!this.files.has(vault)) await this.addFile(vault, child, ctx)
+        } else if (this.trackImages && isImageName(e.name) && !this.images.has(vault)) {
+          pictures.push({ abs: child, vault })
+        }
+      }
+      // A folder of renders moved in can hold thousands: stat them a batch at a time.
+      for (let i = 0; i < pictures.length; i += 32) {
+        const batch = pictures.slice(i, i + 32)
+        const stats = await Promise.all(batch.map((x) => fs.lstat(x.abs).catch(() => null)))
+        for (const [j, x] of batch.entries()) {
+          const st = stats[j]
+          if (st?.isFile()) this.addImage(x.vault, st, ctx)
         }
       }
     }

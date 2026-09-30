@@ -230,6 +230,69 @@ export function createRingMaterial(): ShaderMaterial {
   })
 }
 
+/**
+ * Picture thumbnails: one instanced camera-facing quad per image moon that
+ * has a picture, all sampling one texture array. Per instance: `iCenter` (the
+ * node's live position), `iSize` (quad width), `iLayer` (texture layer) and
+ * `iAlpha` (the node's dim state, so filters and focus dim pictures too). A
+ * dimmed picture darkens the way the cores do instead of turning see-through:
+ * the node's shrunken core sits right behind it and would show through. The
+ * quad is a rounded square with a thin bright rim, so a picture reads as a
+ * framed moon; it sits a little toward the camera so that core stays hidden.
+ * Rows were written top-first (canvas order), hence v is flipped. No fog, and
+ * every output stays under the bloom threshold. `colorspace_fragment`
+ * encodes for the screen when drawn straight to it and is a no-op into the
+ * bloom composer's linear buffer.
+ */
+export function createThumbMaterial(): ShaderMaterial {
+  return new ShaderMaterial({
+    uniforms: { uMap: { value: null } },
+    vertexShader: /* glsl */ `
+      attribute vec3 iCenter;
+      attribute float iSize;
+      attribute float iLayer;
+      attribute float iAlpha;
+      varying vec2 vUv;
+      varying float vLayer;
+      varying float vAlpha;
+      void main() {
+        vUv = uv;
+        vLayer = iLayer;
+        vAlpha = iAlpha;
+        vec4 viewCenter = viewMatrix * modelMatrix * vec4(iCenter, 1.0);
+        viewCenter.xy += position.xy * iSize;
+        viewCenter.z += iSize * 0.2;
+        gl_Position = projectionMatrix * viewCenter;
+      }
+    `,
+    fragmentShader: /* glsl */ `
+      uniform sampler2DArray uMap;
+      varying vec2 vUv;
+      varying float vLayer;
+      varying float vAlpha;
+      // Signed distance to a rounded square of half-size b, corner radius r (negative inside).
+      float roundedBox(vec2 p, float b, float r) {
+        vec2 q = abs(p) - vec2(b - r);
+        return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+      }
+      void main() {
+        float d = roundedBox(vUv - 0.5, 0.5, 0.12);
+        float aa = max(fwidth(d), 1e-4);
+        float mask = 1.0 - smoothstep(-aa, 0.0, d);
+        if (mask < 0.01) discard;
+        vec3 pic = texture(uMap, vec3(vUv.x, 1.0 - vUv.y, vLayer)).rgb;
+        float rim = 1.0 - smoothstep(0.02, 0.02 + aa * 1.5, -d);
+        vec3 col = mix(pic * 0.94, vec3(0.78, 0.8, 0.9), rim) * mix(0.12, 1.0, vAlpha);
+        gl_FragColor = vec4(col, mask);
+        #include <colorspace_fragment>
+      }
+    `,
+    transparent: true,
+    depthWrite: true,
+    depthTest: true,
+  })
+}
+
 /** Starfield points, cheap and dim so they never bloom. */
 export function createStarMaterial(): ShaderMaterial {
   return new ShaderMaterial({

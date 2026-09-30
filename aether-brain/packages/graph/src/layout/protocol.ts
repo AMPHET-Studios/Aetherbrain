@@ -8,8 +8,13 @@
  */
 export type LayoutMode = 'constellation' | 'orbit' | 'system'
 
-/** Node kind codes for the worker: 0 note, 1 ghost, 2 folder. */
-export type LayoutKind = 0 | 1 | 2
+/**
+ * Node kind codes for the worker: 0 note, 1 ghost, 2 folder, 3 the Today hub,
+ * 4 image. Images lay out like notes (leaf moons); the Today hub sits still
+ * straight above the root sun in the system layout and floats freely (pulled
+ * by its beams) in the force layouts.
+ */
+export type LayoutKind = 0 | 1 | 2 | 3 | 4
 /** Folder role codes: 0 root, 1 mount, 2 project, 3 folder; -1 for non-folders. */
 export type LayoutRole = -1 | 0 | 1 | 2 | 3
 

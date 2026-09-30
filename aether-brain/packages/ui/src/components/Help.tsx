@@ -12,9 +12,11 @@ const GROUPS: HelpGroup[] = [
     rows: [
       [`${MOD} K · /`, 'Search neurons, folders & commands'],
       [`${MOD} N · c`, 'Quick capture → Inbox'],
+      ['y · 7', 'Today — the daily brief (☀ hub)'],
       ['d', "Today's daily note"],
       ['1 2 3 4 5 6', 'Graph · Editor · Capture · Search · Review · Projects'],
       ['p', 'Projects board (a selected ★ star: its board)'],
+      ['u', "The newest toast's action (Undo, Show)"],
       ['?', 'This cheatsheet'],
       ['Esc', 'Close / clear filters / deselect'],
     ],
@@ -24,7 +26,7 @@ const GROUPS: HelpGroup[] = [
     rows: [
       ['click · dbl-click', 'Select · open (a folder: expand)'],
       ['drag node', 'Pin it somewhere else'],
-      ['e · Enter', 'Open selected (a folder: expand)'],
+      ['e · Enter', 'Open selected (a folder: expand · a picture: image app)'],
       ['f', 'Fly to selected'],
       ['Tab · ⇧Tab', 'Cycle neighbors (a folder: parent + children)'],
       ['← → ↑ ↓', 'Orbit camera (⇧ = pan)'],
@@ -43,6 +45,17 @@ const GROUPS: HelpGroup[] = [
       ['x', 'Expand / collapse the selected folder'],
       ['[ ]', 'Show fewer / more folder levels'],
       ['o', 'Orbits moving / paused'],
+    ],
+  },
+  {
+    title: 'Today & pictures',
+    rows: [
+      ['y · 7', 'Fly to the ☀ Today hub; its brief shows on the right'],
+      ['Tab · ↑ ↓', 'Into the brief · task to task'],
+      ['Space', 'Tick the focused task (u undoes)'],
+      ['e · Enter', 'A picture: open it in your image app'],
+      ['drop files', 'Import pictures into the selected folder'],
+      ['> picture', 'Palette: import, copy embed, moons, thumbnails'],
     ],
   },
   {

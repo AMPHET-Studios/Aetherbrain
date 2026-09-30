@@ -3,6 +3,12 @@ import { LayoutEngine } from './layout/LayoutEngine'
 import type { LayoutMode } from './layout/protocol'
 import { nodeRadius, type ColorMode } from './theme'
 
+/**
+ * Loads a picture preview: at most `size` px on its longer side, or null when
+ * it can't be read. Set from the vault adapter's `thumbnail`.
+ */
+export type ThumbnailLoader = (path: string, size: number) => Promise<Blob | null>
+
 export interface BrainEvents {
   onSelect?: (id: NoteId | null) => void
   onOpen?: (id: NoteId) => void
@@ -69,6 +75,29 @@ export class BrainController {
   /** Show labels for the largest hubs even when nothing is selected. */
   hubLabels = true
   bloom = true
+  private loader: ThumbnailLoader | null = null
+  private thumbsOn = true
+  /**
+   * Where image moons get their pictures (null: plain moons, no thumbnails).
+   * A new loader is a new vault: the scene forgets every picture it holds.
+   */
+  get thumbnails(): ThumbnailLoader | null {
+    return this.loader
+  }
+  set thumbnails(loader: ThumbnailLoader | null) {
+    if (this.loader === loader) return
+    this.loader = loader
+    this.touch()
+  }
+  /** Draw picture thumbnails on image moons (when a loader is set). */
+  get showThumbnails(): boolean {
+    return this.thumbsOn
+  }
+  set showThumbnails(on: boolean) {
+    if (this.thumbsOn === on) return
+    this.thumbsOn = on
+    this.touch()
+  }
   /** Bumped whenever a visual property changes; the scene diffs against it. */
   version = 0
   events: BrainEvents = {}
@@ -217,12 +246,23 @@ export class BrainController {
   flyTo(id: NoteId, distance?: number): boolean {
     const p = this.engine.positionOf(id)
     if (!p || !this.camera) return false
-    // Default distance scales with the neuron so hubs don't fill the screen;
-    // folders back off far enough to show the planets and moons around them.
     const node = this.graph?.nodes[this.graph.index.get(id) ?? -1]
-    const d = distance ?? (node?.kind === 'folder' ? this.systemDistance(id, p, node) : 34 + (node ? nodeRadius(node) * 10 : 10))
-    this.camera.flyTo(p[0], p[1], p[2], d)
+    this.camera.flyTo(p[0], p[1], p[2], distance ?? this.nodeDistance(id, p, node))
     return true
+  }
+
+  /**
+   * Default distance scales with the neuron so hubs don't fill the screen;
+   * folders back off far enough to show the planets and moons around them.
+   * The Today hub is seen with some of its beams around it; a picture moon
+   * comes close enough for its thumbnail to read.
+   */
+  private nodeDistance(id: NoteId, p: [number, number, number], node: GraphNode | undefined): number {
+    if (!node) return 44
+    if (node.kind === 'folder') return this.systemDistance(id, p, node)
+    if (node.kind === 'today') return 90
+    if (node.kind === 'image') return 26
+    return 34 + nodeRadius(node) * 10
   }
 
   /** Camera distance that frames a folder's system: its furthest live child, else a radius-based guess. */

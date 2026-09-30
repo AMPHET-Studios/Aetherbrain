@@ -8,7 +8,8 @@
  * ring radii are spaced by the extents (subtree radii) of the bodies on them,
  * and angles within a ring are allocated by extent. Orbit planes and start
  * phases come from hashes of the node ids, so the same vault always lays out
- * the same way.
+ * the same way. The Today hub (kind 3) is the exception: it hangs still,
+ * straight above the root sun, outside every ring.
  *
  * Pure (no three.js) so it runs in the layout worker and in unit tests;
  * `systemPositions` allocates nothing and is called every motion frame.
@@ -17,7 +18,7 @@
 export interface SystemInput {
   /** Structural parent index per node, -1 for a root. */
   parent: Int32Array
-  /** 0 note, 1 ghost, 2 folder. */
+  /** 0 note, 1 ghost, 2 folder, 3 the Today hub, 4 image (see `LayoutKind`). */
   kind: Uint8Array
   /** Folder role code (0 root, 1 mount, 2 project, 3 folder), -1 for non-folders. */
   role: Int8Array
@@ -64,6 +65,13 @@ const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5))
  * sizing the shell with 3.0 keeps a small margin.
  */
 const FIB_SPACING = 3.0
+/** Layout kind codes (see `LayoutKind`): folders are always planets; the hub hangs apart. */
+const KIND_FOLDER = 2
+const KIND_TODAY = 3
+/** Height of the Today hub above its parent: parent radius × FIRST_RING + this. */
+const HUB_LIFT = 30
+/** Quaternion component of −90° about X: turns the XZ ring into the vertical plane. */
+const HALF_SQRT2 = Math.SQRT1_2
 
 /** Angular speed of an orbit of radius r: inner orbits run faster. */
 export function orbitSpeed(r: number): number {
@@ -138,6 +146,12 @@ export function computeSystemLayout(input: SystemInput): SystemLayout {
   const n = input.parent.length
   const parent = sanitizeParents(input.parent)
 
+  // The Today hub belongs to the root sun: a hub without a parent joins the
+  // first root instead of becoming a second one.
+  let firstRoot = -1
+  for (let i = 0; i < n && firstRoot < 0; i++) if (parent[i] === -1 && input.kind[i] !== KIND_TODAY) firstRoot = i
+  if (firstRoot >= 0) for (let i = 0; i < n; i++) if (parent[i] === -1 && input.kind[i] === KIND_TODAY) parent[i] = firstRoot
+
   // Children per node, in index order (CSR).
   const childStart = new Int32Array(n + 1)
   for (let i = 0; i < n; i++) {
@@ -190,15 +204,35 @@ export function computeSystemLayout(input: SystemInput): SystemLayout {
   const q = [0, 0, 0, 1]
 
   /**
+   * The Today hub over its parent: still, straight above it (a ring radius at
+   * phase π/2 turned into the vertical plane), no ring, and left out of the
+   * parent's extent so nothing else moves because of it.
+   */
+  const hangAbove = (c: number, p: number): void => {
+    orbitRadius[c] = bodyRadius(p) * FIRST_RING + HUB_LIFT
+    phase[c] = Math.PI / 2
+    speed[c] = 0
+    plane[c * 4] = -HALF_SQRT2
+    plane[c * 4 + 1] = 0
+    plane[c * 4 + 2] = 0
+    plane[c * 4 + 3] = HALF_SQRT2
+  }
+
+  /**
    * Place `kids` around `p` (-1 = the origin, for several roots) starting at
    * `base` + extent. Returns the outer extent of the placed bodies.
    */
   const place = (p: number, kids: ArrayLike<number>, base: number, dir: number, seed: number): number => {
     moons.length = 0
     planets.length = 0
+    let hub = -1
     for (let k = 0; k < kids.length; k++) {
       const c = kids[k]!
-      if (!hasChildren(c) && input.kind[c] !== 2) moons.push(c)
+      if (p >= 0 && input.kind[c] === KIND_TODAY) {
+        hangAbove(c, p)
+        hub = c
+      }
+      else if (!hasChildren(c) && input.kind[c] !== KIND_FOLDER) moons.push(c)
       else planets.push(c)
     }
     planets.sort(bySize)
@@ -279,6 +313,9 @@ export function computeSystemLayout(input: SystemInput): SystemLayout {
       }
       outer = R + maxE
       base = R + maxE + GAP
+      // A shell covers the poles too: the hub hangs clear above it. (Rings stay
+      // within 0.45 rad of the equator, so their moons never come near the axis.)
+      if (hub >= 0) orbitRadius[hub] = Math.max(orbitRadius[hub]!, R + maxE + GAP + bodyRadius(hub) * 1.6 + 1)
     } else {
       fillRings(moons)
     }

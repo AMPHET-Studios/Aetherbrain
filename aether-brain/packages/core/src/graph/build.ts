@@ -1,7 +1,9 @@
-import type { Area, FolderRole, FolderSelection, GraphData, GraphEdge, GraphNode, Link, NoteId, ParsedNote } from '../types'
+import type { Area, FolderRole, FolderSelection, GraphData, GraphEdge, GraphNode, Link, NoteId, ParsedNote, VaultAsset } from '../types'
 import { LinkResolver } from './resolve'
 import { asString } from '../markdown/frontmatter'
+import type { DailyBrief } from '../markdown/brief'
 import { isProjectNote, projectFolderOf } from '../markdown/projects'
+import { AssetResolver, TODAY_ID, imageKey, imageTitle, isImagePath } from '../vault/assets'
 import { folderUniverse, selectFolders, type FolderSelectOptions } from '../vault/folders'
 import { ancestorsOf, areaFromFolder, folderDepth, folderKey, folderOf, normalizeFolderPath } from '../vault/paths'
 
@@ -14,11 +16,39 @@ export interface FolderGraphOptions extends FolderSelectOptions {
   mountLabels?: Record<string, string>
 }
 
+export interface ImageGraphOptions {
+  /** Every image of the vault: vault path → asset (see `assetMap`). */
+  all: Map<string, VaultAsset>
+  /**
+   * With folders (the system layout): the newest images of every shown
+   * folder become moons of it. Without it only embedded / linked images get
+   * nodes (in every layout).
+   */
+  moons?: boolean
+  /** Most images per folder, newest first (default 24); linked images count toward it and always show. */
+  maxPerFolder?: number
+  /** Most image nodes in the graph, embedded ones first (default 1500). */
+  maxTotal?: number
+}
+
+export interface TodayGraphOptions {
+  /** The brief the hub stands for (`dailyBrief`): its beams go to `brief.noteIds`. */
+  brief: DailyBrief
+}
+
 export interface BuildGraphOptions {
   /** Include unresolved link targets as ghost nodes (default true). */
   ghosts?: boolean
   /** Build folder nodes + structural parents (system layout). Omit/null for classic graphs. */
   folders?: FolderGraphOptions | null
+  /**
+   * Picture files: `![[art.png]]` / `[[art.png]]` resolve to image nodes, and
+   * with folders + `moons` each shown folder gets its newest pictures as
+   * moons. Omit/null: image links resolve to nothing (never ghosts).
+   */
+  images?: ImageGraphOptions | null
+  /** Add the Today hub (id `today:`) with beams to the notes of today's brief. Omit/null: no hub. */
+  today?: TodayGraphOptions | null
 }
 
 function toTs(iso: string | null): number | null {
@@ -30,13 +60,24 @@ function toTs(iso: string | null): number | null {
 /**
  * Resolve every link across the vault and build the graph.
  * Mutates `note.links[i].to/resolved` in place so the store has resolved links
- * without a second pass. Deterministic node order: notes sorted by id, then
- * ghosts sorted by id, then (with `folders`) folder nodes sorted by path —
+ * without a second pass. Deterministic node order: notes sorted by id, ghosts
+ * sorted by id, linked images sorted by path, then (with `folders`) image
+ * moons sorted by path and folder nodes sorted by path, then the Today hub —
  * stable order keeps the worker layout stable across rebuilds.
+ *
+ * Links whose target is a picture file (`![[gate.png]]`) resolve against
+ * `opts.images` (to `image:<path>`, `resolved: true`) or stay unresolved, but
+ * never become ghosts: a missing picture is not a note to write.
  */
 export function buildGraph(notes: Map<NoteId, ParsedNote>, opts: BuildGraphOptions = {}): GraphData {
   const ghosts = opts.ghosts ?? true
   const resolver = new LinkResolver(notes.values())
+  const assets = opts.images?.all ?? null
+  // Built on the first picture link only, and kept per asset map (a note edit keeps the map).
+  let assetResolver: AssetResolver | null | undefined
+  const pictures = (): AssetResolver | null => (assetResolver ??= assets && assets.size ? resolverOf(assets) : null)
+  /** Vault paths of the images some note links to or embeds. */
+  const linkedImages = new Set<string>()
 
   const nodes: GraphNode[] = []
   const index = new Map<NoteId, number>()
@@ -82,6 +123,19 @@ export function buildGraph(notes: Map<NoteId, ParsedNote>, opts: BuildGraphOptio
       // Always resolve from the raw text so rebuilding after a vault change
       // (a ghost becoming real, a rename) never needs a re-parse.
       const rawTarget = stripRaw(link.raw)
+      if (isImagePath(rawTarget)) {
+        // A picture: an image node when the file exists, else nothing (never a ghost).
+        const img = pictures()?.resolve(rawTarget, n.meta.folder) ?? null
+        link.resolved = img !== null
+        link.to = img !== null ? imageKey(img) : rawTarget
+        if (img === null) continue
+        linkedImages.add(img)
+        const key = `${id}\u0000${link.to}\u0000${link.kind}`
+        const existing = edgeMap.get(key)
+        if (existing) existing.weight += 1
+        else edgeMap.set(key, { from: id, to: link.to, kind: link.kind, weight: 1 })
+        continue
+      }
       const target = resolver.resolve(rawTarget)
       if (target) {
         link.to = target
@@ -133,6 +187,14 @@ export function buildGraph(notes: Map<NoteId, ParsedNote>, opts: BuildGraphOptio
     }
   }
 
+  // Linked images (every layout); moons come with the folder system below.
+  const imageBudget = { left: Math.max(0, opts.images?.maxTotal ?? 1500) }
+  for (const path of [...linkedImages].sort()) {
+    if (imageBudget.left <= 0) break
+    imageBudget.left--
+    addImageNode(nodes, index, backlinks, outlinks, path, assets?.get(path))
+  }
+
   const edges: GraphEdge[] = []
   for (const e of edgeMap.values()) {
     if (!index.has(e.to)) continue
@@ -145,13 +207,157 @@ export function buildGraph(notes: Map<NoteId, ParsedNote>, opts: BuildGraphOptio
     node.outDegree = outlinks.get(node.id)?.size ?? 0
     node.inDegree = backlinks.get(node.id)?.size ?? 0
     node.degree = node.inDegree + node.outDegree
+    if (node.image) node.image.embeddedBy = node.inDegree
   }
 
   const orphans = nodes.filter((n) => n.kind === 'note' && n.degree === 0).map((n) => n.id)
 
-  const folderSelection = opts.folders ? addFolderSystem(notes, ids, nodes, index, unresolved, opts.folders) : null
+  const folderSelection = opts.folders
+    ? addFolderSystem(notes, ids, nodes, index, unresolved, opts.folders, {
+        images: assets,
+        moons: !!opts.images?.moons,
+        maxPerFolder: opts.images?.maxPerFolder ?? 24,
+        budget: imageBudget,
+        backlinks,
+        outlinks,
+      })
+    : null
+
+  if (opts.today) addTodayHub(nodes, edges, index, backlinks, outlinks, opts.today.brief, opts.folders ? folderKey('') : null)
 
   return { nodes, edges, index, backlinks, outlinks, unresolved, orphans, tagCounts, areaCounts, folderSelection }
+}
+
+/** Append an image node (no parent yet; the folder system sets it). */
+function addImageNode(
+  nodes: GraphNode[],
+  index: Map<NoteId, number>,
+  backlinks: Map<NoteId, Set<NoteId>>,
+  outlinks: Map<NoteId, Set<NoteId>>,
+  path: string,
+  asset: VaultAsset | undefined,
+): GraphNode {
+  const id = imageKey(path)
+  const mtime = asset?.mtime ?? null
+  const node: GraphNode = {
+    id,
+    title: imageTitle(path),
+    area: areaFromFolder(path) ?? 'untagged',
+    type: 'resource',
+    tags: [],
+    kind: 'image',
+    ghost: false,
+    parent: null,
+    image: { path, mtime, size: asset?.size ?? null, embeddedBy: 0 },
+    inDegree: 0,
+    outDegree: 0,
+    degree: 0,
+    created: mtime,
+    updated: mtime,
+    wordCount: 0,
+  }
+  index.set(id, nodes.length)
+  nodes.push(node)
+  backlinks.set(id, new Set())
+  outlinks.set(id, new Set())
+  return node
+}
+
+/**
+ * The Today hub: one node with a beam to every note of the brief. Beams are
+ * outlinks of the hub only (a note's backlinks never list the hub, and it
+ * never makes a note less of an orphan).
+ */
+function addTodayHub(
+  nodes: GraphNode[],
+  edges: GraphEdge[],
+  index: Map<NoteId, number>,
+  backlinks: Map<NoteId, Set<NoteId>>,
+  outlinks: Map<NoteId, Set<NoteId>>,
+  brief: DailyBrief,
+  parent: NoteId | null,
+): void {
+  const out = new Set<NoteId>()
+  for (const id of brief.noteIds) {
+    if (!index.has(id) || out.has(id)) continue
+    out.add(id)
+    edges.push({ from: TODAY_ID, to: id, kind: 'today', weight: 1 })
+  }
+  index.set(TODAY_ID, nodes.length)
+  nodes.push({
+    id: TODAY_ID,
+    title: 'Today',
+    area: 'inbox',
+    type: 'daily',
+    tags: [],
+    kind: 'today',
+    ghost: false,
+    parent,
+    today: {
+      date: brief.date,
+      overdue: brief.overdue.length,
+      today: brief.today.length,
+      next: brief.next.length,
+      total: brief.total,
+    },
+    inDegree: 0,
+    outDegree: out.size,
+    degree: out.size,
+    created: null,
+    updated: null,
+    wordCount: 0,
+  })
+  backlinks.set(TODAY_ID, new Set())
+  outlinks.set(TODAY_ID, out)
+}
+
+/**
+ * The picture resolver of an asset map, memoized per map like the folder
+ * universe: indexing a whole drive's pictures takes a noticeable moment, and
+ * a note edit or a tick keeps the map (applyChanges copies it only when a
+ * picture changed).
+ */
+const resolverCache = new WeakMap<Map<string, VaultAsset>, AssetResolver>()
+
+function resolverOf(assets: Map<string, VaultAsset>): AssetResolver {
+  let r = resolverCache.get(assets)
+  if (!r) {
+    r = new AssetResolver(assets.keys())
+    resolverCache.set(assets, r)
+  }
+  return r
+}
+
+/** Images per folder, newest first (then by path), per asset map: memoized like the folder universe. */
+const imagesByFolderCache = new WeakMap<Map<string, VaultAsset>, Map<string, string[]>>()
+
+function imagesByFolder(assets: Map<string, VaultAsset>): Map<string, string[]> {
+  let out = imagesByFolderCache.get(assets)
+  if (out) return out
+  out = new Map()
+  for (const path of assets.keys()) {
+    const f = folderOf(path)
+    const list = out.get(f)
+    if (list) list.push(path)
+    else out.set(f, [path])
+  }
+  for (const list of out.values()) {
+    list.sort((a, b) => (assets.get(b)?.mtime ?? 0) - (assets.get(a)?.mtime ?? 0) || (a < b ? -1 : a > b ? 1 : 0))
+  }
+  imagesByFolderCache.set(assets, out)
+  return out
+}
+
+interface FolderImageOptions {
+  /** Every image of the vault (null: none known). */
+  images: Map<string, VaultAsset> | null
+  /** Show the newest images of each shown folder as moons (else linked images only). */
+  moons: boolean
+  maxPerFolder: number
+  /** Image nodes still allowed (shared with the linked images). */
+  budget: { left: number }
+  backlinks: Map<NoteId, Set<NoteId>>
+  outlinks: Map<NoteId, Set<NoteId>>
 }
 
 /**
@@ -166,6 +372,7 @@ function addFolderSystem(
   index: Map<NoteId, number>,
   unresolved: Map<NoteId, Set<NoteId>>,
   opts: FolderGraphOptions,
+  img: FolderImageOptions,
 ): FolderSelection {
   // Folders known on disk: everything listed, every note folder, and their
   // ancestors ('' included). Indexed once per folder Set, not on every rebuild.
@@ -223,15 +430,50 @@ function addFolderSystem(
     }
   }
 
-  // Parents of notes and ghosts.
+  // Parents of notes, ghosts and linked images.
   for (const node of nodes) {
     if (node.kind === 'note') {
       const home = homeOf.get(node.id)
       node.parent = folderKey(home ?? nearestVisible(notes.get(node.id)!.meta.folder))
+    } else if (node.kind === 'image') {
+      node.parent = folderKey(nearestVisible(folderOf(node.image!.path)))
     } else {
       let first: NoteId | null = null
       for (const ref of unresolved.get(node.id) ?? []) if (first === null || ref < first) first = ref
       node.parent = first ?? folderKey('')
+    }
+  }
+
+  // Image moons: the newest pictures of every shown folder, shallow folders first.
+  const byFolder = img.images ? imagesByFolder(img.images) : null
+  const shown = new Map<string, number>()
+  for (const node of nodes) {
+    if (node.kind !== 'image') continue
+    const f = folderPathOfParent(node.parent)
+    shown.set(f, (shown.get(f) ?? 0) + 1)
+  }
+  if (byFolder && img.moons && img.budget.left > 0) {
+    const order = [...visible].sort((a, b) => folderDepth(a) - folderDepth(b) || (a < b ? -1 : a > b ? 1 : 0))
+    const moons: string[] = []
+    for (const f of order) {
+      if (img.budget.left <= 0) break
+      const list = byFolder.get(f)
+      if (!list) continue
+      // Linked images of the folder count toward its cap.
+      let taken = shown.get(f) ?? 0
+      for (const path of list) {
+        if (taken >= img.maxPerFolder || img.budget.left <= 0) break
+        if (index.has(imageKey(path))) continue
+        moons.push(path)
+        taken++
+        img.budget.left--
+      }
+    }
+    for (const path of moons.sort()) {
+      const node = addImageNode(nodes, index, img.backlinks, img.outlinks, path, img.images!.get(path))
+      node.parent = folderKey(nearestVisible(folderOf(path)))
+      const f = folderPathOfParent(node.parent)
+      shown.set(f, (shown.get(f) ?? 0) + 1)
     }
   }
 
@@ -268,6 +510,8 @@ function addFolderSystem(
         hiddenFolders: selection.hidden.get(path) ?? 0,
         notes: direct.get(path) ?? 0,
         totalNotes: total.get(path) ?? 0,
+        images: byFolder?.get(path)?.length ?? 0,
+        shownImages: shown.get(path) ?? 0,
       },
       inDegree: 0,
       outDegree: 0,
@@ -278,6 +522,11 @@ function addFolderSystem(
     })
   }
   return selection
+}
+
+/** Folder path of a parent id (`folder:a/b` → `a/b`). */
+function folderPathOfParent(parent: NoteId | null): string {
+  return parent === null ? '' : parent.slice('folder:'.length)
 }
 
 export function ghostKey(target: string): NoteId {

@@ -47,6 +47,10 @@ export const GHOST_COLOR = '#ff3e6c'
 export const STAR_COLOR = '#ffcf6b'
 /** The vault root and its mounts (drives): the suns everything orbits. */
 export const SUN_COLOR = '#fff1d6'
+/** The Today hub: aurora cyan, so it never reads as one of the gold stars. */
+export const TODAY_COLOR = '#8ff7ff'
+/** Picture moons: a pale moonlight white (the thumbnail is their real color). */
+export const IMAGE_COLOR = '#f4f1ff'
 
 /**
  * Planet color for a folder: a stable hashed hue with soft saturation. Hues in
@@ -105,7 +109,9 @@ export function nodeBaseColor(
   activeTag: string | null,
   ageOf: (n: GraphNode) => number,
 ): Color {
-  // Folders are the structure of the system layout: they ignore the color mode.
+  // Folders (the structure of the system layout), the Today hub and pictures ignore the color mode.
+  if (n.kind === 'today') return cachedColor(TODAY_COLOR)
+  if (n.kind === 'image') return cachedColor(IMAGE_COLOR)
   if (n.folder) {
     const role = n.folder.role
     if (role === 'root' || role === 'mount') return cachedColor(SUN_COLOR)
@@ -132,9 +138,12 @@ export function nodeBaseColor(
 /**
  * Visual radius in world units. Notes: hubs grow with sqrt(degree); MOCs get a
  * bonus. Folders by role: suns (root 8, mounts 6.5), project stars 5.5, and
- * planets that grow with how much they hold (1.6 to 4.2).
+ * planets that grow with how much they hold (1.6 to 4.2). The Today hub is a
+ * fixed 4.6 (its beams must not inflate it) and pictures a fixed 1.4.
  */
 export function nodeRadius(n: GraphNode): number {
+  if (n.kind === 'today') return 4.6
+  if (n.kind === 'image') return 1.4
   if (n.folder) {
     const f = n.folder
     if (f.role === 'root') return 8
