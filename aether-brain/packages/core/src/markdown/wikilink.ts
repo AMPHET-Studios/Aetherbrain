@@ -177,3 +177,51 @@ export const remarkWikilink: Plugin<[RemarkWikilinkOptions?], Root> = (options =
     })
   }
 }
+
+/**
+ * remark plugin: a hash written escaped (`\\#word`) is text, not a tag (see
+ * `parseNote`). Its `#` is set apart in a `<span class="literal-hash">`, so a
+ * renderer that turns `#word` in text into tag links (the preview) leaves it
+ * alone, as the graph does. Imported AI chats rely on this.
+ */
+export const remarkLiteralHashes: Plugin<[], Root> = () => {
+  return (tree, file) => {
+    const doc = typeof file?.value === 'string' ? file.value : null
+    if (doc === null || !doc.includes('\\#')) return
+    visit(tree, 'text', (node: Text, index, parent: Parent | undefined) => {
+      if (!parent || index === undefined || !node.value.includes('#')) return
+      const start = node.position?.start.offset
+      const end = node.position?.end.offset
+      if (start === undefined || end === undefined) return
+      const src = doc.slice(start, end)
+      if (!src.includes('\\#')) return
+      // Escapes never add or drop a `#`: the value's hashes are the source's, in order.
+      const escaped: boolean[] = []
+      for (let i = 0; i < src.length; i++) {
+        if (src[i] !== '#') continue
+        let slashes = 0
+        for (let j = i - 1; j >= 0 && src[j] === '\\'; j--) slashes++
+        escaped.push(slashes % 2 === 1)
+      }
+      const hashes: number[] = []
+      for (let i = 0; i < node.value.length; i++) if (node.value[i] === '#') hashes.push(i)
+      if (hashes.length !== escaped.length) return
+      const pieces: PhrasingContent[] = []
+      let cursor = 0
+      hashes.forEach((at, k) => {
+        if (!escaped[k]) return
+        if (at > cursor) pieces.push({ type: 'text', value: node.value.slice(cursor, at) })
+        pieces.push({
+          type: 'literalHash',
+          data: { hName: 'span', hProperties: { className: 'literal-hash' } },
+          children: [{ type: 'text', value: '#' }],
+        } as unknown as PhrasingContent)
+        cursor = at + 1
+      })
+      if (!pieces.length) return
+      if (cursor < node.value.length) pieces.push({ type: 'text', value: node.value.slice(cursor) })
+      parent.children.splice(index, 1, ...pieces)
+      return index + pieces.length
+    })
+  }
+}

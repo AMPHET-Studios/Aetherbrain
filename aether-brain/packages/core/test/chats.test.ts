@@ -14,6 +14,7 @@ import {
   parseNote,
   planChatImport,
   readChatExport,
+  remarkLiteralHashes,
   remarkWikilink,
   renderChatNote,
   sectionOf,
@@ -241,6 +242,12 @@ describe('inert chat text', () => {
     const processor = unified().use(remarkParse).use(remarkWikilink)
     const tree = processor.runSync(processor.parse(md), md)
     expect(JSON.stringify(tree).match(/"type":"wikilink"/g)).toHaveLength(1)
+    // The preview links #tags in text: an escaped hash is set apart so it isn't one.
+    const hashes = unified().use(remarkParse).use(remarkLiteralHashes)
+    const doc = 'a \\#portal and #real, \\\\#not-escaped'
+    const out = JSON.stringify(hashes.runSync(hashes.parse(doc), doc))
+    expect(out.match(/"type":"literalHash"/g)).toHaveLength(1)
+    expect(out).toContain('"value":"portal and #real, \\\\#not-escaped"')
   })
 
   it('makes links, tags, tasks and swallowing HTML inert, and leaves code alone', () => {
@@ -304,7 +311,7 @@ describe('chat notes', () => {
     expect(tasks).toEqual([])
   })
 
-  it('plans a whole import: folders, numbered names, hubs, knowledge, Aether project match, pictures', async () => {
+  it('plans a whole import: folders, numbered names, hubs, knowledge, Aether project match, pictures', () => {
     const plan = planChatImport(archive(), [], {
       base: 'Resources/AI Chats',
       utc: true,
@@ -323,7 +330,6 @@ describe('chat notes', () => {
     ])
     expect(plan.pictures).toEqual([{ from: 'file-AbC123-monolith.webp', path: 'Resources/AI Chats/ChatGPT/Project abcdef12/Pictures/2026-03-04 Monolith ideas 1.webp' }])
     expect(plan.counts).toMatchObject({ claude: 3, chatgpt: 1, projects: 1, docs: 2, pictures: 1 })
-    if (process.env.SHOW_NOTES) (await import('node:fs')).writeFileSync(process.env.SHOW_NOTES, plan.create.map((p) => `=== ${p.path}\n${p.content}`).join('\n'))
     const gpt = plan.create.find((p) => p.path.includes('Monolith'))!.content
     expect(gpt).toContain('![[2026-03-04 Monolith ideas 1.webp]]')
     expect(gpt).toContain('ChatGPT project: <https://chatgpt.com/g/g-p-abcdef1234567890/project>')

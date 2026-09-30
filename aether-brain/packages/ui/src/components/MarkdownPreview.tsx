@@ -10,6 +10,7 @@ import {
   imageKey,
   imagePathOf,
   isImagePath,
+  remarkLiteralHashes,
   remarkWikilink,
   splitFrontmatter,
   type NoteId,
@@ -59,7 +60,7 @@ export function MarkdownPreview({ source, selfId = null, depth = 0, className }:
       const path = pictures.resolve(t, folder)
       return path === null ? null : imageKey(path)
     }
-    return [remarkGfm, [remarkWikilink, { resolve }]] as const
+    return [remarkGfm, [remarkWikilink, { resolve }], remarkLiteralHashes] as const
   }, [resolver, assets, folder])
 
   const components = useMemo<Components>(
