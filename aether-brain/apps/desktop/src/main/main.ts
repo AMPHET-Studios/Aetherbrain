@@ -4,17 +4,19 @@
  * Responsibilities, and nothing more:
  *   - remember the vault roots (one folder, or several such as whole drives)
  *   - read, write, create, rename, delete markdown notes and create folders in them (FsVault, path-jailed)
+ *   - list the pictures in them, make thumbnails, create new pictures (never replacing anything) and open one in the OS
  *   - watch them (VaultWatcher) and stream debounced change batches to the renderer and the AI link
  *   - run the AI link (the in-app MCP server on 127.0.0.1) when the user switches it on
  *
  * No telemetry. The renderer is sandboxed with context isolation and makes no network requests.
  */
-import { app, BrowserWindow, clipboard, dialog, ipcMain, shell, nativeTheme, session } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, shell, nativeTheme, session } from 'electron'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   IPC,
+  type AssetListDto,
   type FolderListDto,
   type VaultChangeDto,
   type VaultFileDto,
@@ -23,6 +25,16 @@ import {
 } from '../shared/ipc.js'
 import { FsVault, within } from './fsvault.js'
 import { VaultWatcher } from './watcher.js'
+import {
+  MAX_THUMB_FILE_BYTES,
+  ThumbCache,
+  assetBytes,
+  assetPath,
+  decodableInProcess,
+  fitWithin,
+  readHeader,
+  thumbPx,
+} from './assets.js'
 import { AiLinkHost, aiSettings, cleanPatch, type AiLinkSettings } from './ai-link.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -217,6 +229,7 @@ async function openVault(input: string[]): Promise<VaultInfo> {
   watcher?.stop()
   watcher = null
   aiHeld = null
+  thumbs.clear()
   vault = next
   opened = true
   settings.roots = wanted
@@ -256,7 +269,7 @@ async function listFiles(): Promise<VaultFileDto[]> {
         }
         throw err
       })
-    if (latest()) w.seed({ files: scan.files.map((f) => f.path), folders: scan.folders })
+    if (latest()) w.seed({ files: scan.files.map((f) => f.path), folders: scan.folders, images: scan.assets.map((a) => a.path) })
     const found = scan.files.length
     const files = await v.readAll(scan.files, (done) => progress({ phase: 'reading', files: done, found, dirs: scan.dirs, done: false }))
     progress({ phase: 'done', files: files.length, found, dirs: scan.dirs, done: true })
@@ -364,6 +377,112 @@ async function reveal(p: unknown): Promise<void> {
   const rel = String(p)
   if (!(await v.stat(rel))) throw new Error(`Not in the vault: ${rel}`)
   shell.showItemInFolder(v.abs(rel))
+}
+
+/* ------------------------------------------------------------------ */
+/* Pictures                                                           */
+/* ------------------------------------------------------------------ */
+
+/** Thumbnails already made, and the ones being made (two requests for the same one share the work). */
+const thumbs = new ThumbCache()
+const thumbsInFlight = new Map<string, Promise<Uint8Array | null>>()
+/**
+ * Longest wait for one thumbnail: a share that stopped answering must not hold
+ * the renderer's few requests in flight forever (it gets null, a plain moon).
+ */
+const THUMB_TIMEOUT = 20_000
+
+/** Every picture the last scan found, with mtime and size where a stat got to them in time. */
+async function listAssets(): Promise<AssetListDto> {
+  const v = requireVault()
+  const scan = v.lastScan
+  if (!scan) return { assets: [], truncated: false }
+  return { assets: await v.statAssets(scan.assets), truncated: scan.assetsTruncated }
+}
+
+/**
+ * PNG bytes of a picture at most `size` px on its longer side, or null when
+ * it is not a picture of the vault, too big, or cannot be decoded.
+ */
+async function thumbnail(p: unknown, size: unknown): Promise<Uint8Array | null> {
+  const v = requireVault()
+  const px = thumbPx(size)
+  const abs = await v.assetAbs(String(p))
+  if (!abs) return null
+  const st = await fs.stat(abs).catch(() => null)
+  if (!st?.isFile() || st.size === 0 || st.size > MAX_THUMB_FILE_BYTES) return null
+  const key = ThumbCache.key(abs, st.mtimeMs, st.size, px)
+  const hit = thumbs.get(key)
+  if (hit !== undefined) return hit
+  let job = thumbsInFlight.get(key)
+  if (!job) {
+    // A picture that cannot be decoded is an answer too (null, cached for this version of the
+    // file): the renderer shows a plain moon, and asks again once the file changes.
+    job = renderThumb(abs, px)
+      .catch(() => null)
+      .then((png) => {
+        thumbs.set(key, png)
+        thumbsInFlight.delete(key)
+        return png
+      })
+    thumbsInFlight.set(key, job)
+  }
+  return job
+}
+
+/**
+ * Windows and macOS ask the OS thumbnailer (it knows every format the system
+ * does, keeps its own cache and runs out of process). Elsewhere, or when it
+ * fails, Electron decodes PNG and JPEG itself: synchronously, in this
+ * process, so only files whose header promises a sane pixel count.
+ */
+async function renderThumb(abs: string, px: number): Promise<Uint8Array | null> {
+  let img: Electron.NativeImage | null = null
+  if (process.platform === 'win32' || process.platform === 'darwin') {
+    img = await nativeImage.createThumbnailFromPath(abs, { width: px, height: px }).catch(() => null)
+  }
+  if (!img || img.isEmpty()) {
+    if (!decodableInProcess(await readHeader(abs))) return null
+    img = nativeImage.createFromPath(abs)
+    if (img.isEmpty()) return null
+  }
+  // Windows sizes by width only: a tall picture comes back taller than asked.
+  const { width, height } = img.getSize()
+  const fit = fitWithin(width, height, px)
+  if (fit) img = img.resize({ ...fit, quality: 'better' })
+  const png = img.toPNG()
+  // A copy of its own: the bytes cross IPC whole.
+  return png.length ? new Uint8Array(png) : null
+}
+
+/**
+ * A new picture (a dropped file, a Concept Forge drawing): a picture path,
+ * bytes that really are a picture, at most 40 MB, created without ever
+ * replacing anything (EEXIST, like notes). The watcher reports it to the
+ * renderer; the AI link hears about it (and a folder made for it) right away.
+ */
+async function createAsset(p: unknown, data: unknown): Promise<void> {
+  const v = requireVault()
+  const rel = assetPath(p)
+  const bytes = assetBytes(data)
+  const canonical = v.toVault(v.abs(rel))
+  if (canonical === null) throw new Error(`Not in the vault: ${rel}`)
+  const parent = canonical.includes('/') ? canonical.slice(0, canonical.lastIndexOf('/')) : ''
+  const madeFolder = parent !== '' && (await v.stat(parent)) === null
+  await v.createBinary(rel, bytes)
+  const changes: VaultChangeDto[] = madeFolder ? [{ kind: 'addDir', path: parent }] : []
+  changes.push({ kind: 'add', path: canonical, mtime: Date.now(), size: bytes.length })
+  toAi(changes)
+}
+
+/** Open a picture of the vault in the OS default app. Pictures only: shell.openPath would run a program just the same. */
+async function openAsset(p: unknown): Promise<void> {
+  const v = requireVault()
+  const rel = String(p)
+  const abs = await v.assetAbs(rel)
+  if (!abs) throw new Error(`Not a picture in the vault: ${rel}`)
+  const err = await shell.openPath(abs)
+  if (err) throw new Error(`Could not open ${rel}: ${err}`)
 }
 
 /** OS folder picker; null when cancelled. */
@@ -509,6 +628,10 @@ function registerIpc(): void {
   ipcMain.handle(IPC.rename, (_e, a: unknown, b: unknown) => renameNote(a, b))
   ipcMain.handle(IPC.mkdir, (_e, p: unknown) => createFolder(p))
   ipcMain.handle(IPC.reveal, (_e, p: unknown) => reveal(p))
+  ipcMain.handle(IPC.assets, () => listAssets())
+  ipcMain.handle(IPC.thumb, (_e, p: unknown, size: unknown) => within(thumbnail(p, size), THUMB_TIMEOUT, null))
+  ipcMain.handle(IPC.createAsset, (_e, p: unknown, data: unknown) => createAsset(p, data))
+  ipcMain.handle(IPC.openAsset, (_e, p: unknown) => openAsset(p))
   ipcMain.handle(IPC.aiStatus, () => requireAi().status())
   ipcMain.handle(IPC.aiConfigure, (_e, patch: unknown) => requireAi().configure(cleanPatch(patch)))
   ipcMain.handle(IPC.copy, (_e, text: unknown) => clipboard.writeText(String(text)))

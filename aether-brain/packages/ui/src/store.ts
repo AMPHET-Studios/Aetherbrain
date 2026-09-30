@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import {
   AREA_FOLDER,
   SearchIndex,
+  TODAY_ID,
   addTask as addTaskToNote,
   applyChanges,
   areaFromFolder,
@@ -9,7 +10,11 @@ import {
   basenameOf,
   blankNote,
   buildGraph,
+  critiqueBaseName,
+  critiqueNote,
+  dailyBrief,
   dailyNote,
+  defaultProjectFolder,
   deleteTask as deleteTaskInNote,
   editTask as editTaskInNote,
   extractTasks,
@@ -20,16 +25,24 @@ import {
   ghostTitle,
   homePrefix as homePrefixOf,
   idFromPath,
+  imageFileName,
+  imageKey,
+  imagePathOf,
   inboxNote,
   isExistsError,
   isFolderId,
   isGhostId,
   isIgnoredPath,
+  isImageId,
   isProjectNote,
+  isTodayId,
+  isVirtualId,
   loadVault,
   mountOf,
   neighborhood,
+  nextDay,
   normalizeFolderPath,
+  normalizeGrade,
   normalizePath,
   parseWikilinkRaw,
   portableFolderRef,
@@ -42,6 +55,8 @@ import {
   todayIso,
   updateFrontmatter,
   type Area,
+  type BriefTask,
+  type BuildGraphOptions,
   type GraphData,
   type GraphOptionsFn,
   type NoteId,
@@ -55,7 +70,7 @@ import {
   type DailyBrief,
 } from '@aether/core'
 import { BrainController, type ColorMode, type LayoutMode } from '@aether/graph'
-import { moveTaskOnBoard } from './projects'
+import { listProjects, moveTaskOnBoard } from './projects'
 import { plural, truncate } from './util'
 
 export type View = 'graph' | 'editor' | 'capture' | 'search' | 'review' | 'projects'
@@ -121,8 +136,10 @@ const EXPANDED_KEY = 'aether:expanded:'
 const SETTINGS_VERSION = 2
 /** Views drawn over the graph: flying to something there shows nothing until they close. */
 const COVERING_VIEWS: ReadonlySet<View> = new Set<View>(['projects', 'review', 'capture', 'search'])
-/** Numbered names (` 2` … ` 1000`) tried for a new note before giving up. */
+/** Numbered names (` 2` … ` 1000`) tried for a new note or picture before giving up. */
 const MAX_SUFFIX = 1000
+/** Largest picture the app writes (an imported file, a Concept Forge drawing). */
+export const MAX_IMAGE_BYTES = 40 * 1024 * 1024
 const LAYOUTS: LayoutMode[] = ['constellation', 'orbit', 'system']
 const LAYOUT_TOASTS: Record<LayoutMode, string> = {
   constellation: 'Constellation layout — clustered by area',
@@ -180,6 +197,9 @@ function loadSettings(): Settings {
   if (!LAYOUTS.includes(s.layoutMode)) s.layoutMode = 'system'
   s.folderDepth = clampDepth(s.folderDepth)
   s.motion = s.motion !== false
+  s.imageMoons = s.imageMoons !== false
+  s.thumbnails = s.thumbnails !== false
+  s.todayHub = s.todayHub !== false
   if (stored && !(typeof stored.v === 'number' && stored.v >= SETTINGS_VERSION)) {
     s.layoutMode = 'system'
     s.v = SETTINGS_VERSION
@@ -278,6 +298,77 @@ function cleanFolderPath(input: string, existing: (path: string) => string | nul
   const path = segs.join('/')
   if (isIgnoredPath(`${path}/x.md`)) return { error: `${path} would be skipped by the brain (ignored folder name)` }
   return { path }
+}
+
+/** Lowercased folder path → the vault's spelling (the first seen), per folder Set: sets are copy-on-write, so one index serves until the folders change. */
+const folderCase = new WeakMap<Set<string>, Map<string, string>>()
+
+function folderCaseIndex(folders: Set<string>): Map<string, string> {
+  let index = folderCase.get(folders)
+  if (!index) {
+    index = new Map()
+    for (const f of folders) {
+      const lower = f.toLowerCase()
+      if (!index.has(lower)) index.set(lower, f)
+    }
+    folderCase.set(folders, index)
+  }
+  return index
+}
+
+/** What a brief row shows or acts on, as one comparable string. */
+function briefRowKey(t: BriefTask): string {
+  return [t.noteId, t.line, t.text, t.reason, t.noteTitle, t.notePath, t.projectId, t.projectTitle, t.section].join('\u0000')
+}
+
+/** True when two briefs list the same tasks the same way (the store keeps the old object, so nothing redraws). */
+function sameBrief(a: DailyBrief, b: DailyBrief): boolean {
+  if (a.date !== b.date || a.total !== b.total || a.noteIds.length !== b.noteIds.length) return false
+  if (a.noteIds.some((id, i) => id !== b.noteIds[i])) return false
+  for (const section of ['overdue', 'today', 'next'] as const) {
+    const x = a[section]
+    const y = b[section]
+    if (x.length !== y.length) return false
+    for (let i = 0; i < x.length; i++) if (briefRowKey(x[i]!) !== briefRowKey(y[i]!)) return false
+  }
+  return true
+}
+
+const IMAGE_NAME = /^(.*?)(\.(?:png|jpe?g|webp|gif|bmp|avif))$/i
+
+/**
+ * The file name a picture is saved under: its own name made safe on every OS
+ * and inside `![[embeds]]` (no `[ ] # ^ |`, nothing Windows refuses, no
+ * reserved device names, no leading dot that would hide it). null when the
+ * name has no picture extension.
+ */
+function cleanImageName(raw: string): string | null {
+  const file = raw.replace(/\\/g, '/').split('/').pop() ?? ''
+  const m = IMAGE_NAME.exec(file.trim())
+  if (!m) return null
+  const stem = slugifyTitle((m[1] ?? '').replace(/[\u0000-\u001f]/g, ' '))
+    .replace(/^[. ]+|[. ]+$/g, '')
+    .trim()
+  if (!stem) return null
+  // `CON.backup.png` is as reserved as `con.png` on Windows: only a prefix frees the name.
+  return `${RESERVED_NAME.test(stem) ? `_${stem}` : stem}${m[2] ?? '.png'}`
+}
+
+/**
+ * Bytes as a Uint8Array of this realm, or null. Data relayed through
+ * Electron's context bridge or posted from another window may be a typed
+ * array of another realm (so `instanceof` fails) or a plain ArrayBuffer.
+ */
+function asBytes(v: unknown): Uint8Array | null {
+  if (v instanceof Uint8Array) return v
+  if (ArrayBuffer.isView(v)) return new Uint8Array(v.buffer, v.byteOffset, v.byteLength)
+  if (Object.prototype.toString.call(v) === '[object ArrayBuffer]') return new Uint8Array(v as ArrayBuffer)
+  return null
+}
+
+/** PNG signature (`\x89PNG`): Concept Forge sends PNGs, and the file is saved as one. */
+function isPng(bytes: Uint8Array): boolean {
+  return bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47
 }
 
 export interface AetherState {
@@ -447,6 +538,18 @@ export interface AetherState {
    * Critique planet, else `<home>Inbox`. Returns the vault paths written.
    */
   importImages(files: { name: string; data: Uint8Array }[], folder?: string): Promise<string[]>
+  /**
+   * The folder `importImages` would save into right now (`folder`, the
+   * selection, else `<home>Inbox`), spelled as on disk; null without a vault.
+   * For the drop overlay's "Drop pictures into …".
+   */
+  importTarget(folder?: string): string | null
+  /**
+   * A preview of a picture at most `size` px on its longer side, from the
+   * vault adapter; null when the adapter has none, it is empty or it fails.
+   * Never rejects.
+   */
+  preview(path: string, size: number): Promise<Blob | null>
   /** Projects a Concept Forge drawing can be saved to (active first). */
   forgeProjects(): ForgeProject[]
   /** File a graded drawing (PNG + critique note) into a project's Critique planet. Rejects with a readable message. */
@@ -495,6 +598,7 @@ export const useAether = create<AetherState>()((set, get) => {
   controller.bloom = settings.bloom
   controller.hubLabels = settings.hubLabels
   controller.motion = settings.motion
+  controller.showThumbnails = settings.thumbnails
 
   controller.events = {
     onSelect: (id) => get().select(id),
@@ -502,22 +606,37 @@ export const useAether = create<AetherState>()((set, get) => {
     onHover: (id) => set({ hoveredId: id }),
   }
 
-  /** Folder nodes (the system layout) only in 'system' mode. */
-  const graphOptions: GraphOptionsFn = (folders) => {
-    const { settings, adapter, roots, expandedFolders } = get()
-    if (settings.layoutMode !== 'system') return {}
+  /** The brief the latest graph-options call computed: the store takes it together with the graph built from it. */
+  let builtBrief: DailyBrief | null = null
+
+  /**
+   * Options for every graph build. Today's brief is computed here, so once
+   * per rebuild (every note or folder change) and never out of step with the
+   * hub's beams; the Today hub when `settings.todayHub`. Pictures: embedded
+   * ones in every layout, moons only in the system layout, which alone has
+   * folder nodes.
+   */
+  const graphOptions: GraphOptionsFn = (folders, notes, assets) => {
+    const { settings, adapter, roots, expandedFolders, brief: shown } = get()
+    const fresh = dailyBrief(notes.values(), { date: todayIso(), folders })
+    // Nothing on it changed: keep the object, so the Inspector and the top bar don't redraw.
+    const brief = shown && sameBrief(shown, fresh) ? shown : fresh
+    builtBrief = brief
+    const system = settings.layoutMode === 'system'
+    const opts: BuildGraphOptions = { images: { all: assets, moons: system && settings.imageMoons } }
+    if (settings.todayHub) opts.today = { brief }
+    if (!system) return opts
     const mountLabels: Record<string, string> = {}
     for (const r of roots) if (r.mount) mountLabels[r.mount] = r.label
-    return {
-      folders: {
-        all: folders,
-        rootTitle: adapter?.name ?? 'Vault',
-        mountLabels,
-        maxDepth: settings.folderDepth,
-        expanded: expandedFolders,
-        multiRoot: roots.length > 1,
-      },
+    opts.folders = {
+      all: folders,
+      rootTitle: adapter?.name ?? 'Vault',
+      mountLabels,
+      maxDepth: settings.folderDepth,
+      expanded: expandedFolders,
+      multiRoot: roots.length > 1,
     }
+    return opts
   }
 
   const nodeOf = (graph: GraphData | null, id: NoteId | null) => (graph && id !== null ? graph.nodes[graph.index.get(id) ?? -1] : undefined)
@@ -573,9 +692,9 @@ export const useAether = create<AetherState>()((set, get) => {
     if (hoveredId && !graph.index.has(hoveredId)) set({ hoveredId: null })
   }
 
-  const setLoaded = (notes: Map<NoteId, ParsedNote>, graph: GraphData, folders: Set<string>) => {
+  const setLoaded = (notes: Map<NoteId, ParsedNote>, graph: GraphData, folders: Set<string>, assets: Map<string, VaultAsset>) => {
     const before = get().graph
-    set((s) => ({ notes, graph, folders, revision: s.revision + 1 }))
+    set((s) => ({ notes, graph, folders, assets, brief: builtBrief, revision: s.revision + 1 }))
     controller.setGraph(graph)
     syncHighlight()
     pruneSelection(graph, before)
@@ -587,15 +706,15 @@ export const useAether = create<AetherState>()((set, get) => {
     }
   }
 
-  /** Rebuild the graph from the notes we have (layout mode, folder depth or expanded folders changed). */
+  /** Rebuild the graph from the notes we have (layout mode, folder depth, expanded folders, a setting or the day changed). */
   const rebuildGraph = () => {
-    const { notes, folders, settings, status, graph: before } = get()
+    const { notes, folders, assets, settings, status, graph: before } = get()
     if (status !== 'ready') {
       controller.setLayoutMode(settings.layoutMode)
       return
     }
-    const graph = buildGraph(notes, graphOptions(folders, notes, new Map()))
-    set((s) => ({ graph, revision: s.revision + 1 }))
+    const graph = buildGraph(notes, graphOptions(folders, notes, assets))
+    set((s) => ({ graph, brief: builtBrief, revision: s.revision + 1 }))
     controller.setLayoutMode(settings.layoutMode, graph)
     syncHighlight()
     pruneSelection(graph, before)
@@ -632,9 +751,8 @@ export const useAether = create<AetherState>()((set, get) => {
   const folderSpelling = (path: string): string | null => {
     const { folders } = get()
     if (folders.has(path)) return path
-    const lower = path.toLowerCase()
-    for (const f of folders) if (f.length === path.length && f.toLowerCase() === lower) return f
-    return null
+    const known = folderCaseIndex(folders).get(path.toLowerCase())
+    return known !== undefined && known.length === path.length ? known : null
   }
 
   /** `path` with every leading folder that exists spelled the vault's way (`Inbox` → `inbox` when that is on disk). */
@@ -656,6 +774,110 @@ export const useAether = create<AetherState>()((set, get) => {
     const lower = id.toLowerCase()
     for (const k of notes.keys()) if (k.length === id.length && k.toLowerCase() === lower) return k
     return null
+  }
+
+  /** Select a node and fly to it, leaving a view that covers the graph; flies again once the layout settles (a new node). */
+  const showNode = (id: NoteId) => {
+    if (COVERING_VIEWS.has(get().view)) set({ view: 'graph' })
+    get().select(id, { fly: true })
+    flyWhenSettled(id)
+  }
+
+  /**
+   * Select a picture and fly to it. A picture that is not in the graph is a
+   * moon to be: image moons on, the system layout, its folder shown.
+   */
+  const showImage = (path: string) => {
+    const id = imageKey(path)
+    if (!get().graph?.index.has(id)) {
+      if (!get().settings.imageMoons) get().setSettings({ imageMoons: true })
+      get().showFolder(folderOf(path))
+    }
+    if (get().graph?.index.has(id)) showNode(id)
+  }
+
+  /** Create a folder (and its parents) unless the vault has it; applied at once (the adapter's addDir echo changes nothing). */
+  const ensureFolder = async (path: string): Promise<void> => {
+    const { adapter } = get()
+    if (!path || get().folders.has(path) || !adapter?.createFolder) return
+    await adapter.createFolder(path)
+    get().applyExternal([{ kind: 'addDir', path }])
+  }
+
+  /** Lowercased paths of every picture the vault has (names a new picture must pass over). */
+  const takenImages = (): Set<string> => {
+    const out = new Set<string>()
+    for (const p of get().assets.keys()) out.add(p.toLowerCase())
+    return out
+  }
+
+  /**
+   * Write a NEW picture `<dir>/<stem><ext>`, never replacing anything: a name
+   * in `taken` (lowercased paths; the path written is added) or refused by
+   * `skip` is passed over, and so is one the adapter refuses with EEXIST
+   * (another letter case on disk, a file not reported yet), for
+   * `<stem> 2<ext>`, ` 3` … Returns the path written.
+   */
+  const createAssetNew = async (
+    dir: string,
+    stem: string,
+    ext: string,
+    data: Uint8Array,
+    taken: Set<string>,
+    skip: (path: string) => boolean = () => false,
+  ): Promise<string> => {
+    const { adapter } = get()
+    if (!adapter?.createAsset) throw new Error('This vault can’t save pictures')
+    for (let n = 1; n <= MAX_SUFFIX; n++) {
+      const path = `${dir ? `${dir}/` : ''}${n === 1 ? stem : `${stem} ${n}`}${ext}`
+      if (taken.has(path.toLowerCase()) || skip(path)) continue
+      try {
+        await adapter.createAsset(path, data)
+        taken.add(path.toLowerCase())
+        return path
+      } catch (err) {
+        if (!isExistsError(err)) throw err
+      }
+    }
+    throw new Error(`${stem}${ext} and the next ${MAX_SUFFIX - 1} numbered names are all taken`)
+  }
+
+  /** Report pictures just written as added (their watcher echo later changes nothing that matters). */
+  const applyImageAdds = (added: { path: string; size: number }[]) => {
+    const mtime = Date.now()
+    const changes: VaultChange[] = added.filter((a) => !get().assets.has(a.path)).map((a) => ({ kind: 'add', path: a.path, mtime, size: a.size }))
+    if (changes.length) get().applyExternal(changes)
+  }
+
+  /**
+   * Where a project's critiques go: the child folder of its home named
+   * `critique` in any letter case, else `<home>/Critique`. Home is its bound
+   * folder, else the one a new project folder would get; `home` is null when
+   * that folder is not on disk yet (it is created on the first save).
+   */
+  const critiqueTarget = (note: ParsedNote): { home: string | null; dir: string } => {
+    const { folders, roots } = get()
+    let home = projectFolderOf(note, folders) ?? defaultProjectFolder(note)
+    // A `folder:` for a folder not made yet is written relative to the note's own drive.
+    if (roots.length > 1 && !roots.some((r) => r.mount === mountOf(home, roots))) home = `${mountOf(note.meta.path, roots)}/${home}`
+    home = canonicalFolder(home)
+    const dir = folderSpelling(`${home}/Critique`) ?? `${home}/Critique`
+    return { home: folders.has(home) ? home : null, dir }
+  }
+
+  /** The project a selection stands for: a project note, or the note of a project star. */
+  const selectedProjectNote = (): ParsedNote | null => {
+    const { selectedId, graph, notes } = get()
+    if (selectedId === null) return null
+    const id = isFolderId(selectedId) ? (nodeOf(graph, selectedId)?.folder?.projectId ?? null) : isVirtualId(selectedId) ? null : selectedId
+    const note = id !== null ? notes.get(id) : undefined
+    return note && isProjectNote(note) ? note : null
+  }
+
+  /** True for a folder a file can be written in: in a vault of several roots, inside one of them. */
+  const insideRoot = (path: string): boolean => {
+    const { roots } = get()
+    return roots.length < 2 || roots.some((r) => r.mount === mountOf(path, roots))
   }
 
   /**
@@ -841,6 +1063,8 @@ export const useAether = create<AetherState>()((set, get) => {
     line = -1,
     from?: string,
   ): Promise<{ before: string; after: string; path: string; line: number } | null> => {
+    // A folder, ghost, picture or the Today hub is no note (a file could still carry such a name).
+    if (isVirtualId(id)) return Promise.resolve(null)
     // What the caller showed, taken now: queued behind other edits, the note may change before this runs.
     const shown = from ?? get().notes.get(id)?.raw
     return exclusive(id, async () => {
@@ -879,7 +1103,7 @@ export const useAether = create<AetherState>()((set, get) => {
 
   /** `moveToArea` inside the note's queue (see `exclusive`). */
   const moveNoteToArea = async (id: NoteId, area: Exclude<Area, 'untagged'>): Promise<NoteId> => {
-    if (!get().notes.has(id)) throw new Error('No such note')
+    if (isVirtualId(id) || !get().notes.has(id)) throw new Error('No such note')
     // The move starts from the saved file: an unsaved draft goes first (or the move waits).
     if (!(await flushDraft(id, 'move the note'))) return id
     // …and from the file as it is on disk now (an edit not reported yet is kept).
@@ -925,7 +1149,7 @@ export const useAether = create<AetherState>()((set, get) => {
   /** `updateProject` inside the note's queue (see `exclusive`). */
   const rewriteProject = async (id: NoteId, patch: ProjectPatch & { renameFile?: boolean }): Promise<NoteId> => {
     const { adapter } = get()
-    if (!adapter) return id
+    if (!adapter || isVirtualId(id)) return id
     if (adapter.readOnly) {
       get().toast('This vault is read-only', 'error')
       return id
@@ -1015,6 +1239,57 @@ export const useAether = create<AetherState>()((set, get) => {
     return newId
   }
 
+  /**
+   * `saveCritique` without its error toast: the drawing as a create-only PNG
+   * in the project's Critique planet (folders made when missing), then its
+   * critique note next to it under the same name (a name is used only when
+   * both files are free), both applied at once.
+   */
+  const fileCritique = async (input: CritiqueSave): Promise<CritiqueSaved> => {
+    const { adapter, status } = get()
+    if (adapter && status === 'loading') throw new Error('The vault is still loading; try again in a moment')
+    if (!adapter || status !== 'ready') throw new Error('Open your vault in Aether Brain first')
+    if (adapter.readOnly) throw new Error('This vault is read-only')
+    if (!adapter.createAsset) throw new Error('This vault can’t save pictures')
+    const { projectId, grade, practiceTomorrow } = input
+    const note = typeof projectId === 'string' && !isVirtualId(projectId) ? get().notes.get(projectId) : undefined
+    if (!note || !isProjectNote(note)) throw new Error('That project is no longer in the vault (renamed or deleted?); pick it again')
+    const png = asBytes(input.png)
+    if (!png || png.byteLength === 0) throw new Error('The drawing is empty')
+    if (png.byteLength > MAX_IMAGE_BYTES) throw new Error('The drawing is larger than 40 MB')
+    if (!isPng(png)) throw new Error('The drawing is not a PNG')
+    const today = todayIso()
+    const g = normalizeGrade(grade)
+    const title = (typeof input.title === 'string' ? input.title.replace(/\s+/g, ' ').trim() : '') || g.drill || 'Drawing'
+    const clean = cleanFolderPath(critiqueTarget(note).dir, folderSpelling)
+    if ('error' in clean) throw new Error(clean.error)
+    const dir = clean.path
+    await ensureFolder(dir)
+    const noteIdOf = (pngPath: string) => pngPath.replace(/\.png$/i, '')
+    const imagePath = await createAssetNew(dir, critiqueBaseName(title, today), '.png', png, takenImages(), (p) => existingId(noteIdOf(p)) !== null)
+    const content = critiqueNote(
+      { title, project: note.meta.title, drill: g.drill, grade: g.grade, score: g.score, scores: g.scores, fixes: g.fixes, strengths: g.strengths, deep: g.deep },
+      imageFileName(imagePath),
+      { date: today, practiceDue: practiceTomorrow === false ? null : nextDay(today) },
+    )
+    let made: { path: string; content: string } | null = null
+    try {
+      made = await createNew(`${noteIdOf(imagePath)}.md`, content)
+    } finally {
+      // The picture is on disk whatever happened to the note: show it (one rebuild for both).
+      const mtime = Date.now()
+      const changes: VaultChange[] = []
+      if (!get().assets.has(imagePath)) changes.push({ kind: 'add', path: imagePath, mtime, size: png.byteLength })
+      if (made) changes.push({ kind: 'add', path: made.path, content: made.content, mtime })
+      if (changes.length) get().applyExternal(changes)
+    }
+    if (!made) throw new Error(`${noteIdOf(imagePath)}.md is taken`)
+    const noteId = idFromPath(made.path)
+    const planet = dir.slice(dir.lastIndexOf('/') + 1)
+    get().toast(`Critique saved to ${note.meta.title} ▸ ${planet}`, 'success', { label: 'Show', run: () => showNode(noteId) })
+    return { noteId, notePath: made.path, imagePath, project: note.meta.title }
+  }
+
   return {
     adapter: null,
     status: 'idle',
@@ -1053,10 +1328,14 @@ export const useAether = create<AetherState>()((set, get) => {
     async openVault(adapter) {
       unwatch?.()
       unwatch = null
+      // The previous vault's pictures are not this one's.
+      controller.thumbnails = null
       set({
         adapter,
         roots: adapter.roots ?? [],
         folders: new Set(),
+        assets: new Map(),
+        brief: null,
         expandedFolders: loadExpanded(adapter.location),
         status: 'loading',
         error: null,
@@ -1080,8 +1359,10 @@ export const useAether = create<AetherState>()((set, get) => {
           },
           graphOptions,
         )
+        const thumbnail = adapter.thumbnail?.bind(adapter)
+        controller.thumbnails = thumbnail ? (path, size) => thumbnail(path, size) : null
         set({ search, status: 'ready', loadProgress: null })
-        setLoaded(loaded.notes, loaded.graph, loaded.folders)
+        setLoaded(loaded.notes, loaded.graph, loaded.folders, loaded.assets)
         unwatch = adapter.watch((changes) => get().applyExternal(changes))
       } catch (err) {
         set({ status: 'error', error: errText(err) })
@@ -1094,12 +1375,12 @@ export const useAether = create<AetherState>()((set, get) => {
     },
 
     applyExternal(changes) {
-      const { notes, search, folders, editorId, dirty } = get()
-      const next = applyChanges(notes, changes, search, { folders, graph: graphOptions })
+      const { notes, search, folders, assets, editorId, dirty } = get()
+      const next = applyChanges(notes, changes, search, { folders, assets, graph: graphOptions })
       if (editorId && dirty && next.touched.includes(editorId)) {
         get().toast('This note changed on disk while you were editing. Your draft is kept; save to overwrite.', 'info')
       }
-      setLoaded(next.notes, next.graph, next.folders)
+      setLoaded(next.notes, next.graph, next.folders, next.assets)
     },
 
     select(id, opts) {
@@ -1127,7 +1408,13 @@ export const useAether = create<AetherState>()((set, get) => {
         get().select(id, { fly: opts?.fly !== false })
         return
       }
-      const note = notes.get(id)
+      // A picture opens in the OS image app; the Today hub has nothing to edit (the Inspector shows its brief).
+      if (isImageId(id) || isTodayId(id)) {
+        if (get().selectedId !== id) get().select(id, { fly: opts?.fly !== false })
+        if (isImageId(id)) void get().openImage(imagePathOf(id))
+        return
+      }
+      const note = isVirtualId(id) ? undefined : notes.get(id)
       if (!note) return
       if (dirty && editorId && editorId !== id) void get().saveDraft()
       const h = history.slice(0, historyIndex + 1)
@@ -1157,7 +1444,7 @@ export const useAether = create<AetherState>()((set, get) => {
       const id = history[historyIndex - 1]
       if (!id) return
       set({ historyIndex: historyIndex - 1 })
-      const note = get().notes.get(id)
+      const note = isVirtualId(id) ? undefined : get().notes.get(id)
       if (note) {
         set({ editorId: id, draft: note.raw, dirty: false, selectedId: id })
         controller.setSelected(id)
@@ -1171,7 +1458,7 @@ export const useAether = create<AetherState>()((set, get) => {
       const id = history[historyIndex + 1]
       if (!id) return
       set({ historyIndex: historyIndex + 1 })
-      const note = get().notes.get(id)
+      const note = isVirtualId(id) ? undefined : get().notes.get(id)
       if (note) {
         set({ editorId: id, draft: note.raw, dirty: false, selectedId: id })
         controller.setSelected(id)
@@ -1194,7 +1481,11 @@ export const useAether = create<AetherState>()((set, get) => {
         const parent = nodeOf(graph, selectedId)?.parent ?? null
         ring = [...(parent !== null ? [parent] : []), ...graph.nodes.filter((n) => n.parent === selectedId).map((n) => n.id)]
       } else {
+        // The Today hub's neighbors are the notes of its beams; a picture's, the notes embedding it.
         ring = [...neighborhood(graph, selectedId, 1)].filter((id) => id !== selectedId).sort()
+        // A picture moon nothing embeds still has its planet.
+        const parent = isImageId(selectedId) ? (nodeOf(graph, selectedId)?.parent ?? null) : null
+        if (parent !== null && !ring.includes(parent)) ring.push(parent)
       }
       if (ring.length === 0) return
       const hovered = get().hoveredId
@@ -1272,7 +1563,7 @@ export const useAether = create<AetherState>()((set, get) => {
       // After any rewrite of the note under way: its write landing later would bring the file back.
       return exclusive(id, async () => {
         const { adapter, notes } = get()
-        const note = notes.get(id)
+        const note = isVirtualId(id) ? undefined : notes.get(id)
         if (!adapter || !note) return
         await adapter.remove(note.meta.path)
         // Close the editor on it; an overlay (the Projects board deleting its project) stays open.
@@ -1285,7 +1576,7 @@ export const useAether = create<AetherState>()((set, get) => {
     renameNote(id, toPath) {
       return exclusive(id, async () => {
         const { adapter } = get()
-        if (!adapter || !get().notes.has(id)) throw new Error('No such note')
+        if (!adapter || isVirtualId(id) || !get().notes.has(id)) throw new Error('No such note')
         if (!(await flushDraft(id, 'rename the note'))) return id
         // The file as it is now, so the renamed note shows what is on disk.
         const note = await freshNote(id, 'rename the note')
@@ -1312,7 +1603,7 @@ export const useAether = create<AetherState>()((set, get) => {
     patchFrontmatter(id, patch) {
       return exclusive(id, async () => {
         const { adapter } = get()
-        if (!adapter || !get().notes.has(id)) return
+        if (!adapter || isVirtualId(id) || !get().notes.has(id)) return
         // Patch what the user typed, not the file under it (a draft saved later would undo the patch).
         if (!(await flushDraft(id, 'update the note'))) return
         const note = await freshNote(id, 'update the note')
@@ -1328,6 +1619,7 @@ export const useAether = create<AetherState>()((set, get) => {
       })
     },
     async createGhost(id) {
+      if (!isGhostId(id)) return
       const title = ghostTitle(id)
       const n = blankNote(title, 'Inbox')
       const dir = canonicalFolder(`${get().homePrefix()}Inbox`)
@@ -1381,7 +1673,7 @@ export const useAether = create<AetherState>()((set, get) => {
     },
 
     async appendLink(fromId, toId) {
-      const to = get().notes.get(toId)
+      const to = isVirtualId(toId) ? undefined : get().notes.get(toId)
       if (!to || !get().notes.has(fromId)) return
       const res = await rewriteNote(fromId, (raw) => `${raw.replace(/\s+$/, '')}\n\n- Related: [[${to.meta.title}]]\n`, 'link the notes')
       if (res) get().toast(`Linked ${get().notes.get(fromId)?.meta.title ?? fromId} → ${to.meta.title}`, 'success')
@@ -1422,10 +1714,15 @@ export const useAether = create<AetherState>()((set, get) => {
       controller.setBloom(next.bloom)
       controller.setHubLabels(next.hubLabels)
       controller.setMotion(next.motion)
-      // Only system graphs carry folder nodes: crossing system ↔ others, or a new depth, rebuilds.
-      const crossed = (prev.layoutMode === 'system') !== (next.layoutMode === 'system')
-      const depth = next.layoutMode === 'system' && prev.folderDepth !== next.folderDepth
-      if (crossed || depth) rebuildGraph()
+      controller.showThumbnails = next.thumbnails
+      // Only system graphs carry folder nodes and picture moons: crossing system ↔ others, a new
+      // depth or moons on/off there rebuilds; so does the Today hub coming or going (every layout).
+      const system = next.layoutMode === 'system'
+      const crossed = (prev.layoutMode === 'system') !== system
+      const depth = system && prev.folderDepth !== next.folderDepth
+      const moons = system && prev.imageMoons !== next.imageMoons
+      const hub = prev.todayHub !== next.todayHub
+      if (crossed || depth || moons || hub) rebuildGraph()
       else if (prev.layoutMode !== next.layoutMode) controller.setLayoutMode(next.layoutMode)
     },
     cycleColorMode() {
@@ -1620,6 +1917,7 @@ export const useAether = create<AetherState>()((set, get) => {
     },
 
     async reviewMark(id, outcome) {
+      if (isVirtualId(id)) return
       const today = todayIso()
       const prev = get().review[id]
       let entry: ReviewEntry
@@ -1645,6 +1943,7 @@ export const useAether = create<AetherState>()((set, get) => {
     },
 
     selectProject(id) {
+      if (id !== null && isVirtualId(id)) return
       set({ projectId: id })
       if (id) get().select(id, { fly: true })
     },
@@ -1724,7 +2023,7 @@ export const useAether = create<AetherState>()((set, get) => {
     },
 
     async archiveProject(id) {
-      const note = get().notes.get(id)
+      const note = isVirtualId(id) ? undefined : get().notes.get(id)
       if (!note) return
       let archived: NoteId
       try {
@@ -1738,7 +2037,7 @@ export const useAether = create<AetherState>()((set, get) => {
     },
 
     async deleteProject(id) {
-      const note = get().notes.get(id)
+      const note = isVirtualId(id) ? undefined : get().notes.get(id)
       if (!note) return
       try {
         await get().deleteNote(id)
@@ -1751,23 +2050,149 @@ export const useAether = create<AetherState>()((set, get) => {
 
     assets: new Map(),
     brief: null,
+
     refreshBrief() {
-      throw new Error('refreshBrief: not implemented yet')
+      const { status, brief } = get()
+      // Every note or folder change rebuilds the brief already: only a new day can make it stale.
+      if (status !== 'ready' || brief?.date === todayIso()) return
+      rebuildGraph()
     },
+
     showToday() {
-      throw new Error('showToday: not implemented yet')
+      if (get().status !== 'ready') return
+      if (!get().settings.todayHub) {
+        get().setSettings({ todayHub: true })
+        get().toast('Today hub on')
+      }
+      showNode(TODAY_ID)
     },
-    async openImage() {
-      throw new Error('openImage: not implemented yet')
+
+    async openImage(path) {
+      const { adapter } = get()
+      if (!adapter) return
+      if (!adapter.openAsset) {
+        get().toast('Pictures open in your image app from the desktop app', 'info')
+        return
+      }
+      try {
+        await adapter.openAsset(path)
+      } catch (err) {
+        get().toast(`Could not open ${imageFileName(path)}: ${errText(err)}`, 'error')
+      }
     },
-    async importImages() {
-      throw new Error('importImages: not implemented yet')
+
+    async preview(path, size) {
+      const thumbnail = get().adapter?.thumbnail
+      if (!thumbnail) return null
+      try {
+        const blob = await thumbnail.call(get().adapter, path, size)
+        return blob && blob.size > 0 ? blob : null
+      } catch {
+        return null
+      }
     },
+
+    importTarget(folder) {
+      if (!get().adapter) return null
+      if (folder !== undefined) {
+        const dir = canonicalFolder(folder)
+        if (insideRoot(dir)) return dir
+      } else {
+        const { selectedId, graph } = get()
+        // A folder takes them itself; a project star (or its note) sends them to its Critique planet.
+        if (selectedId !== null && isFolderId(selectedId) && !nodeOf(graph, selectedId)?.folder?.projectId) {
+          const dir = folderPathOf(selectedId)
+          if (insideRoot(dir)) return dir
+        }
+        const project = selectedProjectNote()
+        if (project) return critiqueTarget(project).dir
+      }
+      return canonicalFolder(`${get().homePrefix()}Inbox`)
+    },
+
+    async importImages(files, folder) {
+      const { adapter, status } = get()
+      if (!adapter || status !== 'ready') return []
+      if (adapter.readOnly) {
+        get().toast('This vault is read-only', 'error')
+        return []
+      }
+      if (!adapter.createAsset) {
+        get().toast('This vault can’t save pictures', 'error')
+        return []
+      }
+      const pictures: { name: string; data: Uint8Array }[] = []
+      const refused: string[] = []
+      const tooBig: string[] = []
+      for (const f of files) {
+        const name = cleanImageName(String(f.name))
+        const data = asBytes(f.data)
+        if (name === null || data === null) refused.push(String(f.name))
+        else if (data.byteLength > MAX_IMAGE_BYTES) tooBig.push(name)
+        else pictures.push({ name, data })
+      }
+      if (refused.length) {
+        const what = refused.length === 1 ? `${truncate(refused[0] ?? '', 48)} is not a picture` : `${refused.length} files are not pictures`
+        get().toast(`${what} (png, jpg, webp, gif, bmp, avif)`, 'error')
+      }
+      if (tooBig.length) get().toast(`${tooBig.length === 1 ? truncate(tooBig[0] ?? '', 48) : plural(tooBig.length, 'picture')} over 40 MB, not added`, 'error')
+      if (!pictures.length) return []
+      let dir = get().importTarget(folder)
+      if (dir === null) return []
+      if (dir && !get().folders.has(dir)) {
+        // A folder to make first (Inbox, a Critique planet): only under a name every OS takes.
+        const clean = cleanFolderPath(dir, folderSpelling)
+        if ('error' in clean) {
+          get().toast(clean.error, 'error')
+          return []
+        }
+        dir = clean.path
+        try {
+          await ensureFolder(dir)
+        } catch (err) {
+          get().toast(`Could not create ${dir}: ${errText(err)}`, 'error')
+          return []
+        }
+      }
+      const taken = takenImages()
+      const written: { path: string; size: number }[] = []
+      const failed: string[] = []
+      for (const p of pictures) {
+        const m = IMAGE_NAME.exec(p.name)
+        try {
+          written.push({ path: await createAssetNew(dir, m?.[1] ?? p.name, m?.[2] ?? '', p.data, taken), size: p.data.byteLength })
+        } catch (err) {
+          failed.push(`${p.name}: ${errText(err)}`)
+        }
+      }
+      applyImageAdds(written)
+      if (failed.length) get().toast(`Could not save ${failed[0]}${failed.length > 1 ? ` (and ${failed.length - 1} more)` : ''}`, 'error')
+      const first = written[0]?.path
+      if (first === undefined) return []
+      if (get().graph?.index.has(imageKey(first))) get().select(imageKey(first))
+      const what = written.length === 1 ? imageFileName(first) : plural(written.length, 'picture')
+      get().toast(`Added ${what} to ${dir || 'the vault'}`, 'success', { label: 'Show', run: () => showImage(first) })
+      return written.map((w) => w.path)
+    },
+
     forgeProjects() {
-      throw new Error('forgeProjects: not implemented yet')
+      const { notes, folders } = get()
+      // The board's order: active first, then the most recently updated, done ones last (archived notes are no projects).
+      return listProjects(notes, folders).map(({ note }) => {
+        const { home, dir } = critiqueTarget(note)
+        return { id: note.meta.id, title: note.meta.title, status: note.meta.status, home, critique: dir }
+      })
     },
-    async saveCritique() {
-      throw new Error('saveCritique: not implemented yet')
+
+    async saveCritique(input) {
+      try {
+        return await fileCritique(input)
+      } catch (err) {
+        // The Forge window shows the message too; the brain says so where the vault is.
+        const message = errText(err)
+        get().toast(`Could not save the critique: ${message}`, 'error')
+        throw err instanceof Error ? err : new Error(message)
+      }
     },
   }
 })

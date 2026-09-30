@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { FsVault, HEAVY_DIRS, isNoteName } from '../src/main/fsvault.js'
+import { FsVault, HEAVY_DIRS, isImageName, isNoteName } from '../src/main/fsvault.js'
 
 let tmp: string
 
@@ -604,5 +604,177 @@ describe.skipIf(process.platform === 'win32')('FsVault on-disk jail (symlinks)',
     await linked.write('Notes/b.md', 'B')
     expect(await v.read('Notes/b.md')).toBe('B')
     expect(await linked.read('Link/secret.md')).toBeNull()
+  })
+})
+
+describe('FsVault pictures', () => {
+  const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3])
+
+  it('knows which file names are pictures', () => {
+    for (const n of ['a.png', 'B.JPG', 'c.jpeg', 'd.webp', 'e.gif', 'f.bmp', 'g.avif', 'Gate at dusk.Png']) expect(isImageName(n), n).toBe(true)
+    for (const n of ['a.svg', 'a.psd', 'a.md', 'a.txt', 'png', 'a.png.aether-tmp', 'a.pngx', '~$a.png']) expect(isImageName(n), n).toBe(false)
+    // On Windows a device name or NTFS stream syntax is never a picture (the OS would open something else).
+    for (const n of ['tool.exe:x.png', 'nul.png', 'CON .png', 'com1.jpg', 'lpt¹.gif']) expect(isImageName(n, 'win32'), n).toBe(false)
+    for (const n of ['console.png', 'nullify.png', 'a.png']) expect(isImageName(n, 'win32'), n).toBe(true)
+    expect(isImageName('12:30 sketch.png', 'linux')).toBe(true)
+  })
+
+  it('scans pictures by name with the same skip rules as notes, without touching them', async () => {
+    await put('a.md', 'A')
+    await put('cover.png')
+    await put('Art/gate.JPG')
+    await put('Art/Deep/ring.webp')
+    await put('Art/sketch.psd')
+    await put('Art/icon.svg')
+    await put('.obsidian/x.png')
+    await put('Art/.thumbs/t.png')
+    await put('node_modules/pkg/logo.png')
+    await put('Private/secret.png')
+    const v = new FsVault([tmp], { exclude: ['Private'] })
+    const stat = vi.spyOn(fs, 'stat')
+    const lstat = vi.spyOn(fs, 'lstat')
+    const res = await v.scan()
+    expect(stat).not.toHaveBeenCalled()
+    expect(lstat).not.toHaveBeenCalled()
+    expect(res.assets.map((a) => a.path).sort()).toEqual(['Art/Deep/ring.webp', 'Art/gate.JPG', 'cover.png'])
+    for (const a of res.assets) expect(a.abs).toBe(v.abs(a.path))
+    expect(res.assetsTruncated).toBe(false)
+    expect(res.files.map((f) => f.path)).toEqual(['a.md'])
+  })
+
+  it('stops listing pictures at maxAssets and says so, while notes and folders go on', async () => {
+    for (const n of ['a', 'b', 'c']) await put(`Art/${n}.png`)
+    await put('Art/Deep/n.md')
+    const v = new FsVault([tmp], { maxAssets: 2 })
+    const res = await v.scan()
+    expect(res.assets).toHaveLength(2)
+    expect(res.assetsTruncated).toBe(true)
+    expect(res.files.map((f) => f.path)).toEqual(['Art/Deep/n.md'])
+    expect(res.folders.sort()).toEqual(['Art', 'Art/Deep'])
+    const all = await new FsVault([tmp], { maxAssets: 3 }).scan()
+    expect(all.assetsTruncated).toBe(false)
+  })
+
+  it('prefixes pictures with the mount in a multi-root vault', async () => {
+    await put('Alpha/a.png')
+    await put('Beta/Art/b.gif')
+    const v = new FsVault([path.join(tmp, 'Alpha'), path.join(tmp, 'Beta')])
+    expect((await v.scan()).assets.map((a) => a.path).sort()).toEqual(['Alpha/a.png', 'Beta/Art/b.gif'])
+  })
+
+  it('stats scanned pictures within a time budget, keeping order and what it could not reach', async () => {
+    await put('a.png', 'aaaa')
+    await put('b.png', 'bb')
+    const v = new FsVault([tmp])
+    const list = [
+      { path: 'b.png', abs: v.abs('b.png') },
+      { path: 'gone.png', abs: v.abs('gone.png') },
+      { path: 'a.png', abs: v.abs('a.png') },
+    ]
+    const out = await v.statAssets(list)
+    expect(out.map((a) => [a.path, a.size])).toEqual([
+      ['b.png', 2],
+      ['gone.png', undefined],
+      ['a.png', 4],
+    ])
+    expect(out[0]!.mtime).toBeGreaterThan(0)
+    expect(out[1]).toEqual({ path: 'gone.png' })
+    // No time left: listed as scanned.
+    expect(await v.statAssets(list, 0)).toEqual(list.map((a) => ({ path: a.path })))
+    // A stat that hangs (a share that stopped answering) does not hold the list up.
+    const lstat = fs.lstat
+    vi.spyOn(fs, 'lstat').mockImplementation(((p: Parameters<typeof fs.lstat>[0], opts?: never) =>
+      String(p).endsWith('a.png') ? new Promise(() => undefined) : lstat(p, opts)) as typeof fs.lstat)
+    const started = Date.now()
+    const partial = await v.statAssets(list, 150)
+    expect(Date.now() - started).toBeLessThan(1000)
+    expect(partial.map((a) => a.size)).toEqual([2, undefined, undefined])
+  })
+
+  it('finds a picture on disk for thumbnails and opening, and nothing else', async () => {
+    await fs.mkdir(path.join(tmp, 'vault'))
+    await fs.mkdir(path.join(tmp, 'outside'))
+    await put('vault/Art/gate.png', 'x')
+    await put('vault/Art/notes.md', 'x')
+    await put('vault/.hidden/x.png', 'x')
+    await put('vault/node_modules/x.png', 'x')
+    await put('outside/secret.png', 'x')
+    await put('vault/Art/tool.exe', 'MZ')
+    await fs.mkdir(path.join(tmp, 'vault', 'Folder.png'))
+    await fs.symlink(path.join(tmp, 'outside'), path.join(tmp, 'vault', 'Link'))
+    await fs.symlink(path.join(tmp, 'vault', 'Art', 'gate.png'), path.join(tmp, 'vault', 'Art', 'alias.png'))
+    await fs.symlink(path.join(tmp, 'vault', 'Art', 'tool.exe'), path.join(tmp, 'vault', 'Art', 'tool.png'))
+    const v = new FsVault([path.join(tmp, 'vault')])
+    expect(await v.assetAbs('Art/gate.png')).toBe(path.join(tmp, 'vault', 'Art', 'gate.png'))
+    expect(await v.assetAbs('Art\\gate.png')).toBe(path.join(tmp, 'vault', 'Art', 'gate.png'))
+    const refused = [
+      'Art/notes.md',
+      'Art/tool.exe',
+      'Art/missing.png',
+      'Folder.png',
+      '.hidden/x.png',
+      'node_modules/x.png',
+      '../outside/secret.png',
+      'Link/secret.png',
+      // Links are never pictures of the vault (the scan does not list them either), whatever they point at.
+      'Art/alias.png',
+      'Art/tool.png',
+      '',
+    ]
+    for (const p of refused) expect(await v.assetAbs(p), p).toBeNull()
+    const multi = new FsVault([path.join(tmp, 'vault'), path.join(tmp, 'outside')])
+    expect(await multi.assetAbs('vault/Art/gate.png')).toBe(path.join(tmp, 'vault', 'Art', 'gate.png'))
+    expect(await multi.assetAbs('Nope/gate.png')).toBeNull()
+  })
+
+  it('creates a new picture from bytes, making parents, and never replaces anything', async () => {
+    const v = new FsVault([tmp])
+    await v.createBinary('Projects/PORTALz/Critique/study.png', PNG)
+    expect(new Uint8Array(await fs.readFile(path.join(tmp, 'Projects', 'PORTALz', 'Critique', 'study.png')))).toEqual(PNG)
+    await put('Art/Gate.PNG', 'kept')
+    await fs.mkdir(path.join(tmp, 'Art', 'dir.png'))
+    for (const p of ['Projects/PORTALz/Critique/study.png', 'Art/gate.png', 'Art/GATE.png', 'Art/dir.png']) {
+      const err = await v.createBinary(p, PNG).then(
+        () => null,
+        (e: unknown) => e as NodeJS.ErrnoException,
+      )
+      expect(err?.code, p).toBe('EEXIST')
+      expect(err?.message, p).toMatch(/EEXIST/)
+    }
+    expect(await fs.readFile(path.join(tmp, 'Art', 'Gate.PNG'), 'utf8')).toBe('kept')
+    expect((await fs.readdir(path.join(tmp, 'Art'))).sort()).toEqual(['Gate.PNG', 'dir.png'])
+    await v.createBinary('Art/Gate 2.png', PNG)
+    expect((await fs.readdir(path.join(tmp, 'Art'))).sort()).toEqual(['Gate 2.png', 'Gate.PNG', 'dir.png'])
+  })
+
+  it('creates pictures only, never in skipped folders or outside the vault', async () => {
+    const v = new FsVault([tmp])
+    for (const p of ['Inbox/note.md', 'Inbox/x.svg', 'Inbox/run.exe', 'Inbox/png']) {
+      const err = await v.createBinary(p, PNG).then(
+        () => null,
+        (e: unknown) => e as Error,
+      )
+      expect(err?.message, p).toMatch(/Not a picture/)
+      expect(err?.message, p).not.toMatch(/EEXIST/)
+    }
+    await expect(v.createBinary('.obsidian/x.png', PNG)).rejects.toThrow(/excluded/)
+    await expect(v.createBinary('proj/node_modules/x.png', PNG)).rejects.toThrow(/excluded/)
+    await expect(v.createBinary('../x.png', PNG)).rejects.toThrow(/escapes/)
+    expect(await exists('.obsidian')).toBe(false)
+    expect(await exists('Inbox/note.md')).toBe(false)
+  })
+
+  it('never shows a new picture half written, on disks with or without hard links', async () => {
+    const v = new FsVault([tmp])
+    const big = new Uint8Array(256 * 1024).fill(7)
+    big.set(PNG)
+    await v.createBinary('a.png', big)
+    expect((await fs.readFile(path.join(tmp, 'a.png'))).length).toBe(big.length)
+    vi.spyOn(fs, 'link').mockRejectedValue(Object.assign(new Error('operation not supported'), { code: 'ENOTSUP' }))
+    await v.createBinary('b.png', big)
+    expect((await fs.readFile(path.join(tmp, 'b.png'))).length).toBe(big.length)
+    await expect(v.createBinary('B.png', PNG)).rejects.toThrow(/EEXIST/)
+    // No temp files left behind.
+    expect((await fs.readdir(tmp)).sort()).toEqual(['a.png', 'b.png'])
   })
 })

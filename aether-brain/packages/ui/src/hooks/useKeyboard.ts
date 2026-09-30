@@ -1,6 +1,7 @@
 import { useEffect } from 'react'
-import { folderPathOf, isFolderId } from '@aether/core'
+import { folderPathOf, imagePathOf, isFolderId, isImageId, isTodayId } from '@aether/core'
 import { selectedProject } from '../commands'
+import { focusBrief } from '../components/Inspector'
 import { useAether } from '../store'
 import { isControl, isTyping } from '../util'
 
@@ -111,7 +112,20 @@ export function handleKey(e: KeyboardEvent): void {
     case 'Enter':
       // Enter on a focused button or link is that control's own (Expand, ✕, a toast's Undo …).
       if (e.key === 'Enter' && isControl(e.target)) return
-      if (s.selectedId) s.openNote(s.selectedId, { fly: true })
+      if (!s.selectedId) return
+      // A picture opens in the OS image app; the Today hub opens its brief (focus on the first task).
+      if (isImageId(s.selectedId)) void s.openImage(imagePathOf(s.selectedId))
+      else if (isTodayId(s.selectedId)) {
+        if (focusBrief(false)) e.preventDefault()
+      } else s.openNote(s.selectedId, { fly: true })
+      return
+    case 'y':
+    case '7':
+      s.showToday()
+      return
+    case 'u':
+      // The newest toast's action: Undo a tick from the brief, Show a picture just imported.
+      if (s.toastAction()) e.preventDefault()
       return
     case 'd':
       void s.openDaily()
@@ -127,6 +141,8 @@ export function handleKey(e: KeyboardEvent): void {
       // Over the board / review, Tab moves focus between their controls.
       if (s.view === 'projects' || s.view === 'review' || s.view === 'capture') return
       e.preventDefault()
+      // The Today hub's neighbors are its tasks: Tab walks into the brief (its rows keep Tab to themselves).
+      if (s.selectedId !== null && isTodayId(s.selectedId) && focusBrief(e.shiftKey)) return
       s.cycleNeighbor(e.shiftKey ? -1 : 1)
       return
     case 't':

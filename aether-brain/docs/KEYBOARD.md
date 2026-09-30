@@ -8,9 +8,11 @@ Every feature has a key. `⌘` is `Ctrl` on Windows/Linux. Single keys are ignor
 | -------------- | ------------------------------------------------- |
 | `⌘ K` · `/`    | Search neurons, folders & commands (palette)      |
 | `⌘ N` · `c`    | Quick capture → Inbox                             |
+| `y` · `7`      | Today: fly to the ☀ Today hub and show the daily brief (turns the hub on if it was off) |
 | `d`            | Open (or create) today's daily note               |
 | `1` `2` `3` `4` `5` `6` | Graph · Editor · Capture · Search · Review · Projects |
 | `p`            | Projects board (with a ★ project star selected: that project's board) |
+| `u`            | The newest toast's action: *Undo* (a ticked brief task, a deleted task) or *Show* (pictures just imported, a Concept Forge critique) |
 | `?`            | Keyboard cheatsheet                               |
 | `Esc`          | Close overlay → close editor → clear filters → deselect (first thing that applies) |
 | `Alt ←` / `Alt →` | History back / forward                         |
@@ -23,7 +25,7 @@ Every feature has a key. `⌘` is `Ctrl` on Windows/Linux. Single keys are ignor
 | click · double-click | Select · open in editor (a folder: expand / collapse it) |
 | drag a neuron        | Pin it somewhere else (physics adapts; in the system layout its moons come along) |
 | click a ghost `+ Title` | Create the missing note in Inbox             |
-| `e` · `Enter`        | Open selected in editor (a folder: expand / collapse) |
+| `e` · `Enter`        | Open selected in editor (a folder: expand / collapse · a picture: open it in your image app · the Today hub: focus its first task) |
 | `f`                  | Fly to selected                                 |
 | `Tab` · `⇧ Tab`      | Cycle through the selection's neighbors (a folder: its parent, planets and moons; nothing selected: the biggest hub) |
 | `← → ↑ ↓`            | Orbit camera · with `⇧`: pan                    |
@@ -48,6 +50,33 @@ The default layout. The vault is the sun at the centre; with several roots (e.g.
 | `t`         | Leave / come back to the system layout                            |
 
 The legend shows the same depth `−` / `+` and the motion switch. Selecting a folder opens the **folder inspector**: its path and counts, its planets (click = fly, double-click = expand) and moons, and buttons for *+ Note here*, *+ Folder here*, *★ Make project* (writes the folder note `<folder>/<name>.md`) or *★ Project board*, *Expand* / *Collapse* and *Reveal* (desktop: show it in Explorer / Finder). In the graph `Tab` walks the neighbors rather than the buttons, so every inspector action has a key or a palette command instead: `p` opens a star's board, `x` expands / collapses, and the palette (`>` folder) has *New note / New folder in the selected folder*, *Make the selected folder a project*, *Open the selected star's project board* and *Show in the file manager*.
+
+## Today & pictures
+
+The **☀ Today hub** is a glowing node that gathers today's to-dos from every note: tasks that are overdue (`📅` date before today), due today, scheduled for today or earlier (`⏳`), written in today's daily note or tagged `#today`, plus the first open task of every active project that has nothing else on the brief (*Next up*). Its beams point at the notes those tasks live in. In the system layout it hangs above the sun. The top bar's **☀ Today N** chip shows the count (a red dot while something is overdue) and flies there too; the brief follows the calendar (checked every minute and whenever the window comes back).
+
+| Key                  | Action                                                        |
+| -------------------- | ------------------------------------------------------------- |
+| `y` · `7`            | Select the hub and fly to it; the inspector shows the brief   |
+| `Tab` · `⇧ Tab`      | With the hub selected: into the brief (first / last task); inside it, from button to button (wraps) |
+| `↑` · `↓`            | In the brief: the same button of the task above / below       |
+| `Space` · `Enter`    | On a task's tick box: tick it — written as `- [x] … ✅ YYYY-MM-DD` in its own note |
+| `u`                  | Undo that tick (while the toast shows)                        |
+| `Enter` on ★ chip    | Select the task's project (its ★ star when the graph shows it, else the project note) |
+| `Enter` on ↗ title   | Open the task's note in the editor                            |
+| `Esc`                | Deselect (leaves the brief)                                   |
+
+Focusing a task lights up its note in the graph. With no tasks the brief says *All clear for today* and how to put things there: `- [ ] Ink the gate 📅 2026-10-01`, `⏳ 2026-10-01`, `#today`, or today's daily note (`d`).
+
+**Pictures** (png, jpg, webp, gif, bmp, avif) are part of the brain: a note that embeds one (`![[gate.png]]`) links to it in every layout, and in the system layout each folder's newest pictures orbit it as **🖼 picture moons**, drawn as thumbnails. Select one to see its preview, where it lives, its size and date, and the notes it is embedded in.
+
+| Key / gesture        | Action                                                        |
+| -------------------- | ------------------------------------------------------------- |
+| `e` · `Enter` · double-click | Open the selected picture in your image app (desktop)  |
+| `Tab` · `⇧ Tab`      | The notes that embed it, and its folder                       |
+| drop files on the window | Import pictures into the selected folder, a selected project's *Critique* planet, else `Inbox` — never replaces a file (`gate 2.png`); up to 40 MB each |
+
+The picture inspector has *Open*, *Reveal* (desktop), *Copy embed* (`![[gate.png]]`, the vault path when two pictures share a name) and *Embedded in*; the folder inspector counts a folder's pictures (*12 pictures · 8 shown*) and has *Import pictures…*. Palette commands (type `> picture`): *Import pictures…*, *Open the selected picture in your image app*, *Copy the embed of the selected picture*, *Toggle image moons*, *Toggle picture thumbnails*; and *Today — daily brief*, *Toggle Today hub*.
 
 ## Palette
 
@@ -140,4 +169,4 @@ Inside a panel: `Esc` closes it, its own key closes it too, the other panel's ke
 
 ## Commands (palette `>`)
 
-Move note → Projects / Areas / Resources / Archive · Set status → evergreen / seedling · Delete note · New project · New folder / new note in the selected folder · Make the selected folder a project · Open the selected star's project board · Show in the file manager · Cycle layout · Orbits moving / paused · Folder levels − / + · Expand / collapse folder · Reload vault from disk · Re-run layout physics · Vault folders · AI link (desktop) · everything above.
+Today — daily brief · Toggle Today hub · Import pictures… · Open the selected picture · Copy the embed of the selected picture · Toggle image moons · Toggle picture thumbnails · Move note → Projects / Areas / Resources / Archive · Set status → evergreen / seedling · Delete note · New project · New folder / new note in the selected folder · Make the selected folder a project · Open the selected star's project board · Show in the file manager (a note, folder or picture) · Cycle layout · Orbits moving / paused · Folder levels − / + · Expand / collapse folder · Reload vault from disk · Re-run layout physics · Vault folders · AI link (desktop) · everything above.

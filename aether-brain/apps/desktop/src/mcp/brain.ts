@@ -29,6 +29,7 @@ import {
   basenameOf,
   blankNote,
   buildGraph,
+  dailyBrief,
   defaultProjectFolder,
   deleteTask,
   editTask,
@@ -40,6 +41,7 @@ import {
   inboxNote,
   isExistsError,
   isIgnoredPath,
+  isImagePath,
   isProjectNote,
   joinFrontmatter,
   loadVault,
@@ -56,11 +58,14 @@ import {
   slugifyTitle,
   splitFrontmatter,
   taskProgress,
+  tasksOf,
   todayIso,
   tokenizeWikilinks,
   updateFrontmatter,
 } from '@aether/core'
 import type {
+  BriefReason,
+  BriefTask,
   GraphData,
   NoteId,
   NoteType,
@@ -133,6 +138,25 @@ export interface FolderNode {
   children?: FolderNode[]
   /** Subfolders not listed (depth or size limit). */
   more?: number
+}
+
+/** One task of the daily brief, as daily_brief lists it. */
+export interface BriefRow {
+  /** The task without its date markers. */
+  task: string
+  /** The task as written (what set_task_done's `task` matches). */
+  text: string
+  /** Title of the note it is in. */
+  note: string
+  /** Vault path of that note (set_task_done's `project`). */
+  path: string
+  /** 0-based line of the task in the note (set_task_done's `line`). */
+  line: number
+  /** The project it belongs to (the note itself, or the project whose folder holds it). */
+  project: string | null
+  due: string | null
+  scheduled: string | null
+  reason: BriefReason
 }
 
 export interface ProjectBrief extends NoteRef {
@@ -608,7 +632,8 @@ export class Brain {
   private lock: Promise<unknown> = Promise.resolve()
 
   private constructor(private readonly opts: BrainOptions) {
-    this.vault = new FsVault(opts.roots, { exclude: opts.exclude ?? [] })
+    // No tool offers pictures: the scan need not list them (a whole drive can hold hundreds of thousands).
+    this.vault = new FsVault(opts.roots, { exclude: opts.exclude ?? [], maxAssets: 0 })
     this.readOnly = opts.readOnly === true
     this.roots = this.vault.roots.map((r) => ({ path: r.abs, mount: r.mount, label: r.label }))
     this.home = homePrefix(this.roots)
@@ -644,10 +669,17 @@ export class Brain {
     return { notes: this.notes.size, folders: this.folders.size }
   }
 
-  /** Apply file/folder changes observed elsewhere (the host's watcher). Idempotent; applied lazily. */
+  /**
+   * Apply file/folder changes observed elsewhere (the host's watcher).
+   * Idempotent; applied lazily. Pictures are dropped: no tool offers them, and
+   * a folder of renders arriving must not rebuild the index.
+   */
   applyExternal(changes: VaultChangeDto[]): void {
     if (this.closed || !changes.length) return
-    for (const c of changes) this.pending.push(c)
+    for (const c of changes) {
+      if (c.kind !== 'addDir' && c.kind !== 'unlinkDir' && isImagePath(c.path)) continue
+      this.pending.push(c)
+    }
     if (this.loaded && this.pending.length > MAX_PENDING) this.sync()
   }
 
@@ -934,6 +966,50 @@ export class Brain {
         return x ? [{ ...this.ref(x), snippet: h.snippet }] : []
       })
     return { note: this.ref(n), linksTo: out.slice(0, 50), linkedFrom: inn.slice(0, 50), similar }
+  }
+
+  /**
+   * The daily brief of `date` (default today, this computer's time), as the
+   * app's Today hub shows it: overdue tasks, tasks due or scheduled that day,
+   * in its daily note or tagged #today, and the next task of each active
+   * project with nothing above. The rows' lines are remembered as a listing
+   * of their notes, so set_task_done with a row's path and line finds its
+   * task even after the note changed.
+   */
+  async dailyBrief(date?: string) {
+    await this.state()
+    const brief = dailyBrief(this.notes.values(), { date: date ?? todayIso(), folders: this.folders })
+    const rows = [...brief.overdue, ...brief.today, ...brief.next]
+    const lines = new Map<NoteId, Set<number>>()
+    for (const t of rows) {
+      const set = lines.get(t.noteId)
+      if (set) set.add(t.line)
+      else lines.set(t.noteId, new Set([t.line]))
+    }
+    for (const [id, want] of lines) {
+      const n = this.notes.get(id)
+      if (!n) continue
+      const all = tasksOf(n)
+      this.remember(n.meta.path, n.raw, all.filter((t) => want.has(t.line)), all)
+    }
+    const row = (t: BriefTask): BriefRow => ({
+      task: t.label,
+      text: t.text,
+      note: t.noteTitle,
+      path: t.notePath,
+      line: t.line,
+      project: t.projectTitle,
+      due: t.due,
+      scheduled: t.scheduled,
+      reason: t.reason,
+    })
+    return {
+      date: brief.date,
+      total: brief.total,
+      overdue: brief.overdue.map(row),
+      today: brief.today.map(row),
+      next: brief.next.map(row),
+    }
   }
 
   /** Recently changed notes, newest first. */
@@ -1295,7 +1371,7 @@ export class Brain {
         folders = [...pre.folders]
       } else {
         if (watch) {
-          early = new VaultWatcher(this.vault, null, sink)
+          early = new VaultWatcher(this.vault, null, sink, { images: false })
           this.watcher = early
           await early.start()
           if (this.closed) return
@@ -1318,7 +1394,7 @@ export class Brain {
       if (early) early.seed(known)
       else if (watch) {
         // A host's preload: watch from what the host read.
-        this.watcher = new VaultWatcher(this.vault, known, sink)
+        this.watcher = new VaultWatcher(this.vault, known, sink, { images: false })
         await this.watcher.start()
       }
     } catch (err) {

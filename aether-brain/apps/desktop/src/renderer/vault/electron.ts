@@ -1,10 +1,12 @@
-import type { VaultAdapter, VaultChange, VaultFile, VaultRootInfo } from '@aether/core'
+import type { VaultAdapter, VaultAsset, VaultChange, VaultFile, VaultRootInfo } from '@aether/core'
 import type { AetherBridge, VaultChangeDto, VaultInfo } from '../../shared/ipc'
 
+/** A change as main reported it (a picture's comes without content, with its size). */
 function toChange(c: VaultChangeDto): VaultChange {
   const out: VaultChange = { kind: c.kind, path: c.path }
   if (c.content !== undefined) out.content = c.content
   if (c.mtime !== undefined) out.mtime = c.mtime
+  if (c.size !== undefined) out.size = c.size
   return out
 }
 
@@ -25,6 +27,8 @@ export class ElectronVaultAdapter implements VaultAdapter {
   readonly info: VaultInfo
   /** True when the last folder listing stopped at the folder cap (the tree is partial). */
   truncated = false
+  /** True when the last picture listing stopped at the picture cap (some pictures are missing). */
+  assetsTruncated = false
   /** Watchers of this adapter, for changes it makes itself (a new folder). */
   private listeners = new Set<(changes: VaultChange[]) => void>()
   /** Changes main reported while a load was running (between list() and watch()). */
@@ -149,5 +153,35 @@ export class ElectronVaultAdapter implements VaultAdapter {
   }
   reveal(path: string): Promise<void> {
     return this.bridge.revealInFolder(path)
+  }
+
+  /** Every picture main's last scan found (mtime and size where it had time to look). */
+  async listAssets(): Promise<VaultAsset[]> {
+    const res = await this.bridge.listAssets()
+    this.assetsTruncated = res.truncated
+    return res.assets
+  }
+
+  /** A PNG preview at most `size` px on its longer side, made by main (the OS thumbnailer where there is one). */
+  async thumbnail(path: string, size: number): Promise<Blob | null> {
+    const bytes = await this.bridge.thumbnail(path, size)
+    // Bytes that crossed IPC sit in a plain ArrayBuffer, never a shared one.
+    return bytes?.length ? new Blob([bytes as Uint8Array<ArrayBuffer>], { type: 'image/png' }) : null
+  }
+
+  /**
+   * A new picture; main refuses (the message carries `EEXIST`) when anything is
+   * at the path in any letter case, and anything that is not a real picture of
+   * at most 40 MB. Emits 'add' at once (main's watcher confirms it later).
+   */
+  async createAsset(path: string, data: Uint8Array): Promise<void> {
+    await this.bridge.createAsset(path, data)
+    const change: VaultChange[] = [{ kind: 'add', path, mtime: Date.now(), size: data.length }]
+    for (const cb of this.listeners) cb(change)
+  }
+
+  /** Open a picture in the OS default app. */
+  openAsset(path: string): Promise<void> {
+    return this.bridge.openAsset(path)
   }
 }

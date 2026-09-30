@@ -1,10 +1,14 @@
 import { useMemo } from 'react'
 import { AREAS, type Area } from '@aether/core'
-import { AREA_COLORS, AREA_LABELS, STAR_COLOR, SUN_COLOR, tagColor } from '@aether/graph'
+import { AREA_COLORS, AREA_LABELS, IMAGE_COLOR, STAR_COLOR, SUN_COLOR, TODAY_COLOR, tagColor } from '@aether/graph'
 import { useAether } from '../store'
 import { cx } from '../util'
 
-/** Bottom-left legend: area constellations + top tags. Chips filter the graph. */
+/**
+ * Bottom-left legend: what the bodies are (the system layout's stars, planets
+ * and moons; pictures; the ☀ Today hub), area constellations + top tags.
+ * Chips filter the graph; the Today entry flies to the hub.
+ */
 export function Legend() {
   const graph = useAether((s) => s.graph)
   const filters = useAether((s) => s.filters)
@@ -19,42 +23,65 @@ export function Legend() {
   const motion = useAether((s) => s.settings.motion)
   const setFolderDepth = useAether((s) => s.setFolderDepth)
   const toggleMotion = useAether((s) => s.toggleMotion)
+  const brief = useAether((s) => s.brief)
+  const todayHub = useAether((s) => s.settings.todayHub)
+  const showToday = useAether((s) => s.showToday)
 
   const tags = useMemo(() => {
     if (!graph) return []
     return [...graph.tagCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 14)
   }, [graph])
+  const pictures = useMemo(() => graph?.nodes.reduce((n, node) => (node.kind === 'image' ? n + 1 : n), 0) ?? 0, [graph])
 
   if (!graph) return null
   const anyFilter = filters.areas.size > 0 || filters.tags.size > 0 || filters.types.size > 0 || !!filters.query
+  const system = layoutMode === 'system'
 
   return (
     <div className="panel flex max-w-[520px] flex-col gap-2 p-3" aria-label="Legend and filters">
-      {layoutMode === 'system' && (
+      {(system || pictures > 0 || (todayHub && brief)) && (
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 text-[11.5px] text-dim">
-          <span title="A project's home folder, or a drive / vault root">
-            <span style={{ color: STAR_COLOR, textShadow: `0 0 8px ${STAR_COLOR}` }}>★</span> star · project or drive
-          </span>
-          <span title="A folder">
-            <span style={{ color: SUN_COLOR }}>●</span> planet · folder
-          </span>
-          <span title="A note">
-            <span className="text-ink">·</span> moon · note
-          </span>
-          <span className="flex-1" />
-          <span className="flex items-center gap-1" title="How many folder levels show without expanding ([ and ])">
-            depth
-            <button type="button" className="hud-btn !h-6 !px-1.5" onClick={() => setFolderDepth(depth - 1)} disabled={depth <= 1} aria-label="Fewer folder levels ([)">
-              −
+          {todayHub && brief && (
+            <button type="button" className="hud-btn !h-6 !px-2" onClick={showToday} title="The Today hub: today's to-dos from every project (y)">
+              <span style={{ color: TODAY_COLOR, textShadow: `0 0 8px ${TODAY_COLOR}` }}>☀</span> Today · {brief.total}
             </button>
-            <span className="w-3 text-center tabular-nums text-ink">{depth}</span>
-            <button type="button" className="hud-btn !h-6 !px-1.5" onClick={() => setFolderDepth(depth + 1)} disabled={depth >= 8} aria-label="More folder levels (])">
-              +
-            </button>
-          </span>
-          <button type="button" className="hud-btn !h-6 !px-2" aria-pressed={motion} onClick={toggleMotion} title="Orbits moving / paused (o)">
-            {motion ? '↻ orbiting' : '❚❚ paused'}
-          </button>
+          )}
+          {system && (
+            <>
+              <span title="A project's home folder, or a drive / vault root">
+                <span style={{ color: STAR_COLOR, textShadow: `0 0 8px ${STAR_COLOR}` }}>★</span> star · project or drive
+              </span>
+              <span title="A folder">
+                <span style={{ color: SUN_COLOR }}>●</span> planet · folder
+              </span>
+              <span title="A note">
+                <span className="text-ink">·</span> moon · note
+              </span>
+            </>
+          )}
+          {pictures > 0 && (
+            <span title={system ? "A picture file: each folder's newest ones orbit it, embedded ones link to their notes" : 'A picture file a note embeds (![[name.png]])'}>
+              <span style={{ color: IMAGE_COLOR }}>🖼</span> picture · {pictures}
+            </span>
+          )}
+          {system && (
+            <>
+              <span className="flex-1" />
+              <span className="flex items-center gap-1" title="How many folder levels show without expanding ([ and ])">
+                depth
+                <button type="button" className="hud-btn !h-6 !px-1.5" onClick={() => setFolderDepth(depth - 1)} disabled={depth <= 1} aria-label="Fewer folder levels ([)">
+                  −
+                </button>
+                <span className="w-3 text-center tabular-nums text-ink">{depth}</span>
+                <button type="button" className="hud-btn !h-6 !px-1.5" onClick={() => setFolderDepth(depth + 1)} disabled={depth >= 8} aria-label="More folder levels (])">
+                  +
+                </button>
+              </span>
+              <button type="button" className="hud-btn !h-6 !px-2" aria-pressed={motion} onClick={toggleMotion} title="Orbits moving / paused (o)">
+                {motion ? '↻ orbiting' : '❚❚ paused'}
+              </button>
+            </>
+          )}
         </div>
       )}
       <div className="flex flex-wrap items-center gap-1.5">

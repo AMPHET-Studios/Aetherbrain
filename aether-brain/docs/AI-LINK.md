@@ -229,6 +229,7 @@ Read tools (always available):
 | `list_folder` | A folder as a tree: planets and moons with note counts, project stars marked |
 | `list_projects` | Every project with status, home folder, progress and next tasks |
 | `get_project` | One project: summary, all tasks (with ✅ dates), planets, notes inside |
+| `daily_brief` | Today's brief, as the ☀ Today hub shows it: overdue, due or scheduled today, today's daily note, `#today`, and each active project's next task, with the note and line to tick it off with `set_task_done` (optional `date`) |
 | `related_notes` | Notes a note links to, notes linking to it, and similar notes |
 | `recent_notes` | Recently changed notes, optionally within some days or a folder |
 | `search` / `fetch` | The same search and read in the shape ChatGPT's connectors expect |

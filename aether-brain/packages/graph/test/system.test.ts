@@ -4,7 +4,7 @@ import { computeSystemLayout, systemPositions, type SystemInput, type SystemLayo
 interface Spec {
   id: string
   parent: string | null
-  kind?: 0 | 1 | 2
+  kind?: 0 | 1 | 2 | 3 | 4
   role?: -1 | 0 | 1 | 2 | 3
   radius?: number
 }
@@ -327,6 +327,82 @@ describe('computeSystemLayout', () => {
     const lone = computeSystemLayout(input([folder('folder:', null, 8)]))
     expect(Array.from(positionsAt(lone, 4))).toEqual([0, 0, 0])
     expect(lone.extent[0]).toBeCloseTo(8 * 1.6 + 1, 5)
+  })
+
+  it('hangs the Today hub still, straight above the root sun, with no ring', () => {
+    const hub: Spec = { id: 'today:', parent: 'folder:', kind: 3, radius: 4.6 }
+    const specs = [...vault(), hub]
+    const h = specs.length - 1
+    const layout = computeSystemLayout(input(specs))
+    const height = 8 * 2.4 + 30
+    expect(layout.parent[h]).toBe(0)
+    expect(layout.speed[h]).toBe(0)
+    expect(layout.orbitRadius[h]).toBeCloseTo(height, 5)
+    for (const t of [0, 4.5, 300]) {
+      const pos = positionsAt(layout, t)
+      expect(pos[h * 3]!).toBeCloseTo(0, 4)
+      expect(pos[h * 3 + 1]!).toBeCloseTo(height, 4)
+      expect(pos[h * 3 + 2]!).toBeCloseTo(0, 4)
+    }
+    for (let k = 0; k < layout.rings.length; k += 6) {
+      if (layout.rings[k] === 0) expect(layout.rings[k + 1]).not.toBeCloseTo(height, 3)
+    }
+
+    // Everything else lays out exactly as without the hub, and the sun does not grow.
+    const plain = computeSystemLayout(input(vault()))
+    expect(Array.from(layout.rings)).toEqual(Array.from(plain.rings))
+    expect(Array.from(layout.extent.subarray(0, h))).toEqual(Array.from(plain.extent))
+    const a = positionsAt(layout, 7.5)
+    const b = positionsAt(plain, 7.5)
+    expect(Array.from(a.subarray(0, h * 3))).toEqual(Array.from(b))
+  })
+
+  it('moves the hub with a dragged sun and never makes it a second root', () => {
+    const specs = [...vault(), { id: 'today:', parent: null, kind: 3 as const, radius: 4.6 }]
+    const h = specs.length - 1
+    const layout = computeSystemLayout(input(specs))
+    expect(layout.parent[h]).toBe(0)
+    expect(Array.from(layout.order).filter((i) => layout.parent[i] === -1)).toEqual([0])
+    const offsets = new Float32Array(specs.length * 3)
+    offsets[0] = 12
+    offsets[2] = -7
+    const pos = positionsAt(layout, 2, offsets)
+    expect(pos[h * 3]!).toBeCloseTo(12, 4)
+    expect(pos[h * 3 + 1]!).toBeCloseTo(8 * 2.4 + 30, 4)
+    expect(pos[h * 3 + 2]!).toBeCloseTo(-7, 4)
+
+    // Several roots: the hub joins the first real one, which keeps its static ring.
+    const multi = [folder('folder:A', null, 6), ...notes('folder:A', 3), { id: 'today:', parent: null, kind: 3 as const, radius: 4.6 }, folder('folder:B', null, 5)]
+    const m = computeSystemLayout(input(multi))
+    expect(m.parent[4]).toBe(0)
+    const roots = Array.from(m.order).filter((i) => m.parent[i] === -1)
+    expect(roots.sort()).toEqual([0, 5])
+    const mp = positionsAt(m, 9)
+    expect(mp[4 * 3]!).toBeCloseTo(mp[0]!, 4)
+    expect(mp[4 * 3 + 1]! - mp[1]!).toBeCloseTo(6 * 2.4 + 30, 4)
+    expect(mp[4 * 3 + 2]!).toBeCloseTo(mp[2]!, 4)
+
+    // A lone hub (nothing else in the graph) is simply the root at the origin.
+    const lone = computeSystemLayout(input([{ id: 'today:', parent: null, kind: 3, radius: 4.6 }]))
+    expect(Array.from(positionsAt(lone, 3))).toEqual([0, 0, 0])
+  })
+
+  it('lays images out as leaf moons, like notes', () => {
+    const images = (parent: string, count: number): Spec[] =>
+      Array.from({ length: count }, (_, i) => ({ id: `image:${parent}/art ${i}.png`, parent, kind: 4 as const, radius: 1.4 }))
+    const specs = [folder('folder:', null, 8), folder('folder:Art', 'folder:', 3), ...images('folder:Art', 5), ...notes('folder:Art', 2), folder('folder:Art/Sub', 'folder:Art', 2)]
+    const layout = computeSystemLayout(input(specs))
+    const sub = specs.length - 1
+    for (let i = 2; i < 7; i++) {
+      expect(layout.parent[i]).toBe(1)
+      expect(layout.shell[i]).toBe(0)
+      // Moons ride the inner rings; the sub-folder planet orbits outside them.
+      expect(layout.orbitRadius[i]!).toBeLessThan(layout.orbitRadius[sub]!)
+    }
+    expectNoSiblingOverlap(layout, positionsAt(layout, 1.25))
+    // Past 24 leaf moons, images join the notes on a shell.
+    const crowd = computeSystemLayout(input([folder('folder:', null, 8), ...images('folder:', 20), ...notes('folder:', 10)]))
+    for (let i = 1; i <= 30; i++) expect(crowd.shell[i]).toBe(1)
   })
 
   it('lays out a 5,000-node tree in well under 100 ms', () => {

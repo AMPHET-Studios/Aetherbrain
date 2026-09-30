@@ -10,7 +10,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
-import { todayIso } from '@aether/core'
+import { nextDay, todayIso } from '@aether/core'
 import { FsVault } from '../src/main/fsvault.js'
 import { MAX_LINE_ARG, MAX_TEXT_ARG } from '../src/mcp/tools.js'
 import {
@@ -631,6 +631,104 @@ describe('tasks and projects', () => {
   })
 })
 
+describe('daily brief', () => {
+  const yesterday = (() => {
+    const d = new Date()
+    d.setDate(d.getDate() - 1)
+    return todayIso(d)
+  })()
+  const tomorrow = nextDay(TODAY)
+
+  beforeEach(async () => {
+    await put('Projects/PORTALz/Design/Gate.md', `# Gate\n\n- [ ] Paint the gate 📅 ${yesterday}\n- [ ] Light pass ⏳ ${TODAY}\n- [x] Done already 📅 ${TODAY} ✅ ${TODAY}\n- [ ] Later 📅 ${tomorrow}\n`)
+    await put(`Daily/${TODAY}.md`, `# ${TODAY}\n\n- [ ] Call the printer\n`)
+    await put('Inbox/Errands.md', '# Errands\n\n- [ ] Buy ink #today\n- [ ] Some day\n')
+    await put('Inbox/Invoices.md', `# Invoices\n\n- [ ] Send the invoice [due:: ${TODAY}]\n`)
+    await put('Archive/Old.md', `# Old\n\n- [ ] Ancient 📅 ${yesterday}\n`)
+    await put('Projects/Gate Kit.md', '---\ntype: project\nstatus: active\n---\n# Gate Kit\n\n## To do\n\n- [ ] Model the hinge\n- [ ] Rig it\n')
+  })
+
+  it("lists what is overdue, what is on for today and what is next, with each task's note, line and project", async () => {
+    const client = await connect(await open())
+    const r = await call(client, 'daily_brief')
+    expect(r.content[0]!.text).toMatch(new RegExp(`^Today \\(${TODAY}\\): 1 overdue, 4 for the day, 1 next up\\. .*set_task_done`))
+    const b = json(r)
+    expect(b.date).toBe(TODAY)
+    expect(b.total).toBe(6)
+    expect(b.overdue).toEqual([
+      {
+        task: 'Paint the gate',
+        text: `Paint the gate 📅 ${yesterday}`,
+        note: 'Gate',
+        path: 'Projects/PORTALz/Design/Gate.md',
+        line: 2,
+        project: 'PORTALz',
+        due: yesterday,
+        scheduled: null,
+        reason: 'overdue',
+      },
+    ])
+    expect(b.today.map((t: { task: string; reason: string }) => [t.task, t.reason])).toEqual([
+      ['Send the invoice', 'due'],
+      ['Light pass', 'scheduled'],
+      ['Call the printer', 'daily'],
+      ['Buy ink #today', 'flagged'],
+    ])
+    expect(b.today[2]).toMatchObject({ path: `Daily/${TODAY}.md`, project: null, line: 2 })
+    // PORTALz has a task above already; the paused ConceptForge is not proposed; Archive never counts.
+    expect(b.next).toEqual([expect.objectContaining({ task: 'Model the hinge', path: 'Projects/Gate Kit.md', project: 'Gate Kit', reason: 'next', line: 8 })])
+    expect(JSON.stringify(b)).not.toMatch(/Ancient|Done already|Later|Some day/)
+    expect(b.howToTick).toMatch(/set_task_done.*path.*line/)
+    expect(activity.at(-1)).toMatchObject({ tool: 'daily_brief', summary: "looked at today's brief", path: null, write: false })
+    expect(client.getInstructions()).toMatch(/daily_brief.*set_task_done/)
+  })
+
+  it("ticks a row off with set_task_done (the row's path and line), even after its note changed", async () => {
+    const client = await connect(await open())
+    const [row] = json(await call(client, 'daily_brief')).overdue
+    // Edited in another app since the brief was listed: the task moved down a line.
+    const before = await disk('Projects/PORTALz/Design/Gate.md')
+    await put('Projects/PORTALz/Design/Gate.md', before.replace('# Gate\n', '# Gate\nPainted in Krita.\n'))
+    const done = json(await call(client, 'set_task_done', { project: row.path, line: row.line }))
+    expect(done).toMatchObject({ changed: true, task: { text: row.text, done: true, line: 3 } })
+    expect(await disk('Projects/PORTALz/Design/Gate.md')).toContain(`- [x] Paint the gate 📅 ${yesterday} ✅ ${TODAY}\n`)
+    const after = json(await call(client, 'daily_brief'))
+    expect(after.overdue).toEqual([])
+    expect(after.total).toBe(5)
+  })
+
+  it('answers for another day, and refuses a date that is not a real day', async () => {
+    const client = await connect(await open())
+    const r = await call(client, 'daily_brief', { date: tomorrow })
+    expect(r.content[0]!.text).toMatch(new RegExp(`^The brief for ${tomorrow}: 2 overdue`))
+    const b = json(r)
+    expect(b.date).toBe(tomorrow)
+    expect(b.today.map((t: { task: string; reason: string }) => [t.task, t.reason])).toContainEqual(['Later', 'due'])
+    expect(activity.at(-1)?.summary).toBe(`looked at the brief for ${tomorrow}`)
+    for (const date of ['2026-02-30', 'tomorrow', '2026-9-30', '']) {
+      expect(errorOf(await call(client, 'daily_brief', { date })), date).toMatch(/YYYY-MM-DD/)
+    }
+    const { tools } = await client.listTools()
+    expect(tools.find((t) => t.name === 'daily_brief')?.inputSchema.properties?.['date']).toMatchObject({ type: 'string', pattern: expect.stringContaining('\\d{4}') })
+  })
+
+  it('does not point a read-only link at set_task_done', async () => {
+    const client = await connect(await open(), true)
+    const r = await call(client, 'daily_brief')
+    expect(r.content[0]!.text).not.toMatch(/set_task_done/)
+    expect(json(r).total).toBe(6)
+  })
+
+  it('says so when there is nothing to do', async () => {
+    const empty = path.join(tmp, 'empty')
+    await put('a.md', '# A\n\n- [x] All done ✅ 2026-01-01\n', empty)
+    const client = await connect(await open({ roots: [empty] }))
+    const r = await call(client, 'daily_brief')
+    expect(r.content[0]!.text).toMatch(/nothing is overdue, due or planned/)
+    expect(json(r)).toMatchObject({ total: 0, overdue: [], today: [], next: [] })
+  })
+})
+
 describe('create-only notes', () => {
   it('a new note never lands on a file the index has not seen, in any letter case', async () => {
     const client = await connect(await open())
@@ -866,6 +964,26 @@ describe('keeping current', () => {
     expect(tasks).toContain('Added during the load')
     expect(hits).toEqual(['Projects/New during load'])
   }, 10_000)
+
+  it('ignores picture changes from the host, but not a folder whose name looks like a picture', async () => {
+    const b = await open()
+    const client = await connect(b)
+    const derived = () => (b as unknown as { idx(): unknown }).idx()
+    json(await call(client, 'vault_overview'))
+    const before = derived()
+    const t = Date.now()
+    b.applyExternal([
+      { kind: 'add', path: 'Renders/Frames/f001.png', mtime: t, size: 10 },
+      { kind: 'change', path: 'Projects/PORTALz/Art/gate.JPG', mtime: t, size: 20 },
+      { kind: 'unlink', path: 'Resources/old.webp' },
+    ])
+    json(await call(client, 'vault_overview'))
+    // Nothing was applied: the index is the one from before (a folder of renders never rebuilds it).
+    expect(derived()).toBe(before)
+    expect(errorOf(await call(client, 'list_folder', { path: 'Renders' }))).toMatch(/Renders/)
+    b.applyExternal([{ kind: 'addDir', path: 'Resources/Refs.png' }])
+    expect(json(await call(client, 'list_folder', { path: 'Resources' })).folder.children.map((c: { name: string }) => c.name)).toContain('Refs.png')
+  })
 
   it('a note edit reuses the folder tables; a folder change rebuilds them', async () => {
     const b = await open()

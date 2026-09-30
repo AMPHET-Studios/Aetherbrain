@@ -44,6 +44,7 @@ export const INSTRUCTIONS = `Aether Brain is the user's second brain: plain mark
 How to work with it:
 - Name notes by title, alias, id or vault path (e.g. Projects/PORTALz.md). When a title is ambiguous the error lists the paths to use.
 - get_project and read_note list tasks with their line numbers; set_task_done, edit_task and delete_task take that line or the task's text. Adding or deleting a task moves the lines below it: use the tasks list add_task and delete_task return, or pass the text with the line.
+- daily_brief is the user's Today: overdue tasks, tasks due or scheduled today (📅 / ⏳ dates, #today, today's daily note) and the next task of each active project. Tick one off with set_task_done, passing the row's path as project and its line.
 - New notes go to the Inbox unless you give a folder. Nothing is overwritten (a taken name gets " 2"), only .md notes and folders are created, and no tool deletes a note.
 - A planet is a folder inside a project's home folder: create_folder with project and path.
 - Prefer small edits (edit_note, append_to_note, add_task) over rewriting whole notes, and keep the user's own words.`
@@ -97,6 +98,12 @@ export const TOOLS = {
     write: false,
     description:
       'Use this when you need one project in detail: summary, status, every task with its line number and ✅ done date, its planets (subfolders of its home folder) and the notes inside it.',
+  },
+  daily_brief: {
+    title: "Today's brief",
+    write: false,
+    description:
+      "Use this when the user asks what's on today, what's due or overdue, or what to work on next: tasks from every note that are overdue, due or scheduled today, in today's daily note or tagged #today, plus the next open task of each active project. Each row has the task, its note (title and path), line, project, due date and why it is listed. Optional date (YYYY-MM-DD) for another day.",
   },
   related_notes: {
     title: 'Related notes',
@@ -229,6 +236,19 @@ function quote(s: string, n = 60): string {
 function plural(n: number, one: string, many = `${one}s`): string {
   return `${n} ${n === 1 ? one : many}`
 }
+
+const DAY_RE = /^\d{4}-\d{2}-\d{2}$/
+const DAY_MESSAGE = 'date must be a real day written YYYY-MM-DD, e.g. 2026-10-01'
+
+/** True for a real day written YYYY-MM-DD (not 2026-02-30). */
+function isDay(s: string): boolean {
+  if (!DAY_RE.test(s)) return false
+  const t = Date.parse(`${s}T00:00:00Z`)
+  return !Number.isNaN(t) && new Date(t).toISOString().slice(0, 10) === s
+}
+
+/** How daily_brief tells the AI to tick a row off. */
+const TICK_HINT = "Tick a task off with set_task_done: the row's path as project and its line (its text as task too, to be safe)."
 
 /** Said when a task reply lists the current lines because the note changed since they were listed. */
 function relisted(r: { tasks?: unknown }): string {
@@ -397,6 +417,27 @@ export function createMcpServer(brain: Brain, opts: McpServerOptions): McpServer
     const line = `Project ${quote(p.title, 120)} (${p.status ?? 'no status'}): ${p.progress} tasks done, ${open} open, ${plural(p.planets.length, 'planet')}.`
     return { text: reply(line, p), summary: `opened project ${quote(p.title)}`, path: p.path }
   })
+
+  tool(
+    'daily_brief',
+    {
+      date: oneLine()
+        .regex(DAY_RE, DAY_MESSAGE)
+        .refine(isDay, DAY_MESSAGE)
+        .optional()
+        .describe('The day, YYYY-MM-DD (default: today on the user\'s computer).'),
+    },
+    READ,
+    async ({ date }) => {
+      const b = await brain.dailyBrief(date)
+      const day = date ? `The brief for ${b.date}` : `Today (${b.date})`
+      // A read-only link offers no set_task_done: no hint to use it then.
+      const line = b.total
+        ? `${day}: ${b.overdue.length} overdue, ${b.today.length} for the day, ${b.next.length} next up.${readOnly ? '' : ` ${TICK_HINT}`}`
+        : `${day}: nothing is overdue, due or planned, and no active project has an open task.`
+      return { text: reply(line, readOnly ? b : { ...b, howToTick: TICK_HINT }), summary: date ? `looked at the brief for ${b.date}` : "looked at today's brief" }
+    },
+  )
 
   tool(
     'related_notes',

@@ -176,7 +176,7 @@ describe('projects', () => {
   it('lists projects with isProjectNote: notes inside a project folder are not projects', async () => {
     const { s, listProjects } = await freshStore()
     await s().openVault(new MemoryVaultAdapter(demoVault()))
-    expect(s().notes.size).toBe(70)
+    expect(s().notes.size).toBe(71)
     const rows = listProjects(s().notes, s().folders)
     const titles = rows.map((r) => r.note.meta.title)
     expect(titles).toContain('PORTALz')

@@ -1,7 +1,7 @@
-import { useEffect, useMemo } from 'react'
-import { isFolderId } from '@aether/core'
+import { useEffect, useMemo, useState } from 'react'
+import { isFolderId, isImageId, isTodayId } from '@aether/core'
 import { BrainScene } from '@aether/graph'
-import { useAether } from './store'
+import { useAether, type AetherState } from './store'
 import { useKeyboard } from './hooks/useKeyboard'
 import { TopBar } from './components/TopBar'
 import { Legend } from './components/Legend'
@@ -14,7 +14,11 @@ import { ProjectsView } from './components/ProjectsView'
 import { Help } from './components/Help'
 import { Toasts } from './components/Toasts'
 import { Welcome, type VaultSource } from './components/Welcome'
+import { importPictureFiles } from './components/pictures'
 import { cx } from './util'
+
+/** How often the Today brief checks whether the day turned (a brief left open overnight). */
+const BRIEF_REFRESH_MS = 60_000
 
 export interface AetherAppProps {
   /** Ways to open a vault, rendered on the welcome screen. */
@@ -48,9 +52,24 @@ export function AetherApp({ sources, onPickVault, autoOpen }: AetherAppProps) {
   // Flush unsaved edits when the window closes.
   useEffect(() => {
     const flush = () => void useAether.getState().saveDraft()
+    const hidden = () => document.hidden && flush()
     window.addEventListener('beforeunload', flush)
-    document.addEventListener('visibilitychange', () => document.hidden && flush())
-    return () => window.removeEventListener('beforeunload', flush)
+    document.addEventListener('visibilitychange', hidden)
+    return () => {
+      window.removeEventListener('beforeunload', flush)
+      document.removeEventListener('visibilitychange', hidden)
+    }
+  }, [])
+
+  // The Today brief follows the calendar: a new day (checked every minute, and whenever the window comes back) rebuilds it.
+  useEffect(() => {
+    const refresh = () => useAether.getState().refreshBrief()
+    const timer = setInterval(refresh, BRIEF_REFRESH_MS)
+    window.addEventListener('focus', refresh)
+    return () => {
+      clearInterval(timer)
+      window.removeEventListener('focus', refresh)
+    }
   }, [])
 
   // FPS meter (rAF-based, independent of the R3F loop).
@@ -122,6 +141,7 @@ export function AetherApp({ sources, onPickVault, autoOpen }: AetherAppProps) {
       <Help />
       <Toasts />
       <Welcome sources={sources} />
+      <DropZone />
     </div>
   )
 }
@@ -145,6 +165,15 @@ function Hint() {
           </span>{' '}
           · {node.folder?.totalNotes ?? 0} notes · click to select · double-click to expand
         </span>
+      ) : node?.kind === 'today' ? (
+        <span>
+          <span className="text-ink">☀ Today</span> · {node.today?.total ?? 0} to do
+          {node.today?.overdue ? ` · ${node.today.overdue} late` : ''} · click for the brief
+        </span>
+      ) : h && node?.kind === 'image' ? (
+        <span>
+          <span className="text-ink">🖼 {h}</span> · click to select · double-click to open
+        </span>
       ) : h ? (
         <span>
           <span className="text-ink">{h}</span> · click to select · double-click to {node?.kind === 'ghost' ? 'create' : 'open'}
@@ -153,15 +182,122 @@ function Hint() {
         <span>
           <kbd>x</kbd> expand · <kbd>Tab</kbd> planets · <kbd>f</kbd> fly · <kbd>[</kbd> <kbd>]</kbd> depth · <kbd>Esc</kbd> deselect
         </span>
+      ) : selectedId && isTodayId(selectedId) ? (
+        <span>
+          <kbd>Tab</kbd> tasks · <kbd>Space</kbd> tick the focused task · <kbd>u</kbd> undo · <kbd>y</kbd> Today · <kbd>Esc</kbd> deselect
+        </span>
+      ) : selectedId && isImageId(selectedId) ? (
+        <span>
+          <kbd>e</kbd> open in your image app · <kbd>Tab</kbd> neighbors · <kbd>f</kbd> fly · <kbd>Esc</kbd> deselect
+        </span>
       ) : selectedId ? (
         <span>
           <kbd>e</kbd> open · <kbd>Tab</kbd> neighbors · <kbd>f</kbd> fly · <kbd>Esc</kbd> deselect
         </span>
       ) : (
         <span>
-          drag to orbit · scroll to zoom · <kbd>?</kbd> keys · <kbd>/</kbd> search
+          drag to orbit · scroll to zoom · <kbd>y</kbd> today · <kbd>?</kbd> keys · <kbd>/</kbd> search
         </span>
       )}
+    </div>
+  )
+}
+
+/** Why dropped pictures can't be saved right now, or null when they can. */
+function dropBlocker(s: AetherState): string | null {
+  if (s.status !== 'ready' || !s.adapter) return 'Open a vault first to add pictures'
+  if (s.adapter.readOnly) return 'This vault is read-only'
+  if (!s.adapter.createAsset) return 'This vault can’t save pictures'
+  return null
+}
+
+/** True when a drag carries files (not text or a link dragged inside the page). */
+function hasFiles(e: DragEvent): boolean {
+  return !!e.dataTransfer && Array.from(e.dataTransfer.types).includes('Files')
+}
+
+/**
+ * Picture files dropped anywhere on the window go into the vault
+ * (`importImages`): into the selected folder, a selected project's Critique
+ * planet, else Inbox; the overlay says which while the files hover. Every
+ * file drag is taken, so a dropped file never navigates the window away.
+ */
+function DropZone() {
+  /** What the overlay says; null while no files are dragged over the window. */
+  const [message, setMessage] = useState<{ text: string; ok: boolean } | null>(null)
+
+  useEffect(() => {
+    // dragenter / dragleave fire for every element crossed: count them to know when the drag left the window.
+    let depth = 0
+    // A drag that started in the page (a picture in a preview carries "Files" in Chromium) is no import.
+    let inside = false
+    const start = () => {
+      inside = true
+    }
+    const end = () => {
+      inside = false
+    }
+    const describe = () => {
+      const s = useAether.getState()
+      const blocker = dropBlocker(s)
+      if (blocker) return { text: blocker, ok: false }
+      const target = s.importTarget()
+      return { text: `Drop pictures into ${target ? `${target}/` : 'the vault'}`, ok: true }
+    }
+    const enter = (e: DragEvent) => {
+      if (inside || !hasFiles(e)) return
+      e.preventDefault()
+      if (depth++ === 0) setMessage(describe())
+    }
+    const over = (e: DragEvent) => {
+      if (inside || !hasFiles(e)) return
+      e.preventDefault()
+      if (e.dataTransfer) e.dataTransfer.dropEffect = dropBlocker(useAether.getState()) ? 'none' : 'copy'
+    }
+    const leave = (e: DragEvent) => {
+      if (inside || !hasFiles(e)) return
+      depth = Math.max(0, depth - 1)
+      if (depth === 0) setMessage(null)
+    }
+    const drop = (e: DragEvent) => {
+      if (inside || !hasFiles(e)) return
+      e.preventDefault()
+      depth = 0
+      setMessage(null)
+      const s = useAether.getState()
+      const blocker = dropBlocker(s)
+      if (blocker) {
+        s.toast(blocker, 'error')
+        return
+      }
+      void importPictureFiles(Array.from(e.dataTransfer?.files ?? []))
+    }
+    window.addEventListener('dragstart', start)
+    window.addEventListener('dragend', end)
+    window.addEventListener('dragenter', enter)
+    window.addEventListener('dragover', over)
+    window.addEventListener('dragleave', leave)
+    window.addEventListener('drop', drop)
+    return () => {
+      window.removeEventListener('dragstart', start)
+      window.removeEventListener('dragend', end)
+      window.removeEventListener('dragenter', enter)
+      window.removeEventListener('dragover', over)
+      window.removeEventListener('dragleave', leave)
+      window.removeEventListener('drop', drop)
+    }
+  }, [])
+
+  if (!message) return null
+  return (
+    <div className="pointer-events-none absolute inset-0 z-[60] grid place-items-center bg-black/45 p-6" aria-live="polite">
+      <div className={cx('panel drop-frame rise flex flex-col items-center gap-2 px-10 py-8 text-center', !message.ok && 'blocked')}>
+        <span className="text-[34px] leading-none" aria-hidden>
+          🖼
+        </span>
+        <span className={cx('text-[15px] font-semibold', message.ok ? 'text-white' : 'text-danger')}>{message.text}</span>
+        {message.ok && <span className="text-[12px] text-dim">png · jpg · webp · gif · bmp · avif — never replaces a file (a taken name gets “ 2”)</span>}
+      </div>
     </div>
   )
 }

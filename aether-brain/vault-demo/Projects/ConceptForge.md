@@ -23,19 +23,21 @@ The trainer exists because [[Deliberate Practice]] needs three things a sketchbo
 
 ## To do
 
-- [ ] Calibrate the pressure curve on the 24 Pro 4K (it flattens above 70%)
+- [ ] Calibrate the pressure curve on the 24 Pro 4K (it flattens above 70%) 📅 2026-10-01
 - [ ] Posable 3D mannequin for any-angle figure reference
 - [ ] Link each Library chapter's "Forge Drill" straight to its timer
 - [ ] Layers (sketch / ink / value) with per-layer opacity
 - [ ] Constructive mode: ghost a faint construction grid that fades as the timer runs
 - [ ] Streak calendar + export drill history as CSV
-- [ ] Ask [[Mira Okafor]] to review a week of graded value studies against her own notes
+- [ ] Ask [[Mira Okafor]] to review a week of graded value studies against her own notes #today
 - [x] Pressure-driven brush size and opacity via PointerEvents ✅ 2026-09-17
 - [x] Reference image dropper with grayscale and grid ✅ 2026-09-19
 - [x] Offline grader with per-drill rubric weights ✅ 2026-09-21
 - [x] Deep Critique with Claude / GPT-4o vision, key stored locally ✅ 2026-09-22
 
 ## Notes
+
+Graded drawings land in the Critique planet as a picture plus a note (the latest: [[2026-09-28 Value Study|a value study]], whose top fix is already on the brief).
 
 The grader is heuristics, not a neural net, and that is fine: it is consistent, instant and honest about what it can't judge. What it *can't* see — anatomy, likeness, story — is exactly what [[Spaced Repetition|spaced review]] of my own old drills is for. Practice logs live in [[Creative Practice]].
 

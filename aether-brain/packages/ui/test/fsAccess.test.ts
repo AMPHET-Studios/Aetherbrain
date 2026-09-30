@@ -7,7 +7,7 @@ import { FsAccessVaultAdapter } from '../src/vault/fsAccess'
 interface FileEntry {
   kind: 'file'
   name: string
-  content: string
+  content: string | Uint8Array
   mtime: number
 }
 interface DirEntry {
@@ -18,6 +18,8 @@ interface DirEntry {
 type Entry = FileEntry | DirEntry
 
 let clock = 1
+/** Names of the files opened (`getFile`) so far: listing pictures must not open them. */
+let opened: string[] = []
 
 class CIFile {
   readonly kind = 'file' as const
@@ -32,17 +34,18 @@ class CIFile {
   }
   async getFile() {
     const e = this.entry()
-    return { lastModified: e.mtime, text: async () => e.content }
+    opened.push(e.name)
+    return new File([typeof e.content === 'string' ? e.content : e.content.slice()], e.name, { lastModified: e.mtime })
   }
   async createWritable() {
-    let buf = ''
+    const parts: (string | Uint8Array)[] = []
     return {
-      write: async (d: string) => {
-        buf += d
+      write: async (d: string | Uint8Array) => {
+        parts.push(d)
       },
       close: async () => {
         const e = this.entry()
-        e.content = buf
+        e.content = parts.every((p) => typeof p === 'string') ? parts.join('') : Uint8Array.from(parts.flatMap((p) => [...(p as Uint8Array)]))
         e.mtime = clock++
       },
     }
@@ -99,7 +102,7 @@ class CIDir {
   }
 }
 
-async function vaultWith(files: Record<string, string>) {
+async function vaultWith(files: Record<string, string | Uint8Array>) {
   const root = new CIDir('vault')
   for (const [path, content] of Object.entries(files)) {
     const parts = path.split('/')
@@ -114,6 +117,7 @@ async function vaultWith(files: Record<string, string>) {
 afterEach(() => {
   vi.unstubAllGlobals()
   sameEntry = 'entry'
+  opened = []
 })
 
 describe('FsAccessVaultAdapter on a case-insensitive disk', () => {
@@ -180,5 +184,70 @@ describe('FsAccessVaultAdapter on a case-insensitive disk', () => {
     expect(await adapter.read('Projects/Portal Game.md')).toContain('title: Portal Game')
     // Stop the adapter's poll.
     await s().openVault(new MemoryVaultAdapter())
+  })
+})
+
+describe('FsAccessVaultAdapter pictures', () => {
+  const PNG = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3])
+  /** The adapter's poll, run once now (the timer is not needed to test what it reports). */
+  const poll = (adapter: FsAccessVaultAdapter) => (adapter as unknown as { poll(): Promise<void> }).poll()
+
+  it('lists the pictures its walk finds without opening one, skipping hidden and ignored folders', async () => {
+    const { adapter } = await vaultWith({
+      'Art/gate.png': PNG,
+      'Art/Ref.JPG': PNG,
+      'Art/Notes.md': '# Notes\n',
+      'Art/brief.txt': 'not a picture',
+      '.trash/old.png': PNG,
+      'node_modules/pkg/logo.png': PNG,
+    })
+    expect((await adapter.list()).map((f) => f.path)).toEqual(['Art/Notes.md'])
+    expect((await adapter.listAssets()).map((a) => a.path).sort()).toEqual(['Art/Ref.JPG', 'Art/gate.png'])
+    expect(opened).toEqual(['Notes.md'])
+  })
+
+  it('writes a new picture only where nothing is (any letter case), and previews it', async () => {
+    const { root, adapter } = await vaultWith({ 'Art/gate.png': PNG, 'Art/shots.png/one.md': '# one\n' })
+    const changes: unknown[] = []
+    const stop = adapter.watch((c) => changes.push(...c))
+    await adapter.list()
+    // Another letter case, the same name, a folder named like a picture: all taken.
+    for (const taken of ['Art/GATE.png', 'Art/gate.png', 'Art/Shots.png']) {
+      const err = await adapter.createAsset(taken, PNG).catch((e: unknown) => e)
+      expect(isExistsError(err)).toBe(true)
+    }
+    expect((await root.getDirectoryHandle('Art')).find('gate.png')).toMatchObject({ content: PNG })
+    await expect(adapter.createAsset('Art/brief.txt', PNG)).rejects.toThrow('Not a picture')
+    await adapter.createAsset('New/Dir/sketch.png', PNG)
+    const dir = await (await root.getDirectoryHandle('New')).getDirectoryHandle('Dir')
+    expect(dir.find('sketch.png')).toMatchObject({ kind: 'file', content: PNG })
+    expect(changes).toEqual([{ kind: 'add', path: 'New/Dir/sketch.png', mtime: expect.any(Number), size: PNG.byteLength }])
+    expect((await adapter.listAssets()).map((a) => a.path)).toContain('New/Dir/sketch.png')
+    // No canvas here (node): the picture itself is its preview.
+    const thumb = await adapter.thumbnail('New/Dir/sketch.png', 128)
+    expect(new Uint8Array(await thumb!.arrayBuffer())).toEqual(PNG)
+    expect(await adapter.thumbnail('Art/missing.png', 128)).toBeNull()
+    stop()
+  })
+
+  it('reports pictures added and removed outside the app, and not the ones it wrote', async () => {
+    const { root, adapter } = await vaultWith({ 'Art/gate.png': PNG, 'Art/Notes.md': '# Notes\n' })
+    const changes: { kind: string; path: string }[] = []
+    const stop = adapter.watch((c) => changes.push(...c))
+    await adapter.list()
+    await adapter.createAsset('Art/mine.png', PNG)
+    changes.length = 0
+    const art = await root.getDirectoryHandle('Art')
+    art.entries.set('theirs.webp', { kind: 'file', name: 'theirs.webp', content: PNG, mtime: clock++ })
+    await art.removeEntry('gate.png')
+    await poll(adapter)
+    expect(changes).toEqual([
+      { kind: 'add', path: 'Art/theirs.webp' },
+      { kind: 'unlink', path: 'Art/gate.png' },
+    ])
+    changes.length = 0
+    await poll(adapter)
+    expect(changes).toEqual([])
+    stop()
   })
 })
