@@ -5,8 +5,11 @@ import { BrainController } from '../src/BrainController'
 import { ThumbLayer, thumbTargets, type ThumbTargets, type ThumbView } from '../src/scene/thumbLayer'
 import {
   THUMB_MAX_IN_FLIGHT,
+  THUMB_RETRY_MS,
   THUMB_REQUEST,
   THUMB_SIZE,
+  thumbHalf,
+  thumbPickHit,
   ThumbScheduler,
   claimSlot,
   coverRect,
@@ -118,6 +121,26 @@ describe('thumbnail slots', () => {
   })
 })
 
+describe('picking pictures', () => {
+  it('hits a picture anywhere on its square as drawn, grown when hovered or selected', () => {
+    // A 52 px moon shows a picture 2.4 radii wide: 62 px to each side, 81 px when selected.
+    const r = 52
+    expect(thumbHalf(3, -1, -1)).toBeCloseTo(1.2)
+    expect(thumbHalf(3, 3, -1)).toBeCloseTo(1.56)
+    expect(thumbHalf(3, -1, 3)).toBeCloseTo(1.38)
+    // The corner of a selected picture (a circle of 1.2 r + 5 missed it).
+    expect(thumbPickHit(78, 78, r, true, thumbHalf(3, 3, -1))).toBe(true)
+    expect(thumbPickHit(78, 78, r, true, thumbHalf(3, -1, -1))).toBe(false)
+    expect(thumbPickHit(90, 0, r, true, thumbHalf(3, 3, -1))).toBe(false)
+    // A body is round.
+    expect(thumbPickHit(40, 40, r, false, 1)).toBe(true)
+    expect(thumbPickHit(45, 45, r, false, 1)).toBe(false)
+    // Tiny on screen: never under 9 px.
+    expect(thumbPickHit(8, 0, 1, true, thumbHalf(0, -1, -1))).toBe(true)
+    expect(thumbPickHit(8, 0, 1, false, 1)).toBe(true)
+  })
+})
+
 describe('ThumbScheduler', () => {
   it('keeps at most six loads in flight and starts the next as one finishes', async () => {
     const src = manualSource()
@@ -177,6 +200,22 @@ describe('ThumbScheduler', () => {
     s.want(keys, paths, 2, 1250)
     s.retryFailed()
     expect(src.started).toHaveLength(4)
+
+    // A failure is tried again once it is a minute old (a thumbnail that timed out while a drive woke up).
+    const lateSrc = manualSource()
+    const again = new ThumbScheduler(lateSrc, 4)
+    again.want([keys[0]!], [paths[0]!], 1, 0)
+    lateSrc.resolve('Art/null.png', null)
+    await settle()
+    again.want([keys[0]!], [paths[0]!], 1, THUMB_RETRY_MS - 1)
+    expect(lateSrc.started).toHaveLength(1)
+    expect(again.hasFailed(keys[0]!)).toBe(true)
+    again.want([keys[0]!], [paths[0]!], 1, THUMB_RETRY_MS)
+    expect(lateSrc.started).toHaveLength(2)
+    lateSrc.resolve('Art/null.png', 'back')
+    await settle()
+    expect(again.layerOf(keys[0]!)).toBeGreaterThanOrEqual(0)
+    expect(again.hasFailed(keys[0]!)).toBe(false)
 
     // A loader that throws synchronously counts as a failure too.
     const throwing = new ThumbScheduler<string>({

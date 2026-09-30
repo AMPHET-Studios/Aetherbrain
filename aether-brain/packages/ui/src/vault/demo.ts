@@ -95,9 +95,21 @@ function isMemoryAsset(v: unknown): v is MemoryAsset {
   return !!a && typeof a.path === 'string' && a.data instanceof Uint8Array && typeof a.mtime === 'number'
 }
 
+/**
+ * True once this session read the saved overlay. Saving rewrites the whole
+ * overlay from the in-memory vault, so a session that could not read it (a
+ * tab of an older version blocking the upgrade) must never save: it would
+ * erase every earlier demo edit.
+ */
+let overlayRead = false
+
 async function readOverlay(): Promise<Overlay | null> {
   const db = await openDb()
-  if (!db) return null
+  if (!db) {
+    if (typeof indexedDB !== 'undefined') console.warn('[aether] demo edits are not saved this time: close other Aether Brain tabs and reload')
+    return null
+  }
+  overlayRead = true
   const out: Overlay = { files: new Map(), folders: [], assets: [] }
   for (const [key, value] of await readAll(db, STORE)) {
     if (key === FOLDERS_KEY) out.folders = Array.isArray(value) ? value.filter((x): x is string => typeof x === 'string') : []
@@ -113,6 +125,7 @@ let persistTimer: ReturnType<typeof setTimeout> | null = null
 let savedAssets = new Map<string, number>()
 
 function persistOverlay(base: Map<string, string>, files: Map<string, VaultFile>, folders: Set<string>, assets: Map<string, MemoryAsset>): void {
+  if (!overlayRead) return
   if (persistTimer) clearTimeout(persistTimer)
   // Copy now: the adapter keeps mutating its own maps and set (picture bytes are never changed in place).
   const snapshot = [...files.values()].map((f) => ({ path: f.path, content: f.content, mtime: f.mtime }))

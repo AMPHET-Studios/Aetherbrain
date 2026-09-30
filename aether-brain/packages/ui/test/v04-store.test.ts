@@ -285,6 +285,24 @@ describe('pictures', () => {
 })
 
 describe('importImages', () => {
+  it('rebuilds the graph once for a whole drop, and once for a critique (adapters report each file as it is written)', async () => {
+    const { s } = await freshStore()
+    // A plain memory vault: it reports every new file to the app synchronously, like the desktop adapter.
+    const vault = new MemoryVaultAdapter([{ path: 'Projects/Gate.md', content: project('Gate') }], { folders: ['Projects/Gate'] })
+    await s().openVault(vault)
+    const before = s().revision
+    const got = await s().importImages(['a.png', 'b.png', 'c.png'].map((name) => ({ name, data: bytes(5) })), 'Projects/Gate/Art')
+    expect(got).toEqual(['Projects/Gate/Art/a.png', 'Projects/Gate/Art/b.png', 'Projects/Gate/Art/c.png'])
+    expect(s().revision).toBe(before + 1)
+    expect([...s().assets.keys()].filter((p) => p.startsWith('Projects/Gate/Art/'))).toHaveLength(3)
+    expect(s().folders.has('Projects/Gate/Art')).toBe(true)
+    const mid = s().revision
+    const saved = await s().saveCritique({ projectId: 'Projects/Gate', title: 'Study', png: PNG })
+    expect(s().revision).toBe(mid + 1)
+    expect(s().notes.has(saved.noteId)).toBe(true)
+    expect(s().assets.has(saved.imagePath)).toBe(true)
+  })
+
   const files = (): VaultFile[] => [
     { path: 'Projects/Gate.md', content: project('Gate') },
     { path: 'Projects/Gate/Art/Study.md', content: '# Study\n' },

@@ -205,6 +205,11 @@ describe('critique notes', () => {
       ],
     })
     expect(normalizeGrade(null)).toEqual({ grade: null, score: null, drill: null, scores: [], fixes: [], strengths: [], deep: null })
+    // A criterion named like a score field is a criterion, not the overall score.
+    expect(normalizeGrade({ letter: 'B', scores: { line: 88, value: 74, form: 70 } })).toMatchObject({ grade: 'B', score: null })
+    expect(normalizeGrade({ letter: 'B', breakdown: { line: 88, total: 60 } }).score).toBeNull()
+    expect(normalizeGrade({ letter: 'B', score: '' }).score).toBeNull()
+    expect(normalizeGrade({ result: { letter: 'C', score: '71%' } })).toMatchObject({ grade: 'C', score: 71 })
     expect(normalizeGrade('B')).toMatchObject({ grade: null })
   })
 
@@ -215,6 +220,10 @@ describe('critique notes', () => {
     expect(cleanScore('0.5')).toBe(50)
     expect(cleanScore(140)).toBeNull()
     expect(cleanScore(-1)).toBeNull()
+    expect(cleanScore('')).toBeNull()
+    expect(cleanScore('   ')).toBeNull()
+    expect(cleanScore('82%')).toBe(82)
+    expect(cleanScore(' 64 / 100 ')).toBe(64)
     expect(critiqueBaseName('Value: study / "night"?', '2026-09-30')).toBe('2026-09-30 Value study night')
     expect(critiqueBaseName('   ', '2026-09-30')).toBe('2026-09-30 Drawing')
   })
@@ -252,6 +261,12 @@ describe('images', () => {
     expect(r.resolve('missing.png')).toBeNull()
     expect(r.resolve('Other/gate.png')).toBeNull()
     expect(r.resolve('../../../../x.png', 'a')).toBeNull()
+    // Folders in the link count even when only one file has that name.
+    const one = new AssetResolver(['Refs/gate.png'])
+    expect(one.resolve('Art/gate.png', 'Notes')).toBeNull()
+    expect(one.resolve('../Art/gate.png', 'Notes')).toBeNull()
+    expect(one.resolve('Refs/gate.png', 'Notes')).toBe('Refs/gate.png')
+    expect(one.resolve('gate.png', 'Notes')).toBe('Refs/gate.png')
   })
 
   const files = {

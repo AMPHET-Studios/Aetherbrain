@@ -84,7 +84,7 @@ const REASON_ORDER: Record<BriefReason, number> = { overdue: 0, due: 1, schedule
 
 /** True for a project the brief proposes a next task for. */
 export function isActiveProject(note: ParsedNote): boolean {
-  if (note.meta.area === 'archive' || !isProjectNote(note)) return false
+  if (note.meta.area === 'archive' || !isProject(note)) return false
   return !INACTIVE.has((note.meta.status ?? '').trim().toLowerCase())
 }
 
@@ -119,25 +119,36 @@ function reasonOf(t: TaskItem, date: string, dailyNote: boolean): BriefReason | 
   return null
 }
 
+/** `isProjectNote` per parsed note object (a note is re-parsed into a new object when its file changes). */
+const projectCache = new WeakMap<ParsedNote, boolean>()
+
+function isProject(note: ParsedNote): boolean {
+  let p = projectCache.get(note)
+  if (p === undefined) {
+    p = isProjectNote(note)
+    projectCache.set(note, p)
+  }
+  return p
+}
+
+const byId = (a: ParsedNote, b: ParsedNote): number => (a.meta.id < b.meta.id ? -1 : a.meta.id > b.meta.id ? 1 : 0)
+
 /**
  * Home folder → project note, for every project (first by id wins a folder).
  * A note inside a project's home folder belongs to that project.
  */
-function projectHomes(notes: ParsedNote[], folders: Set<string>): { homes: Map<string, ParsedNote>; projects: ParsedNote[] } {
+function projectHomes(projects: ParsedNote[], folders: Set<string>): Map<string, ParsedNote> {
   const homes = new Map<string, ParsedNote>()
-  const projects: ParsedNote[] = []
-  for (const n of notes) {
-    if (!isProjectNote(n)) continue
-    projects.push(n)
+  for (const n of projects) {
     const home = projectFolderOf(n, folders)
     if (home && !homes.has(home)) homes.set(home, n)
   }
-  return { homes, projects }
+  return homes
 }
 
 /** The project a note belongs to: itself, or the nearest project home folder above it. */
 function projectOf(note: ParsedNote, homes: Map<string, ParsedNote>): ParsedNote | null {
-  if (isProjectNote(note)) return note
+  if (isProject(note)) return note
   for (let f = note.meta.folder; ; f = folderOf(f)) {
     const p = homes.get(f)
     if (p) return p
@@ -150,8 +161,18 @@ export function dailyBrief(input: Iterable<ParsedNote>, opts: BriefOptions = {})
   const date = opts.date ?? todayIso()
   const maxNext = opts.maxNext ?? 8
   const cap = opts.maxPerSection ?? 100
-  const notes = [...input].sort((a, b) => (a.meta.id < b.meta.id ? -1 : a.meta.id > b.meta.id ? 1 : 0))
-  const { homes, projects } = projectHomes(notes, opts.folders ?? new Set())
+  // One pass keeps what the brief can use: projects and notes with tasks. Only
+  // those get sorted (by id: first project wins a folder, rows keep a stable
+  // order); a big vault's task-free notes cost one memoized check each.
+  const projects: ParsedNote[] = []
+  const withTasks: ParsedNote[] = []
+  for (const n of input) {
+    if (isProject(n)) projects.push(n)
+    if (n.meta.area !== 'archive' && tasksOf(n).length) withTasks.push(n)
+  }
+  projects.sort(byId)
+  withTasks.sort(byId)
+  const homes = projectHomes(projects, opts.folders ?? new Set())
 
   const make = (n: ParsedNote, t: TaskItem, reason: BriefReason, project: ParsedNote | null): BriefTask => ({
     noteId: n.meta.id,
@@ -171,10 +192,8 @@ export function dailyBrief(input: Iterable<ParsedNote>, opts: BriefOptions = {})
   const overdue: BriefTask[] = []
   const today: BriefTask[] = []
   const covered = new Set<NoteId>()
-  for (const n of notes) {
-    if (n.meta.area === 'archive') continue
+  for (const n of withTasks) {
     const tasks = tasksOf(n)
-    if (!tasks.length) continue
     const daily = isDailyName(basenameOf(n.meta.path)) && basenameOf(n.meta.path) === date
     let project: ParsedNote | null | undefined
     for (const t of tasks) {

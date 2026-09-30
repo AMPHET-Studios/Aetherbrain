@@ -77,10 +77,12 @@ export class AssetResolver {
   private byPath = new Map<string, string>()
   private byName = new Map<string, string[]>()
 
+  /** `assets`: normalized vault paths (the keys of an `assetMap`). */
   constructor(assets: Iterable<string>) {
     for (const p of assets) {
-      this.byPath.set(p.toLowerCase(), p)
-      const name = imageFileName(p).toLowerCase()
+      const lower = p.toLowerCase()
+      this.byPath.set(lower, p)
+      const name = lower.slice(lower.lastIndexOf('/') + 1)
       const list = this.byName.get(name)
       if (list) list.push(p)
       else this.byName.set(name, [p])
@@ -106,11 +108,12 @@ export class AssetResolver {
     }
     const cands = this.byName.get(imageFileName(raw).toLowerCase())
     if (!cands?.length) return null
-    if (cands.length === 1) return cands[0] ?? null
-    // A path written with folders must end with them (`Art/gate.png` ≠ `Refs/gate.png`).
+    // A path written with folders must end with them (`Art/gate.png` ≠ `Refs/gate.png`),
+    // even when only one file has that name: Obsidian leaves such a link unresolved.
     const suffix = raw.includes('/') ? `/${raw.toLowerCase()}` : null
     const fitting = suffix ? cands.filter((c) => `/${c.toLowerCase()}`.endsWith(suffix)) : cands
     if (!fitting.length) return null
+    if (fitting.length === 1) return fitting[0] ?? null
     return [...fitting].sort((a, b) => nearness(b, fromFolder) - nearness(a, fromFolder) || a.length - b.length || a.localeCompare(b))[0] ?? null
   }
 }

@@ -225,9 +225,13 @@ export function computeSystemLayout(input: SystemInput): SystemLayout {
   const place = (p: number, kids: ArrayLike<number>, base: number, dir: number, seed: number): number => {
     moons.length = 0
     planets.length = 0
+    let hub = -1
     for (let k = 0; k < kids.length; k++) {
       const c = kids[k]!
-      if (p >= 0 && input.kind[c] === KIND_TODAY) hangAbove(c, p)
+      if (p >= 0 && input.kind[c] === KIND_TODAY) {
+        hangAbove(c, p)
+        hub = c
+      }
       else if (!hasChildren(c) && input.kind[c] !== KIND_FOLDER) moons.push(c)
       else planets.push(c)
     }
@@ -309,6 +313,9 @@ export function computeSystemLayout(input: SystemInput): SystemLayout {
       }
       outer = R + maxE
       base = R + maxE + GAP
+      // A shell covers the poles too: the hub hangs clear above it. (Rings stay
+      // within 0.45 rad of the equator, so their moons never come near the axis.)
+      if (hub >= 0) orbitRadius[hub] = Math.max(orbitRadius[hub]!, R + maxE + GAP + bodyRadius(hub) * 1.6 + 1)
     } else {
       fillRings(moons)
     }

@@ -53,7 +53,7 @@ import {
 import { shiftTarget } from './follow'
 import { todayLabel } from './labels'
 import { ThumbLayer, thumbTargets, type ThumbTargets } from './thumbLayer'
-import { THUMB_SCALE } from './thumbs'
+import { thumbHalf, thumbPickHit } from './thumbs'
 
 const HOME_POS: [number, number, number] = [0, 150, 460]
 const BG = '#04050d'
@@ -621,6 +621,7 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
     }
     const pick = (x: number, y: number): number => {
       const s = buffers.screen
+      const selI = controller.selected ? (buffers.graph.index.get(controller.selected) ?? -1) : -1
       let best = -1
       let bestD = Infinity
       for (let i = 0; i < buffers.count; i++) {
@@ -628,9 +629,7 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
         const sy = s[i * 4 + 1] ?? 0
         const depth = s[i * 4 + 2] ?? 2
         if (depth > 1 || depth < -1) continue
-        const rad = pickRadius(buffers, i)
-        const d = Math.hypot(sx - x, sy - y)
-        if (d <= rad && depth < bestD) {
+        if (hits(buffers, i, sx - x, sy - y, selI, st.hovered) && depth < bestD) {
           bestD = depth
           best = i
         }
@@ -735,13 +734,12 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
       const s = buffers.screen
       const px = st.pointer.x
       const py = st.pointer.y
+      const sel = controller.selected ? (g.index.get(controller.selected) ?? -1) : -1
       let bestD = Infinity
       for (let i = 0; i < n; i++) {
         const depth = s[i * 4 + 2] ?? 2
         if (depth > 1 || depth < -1) continue
-        const rad = pickRadius(buffers, i)
-        const d = Math.hypot((s[i * 4] ?? 0) - px, (s[i * 4 + 1] ?? 0) - py)
-        if (d <= rad && depth < bestD) {
+        if (hits(buffers, i, (s[i * 4] ?? 0) - px, (s[i * 4 + 1] ?? 0) - py, sel, st.hovered) && depth < bestD) {
           bestD = depth
           hoveredIndex = i
         }
@@ -854,10 +852,14 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
   )
 }
 
-/** Screen radius (px) within which the pointer hits node `i`: its body, or its picture while it shows one. */
-function pickRadius(b: Buffers, i: number): number {
-  const r = b.screen[i * 4 + 3] ?? 0
-  return Math.max(9, (b.thumbs.shown[i] === 1 ? (r * THUMB_SCALE) / 2 : r) + 5)
+/**
+ * True when the pointer, (dx, dy) px from node `i`'s projected centre, hits
+ * it: its body, or while it shows one, its picture as drawn (grown when
+ * hovered or selected).
+ */
+function hits(b: Buffers, i: number, dx: number, dy: number, selI: number, hovI: number): boolean {
+  const picture = b.thumbs.shown[i] === 1
+  return thumbPickHit(dx, dy, b.screen[i * 4 + 3] ?? 0, picture, picture ? thumbHalf(i, selI, hovI) : 1)
 }
 
 /* ------------------------------------------------------------------ */
@@ -1112,8 +1114,6 @@ const LABEL_FONTS = [
 const LABEL_MIN_PX = 10
 const PLANET_LABEL_MIN_PX = 6
 const ZOOM_LABELS = 60
-/** A picture reaches THUMB_SCALE / 2 radii below its centre (a little more when selected): its label goes under it. */
-const THUMB_LABEL_LIFT = THUMB_SCALE / 2 + 0.1
 
 function drawLabels(
   canvas: HTMLCanvasElement | null,
@@ -1151,8 +1151,8 @@ function drawLabels(
     if (depth > 1 || depth < -1) return
     const x = s[i * 4] ?? 0
     const y = s[i * 4 + 1] ?? 0
-    // Below the picture when the node shows one (it is wider than the core).
-    const r = (s[i * 4 + 3] ?? 0) * (shown[i] === 1 ? THUMB_LABEL_LIFT : 1)
+    // Below the picture when the node shows one (it is wider than the core, and grows when hovered or selected).
+    const r = (s[i * 4 + 3] ?? 0) * (shown[i] === 1 ? thumbHalf(i, selI, hovI) + 0.1 : 1)
     if (x < -40 || x > width + 40 || y < -20 || y > height + 20) return
     const node = g.nodes[i]!
     const filtered = highlight !== null && !highlight.has(node.id) && emphasis < 2

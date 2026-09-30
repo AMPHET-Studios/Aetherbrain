@@ -796,6 +796,28 @@ export const useAether = create<AetherState>()((set, get) => {
     if (get().graph?.index.has(id)) showNode(id)
   }
 
+  /**
+   * Changes held back while a multi-file write runs (`batched`): adapters
+   * report each new file synchronously, and applying each one would rebuild
+   * the whole graph once per picture of a drop. The writes' own changes and
+   * the adapter's echoes are applied together, once, when the batch ends.
+   */
+  let holding = 0
+  let held: VaultChange[] = []
+  const batched = async <T>(fn: () => Promise<T>): Promise<T> => {
+    holding++
+    try {
+      return await fn()
+    } finally {
+      holding--
+      if (holding === 0 && held.length) {
+        const changes = held
+        held = []
+        get().applyExternal(changes)
+      }
+    }
+  }
+
   /** Create a folder (and its parents) unless the vault has it; applied at once (the adapter's addDir echo changes nothing). */
   const ensureFolder = async (path: string): Promise<void> => {
     const { adapter } = get()
@@ -1245,7 +1267,50 @@ export const useAether = create<AetherState>()((set, get) => {
    * critique note next to it under the same name (a name is used only when
    * both files are free), both applied at once.
    */
-  const fileCritique = async (input: CritiqueSave): Promise<CritiqueSaved> => {
+  /**
+   * The writing half of `importImages`: make the target folder when needed,
+   * then each picture create-only. Null (with a toast) when the folder can't
+   * be made. Runs inside `batched`, so the whole drop is one rebuild.
+   */
+  const writePictures = async (
+    target: string,
+    pictures: { name: string; data: Uint8Array }[],
+  ): Promise<{ dir: string; written: { path: string; size: number }[] } | null> => {
+    let dir = target
+    if (dir && !get().folders.has(dir)) {
+      // A folder to make first (Inbox, a Critique planet): only under a name every OS takes.
+      const clean = cleanFolderPath(dir, folderSpelling)
+      if ('error' in clean) {
+        get().toast(clean.error, 'error')
+        return null
+      }
+      dir = clean.path
+      try {
+        await ensureFolder(dir)
+      } catch (err) {
+        get().toast(`Could not create ${dir}: ${errText(err)}`, 'error')
+        return null
+      }
+    }
+    const taken = takenImages()
+    const written: { path: string; size: number }[] = []
+    const failed: string[] = []
+    for (const p of pictures) {
+      const m = IMAGE_NAME.exec(p.name)
+      try {
+        written.push({ path: await createAssetNew(dir, m?.[1] ?? p.name, m?.[2] ?? '', p.data, taken), size: p.data.byteLength })
+      } catch (err) {
+        failed.push(`${p.name}: ${errText(err)}`)
+      }
+    }
+    applyImageAdds(written)
+    if (failed.length) get().toast(`Could not save ${failed[0]}${failed.length > 1 ? ` (and ${failed.length - 1} more)` : ''}`, 'error')
+    return { dir, written }
+  }
+
+  const fileCritique = (input: CritiqueSave): Promise<CritiqueSaved> => batched(() => writeCritique(input))
+
+  const writeCritique = async (input: CritiqueSave): Promise<CritiqueSaved> => {
     const { adapter, status } = get()
     if (adapter && status === 'loading') throw new Error('The vault is still loading; try again in a moment')
     if (!adapter || status !== 'ready') throw new Error('Open your vault in Aether Brain first')
@@ -1328,6 +1393,8 @@ export const useAether = create<AetherState>()((set, get) => {
     async openVault(adapter) {
       unwatch?.()
       unwatch = null
+      // Changes a batch held for the previous vault are not this one's.
+      held = []
       // The previous vault's pictures are not this one's.
       controller.thumbnails = null
       set({
@@ -1375,6 +1442,10 @@ export const useAether = create<AetherState>()((set, get) => {
     },
 
     applyExternal(changes) {
+      if (holding > 0) {
+        held.push(...changes)
+        return
+      }
       const { notes, search, folders, assets, editorId, dirty } = get()
       const next = applyChanges(notes, changes, search, { folders, assets, graph: graphOptions })
       if (editorId && dirty && next.touched.includes(editorId)) {
@@ -2137,36 +2208,11 @@ export const useAether = create<AetherState>()((set, get) => {
       }
       if (tooBig.length) get().toast(`${tooBig.length === 1 ? truncate(tooBig[0] ?? '', 48) : plural(tooBig.length, 'picture')} over 40 MB, not added`, 'error')
       if (!pictures.length) return []
-      let dir = get().importTarget(folder)
-      if (dir === null) return []
-      if (dir && !get().folders.has(dir)) {
-        // A folder to make first (Inbox, a Critique planet): only under a name every OS takes.
-        const clean = cleanFolderPath(dir, folderSpelling)
-        if ('error' in clean) {
-          get().toast(clean.error, 'error')
-          return []
-        }
-        dir = clean.path
-        try {
-          await ensureFolder(dir)
-        } catch (err) {
-          get().toast(`Could not create ${dir}: ${errText(err)}`, 'error')
-          return []
-        }
-      }
-      const taken = takenImages()
-      const written: { path: string; size: number }[] = []
-      const failed: string[] = []
-      for (const p of pictures) {
-        const m = IMAGE_NAME.exec(p.name)
-        try {
-          written.push({ path: await createAssetNew(dir, m?.[1] ?? p.name, m?.[2] ?? '', p.data, taken), size: p.data.byteLength })
-        } catch (err) {
-          failed.push(`${p.name}: ${errText(err)}`)
-        }
-      }
-      applyImageAdds(written)
-      if (failed.length) get().toast(`Could not save ${failed[0]}${failed.length > 1 ? ` (and ${failed.length - 1} more)` : ''}`, 'error')
+      const target = get().importTarget(folder)
+      if (target === null) return []
+      const done = await batched(() => writePictures(target, pictures))
+      if (!done) return []
+      const { dir, written } = done
       const first = written[0]?.path
       if (first === undefined) return []
       if (get().graph?.index.has(imageKey(first))) get().select(imageKey(first))

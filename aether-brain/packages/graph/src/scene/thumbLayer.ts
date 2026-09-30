@@ -17,8 +17,10 @@ import type { BrainController, ThumbnailLoader } from '../BrainController'
 import { createThumbMaterial } from './materials'
 import {
   THUMB_LAYERS,
+  THUMB_HOVER_SCALE,
   THUMB_REQUEST,
   THUMB_SCALE,
+  THUMB_SELECTED_SCALE,
   THUMB_SIZE,
   THUMB_TICK_MS,
   ThumbScheduler,
@@ -33,9 +35,6 @@ const LAYER_BYTES = THUMB_SIZE * THUMB_SIZE * 4
 const FLUSH_MS = 120
 /** What shows through the transparent parts of a picture: a dark card. */
 const BACKDROP = '#151827'
-/** Hovered and selected pictures grow like the cores do. */
-const HOVER_SCALE = 1.15
-const SELECTED_SCALE = 1.3
 
 /** The image nodes of one graph, as the thumbnail layer needs them. */
 export interface ThumbTargets {
@@ -215,8 +214,8 @@ export class ThumbLayer {
       center[j * 3 + 1] = pos[i * 3 + 1] ?? 0
       center[j * 3 + 2] = pos[i * 3 + 2] ?? 0
       let s = (view.radii[i] ?? 1) * THUMB_SCALE
-      if (i === selI) s *= SELECTED_SCALE
-      else if (i === hovI) s *= HOVER_SCALE
+      if (i === selI) s *= THUMB_SELECTED_SCALE
+      else if (i === hovI) s *= THUMB_HOVER_SCALE
       size[j] = s
       alpha[j] = glow[i * 4 + 1] ?? 1
     }

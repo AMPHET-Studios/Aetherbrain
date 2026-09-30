@@ -357,6 +357,34 @@ describe('computeSystemLayout', () => {
     expect(Array.from(a.subarray(0, h * 3))).toEqual(Array.from(b))
   })
 
+  it('hangs the hub clear above a shell of many loose root notes', () => {
+    // Around 140 of these moons the shell's radius is the hub's usual height; with more, the shell would enclose it.
+    for (const m of [60, 130, 142, 150, 400]) {
+      const specs: Spec[] = [folder('folder:', null, 8), ...notes('folder:', m), { id: 'today:', parent: 'folder:', kind: 3, radius: 4.6 }]
+      const h = specs.length - 1
+      const layout = computeSystemLayout(input(specs))
+      expect(layout.speed[h]).toBe(0)
+      for (const t of [0, 3.3, 17, 41]) {
+        const pos = positionsAt(layout, t)
+        const hx = pos[h * 3]!
+        const hy = pos[h * 3 + 1]!
+        const hz = pos[h * 3 + 2]!
+        expect(hx).toBeCloseTo(0, 4)
+        expect(hz).toBeCloseTo(0, 4)
+        let closest = Infinity
+        let top = -Infinity
+        for (let i = 1; i < h; i++) {
+          closest = Math.min(closest, Math.hypot(pos[i * 3]! - hx, pos[i * 3 + 1]! - hy, pos[i * 3 + 2]! - hz))
+          top = Math.max(top, pos[i * 3 + 1]!)
+        }
+        // Above the shell, not buried in it.
+        expect(hy, `m=${m} t=${t}`).toBeGreaterThan(top + 2.6)
+        // Never inside a moon: at least the hub's and the largest moon's radii apart.
+        expect(closest, `m=${m} t=${t}`).toBeGreaterThan(4.6 + 2.6)
+      }
+    }
+  })
+
   it('moves the hub with a dragged sun and never makes it a second root', () => {
     const specs = [...vault(), { id: 'today:', parent: null, kind: 3 as const, radius: 4.6 }]
     const h = specs.length - 1

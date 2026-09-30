@@ -22,8 +22,33 @@ export const THUMB_MIN_PX = 5
 export const THUMB_MAX_IN_FLIGHT = 6
 /** How often the wanted pictures are ranked again (ms). */
 export const THUMB_TICK_MS = 250
+/**
+ * A failed picture is tried again after this long (ms, in the clock `want`
+ * is given): not every tick, but a thumbnail that timed out while a drive
+ * woke up does come back.
+ */
+export const THUMB_RETRY_MS = 60_000
 /** Billboard width over the node's radius. */
 export const THUMB_SCALE = 2.4
+/** Hovered and selected pictures grow like the cores do. */
+export const THUMB_HOVER_SCALE = 1.15
+export const THUMB_SELECTED_SCALE = 1.3
+
+/** Half the drawn width of node `i`'s picture over its projected radius (hover and selection grow it). */
+export function thumbHalf(i: number, selI: number, hovI: number): number {
+  return (THUMB_SCALE / 2) * (i === selI ? THUMB_SELECTED_SCALE : i === hovI ? THUMB_HOVER_SCALE : 1)
+}
+
+/**
+ * True when the pointer, (dx, dy) px from a node's projected centre, hits it:
+ * a picture is hit anywhere on its square as drawn (plus a 5 px margin, which
+ * also covers the billboard's small shift toward the camera); a body within
+ * its projected radius plus 5 px, never less than 9 px.
+ */
+export function thumbPickHit(dx: number, dy: number, radiusPx: number, picture: boolean, half: number): boolean {
+  if (picture) return Math.max(Math.abs(dx), Math.abs(dy)) <= Math.max(9, radiusPx * half + 5)
+  return Math.hypot(dx, dy) <= Math.max(9, radiusPx + 5)
+}
 
 /** Identity of one version of a picture: its path, plus mtime and size so an edited file loads again. */
 export function thumbKey(image: Pick<ImageNodeInfo, 'path' | 'mtime' | 'size'>): string {
@@ -155,7 +180,8 @@ interface Flight {
  * and never the same path twice at once. A finished load claims a layer
  * (least recently wanted goes first) and is stored; the next wanted picture
  * starts right away. Failures (null or a rejection) are remembered per key
- * and not retried until `retryFailed` or a new key (the file changed).
+ * and retried only after THUMB_RETRY_MS, on `retryFailed` or with a new key
+ * (the file changed).
  * `reset` (another vault) forgets everything and drops the loads in flight.
  */
 export class ThumbScheduler<P> {
@@ -163,7 +189,8 @@ export class ThumbScheduler<P> {
   /** Bumped whenever a layer changes hands: the renderer maps nodes to layers again. */
   version = 0
   private readonly inFlight = new Map<string, Flight>()
-  private readonly failed = new Set<string>()
+  /** Failed keys → when they failed (the last `want` time then). */
+  private readonly failed = new Map<string, number>()
   private generation = 0
   private readonly wantedKeys: string[] = []
   private readonly wantedPaths: string[] = []
@@ -187,8 +214,10 @@ export class ThumbScheduler<P> {
     return this.table.layerOf.get(key) ?? -1
   }
 
+  /** True while `key`'s last failure is recent (not yet due for another try). */
   hasFailed(key: string): boolean {
-    return this.failed.has(key)
+    const at = this.failed.get(key)
+    return at !== undefined && this.wantedAt - at < THUMB_RETRY_MS
   }
 
   /** The pictures wanted now (`count` entries of the parallel `keys` / `paths`, biggest first). */
@@ -234,7 +263,7 @@ export class ThumbScheduler<P> {
     for (let k = 0; k < this.wantedKeys.length && this.inFlight.size < this.maxInFlight; k++) {
       const key = this.wantedKeys[k]!
       const path = this.wantedPaths[k]!
-      if (this.table.layerOf.has(key) || this.failed.has(key) || this.inFlight.has(path)) continue
+      if (this.table.layerOf.has(key) || this.hasFailed(key) || this.inFlight.has(path)) continue
       this.start(key, path)
     }
   }
@@ -259,8 +288,9 @@ export class ThumbScheduler<P> {
     if (gen !== this.generation) return
     if (this.inFlight.get(path) === flight) this.inFlight.delete(path)
     if (picture === null) {
-      this.failed.add(flight.key)
+      this.failed.set(flight.key, this.wantedAt)
     } else {
+      this.failed.delete(flight.key)
       const layer = claimSlot(this.table, flight.key, flight.wantedAt)
       if (layer >= 0) {
         try {
@@ -268,7 +298,7 @@ export class ThumbScheduler<P> {
           this.version++
         } catch {
           releaseSlot(this.table, layer)
-          this.failed.add(flight.key)
+          this.failed.set(flight.key, this.wantedAt)
           this.version++
         }
       }

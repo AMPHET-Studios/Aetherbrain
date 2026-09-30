@@ -73,7 +73,9 @@ export function buildGraph(notes: Map<NoteId, ParsedNote>, opts: BuildGraphOptio
   const ghosts = opts.ghosts ?? true
   const resolver = new LinkResolver(notes.values())
   const assets = opts.images?.all ?? null
-  const assetResolver = assets && assets.size ? new AssetResolver(assets.keys()) : null
+  // Built on the first picture link only, and kept per asset map (a note edit keeps the map).
+  let assetResolver: AssetResolver | null | undefined
+  const pictures = (): AssetResolver | null => (assetResolver ??= assets && assets.size ? resolverOf(assets) : null)
   /** Vault paths of the images some note links to or embeds. */
   const linkedImages = new Set<string>()
 
@@ -123,7 +125,7 @@ export function buildGraph(notes: Map<NoteId, ParsedNote>, opts: BuildGraphOptio
       const rawTarget = stripRaw(link.raw)
       if (isImagePath(rawTarget)) {
         // A picture: an image node when the file exists, else nothing (never a ghost).
-        const img = assetResolver?.resolve(rawTarget, n.meta.folder) ?? null
+        const img = pictures()?.resolve(rawTarget, n.meta.folder) ?? null
         link.resolved = img !== null
         link.to = img !== null ? imageKey(img) : rawTarget
         if (img === null) continue
@@ -307,6 +309,23 @@ function addTodayHub(
   })
   backlinks.set(TODAY_ID, new Set())
   outlinks.set(TODAY_ID, out)
+}
+
+/**
+ * The picture resolver of an asset map, memoized per map like the folder
+ * universe: indexing a whole drive's pictures takes a noticeable moment, and
+ * a note edit or a tick keeps the map (applyChanges copies it only when a
+ * picture changed).
+ */
+const resolverCache = new WeakMap<Map<string, VaultAsset>, AssetResolver>()
+
+function resolverOf(assets: Map<string, VaultAsset>): AssetResolver {
+  let r = resolverCache.get(assets)
+  if (!r) {
+    r = new AssetResolver(assets.keys())
+    resolverCache.set(assets, r)
+  }
+  return r
 }
 
 /** Images per folder, newest first (then by path), per asset map: memoized like the folder universe. */

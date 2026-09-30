@@ -69,7 +69,13 @@ export function cleanGrade(grade: unknown): string | null {
 
 /** A score in 0–100 (a 0–1 fraction is scaled), rounded, or null. */
 export function cleanScore(score: unknown): number | null {
-  const n = typeof score === 'number' ? score : typeof score === 'string' ? Number(score.trim()) : NaN
+  let n = NaN
+  if (typeof score === 'number') n = score
+  else if (typeof score === 'string') {
+    // `82`, `82%`, `82/100`; a blank string is no score (Number('') would be 0).
+    const t = score.trim().replace(/\s*(%|\/\s*100)$/, '')
+    if (t) n = Number(t)
+  }
   if (!Number.isFinite(n) || n < 0) return null
   const v = n <= 1 && n > 0 && !Number.isInteger(n) ? n * 100 : n
   return v > 100 ? null : Math.round(v)
@@ -244,8 +250,12 @@ function scoresOf(v: unknown): CritiqueScore[] {
 export function normalizeGrade(raw: unknown): CritiqueGrade {
   const out: CritiqueGrade = { grade: null, score: null, drill: null, scores: [], fixes: [], strengths: [], deep: null }
   if (!isRecord(raw)) return out
+  // One nested level (`{ grade: { … } }`, `{ result: { … } }`), but never the lists of
+  // criteria, fixes or strengths themselves: a criterion named `value` or `total`
+  // must not become the overall score.
+  const lists = new Set([pick(raw, SCORES_KEYS), pick(raw, FIX_KEYS), pick(raw, STRENGTH_KEYS)])
   const layers: Record<string, unknown>[] = [raw]
-  for (const v of Object.values(raw).slice(0, 50)) if (isRecord(v)) layers.push(v)
+  for (const v of Object.values(raw).slice(0, 50)) if (isRecord(v) && !lists.has(v)) layers.push(v)
   for (const obj of layers) {
     if (out.grade === null) {
       const g = pick(obj, GRADE_KEYS)
