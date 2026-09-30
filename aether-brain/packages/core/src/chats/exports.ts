@@ -126,11 +126,37 @@ function isoOf(v: unknown): string | null {
   return null
 }
 
+/** `text` with lone surrogate halves (which no file name or URL takes) replaced by U+FFFD. */
+export function wellFormed(text: string): string {
+  return text.replace(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g, '�')
+}
+
+/** At most `max` characters of `text` (code points: an emoji is never cut in half). */
+export function cutChars(text: string, max: number): string {
+  if (text.length <= max) return text
+  const chars = Array.from(text)
+  return chars.length <= max ? text : chars.slice(0, max).join('')
+}
+
+/** At most `maxBytes` of `text` in UTF-8 (file names are limited in bytes), never half a character. */
+export function cutBytes(text: string, maxBytes: number): string {
+  let bytes = 0
+  let out = ''
+  for (const ch of text) {
+    const cp = ch.codePointAt(0)!
+    const n = cp < 0x80 ? 1 : cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4
+    if (bytes + n > maxBytes) break
+    bytes += n
+    out += ch
+  }
+  return out
+}
+
 /** A title on one line. */
 function titleOf(...candidates: unknown[]): string {
   for (const c of candidates) {
-    const t = str(c).replace(/\s+/g, ' ').trim()
-    if (t) return t.length > 160 ? `${t.slice(0, 157)}…` : t
+    const t = wellFormed(str(c)).replace(/\s+/g, ' ').trim()
+    if (t) return Array.from(t).length > 160 ? `${cutChars(t, 157)}…` : t
   }
   return ''
 }
@@ -138,7 +164,7 @@ function titleOf(...candidates: unknown[]): string {
 /** Read every file of an export (see `isChatExportJson`); anything not understood becomes a warning. */
 export function readChatExport(files: ExportFile[]): ChatArchive {
   const out: ChatArchive = { conversations: [], projects: [], files: [], warnings: [] }
-  const seenConv = new Set<string>()
+  const seenConv = new Map<string, number>()
   const seenProj = new Set<string>()
   for (const f of files) {
     let data: unknown
@@ -156,7 +182,7 @@ export function readChatExport(files: ExportFile[]): ChatArchive {
   return out
 }
 
-function collect(data: unknown, out: ChatArchive, seenConv: Set<string>, seenProj: Set<string>, depth: number): void {
+function collect(data: unknown, out: ChatArchive, seenConv: Map<string, number>, seenProj: Set<string>, depth: number): void {
   if (depth > 2) return
   if (Array.isArray(data)) {
     for (const item of data) collectOne(item, out, seenConv, seenProj)
@@ -174,16 +200,20 @@ function collect(data: unknown, out: ChatArchive, seenConv: Set<string>, seenPro
   if (!wrapped) collectOne(data, out, seenConv, seenProj)
 }
 
-function collectOne(item: unknown, out: ChatArchive, seenConv: Set<string>, seenProj: Set<string>): void {
+function collectOne(item: unknown, out: ChatArchive, seenConv: Map<string, number>, seenProj: Set<string>): void {
   if (!isRec(item)) return
   let conv: ChatConversation | null = null
   let proj: ChatProject | null = null
   if (Array.isArray(item.chat_messages)) conv = claudeConversation(item)
   else if (isRec(item.mapping)) conv = chatgptConversation(item)
   else if ('prompt_template' in item || Array.isArray(item.docs)) proj = claudeProject(item)
-  if (conv && !seenConv.has(conv.url)) {
-    seenConv.add(conv.url)
-    out.conversations.push(conv)
+  if (conv) {
+    // The same chat in two exports: the newer copy wins.
+    const at = seenConv.get(conv.url)
+    if (at === undefined) {
+      seenConv.set(conv.url, out.conversations.length)
+      out.conversations.push(conv)
+    } else if ((conv.updated ?? '') > (out.conversations[at]!.updated ?? '')) out.conversations[at] = conv
   }
   if (proj && !seenProj.has(proj.url)) {
     seenProj.add(proj.url)
@@ -247,17 +277,24 @@ function claudeMessage(m: Rec): ChatMessage | null {
 }
 
 function claudeConversation(c: Rec): ChatConversation | null {
-  const id = str(c.uuid) || str(c.id)
+  const id = wellFormed(str(c.uuid) || str(c.id))
   if (!id) return null
   const raw = arr(c.chat_messages).filter(isRec)
   let ordered = raw
   const leaf = str(c.current_leaf_message_uuid)
-  if (leaf && raw.some((m) => str(m.parent_message_uuid))) {
-    // Edited messages are branches: the thread shown is the leaf's line to the root.
+  if (raw.some((m) => str(m.parent_message_uuid))) {
+    // Edited messages are branches: the thread shown is the leaf's line to the root. Without a
+    // current leaf the export knows, the newest message nothing answers is taken as the leaf.
     const byId = new Map(raw.map((m) => [str(m.uuid), m]))
+    let start = byId.get(leaf)
+    if (!start) {
+      const parents = new Set(raw.map((m) => str(m.parent_message_uuid)))
+      const leaves = raw.filter((m) => !parents.has(str(m.uuid)))
+      start = leaves.sort((a, b) => str(b.created_at).localeCompare(str(a.created_at)))[0]
+    }
     const chain: Rec[] = []
     const seen = new Set<string>()
-    for (let m = byId.get(leaf); m && !seen.has(str(m.uuid)); m = byId.get(str(m.parent_message_uuid))) {
+    for (let m = start; m && !seen.has(str(m.uuid)); m = byId.get(str(m.parent_message_uuid))) {
       seen.add(str(m.uuid))
       chain.push(m)
     }
@@ -274,7 +311,7 @@ function claudeConversation(c: Rec): ChatConversation | null {
     created: isoOf(c.created_at),
     updated: isoOf(c.updated_at) ?? isoOf(c.created_at),
     url: `https://claude.ai/chat/${encodeURIComponent(id)}`,
-    projectId: str(c.project_uuid) || (project ? str(project.uuid) : '') || null,
+    projectId: wellFormed(str(c.project_uuid) || (project ? str(project.uuid) : '')) || null,
     gptId: null,
     model: str(c.model) || null,
     messages,
@@ -282,7 +319,7 @@ function claudeConversation(c: Rec): ChatConversation | null {
 }
 
 function claudeProject(p: Rec): ChatProject | null {
-  const id = str(p.uuid) || str(p.id)
+  const id = wellFormed(str(p.uuid) || str(p.id))
   if (!id || p.is_starter_project === true) return null
   const docs: ChatProjectDoc[] = []
   const names = new Set<string>()
@@ -432,13 +469,13 @@ function chatgptThread(mapping: Rec, current: string): Rec[] {
 }
 
 function chatgptConversation(c: Rec): ChatConversation | null {
-  const id = str(c.conversation_id) || str(c.id)
+  const id = wellFormed(str(c.conversation_id) || str(c.id))
   if (!id || !isRec(c.mapping)) return null
   const pieces = chatgptThread(c.mapping, str(c.current_node))
     .map(chatgptPiece)
     .filter((p): p is Piece => p !== null)
   const messages = mergeTurns(pieces)
-  const gizmo = str(c.gizmo_id)
+  const gizmo = wellFormed(str(c.gizmo_id))
   return {
     source: 'chatgpt',
     id,
@@ -455,7 +492,7 @@ function chatgptConversation(c: Rec): ChatConversation | null {
 
 /** The web address of a ChatGPT project (`g-p-…`). */
 export function chatgptProjectUrl(projectId: string): string {
-  return `https://chatgpt.com/g/${encodeURIComponent(projectId)}/project`
+  return `https://chatgpt.com/g/${encodeURIComponent(wellFormed(projectId))}/project`
 }
 
 /** Consecutive turns of the same speaker become one message (a reply split around a tool call, its pictures). */

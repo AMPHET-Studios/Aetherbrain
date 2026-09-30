@@ -980,7 +980,8 @@ export const useAether = create<AetherState>()((set, get) => {
     // Folders and notes, a chunk at a time.
     const taken = new Set([...get().notes.keys()].map((k) => k.toLowerCase()))
     const folders = plan.folders.map(spell)
-    const notes = plan.create.map((n) => ({ ...n, path: place(n.path) }))
+    // Not spread: a planned note renders its text when first read, and that is done a chunk at a time below.
+    const notes = plan.create.map((n) => ({ note: n, path: place(n.path) }))
     await batched(async () => {
       const changes: VaultChange[] = []
       for (const dir of folders) {
@@ -995,13 +996,28 @@ export const useAether = create<AetherState>()((set, get) => {
       if (changes.length) get().applyExternal(changes)
     })
     for (let i = 0; i < notes.length && current(); i += NOTE_CHUNK) {
+      // Render the chunk first, with nothing held, letting the page breathe between notes (a parse each).
+      const chunk: { path: string; kind: string; text: string }[] = []
+      let slice = performance.now()
+      for (const { note, path } of notes.slice(i, i + NOTE_CHUNK)) {
+        try {
+          chunk.push({ path, kind: note.kind, text: note.content })
+        } catch (err) {
+          result.failed.push(`${path}: ${errText(err)}`)
+        }
+        if (performance.now() - slice > 40) {
+          await new Promise((r) => setTimeout(r, 0))
+          slice = performance.now()
+        }
+      }
+      if (!current()) break
       await batched(async () => {
         const changes: VaultChange[] = []
         const mtime = Date.now()
-        for (const note of notes.slice(i, i + NOTE_CHUNK)) {
+        for (const note of chunk) {
           if (!current()) break
           try {
-            const done = await createNew(note.path, note.content, { taken })
+            const done = await createNew(note.path, note.text, { taken })
             if (done) {
               changes.push({ kind: 'add', path: done.path, content: done.content, mtime })
               result.created++
@@ -1060,7 +1076,15 @@ export const useAether = create<AetherState>()((set, get) => {
 
     for (const u of plan.update) {
       if (!current()) break
-      const done = await rewriteNote(u.noteId, (raw) => applyChatUpdate(raw, u) ?? raw, `update ${basenameOf(u.path)}`)
+      // The new section is rendered before the note's queue is entered (a parse; nothing held meanwhile).
+      let section: string
+      try {
+        section = u.section
+      } catch (err) {
+        result.failed.push(`${u.path}: ${errText(err)}`)
+        continue
+      }
+      const done = await rewriteNote(u.noteId, (raw) => applyChatUpdate(raw, { heading: u.heading, section, updated: u.updated }) ?? raw, `update ${basenameOf(u.path)}`)
       if (done) {
         result.updated++
         result.first ??= u.noteId

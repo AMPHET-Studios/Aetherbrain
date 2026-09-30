@@ -26,11 +26,12 @@
  */
 import type { NoteId, ParsedNote } from '../types'
 import { joinFrontmatter, splitFrontmatter, updateFrontmatter } from '../markdown/frontmatter'
-import { inlineTagOffsets, parseMarkdown } from '../markdown/parse'
+import { parseMarkdown } from '../markdown/parse'
+import { charOrigins, textTags, textWikilinks, wikilinkBrackets } from '../markdown/wikilink'
 import { extractTasks } from '../markdown/tasks'
 import { visit } from 'unist-util-visit'
 import { basenameOf, folderOf, idFromPath, normalizePath, slugifyTitle } from '../vault/paths'
-import { chatgptProjectUrl, type ChatArchive, type ChatConversation, type ChatMessage, type ChatProject, type ChatSource } from './exports'
+import { chatgptProjectUrl, cutBytes, wellFormed, type ChatArchive, type ChatConversation, type ChatMessage, type ChatProject, type ChatSource } from './exports'
 
 /** Caps: one chat must never make a note the parser chokes on. */
 export const MAX_MESSAGE_CHARS = 100_000
@@ -43,6 +44,8 @@ export const TRANSCRIPT_HEADING = '## Transcript'
 export const TRANSCRIPT_END = '*— end of transcript —*'
 export const SUMMARY_HEADING = '## Summary'
 export const PROJECT_HEADING = '## Project'
+/** The last line of a hub's `## Project` section: what follows it is the user's and stays on update. */
+export const PROJECT_END = '*— end of project —*'
 
 const SOURCE_NAME: Record<ChatSource, string> = { claude: 'Claude', chatgpt: 'ChatGPT' }
 
@@ -65,13 +68,15 @@ export function inlineText(text: string, max = 160): string {
 }
 
 /** A title usable inside `[[…]]` and as a file name. */
-function linkTitle(text: string): string {
-  return text
-    .replace(/[[\]|#^\\/:*?"<>]+/g, ' ')
-    .replace(/[\u0000-\u001f\u007f]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .replace(/^[. ]+|[. ]+$/g, '')
+function linkTitle(text: string, maxBytes = 120): string {
+  return cutBytes(
+    wellFormed(text)
+      .replace(/[[\]|#^\\/:*?"<>]+/g, ' ')
+      .replace(/[\u0000-\u001f\u007f]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim(),
+    maxBytes,
+  ).replace(/^[. ]+|[. ]+$/g, '')
 }
 
 /**
@@ -79,9 +84,9 @@ function linkTitle(text: string): string {
  * no leading dot (hidden, skipped: `.NET migration` → `NET migration`), no
  * trailing dot, not a reserved or skipped name, not too long.
  */
-function safeName(text: string, max = 80): string {
-  const name = slugifyTitle(text.replace(/[\u0000-\u001f\u007f]+/g, ' '))
-    .slice(0, max)
+function safeName(text: string, maxBytes = 120): string {
+  // Bytes, not characters: a file name is at most 255 bytes, and 60 CJK characters are 180 of them.
+  const name = cutBytes(slugifyTitle(wellFormed(text).replace(/[\u0000-\u001f\u007f]+/g, ' ')), maxBytes)
     .replace(/^[. ]+|[. ]+$/g, '')
     .trim()
   return /^(con|prn|aux|nul|com\d|lpt\d|node_modules|__macosx)$/i.test(name) ? `${name} chat` : name
@@ -90,7 +95,7 @@ function safeName(text: string, max = 80): string {
 /** A fence line: up to three spaces, then three or more backticks or tildes (CommonMark). */
 const FENCE_LINE = /^ {0,3}(`{3,}|~{3,})(.*)$/
 
-/** For each line: true inside a fenced code block (fence lines included), CommonMark style. */
+/** For each line: true inside a fenced code block that starts at the top level (fence lines included). */
 function fenceMask(lines: string[]): boolean[] {
   const out: boolean[] = []
   let open: { ch: string; len: number } | null = null
@@ -111,23 +116,27 @@ function fenceMask(lines: string[]): boolean[] {
 }
 
 /**
- * Close a fenced code block a chat message left open, so it can't swallow
- * the rest of the note (CommonMark rules: same fence character, at least as
- * long, up to three spaces of indent).
+ * Close a fenced code block that `text` leaves open at its top level, so it
+ * can't swallow what follows it in a note. Read from the parse, the way
+ * CommonMark sees it: a fence opened inside a list item or a quote ends
+ * with its container and needs nothing; one hidden in an HTML block is no
+ * fence.
  */
 export function closeFences(text: string): string {
-  let open: { ch: string; len: number } | null = null
-  for (const line of text.split('\n')) {
-    const m = FENCE_LINE.exec(line)
-    if (!m) continue
-    const fence = m[1]!
-    const ch = fence[0]!
-    if (!open) {
-      if (ch === '`' && m[2]!.includes('`')) continue
-      open = { ch, len: fence.length }
-    } else if (ch === open.ch && fence.length >= open.len && !m[2]!.trim()) open = null
-  }
-  return open ? `${text}\n${open.ch.repeat(open.len)}` : text
+  if (!/`{3,}|~{3,}/.test(text)) return text
+  const tree = parseMarkdown(text)
+  const last = tree.children[tree.children.length - 1]
+  if (!last || last.type !== 'code') return text
+  const start = last.position?.start.offset
+  const end = last.position?.end.offset
+  if (start === undefined || end === undefined) return text
+  const lines = text.slice(start, end).split('\n')
+  const open = /^ {0,3}(`{3,}|~{3,})/.exec(lines[0] ?? '')
+  if (!open) return text
+  const fence = open[1]!
+  const close = lines.length > 1 ? /^ {0,3}(`{3,}|~{3,})\s*$/.exec(lines[lines.length - 1] ?? '') : null
+  if (close && close[1]![0] === fence[0] && close[1]!.length >= fence.length) return text
+  return `${text}\n${fence[0]!.repeat(fence.length)}`
 }
 
 /** A fence for `content`: longer than any backtick run inside it. */
@@ -137,12 +146,8 @@ function fenceFor(content: string): string {
   return '`'.repeat(Math.max(3, longest + 1))
 }
 
-/** HTML that opens a block only its end marker closes (CommonMark types 1–5): it would swallow what follows. */
-const HTML_OPENER = /^<(?:(?:script|pre|style|textarea)(?:[\s>]|$)|!--|\?|![A-Za-z]|!\[CDATA\[)/i
-/** The same opener at the start of a line (up to three spaces of indent). */
+/** An HTML block opener only its end marker closes (CommonMark types 1–5), at the start of a line. */
 const HTML_OPENER_LINE = /^( {0,3})<(?=(?:script|pre|style|textarea)(?:[\s>]|$)|!--|\?|![A-Za-z]|!\[CDATA\[)/i
-/** The `<` of such an opener anywhere (the fail-closed escape). */
-const HTML_OPENER_ANY = /<(?=(?:script|pre|style|textarea)(?:[\s>]|$)|!--|\?|![A-Za-z]|!\[CDATA\[)/gi
 
 /**
  * Most emphasis delimiters (`*`, `_`) one paragraph of chat text keeps.
@@ -153,7 +158,7 @@ const HTML_OPENER_ANY = /<(?=(?:script|pre|style|textarea)(?:[\s>]|$)|!--|\?|![A
  */
 export const MAX_DELIMITERS = 1000
 
-/** The characters of `line` at `i` is escaped by an odd run of backslashes before it. */
+/** True when the character of `line` at `i` is escaped by an odd run of backslashes before it. */
 function escapedAt(line: string, i: number): boolean {
   let n = 0
   for (let j = i - 1; j >= 0 && line[j] === '\\'; j--) n++
@@ -161,32 +166,47 @@ function escapedAt(line: string, i: number): boolean {
 }
 
 /**
- * Chat markdown made safe to put in a note: an open fence closed, block HTML
- * openers that would swallow the rest of the note escaped, and paragraphs
- * with pathological runs of emphasis delimiters escaped. Code is left alone.
+ * Most square brackets one paragraph of chat text keeps: micromark's link
+ * label matching also slows down sharply on thousands of them (16,000 in one
+ * paragraph: seconds); past this, they are escaped (shown as written).
  */
-export function tameChatMarkdown(text: string): string {
-  const lines = closeFences(text).split('\n')
-  const code = fenceMask(lines)
-  for (let i = 0; i < lines.length; i++) {
-    if (code[i]) continue
-    const m = HTML_OPENER_LINE.exec(lines[i]!)
-    if (m) lines[i] = `${m[1]}\\${lines[i]!.slice(m[1]!.length)}`
+export const MAX_BRACKETS = 1000
+
+/**
+ * Paragraphs of `text` holding more than MAX_DELIMITERS `*` and `_` (or more
+ * than MAX_BRACKETS `[` and `]`), put in a code block: shown as written, and
+ * parsed in linear time (escaping would not do: micromark is slow on
+ * thousands of escapes too). Code is left alone. Real chats stay far below both.
+ */
+export function tameInline(text: string): string {
+  let delims = 0
+  let brackets = 0
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i)
+    if (c === 42 || c === 95) delims++
+    else if (c === 91 || c === 93) brackets++
   }
+  if (delims <= MAX_DELIMITERS && brackets <= MAX_BRACKETS) return text
+  const lines = text.split('\n')
+  const code = fenceMask(lines)
   let start = 0
   const paragraph = (end: number) => {
-    let count = 0
-    for (let i = start; i < end; i++) for (const ch of lines[i]!) if (ch === '*' || ch === '_') count++
-    if (count <= MAX_DELIMITERS) return
+    let d = 0
+    let b = 0
     for (let i = start; i < end; i++) {
-      const line = lines[i]!
-      let out = ''
-      for (let j = 0; j < line.length; j++) {
-        const ch = line[j]!
-        out += (ch === '*' || ch === '_') && !escapedAt(line, j) ? `\\${ch}` : ch
+      for (const ch of lines[i]!) {
+        if (ch === '*' || ch === '_') d++
+        else if (ch === '[' || ch === ']') b++
       }
-      lines[i] = out
     }
+    if (d <= MAX_DELIMITERS && b <= MAX_BRACKETS) return
+    // Shown as written, in a code block: code is never parsed inline (linear), and holds no link or tag.
+    const block = lines.slice(start, end).join('\n')
+    let longest = 0
+    for (const m of block.matchAll(/~+/g)) longest = Math.max(longest, m[0].length)
+    const fence = '~'.repeat(Math.max(3, longest + 1))
+    lines[start] = `${fence}text\n${lines[start]}`
+    lines[end - 1] = `${lines[end - 1]}\n${fence}`
   }
   for (let i = 0; i < lines.length; i++) {
     if (code[i] || !lines[i]!.trim()) {
@@ -198,6 +218,22 @@ export function tameChatMarkdown(text: string): string {
   return lines.join('\n')
 }
 
+/**
+ * Markdown written live into a note (a summary): an open fence closed, block
+ * HTML openers that would swallow the rest of the note escaped, and
+ * paragraphs with pathological runs of emphasis delimiters escaped.
+ */
+export function tameChatMarkdown(text: string): string {
+  const lines = closeFences(text).split('\n')
+  const code = fenceMask(lines)
+  for (let i = 0; i < lines.length; i++) {
+    if (code[i]) continue
+    const m = HTML_OPENER_LINE.exec(lines[i]!)
+    if (m) lines[i] = `${m[1]}\\${lines[i]!.slice(m[1]!.length)}`
+  }
+  return tameInline(lines.join('\n'))
+}
+
 /** Headings of level 1 and 2 pushed down to 3 and 4 (outside code), so a summary can't start a section of the note. */
 function demoteHeadings(text: string): string {
   const lines = text.split('\n')
@@ -206,72 +242,119 @@ function demoteHeadings(text: string): string {
 }
 
 /**
- * Make chat text inert from offset `from` on: escape everything the brain
- * would read as a wikilink (`[[`), an inline tag (`#word`) or a task
- * (`- [ ]`). Code stays untouched. The markdown is parsed once, the way the
- * brain parses notes, so what is escaped is exactly what the brain would
- * have picked up. Text should come through `tameChatMarkdown` first; should
- * a swallowing HTML block still be found, it fails closed (`blanketInert`).
+ * Every line of `text` behind `> ` (an empty line: `>`). A message quoted
+ * this way is kept whole whatever it holds: a fence it leaves open, an HTML
+ * block, a list all end with the quote (CommonMark closes what a container
+ * holds when it ends), and the brain's line-by-line task scan never reads a
+ * quoted line as a task.
  */
-export function inertMarkdown(body: string, from = 0): string {
+export function quoteMarkdown(text: string): string {
+  return text
+    .split('\n')
+    .map((l) => (l.length ? `> ${l}` : '>'))
+    .join('\n')
+}
+
+/** Offsets (in `body`) of everything from `from` on that the brain would read as a wikilink, an inline tag or a task. */
+function liveMarks(body: string, from: number): number[] {
   const tree = parseMarkdown(body)
-  let swallowing = false
-  visit(tree, 'html', (node) => {
-    const at = node.position?.start.offset
-    if (at !== undefined && at >= from && HTML_OPENER.test(node.value.trimStart())) swallowing = true
-  })
-  if (swallowing) return blanketInert(body, from)
   const at = new Set<number>()
-  visit(tree, 'text', (node) => {
+  visit(tree, (node) => {
     const start = node.position?.start.offset
     const end = node.position?.end.offset
     if (start === undefined || end === undefined || end <= from) return
-    const src = body.slice(start, end)
-    for (let i = src.indexOf('[['); i >= 0; i = src.indexOf('[[', i + 1)) if (start + i + 1 >= from) at.add(start + i + 1)
-    for (const i of inlineTagOffsets(src)) if (start + i >= from) at.add(start + i)
+    if (node.type === 'text') {
+      const value = (node as { value: string }).value
+      const src = body.slice(start, end)
+      // Both brackets of each side: an escape keeps them balanced, so a link around them stays a link.
+      const links = textWikilinks(value, src)
+      if (links.length) {
+        const brackets = wikilinkBrackets(value, src, links)
+        if (brackets) for (const b of brackets.flat()) at.add(start + b)
+        else for (let i = 0; i < src.length; i++) if (src[i] === '[' || src[i] === ']') at.add(start + i)
+      }
+      const tags = textTags(value, src)
+      if (tags.length) {
+        const origins = charOrigins(value, src, '#')
+        const ordinal = new Map<number, number>()
+        for (let i = 0, k = 0; i < value.length; i++) if (value[i] === '#') ordinal.set(i, k++)
+        for (const t of tags) {
+          const o = origins?.[ordinal.get(t.index) ?? -1]
+          if (o && !o.escaped) at.add(start + o.at)
+          else if (!origins) for (let i = 0; i < src.length; i++) if (src[i] === '#') at.add(start + i)
+        }
+      }
+    } else if (node.type === 'listItem' && typeof (node as { checked?: unknown }).checked === 'boolean') {
+      // A GFM task list item: its checkbox would show as a to-do in the preview.
+      const m = /^(?:[-*+]|\d{1,9}[.)])[ \t]+\[/.exec(body.slice(start, start + 24))
+      if (m) at.add(start + m[0].length - 1)
+    }
   })
-  // Tasks are read line by line (tasks.ts), not from the tree: escape what that scan sees.
+  // Tasks are read line by line (tasks.ts), not from the tree: escape what that scan sees too.
   const lines = body.split('\n')
+  let off = 0
   const lineStart: number[] = []
-  for (let i = 0, off = 0; i < lines.length; i++) {
+  for (const l of lines) {
     lineStart.push(off)
-    off += lines[i]!.length + 1
+    off += l.length + 1
   }
   for (const t of extractTasks(body)) {
-    const off = lineStart[t.line]
-    if (off === undefined || off < from) continue
+    const o = lineStart[t.line]
+    if (o === undefined || o < from) continue
     const m = /^\s*[-*+]\s+\[/.exec(lines[t.line]!)
-    if (m) at.add(off + m[0].length - 1)
+    if (m) at.add(o + m[0].length - 1)
   }
-  return insertBackslashes(body, [...at])
+  return [...at].filter((i) => i >= from)
 }
 
 /**
- * The fail-closed escape: from `from` on, every `[` after a `[`, every `#`
- * before a word character, every task checkbox and every swallowing HTML
- * opener is escaped, in code too (a stray backslash there is the price of
- * never leaking a link, tag or task).
+ * Make chat text inert from offset `from` on: escape everything the brain
+ * would read as a wikilink (`\[\[x\]\]`), an inline tag (`\#word`) or a task
+ * (`- \[ ]`), parsing the way the brain parses notes. Code is untouched.
+ * The result is parsed again; should anything still be live (an escape that
+ * changed how the rest parses), it fails closed (`blanketInert`). Messages
+ * should be quoted (`quoteMarkdown`) so nothing in them can reach past them.
+ */
+export function inertMarkdown(body: string, from = 0): string {
+  const marks = liveMarks(body, from)
+  if (!marks.length) return body
+  const out = insertBackslashes(body, marks)
+  return liveMarks(out, from).length ? blanketInert(out, from) : out
+}
+
+/**
+ * The fail-closed escape: from `from` on, every bracket, every `#` before a
+ * word character and every task checkbox is escaped, in code too (a stray
+ * backslash there is the price of never leaking a link, tag or task).
  */
 export function blanketInert(body: string, from = 0): string {
   const rest = body
     .slice(from)
     .split('\n')
-    .map((line) =>
-      line
-        .replace(/^(\s*[-*+]\s+)\[([ xX])\]/, '$1\\[$2]')
-        .replace(HTML_OPENER_ANY, '\\<')
-        .replace(/(?<=\[)\[/g, '\\[')
-        .replace(/#(?=[\p{L}\p{N}_])/gu, (m, i: number, all: string) => (escapedAt(all, i) ? m : '\\#')),
-    )
+    .map((line) => {
+      let out = ''
+      for (let i = 0; i < line.length; i++) {
+        const ch = line[i]!
+        const escape = (ch === '[' || ch === ']' || (ch === '#' && /[\p{L}\p{N}_]/u.test(line[i + 1] ?? ''))) && !escapedAt(line, i)
+        out += escape ? `\\${ch}` : ch
+      }
+      return out
+    })
     .join('\n')
   return body.slice(0, from) + rest
 }
 
+/** `text` with a backslash put before each offset (one pass). */
 function insertBackslashes(text: string, offsets: number[]): string {
-  const sorted = [...new Set(offsets)].sort((a, b) => b - a)
-  let out = text
-  for (const i of sorted) out = `${out.slice(0, i)}\\${out.slice(i)}`
-  return out
+  const sorted = [...new Set(offsets)].sort((a, b) => a - b)
+  const parts: string[] = []
+  let last = 0
+  for (const i of sorted) {
+    parts.push(text.slice(last, i), '\\')
+    last = i
+  }
+  parts.push(text.slice(last))
+  return parts.join('')
 }
 
 // ------------------------------------------------------------------ dates
@@ -352,8 +435,8 @@ function messageBlock(m: ChatMessage, speaker: string, day: { last: string | nul
     stamp = at.day === day.last ? ` · ${at.time}` : ` · ${at.day} ${at.time}`
     day.last = at.day
   }
-  const out: string[] = [`### ${speaker}${stamp}`, '']
-  if (m.text) out.push(tameChatMarkdown(cleanText(m.text, MAX_MESSAGE_CHARS)), '')
+  const out: string[] = []
+  if (m.text) out.push(tameInline(cleanText(m.text, MAX_MESSAGE_CHARS)), '')
   for (const img of m.images) {
     const file = opts.pictures?.get(img.fileId)
     out.push(file ? live.add(`![[${file}]]`) : '🖼 *picture not imported*', '')
@@ -372,7 +455,8 @@ function messageBlock(m: ChatMessage, speaker: string, day: { last: string | nul
       out.push(`${fence}text`, content, fence, '')
     }
   }
-  return out.join('\n')
+  // The message whole behind `> `: nothing in it reaches past it.
+  return `### ${speaker}${stamp}\n\n${quoteMarkdown(out.join('\n').trimEnd())}\n`
 }
 
 /** The `## Transcript` section of a chat (heading included), inert. */
@@ -431,7 +515,7 @@ export function renderChatNote(conv: ChatConversation, title: string, opts: Chat
 
 /** `PORTALz (Claude project)`: the title (and file name) of a project's hub note. */
 export function projectHubTitle(project: ChatProject): string {
-  return `${linkTitle(project.name).slice(0, 80) || 'Project'} (${SOURCE_NAME[project.source]} project)`
+  return `${linkTitle(project.name, 100) || 'Project'} (${SOURCE_NAME[project.source]} project)`
 }
 
 /** Fence language of a knowledge doc by its extension; '' = markdown shown as markdown. */
@@ -455,12 +539,12 @@ export interface ProjectRenderOptions {
 export function renderProjectSection(project: ChatProject, opts: ProjectRenderOptions = {}): string {
   const live = new Live()
   const out: string[] = [PROJECT_HEADING, '']
-  if (project.description) out.push(tameChatMarkdown(cleanText(project.description, MAX_DOC_CHARS)), '')
-  if (project.instructions) out.push('### Instructions', '', tameChatMarkdown(cleanText(project.instructions, MAX_DOC_CHARS)), '')
+  if (project.description) out.push(quoteMarkdown(tameInline(cleanText(project.description, MAX_DOC_CHARS))), '')
+  if (project.instructions) out.push('### Instructions', '', quoteMarkdown(tameInline(cleanText(project.instructions, MAX_DOC_CHARS))), '')
   if (opts.docs?.length) out.push('### Knowledge', '', ...opts.docs.map((t) => live.add(`- [[${t}]]`)), '')
   if (opts.chats?.length) out.push('### Chats', '', ...opts.chats.map((t) => live.add(`- [[${t}]]`)), '')
   const text = inertMarkdown(out.join('\n'), PROJECT_HEADING.length)
-  return `${live.fill(text).replace(/\n{3,}/g, '\n\n').trimEnd()}\n`
+  return `${live.fill(text).replace(/\n{3,}/g, '\n\n').trimEnd()}\n\n${PROJECT_END}\n`
 }
 
 export function renderProjectHub(project: ChatProject, title: string, opts: ProjectRenderOptions = {}): string {
@@ -476,6 +560,11 @@ export function renderProjectHub(project: ChatProject, title: string, opts: Proj
   return joinFrontmatter(fm, `# ${inlineText(title, 200)}\n\n${lines.join('  \n')}\n\n${renderProjectSection(project, opts)}`)
 }
 
+/** The `Source:` of a knowledge doc: its project's address and its file name (the doc's identity on re-import). */
+export function projectDocUrl(project: ChatProject, name: string): string {
+  return `${project.url}#${encodeURIComponent(wellFormed(name))}`
+}
+
 export function renderProjectDoc(project: ChatProject, doc: { name: string; content: string }, title: string, hubTitle: string, utc = false): string {
   const created = dayOf(project.created, utc)
   const fm: Record<string, unknown> = { title, tags: ['ai-knowledge', project.source] }
@@ -483,13 +572,10 @@ export function renderProjectDoc(project: ChatProject, doc: { name: string; cont
   const content = cleanText(doc.content, MAX_DOC_CHARS)
   const lang = docLanguage(doc.name)
   const live = new Live()
-  const head = `# ${inlineText(title, 200)}\n\nKnowledge of ${live.add(`[[${hubTitle}]]`)} · ${inlineText(doc.name, 200)}\n\n## Document\n\n`
-  let body: string
-  if (lang === null) body = inertMarkdown(head + tameChatMarkdown(content), 0)
-  else {
-    const fence = fenceFor(content)
-    body = inertMarkdown(`${head}${fence}${lang}\n${content}\n${fence}`, 0)
-  }
+  const head = `# ${inlineText(title, 200)}\n\nKnowledge of ${live.add(`[[${hubTitle}]]`)} · ${inlineText(doc.name, 200)}  \nSource: <${projectDocUrl(project, doc.name)}>\n\n## Document\n\n`
+  const fence = lang === null ? '' : fenceFor(content)
+  const text = lang === null ? tameInline(content) : `${fence}${lang}\n${content}\n${fence}`
+  const body = inertMarkdown(head + quoteMarkdown(text), head.length)
   return joinFrontmatter(fm, `${live.fill(body).trimEnd()}\n`)
 }
 
@@ -729,7 +815,8 @@ export function planChatImport(archive: ChatArchive, existing: Iterable<ParsedNo
     }
   }
 
-  // Projects first: their hubs decide where their chats go.
+  // Projects first: their hubs decide where their chats go. A note is only taken for a hub or a chat
+  // when the importer wrote it (tagged); a note of the user's carrying an address is left alone.
   interface ProjectPlace {
     dir: string
     hubTitle: string
@@ -743,18 +830,15 @@ export function planChatImport(archive: ChatArchive, existing: Iterable<ParsedNo
   }
   const places = new Map<string, ProjectPlace>()
   for (const p of archive.projects) {
-    const hub = imported.get(p.url) ?? null
+    const found = imported.get(p.url)
+    const hub = found && isProjectHub(found) ? found : null
     const match = byName.get(norm(p.name)) ?? null
     let dir: string
-    let hubTitle: string
+    let hubTitle = ''
     if (hub) {
       dir = hub.meta.folder
       hubTitle = hub.meta.title
-    } else {
-      const home = match ? join(match.home, 'AI Chats') : join(opts.base, SOURCE_NAME[p.source], safeName(p.name, 60) || `Project ${p.id.slice(0, 8)}`)
-      dir = home
-      hubTitle = ''
-    }
+    } else dir = match ? join(match.home, 'AI Chats') : join(opts.base, SOURCE_NAME[p.source], safeName(p.name, 90) || `Project ${safeName(p.id, 24)}`)
     places.set(p.id, { dir, hubTitle, hubPath: null, aether: match?.title ?? null, hub, project: p, docs: [], chats: [] })
   }
   // Hub titles for new hubs (after existing ones took theirs).
@@ -765,30 +849,35 @@ export function planChatImport(archive: ChatArchive, existing: Iterable<ParsedNo
     place.hubPath = path
   }
 
-  // Knowledge docs: create-only, next to the hub.
+  // Knowledge docs: known by their Source (project + file name), created once, next to the hub.
   for (const place of places.values()) {
     const kdir = join(place.dir, 'Knowledge')
     for (const doc of place.project.docs) {
-      const name = `${linkTitle(place.project.name).slice(0, 40) || 'Project'} – ${safeName(doc.name.replace(/\.[a-z0-9]+$/i, ''), 60) || 'Document'}`
-      const path = join(kdir, `${name}.md`)
-      if (place.docs.includes(name)) continue
-      place.docs.push(name)
-      if (taken.has(path.toLowerCase())) continue
-      taken.add(path.toLowerCase())
-      plan.create.push({ path, content: renderProjectDoc(place.project, doc, name, place.hubTitle, utc), kind: 'doc', source: place.project.source })
+      const found = imported.get(projectDocUrl(place.project, doc.name))
+      if (found) {
+        if (!place.docs.includes(found.meta.title)) place.docs.push(found.meta.title)
+        continue
+      }
+      const name = `${linkTitle(place.project.name, 60) || 'Project'} – ${safeName(doc.name.replace(/\.[a-z0-9]+$/i, ''), 90) || 'Document'}`
+      const [path, title] = freeNote(kdir, name)
+      place.docs.push(title)
+      const { project, hubTitle } = place
+      plan.create.push(lazyNote({ path, kind: 'doc', source: project.source }, () => renderProjectDoc(project, doc, title, hubTitle, utc)))
       plan.counts.docs++
       folders.add(kdir)
     }
   }
 
   // Chats.
+  const pictureNames = new Set([...pictureTaken].map((p) => p.slice(p.lastIndexOf('/') + 1)))
   const sorted = [...archive.conversations].sort((a, b) => (a.created ?? '').localeCompare(b.created ?? '') || a.id.localeCompare(b.id))
   for (const conv of sorted) {
     if (!conv.messages.length) continue
     plan.counts[conv.source]++
     plan.counts.messages += conv.messages.length
     const place = conv.projectId ? places.get(conv.projectId) : undefined
-    const existingNote = imported.get(conv.url) ?? null
+    const found = imported.get(conv.url)
+    const existingNote = found && isChatNote(found) ? found : null
     let dir: string
     let title: string
     let path: string
@@ -799,11 +888,13 @@ export function planChatImport(archive: ChatArchive, existing: Iterable<ParsedNo
     } else {
       if (place) dir = place.dir
       else if (conv.source === 'chatgpt' && conv.projectId) {
-        dir = gptFolders.get(chatgptProjectUrl(conv.projectId)) ?? join(opts.base, 'ChatGPT', `Project ${conv.projectId.replace(/^g-p-/, '').slice(0, 8)}`)
+        const short = conv.projectId.replace(/^g-p-/, '').replace(/[^A-Za-z0-9]/g, '').slice(0, 8) || 'unnamed'
+        dir = gptFolders.get(chatgptProjectUrl(conv.projectId)) ?? join(opts.base, 'ChatGPT', `Project ${short}`)
       } else dir = join(opts.base, SOURCE_NAME[conv.source])
       ;[path, title] = freeNote(dir, chatBaseName(conv, utc))
     }
-    // Pictures: `<chat folder>/Pictures/<chat> <n>.<ext>`, create-only.
+    // Pictures: `<chat folder>/Pictures/<chat> <n>.<ext>`, created once: one of that name anywhere
+    // in the vault (the note or its pictures were moved) is taken as already there.
     const pictures = new Map<string, string>()
     let added = 0
     let n = 0
@@ -813,11 +904,12 @@ export function planChatImport(archive: ChatArchive, existing: Iterable<ParsedNo
         if (!from || pictures.has(img.fileId)) continue
         n++
         const ext = (/\.[a-z0-9]+$/i.exec(from)?.[0] ?? '.png').toLowerCase()
-        const file = `${safeName(title, 100)} ${n}${ext}`
+        const file = `${safeName(title, 140)} ${n}${ext}`
         const target = join(dir, 'Pictures', file)
         pictures.set(img.fileId, file)
-        if (pictureTaken.has(target.toLowerCase())) continue
+        if (pictureTaken.has(target.toLowerCase()) || pictureNames.has(file.toLowerCase())) continue
         pictureTaken.add(target.toLowerCase())
+        pictureNames.add(file.toLowerCase())
         added++
         plan.pictures.push({ from, path: target })
         plan.counts.pictures++
@@ -826,43 +918,49 @@ export function planChatImport(archive: ChatArchive, existing: Iterable<ParsedNo
     }
     const renderOpts: ChatRenderOptions = { utc, pictures, projectLink: place?.hubTitle ?? null, aetherProject: place?.aether ?? null }
     if (place) place.chats.push({ title, created: conv.created ?? '' })
+    // (An address found on a note that is not the importer's — a user's own note — gets the chat a note of its own.)
     if (existingNote) {
-      const current = isChatNote(existingNote) ? sectionOf(existingNote.raw, TRANSCRIPT_HEADING, TRANSCRIPT_END) : null
+      const current = sectionOf(existingNote.raw, TRANSCRIPT_HEADING, TRANSCRIPT_END)
       const count = current === null ? null : transcriptCount(current)
       // A transcript is rewritten only when the chat grew or brought new pictures: edits the user made stay.
-      // A note that is not a chat note (a user's note carrying the address) is never rewritten.
       if (current === null || (count === conv.messages.length && added === 0)) {
         plan.unchanged++
         continue
       }
-      plan.update.push({
-        noteId: existingNote.meta.id,
-        path: existingNote.meta.path,
-        heading: TRANSCRIPT_HEADING,
-        section: renderTranscript(conv, renderOpts),
-        updated: dayOf(conv.updated, utc),
-        kind: 'chat',
-      })
+      plan.update.push(
+        lazyUpdate(
+          { noteId: existingNote.meta.id, path: existingNote.meta.path, heading: TRANSCRIPT_HEADING, updated: dayOf(conv.updated, utc), kind: 'chat' },
+          () => renderTranscript(conv, renderOpts),
+        ),
+      )
       continue
     }
-    plan.create.push({ path, content: renderChatNote(conv, title, renderOpts), kind: 'chat', source: conv.source })
+    plan.create.push(lazyNote({ path, kind: 'chat', source: conv.source }, () => renderChatNote(conv, title, renderOpts)))
     folders.add(dir)
   }
 
-  // Hubs last: they list their docs and chats.
+  // Hubs last: they list their docs and chats. An export with no chats at all (projects.json
+  // alone) says nothing about which chats a project has: a hub's list then stays as it is.
   for (const place of places.values()) {
     plan.counts.projects++
-    const chats = place.chats.sort((a, b) => b.created.localeCompare(a.created)).map((c) => c.title)
+    const current = place.hub ? sectionOf(place.hub.raw, PROJECT_HEADING, PROJECT_END) : null
+    const chats = archive.conversations.length
+      ? place.chats.sort((a, b) => b.created.localeCompare(a.created)).map((c) => c.title)
+      : current
+        ? listedChats(current)
+        : []
     const ropts: ProjectRenderOptions = { utc, docs: place.docs, chats, aetherProject: place.aether }
     if (place.hub) {
-      const current = isProjectHub(place.hub) ? sectionOf(place.hub.raw, PROJECT_HEADING) : null
       const section = renderProjectSection(place.project, ropts)
       if (current === null || current === section) continue
-      plan.update.push({ noteId: place.hub.meta.id, path: place.hub.meta.path, heading: PROJECT_HEADING, section, updated: dayOf(place.project.updated, utc), kind: 'project' })
+      plan.update.push(
+        lazyUpdate({ noteId: place.hub.meta.id, path: place.hub.meta.path, heading: PROJECT_HEADING, updated: dayOf(place.project.updated, utc), kind: 'project' }, () => section),
+      )
       continue
     }
     if (!place.hubPath) continue
-    plan.create.push({ path: place.hubPath, content: renderProjectHub(place.project, place.hubTitle, ropts), kind: 'project', source: place.project.source })
+    const { project, hubTitle } = place
+    plan.create.push(lazyNote({ path: place.hubPath, kind: 'project', source: project.source }, () => renderProjectHub(project, hubTitle, ropts)))
     folders.add(place.dir)
   }
 
@@ -870,9 +968,37 @@ export function planChatImport(archive: ChatArchive, existing: Iterable<ParsedNo
   return plan
 }
 
+/** The chat titles a hub's `### Chats` list links, in order. */
+function listedChats(section: string): string[] {
+  const at = section.indexOf('\n### Chats\n')
+  if (at < 0) return []
+  const out: string[] = []
+  for (const line of section.slice(at + 11).split('\n')) {
+    if (line.startsWith('#') || line.startsWith('*— end')) break
+    const m = /^- \[\[([^[\]]+)\]\]\s*$/.exec(line)
+    if (m) out.push(m[1]!)
+  }
+  return out
+}
+
+/**
+ * A planned note whose text is made when first read: rendering (a parse per
+ * chat) is the costly part of an import, so the store renders each note as
+ * it writes it, a chunk at a time, instead of all of them up front.
+ */
+function lazyNote(n: Omit<PlannedNote, 'content'>, render: () => string): PlannedNote {
+  let text: string | null = null
+  return Object.defineProperty(n, 'content', { get: () => (text ??= render()), enumerable: true }) as PlannedNote
+}
+
+function lazyUpdate(u: Omit<PlannedUpdate, 'section'>, render: () => string): PlannedUpdate {
+  let text: string | null = null
+  return Object.defineProperty(u, 'section', { get: () => (text ??= render()), enumerable: true }) as PlannedUpdate
+}
+
 /** Apply a planned update to the note's text on disk: the section replaced, `updated` patched. Null when the section is gone. */
 export function applyChatUpdate(raw: string, u: Pick<PlannedUpdate, 'heading' | 'section' | 'updated'>): string | null {
-  const next = replaceSection(raw, u.heading, u.section, u.heading === TRANSCRIPT_HEADING ? TRANSCRIPT_END : undefined)
+  const next = replaceSection(raw, u.heading, u.section, u.heading === TRANSCRIPT_HEADING ? TRANSCRIPT_END : u.heading === PROJECT_HEADING ? PROJECT_END : undefined)
   if (next === null) return null
   return u.updated ? updateFrontmatter(next, { updated: u.updated }) : next
 }

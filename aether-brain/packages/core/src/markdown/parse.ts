@@ -6,7 +6,7 @@ import { toString as mdToString } from 'mdast-util-to-string'
 import type { Root, Heading as MdHeading, Text } from 'mdast'
 import type { Heading, Link, NoteMeta, ParsedNote, VaultFile } from '../types'
 import { asIsoDate, asString, asStringArray, splitFrontmatter } from './frontmatter'
-import { textWikilinks } from './wikilink'
+import { textTags, textWikilinks } from './wikilink'
 import {
   areaFromFolder,
   basenameOf,
@@ -134,14 +134,6 @@ export function inlineTagOffsets(text: string): number[] {
   return out
 }
 
-/**
- * The source of a text node, as tags are read from it: backslash escapes
- * resolved except `\#`, so an escaped `\#word` stays text (markdown's way to
- * write a literal hash) while `#multi\_word` still reads `multi_word`.
- */
-function tagSource(source: string): string {
-  return source.replace(/\\([!-/:-@[-`{-~])/g, (m, c: string) => (c === '#' ? m : c))
-}
 
 export function normalizeTag(tag: string): string {
   return tag.replace(/^#/, '').trim().toLowerCase()
@@ -166,7 +158,7 @@ export function parseNote(file: VaultFile): ParsedNote {
   const headings: Heading[] = []
   let firstH1: string | null = null
   const textChunks: string[] = []
-  const tagChunks: string[] = []
+  const tagSet = new Set<string>()
   const links: Link[] = []
 
   visit(tree, (node) => {
@@ -186,7 +178,7 @@ export function parseNote(file: VaultFile): ParsedNote {
       // Links and tags are read from the markdown as written, so escaped
       // brackets and hashes (`[\[x]]`, `\#word`) stay plain text.
       const source = start !== undefined && end !== undefined ? body.slice(start, end) : null
-      tagChunks.push(source === null ? t.value : tagSource(source))
+      for (const { tag } of textTags(t.value, source)) tagSet.add(tag)
       const base = start ?? 0
       for (const tok of textWikilinks(t.value, source)) {
         const link: Link = {
@@ -204,6 +196,18 @@ export function parseNote(file: VaultFile): ParsedNote {
     }
   })
 
+  // A paragraph `tameDelimiters` guarded holds look-alikes for its * and _ : links and search text get them back.
+  if (tameDelimiters(body) !== body) {
+    const back = (x: string) => x.replace(/\u2217/g, '*').replace(/\uff3f/g, '_')
+    for (const l of links) {
+      l.to = back(l.to)
+      l.raw = back(l.raw)
+      if (l.alias) l.alias = back(l.alias)
+      if (l.heading) l.heading = back(l.heading)
+    }
+    for (let i = 0; i < textChunks.length; i++) textChunks[i] = back(textChunks[i]!)
+  }
+
   // Plain text for search/mentions: strip wikilink syntax but keep the words.
   // `[^[\]]` like WIKILINK_RE: a long run of `[[` must not make this quadratic.
   const plain = textChunks
@@ -216,7 +220,7 @@ export function parseNote(file: VaultFile): ParsedNote {
     .trim()
 
   const fmTags = asStringArray(frontmatter['tags']).map(normalizeTag).filter(Boolean)
-  const inlineTags = extractInlineTags(tagChunks.join('\n'))
+  const inlineTags = [...tagSet]
   const tags = uniq([...fmTags, ...inlineTags])
 
   const fmTitle = asString(frontmatter['title'])

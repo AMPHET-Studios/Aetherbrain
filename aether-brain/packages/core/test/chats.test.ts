@@ -295,16 +295,49 @@ describe('inert chat text', () => {
     expect(inertMarkdown(out)).toBe(out)
   })
 
-  it('fails closed: a swallowing HTML block still found escapes everything, code too, in one pass', () => {
-    const chat = `${'<!--\n'.repeat(60)}- [ ] LIVE TASK\n[[Link]] #tag\n`
-    const out = inertMarkdown(chat)
-    expect(out).toBe(blanketInert(chat))
-    const { links, tags, tasks } = brainOf(out)
-    expect([links, tags, tasks]).toEqual([[], [], []])
-    // Through tameChatMarkdown (as every renderer does) the openers are escaped up front.
-    const tamed = inertMarkdown(tameChatMarkdown(chat))
-    expect(brainOf(tamed).tasks).toEqual([])
-    expect(tamed).toContain('\\<!--')
+  it('keeps every message whole: nothing it opens (fence, HTML, list) reaches the next one or the notes after it', () => {
+    const conv = {
+      source: 'claude' as const, id: 'q', title: 'Q', created: '2026-03-02T10:00:00Z', updated: '2026-03-02T10:00:00Z',
+      url: 'https://claude.ai/chat/qqqqqq', projectId: null, gptId: null, model: null,
+      messages: [
+        { role: 'assistant' as const, time: null, text: '1. Install the deps:\n   ```bash\n   npm i', attachments: [], images: [], artifacts: [] },
+        { role: 'user' as const, time: null, text: `${'<!--\n'.repeat(60)}<div>\n\`\`\`\n\n\`\`\`\n- [ ] LIVE TASK`, attachments: [], images: [], artifacts: [] },
+        { role: 'assistant' as const, time: null, text: 'Last one', attachments: [], images: [], artifacts: [] },
+      ],
+    }
+    const note = `${renderChatNote(conv, '2026-03-02 Q', { utc: true })}\n## After\n\nSee [[Idea]] #followup\n\n- [ ] mine\n`
+    const tree = parseMarkdown(splitFrontmatter(note).body)
+    const headings = tree.children.filter((n) => n.type === 'heading').map((n) => JSON.stringify(n).match(/"value":"([^"]+)"/)?.[1])
+    expect(headings).toEqual(['2026-03-02 Q', 'Transcript', 'Claude', 'You', 'Claude', 'After'])
+    const { links, tags, tasks } = brainOf(note)
+    expect(links).toEqual(['Idea'])
+    expect(tags).toEqual(['ai-chat', 'claude', 'followup'])
+    expect(tasks).toEqual(['mine'])
+    // Text above the transcript that toggles the line-by-line task scan changes nothing inside it.
+    const toggled = note.replace('## Transcript', '```\n\n## Transcript')
+    expect(brainOf(toggled).tasks.filter((t) => t !== 'mine')).toEqual([])
+  })
+
+  it('escapes a link inside a markdown link without breaking the link around it', () => {
+    for (const text of ['[a [[x]] b](u[[y]])', '[a [[x]] b](#tag)', '[a [[x]] b](u "[[y]] #z")', '<!-- TODO --> and `#include` stays', 'if [[ -f x ]]; then #comment']) {
+      const conv = { source: 'claude' as const, id: 'l', title: 'L', created: null, updated: null, url: 'https://claude.ai/chat/llllll', projectId: null, gptId: null, model: null, messages: [{ role: 'user' as const, time: null, text, attachments: [], images: [], artifacts: [] }] }
+      const b = brainOf(renderChatNote(conv, 'L', { utc: true }))
+      expect(b.links, text).toEqual([])
+      expect(b.tags, text).toEqual(['ai-chat', 'claude'])
+    }
+    // Both sides escaped: the markdown link around stays a link (no fail-closed escape was needed).
+    const nested = { source: 'claude' as const, id: 'n', title: 'N', created: null, updated: null, url: 'https://claude.ai/chat/nnnnnn', projectId: null, gptId: null, model: null, messages: [{ role: 'user' as const, time: null, text: '[a [[x]] b](u[[y]])', attachments: [], images: [], artifacts: [] }] }
+    expect(renderChatNote(nested, 'N', { utc: true })).toContain('> [a \\[\\[x\\]\\] b](u[[y]])')
+    // Code is never touched outside the fail-closed path.
+    const code = { source: 'claude' as const, id: 'c', title: 'C', created: null, updated: null, url: 'https://claude.ai/chat/cccccc', projectId: null, gptId: null, model: null, messages: [{ role: 'user' as const, time: null, text: 'Mark it <!-- TODO --> please\n\n```c\n#include <stdio.h>\nif [[ -f x ]]\n```\n\n    - [ ] indented code', attachments: [], images: [], artifacts: [] }] }
+    const out = renderChatNote(code, 'C', { utc: true })
+    expect(out).toContain('> #include <stdio.h>\n> if [[ -f x ]]')
+    expect(out).toContain('>     - [ ] indented code')
+    // The fail-closed escape leaves nothing live, in code too.
+    const blank = blanketInert('[[a]] #b\n- [ ] c\n```\n[[d]] #e\n```')
+    expect(brainOf(blank).links).toEqual([])
+    expect(brainOf(blank).tags).toEqual([])
+    expect(brainOf(blank).tasks).toEqual([])
   })
 
   it('pathological emphasis runs cost milliseconds, in chats and in any note', () => {
@@ -312,7 +345,11 @@ describe('inert chat text', () => {
     const tamed = tameChatMarkdown(`${'*a'.repeat(20000)}\n\nnormal *emphasis* stays`)
     parseMarkdown(tamed)
     expect(performance.now() - t).toBeLessThan(2000)
-    expect(tamed).toContain('\\*a\\*a')
+    expect(tamed).toMatch(/^~~~text\n\*a\*a/)
+    // A tilde run inside cannot close the block early.
+    const tildes = tameChatMarkdown(`${'*a'.repeat(1200)} ~~~~~\n[[x]] #y`)
+    expect(tildes.startsWith('~~~~~~text\n')).toBe(true)
+    expect(brainOf(tildes).links).toEqual([])
     expect(tamed).toContain('normal *emphasis* stays')
     // The brain's own parser guards every note the same way (same length: offsets stay true).
     t = performance.now()
@@ -344,8 +381,8 @@ describe('chat notes', () => {
     expect(content).toContain('### You · 2026-03-02 14:05')
     expect(content).toContain('### Claude · 14:07')
     expect(content).toContain('### You · 2026-03-04 09:00')
-    expect(content).toContain('**🧩 Glow shader**')
-    expect(content).toContain('````python\nglow = 1  # [[not a link]]\n```\nnested\n```\n````')
+    expect(content).toContain('> **🧩 Glow shader**')
+    expect(content).toContain('> ````python\n> glow = 1  # [[not a link]]\n> ```\n> nested\n> ```\n> ````')
     const { links, tags, tasks } = brainOf(content)
     expect(links).toEqual(['PORTALz (Claude project)'])
     expect(tags).toEqual(['ai-chat', 'claude'])
@@ -383,7 +420,7 @@ describe('chat notes', () => {
     const lore = plan.create.find((p) => p.path.endsWith('lore bible.md'))!.content
     expect(brainOf(lore).tasks).toEqual([])
     expect(brainOf(lore).links).toEqual(['PORTALz (Claude project)'])
-    expect(plan.create.find((p) => p.path.endsWith('gen.md'))!.content).toContain('```python\nprint("hi")\n```')
+    expect(plan.create.find((p) => p.path.endsWith('gen.md'))!.content).toContain('> ```python\n> print("hi")\n> ```')
     // Every note the plan writes gives the brain no stray links, tags or tasks.
     for (const p of plan.create) {
       const b = brainOf(p.content, p.path)
@@ -439,9 +476,10 @@ describe('chat notes', () => {
     // A note of the user's carrying a chat's address is never rewritten (nor duplicated).
     const mine = parseNote({ path: 'Areas/Meeting.md', content: '# Meeting\n\nSource: <https://claude.ai/chat/c-1>\n\n## Transcript\n\n*1 message*\n\n## My follow-ups\n\n- [ ] call Sam\n' })
     const plan = planChatImport(archive(), [mine], { base: 'AI Chats', utc: true })
+    // ...and never blocks the chat either: the chat gets a note of its own.
     expect(plan.update).toEqual([])
-    expect(plan.create.map((p) => p.path)).not.toContain('AI Chats/Claude/2026-03-02 Portal lighting.md')
-    expect(plan.unchanged).toBe(1)
+    expect(plan.create.map((p) => p.path)).toContain('AI Chats/Claude/2026-03-02 Portal lighting.md')
+    expect(plan.unchanged).toBe(0)
   })
 
   it('keeps what follows the end of the transcript, and a summary never moves where the transcript starts', () => {
@@ -478,3 +516,122 @@ describe('chat notes', () => {
     expect(splitFrontmatter(note.content).frontmatter.title).toBe('2026-03-02 Portal lighting 2')
   })
 })
+
+describe('chat import: review round two', () => {
+  const conv = (over: Partial<ChatConversation>, text = 'hi'): ChatConversation => ({
+    source: 'claude', id: 'x1', title: 'T', created: '2026-01-01T10:00:00Z', updated: '2026-01-01T10:00:00Z', url: 'https://claude.ai/chat/x1x1x1', projectId: null, gptId: null, model: null,
+    messages: [{ role: 'user', time: null, text, attachments: [], images: [], artifacts: [] }],
+    ...over,
+  })
+
+  it('escapes in one pass: thousands of tags and links cost milliseconds', () => {
+    const big = Array.from({ length: 10 }, () => conv({}, '#a [[b]] '.repeat(15000)).messages[0]!)
+    const t = performance.now()
+    const out = renderTranscript(conv({ messages: big }), { utc: true })
+    expect(performance.now() - t).toBeLessThan(8000)
+    expect(brainOf(`# x\n\n${out}`).tags).toEqual([])
+  })
+
+  it('keeps code as written: no blank lines squeezed out of a Python file', () => {
+    const out = renderTranscript(conv({}, '```python\ndef a():\n    pass\n\n\ndef b():\n    pass\n```'), { utc: true })
+    expect(out).toContain('>     pass\n>\n>\n> def b():')
+  })
+
+  it('a hub keeps what the user wrote after it, and a projects.json alone keeps its list of chats', () => {
+    const first = planChatImport(archive(), [], { base: 'AI Chats', utc: true })
+    const notes = first.create.map((p) => parseNote({ path: p.path, content: p.kind === 'project' ? `${p.content}\n## My thoughts\n\nKeep this!\n` : p.content }))
+    const hub = notes.find((n) => n.meta.tags.includes('ai-project'))!
+    const changed = readChatExport([{ name: 'projects.json', text: JSON.stringify([{ ...claudeProjects[0], description: 'The portal game, v2.' }]) }])
+    const plan = planChatImport(changed, notes, { base: 'AI Chats', utc: true })
+    const u = plan.update.find((x) => x.kind === 'project')!
+    const next = applyChatUpdate(hub.raw, u)!
+    expect(next).toContain('The portal game, v2.')
+    expect(next).toContain('## My thoughts\n\nKeep this!')
+    expect(next).toContain('- [[2026-03-02 Portal lighting 2]]')
+    expect(plan.create).toEqual([])
+  })
+
+  it('knowledge docs: unique titles, one per project and file, found again after the hub moved', () => {
+    const long = 'My long project about the portal game very long indeed'
+    const two = readChatExport([
+      { name: 'projects.json', text: JSON.stringify([
+        { uuid: 'pa', name: long, prompt_template: '', docs: [{ filename: 'notes.md', content: 'FIRST' }] },
+        { uuid: 'pb', name: `${long} too`, prompt_template: '', docs: [{ filename: 'notes.md', content: 'SECOND' }] },
+        { uuid: 'pc', name: 'Portal', prompt_template: '', docs: [{ filename: 'notes.md', content: 'THIRD' }] },
+        { uuid: 'pd', name: 'Portal', prompt_template: '', docs: [{ filename: 'notes.md', content: 'FOURTH' }] },
+      ]) },
+    ])
+    const plan = planChatImport(two, [], { base: 'AI', utc: true })
+    const docs = plan.create.filter((p) => p.kind === 'doc')
+    expect(docs).toHaveLength(4)
+    const titles = docs.map((d) => String(splitFrontmatter(d.content).frontmatter.title))
+    expect(new Set(titles).size).toBe(4)
+    for (const text of ['FIRST', 'SECOND', 'THIRD', 'FOURTH']) expect(docs.some((d) => d.content.includes(`> ${text}`))).toBe(true)
+    // The hub and its docs moved elsewhere: a re-import finds them, nothing is made twice.
+    const moved = plan.create.map((p) => parseNote({ path: p.path.replace(/^AI\//, 'Projects/Moved/'), content: p.content }))
+    expect(planChatImport(two, moved, { base: 'AI', utc: true }).create).toEqual([])
+  })
+
+  it('a moved chat with pictures: its pictures are not copied again, its transcript not rewritten', () => {
+    const first = planChatImport(archive(), [], { base: 'AI', utc: true, pictureFiles: ['file-AbC123-monolith.webp'] })
+    const pics = first.pictures.map((p) => p.path.replace(/^AI\//, 'Elsewhere/'))
+    const notes = first.create.map((p) => parseNote({ path: p.path.replace(/^AI\/ChatGPT\//, 'Elsewhere/'), content: p.content }))
+    const again = planChatImport(archive(), notes, { base: 'AI', utc: true, pictureFiles: ['file-AbC123-monolith.webp'], existingPictures: pics })
+    expect(again.pictures).toEqual([])
+    expect(again.update).toEqual([])
+  })
+
+  it('names: never half an emoji, never over 255 bytes, never a folder from an id', () => {
+    const emoji = `${'a'.repeat(118)}😀😀`
+    const c1 = conv({ title: emoji })
+    const cjk = conv({ id: 'x2', url: 'https://claude.ai/chat/x2x2x2', title: '漢'.repeat(200) })
+    const gpt = conv({ source: 'chatgpt', id: 'g9', url: 'https://chatgpt.com/c/g9g9g9', projectId: 'g-p-../../..:*?<>|', title: 'G' })
+    const odd = readChatExport([{ name: 'conversations.json', text: `[{"uuid":"\\ud800bad","name":"x","chat_messages":[{"uuid":"m","sender":"human","text":"hi"}]}]` }])
+    const plan = planChatImport({ conversations: [c1, cjk, cjk, gpt, ...odd.conversations], projects: [], files: [], warnings: [] }, [], { base: 'AI', utc: true })
+    for (const p of plan.create) {
+      const name = p.path.slice(p.path.lastIndexOf('/') + 1)
+      expect(new TextEncoder().encode(name).length, name).toBeLessThanOrEqual(200)
+      expect(/[\ud800-\udfff]/.test(name.replace(/[\ud800-\udbff][\udc00-\udfff]/g, '')), name).toBe(false)
+      expect(p.path.split('/').every((seg) => seg !== '..' && !/[:*?<>|]/.test(seg)), p.path).toBe(true)
+    }
+    expect(plan.create.some((p) => p.path.startsWith('AI/ChatGPT/Project '))).toBe(true)
+  })
+
+  it('reads the thread of a Claude chat whose current leaf is missing, and keeps the newer copy of a chat found twice', () => {
+    const branched = [{ uuid: 'b1', name: 'B', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-02T00:00:00Z', current_leaf_message_uuid: 'gone', chat_messages: [
+      { uuid: 'm1', sender: 'human', text: 'q', created_at: '2026-01-01T00:00:00Z', parent_message_uuid: '00000000-0000-4000-8000-000000000000' },
+      { uuid: 'm2', sender: 'assistant', text: 'old answer', created_at: '2026-01-01T00:01:00Z', parent_message_uuid: 'm1' },
+      { uuid: 'm3', sender: 'assistant', text: 'new answer', created_at: '2026-01-01T00:02:00Z', parent_message_uuid: 'm1' },
+    ] }]
+    const newer = [{ ...branched[0], updated_at: '2026-02-01T00:00:00Z', name: 'B newer' }]
+    const a = readChatExport([{ name: 'a/conversations.json', text: JSON.stringify(branched) }, { name: 'b/conversations.json', text: JSON.stringify(newer) }])
+    expect(a.conversations).toHaveLength(1)
+    expect(a.conversations[0]!.title).toBe('B newer')
+    expect(a.conversations[0]!.messages.map((m) => m.text)).toEqual(['q', 'new answer'])
+  })
+
+  it('zip: a comment holding the end signature, and a stored entry bigger than it claims', async () => {
+    const zip = makeZip({ 'conversations.json': '[]' }, { store: true })
+    const comment = new Uint8Array([0x50, 0x4b, 0x05, 0x06, ...new Array(30).fill(0)])
+    const withComment = new Uint8Array(zip.length + comment.length)
+    withComment.set(zip)
+    withComment.set(comment, zip.length)
+    // The comment length field of the real end record.
+    withComment[zip.length - 2] = comment.length & 0xff
+    withComment[zip.length - 1] = comment.length >> 8
+    expect((await zipEntries(bytesZipSource(withComment))).map((e) => e.name)).toEqual(['conversations.json'])
+    const stored = makeZip({ 'big.json': 'x'.repeat(20000) }, { store: true })
+    const src = bytesZipSource(stored)
+    const [e] = await zipEntries(src)
+    await expect(zipRead(src, { ...e!, size: 10 }, 1000)).rejects.toThrow(/too large/)
+  })
+
+  it('ordinary notes read as before: quotes without a space, character references', () => {
+    expect(brainOf('>quote line\n>#bar\n\n>>#deep').tags).toEqual(['bar', 'deep'])
+    expect(brainOf('[[Caf&eacute;]] and [[AT&amp;T]]').links).toEqual(['Café', 'AT&T'])
+    expect(brainOf('#caf&eacute; a&nbsp;#nbsp').tags).toEqual(['café', 'nbsp'])
+    expect(brainOf('&#91;[x]] \\#no').links).toEqual([])
+    expect(brainOf(`${'x_'.repeat(1200)} [[my_other_note]]`).links.map((l) => l)).toEqual(['my_other_note'])
+  })
+})
+

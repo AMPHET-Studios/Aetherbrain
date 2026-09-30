@@ -27,8 +27,12 @@ export interface ZipEntry {
   encrypted: boolean
 }
 
-/** Bytes of an entry as they come out: never more than this unless the caller allows it. */
-export const MAX_ENTRY_BYTES = 1024 * 1024 * 1024
+/**
+ * Bytes of an entry as they come out: never more than this unless the caller
+ * allows it. Below V8's longest string (about 512 M characters), so an entry
+ * read as text fails here, before it is inflated, not after.
+ */
+export const MAX_ENTRY_BYTES = 480 * 1024 * 1024
 
 export class ZipError extends Error {
   override name = 'ZipError'
@@ -67,9 +71,11 @@ export async function zipEntries(src: ZipSource): Promise<ZipEntry[]> {
   const tailLen = Math.min(src.size, 22 + 0xffff)
   const tailAt = src.size - tailLen
   const tail = await src.read(tailAt, tailLen)
+  // The end record is the last one whose comment runs exactly to the end of the file (a comment
+  // can hold the record's signature itself).
   let eocd = -1
   for (let i = tail.byteLength - 22; i >= 0; i--) {
-    if (u32(tail, i) === EOCD) {
+    if (u32(tail, i) === EOCD && i + 22 + u16(tail, i + 20) === tail.byteLength) {
       eocd = i
       break
     }
@@ -111,15 +117,17 @@ export async function zipEntries(src: ZipSource): Promise<ZipEntry[]> {
       const len = u16(cd, e + 2)
       if (id === 0x0001) {
         let q = e + 4
-        if (size === 0xffffffff) {
+        const stop = Math.min(e + 4 + len, extraEnd)
+        // Only the values the record has room for (a short field must not read into the next record).
+        if (size === 0xffffffff && q + 8 <= stop) {
           size = u64(cd, q)
           q += 8
         }
-        if (compressedSize === 0xffffffff) {
+        if (compressedSize === 0xffffffff && q + 8 <= stop) {
           compressedSize = u64(cd, q)
           q += 8
         }
-        if (localOffset === 0xffffffff) localOffset = u64(cd, q)
+        if (localOffset === 0xffffffff && q + 8 <= stop) localOffset = u64(cd, q)
       }
       e += 4 + len
     }
@@ -133,7 +141,9 @@ export async function zipEntries(src: ZipSource): Promise<ZipEntry[]> {
 export async function zipRead(src: ZipSource, entry: ZipEntry, maxBytes = MAX_ENTRY_BYTES): Promise<Uint8Array> {
   if (entry.encrypted) throw new ZipError(`${entry.name} is encrypted`)
   if (entry.method !== 0 && entry.method !== 8) throw new ZipError(`${entry.name} uses an unsupported compression (${entry.method})`)
-  if (entry.size > maxBytes) throw new ZipError(`${entry.name} is too large (${Math.round(entry.size / 1048576)} MB)`)
+  if (entry.size > maxBytes || (entry.method === 0 && entry.compressedSize > maxBytes)) {
+    throw new ZipError(`${entry.name} is too large (${Math.round(Math.max(entry.size, entry.compressedSize) / 1048576)} MB)`)
+  }
   const head = await src.read(entry.localOffset, 30)
   if (u32(head, 0) !== LOCAL) throw new ZipError(`Broken entry ${entry.name}`)
   const start = entry.localOffset + 30 + u16(head, 26) + u16(head, 28)

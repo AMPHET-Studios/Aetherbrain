@@ -91,11 +91,13 @@ Source: <https://claude.ai/chat/5a1f0c1e-…>
 
 ### You · 2026-03-02 14:05
 
-How should the portal glow?
+> How should the portal glow?
 
 ### Claude · 14:06
 
-Rim light first, then bloom …
+> Rim light first, then bloom …
+
+*— end of transcript —*
 ```
 
 - **What's included:** the messages as they appear in the chat (for an edited
@@ -105,10 +107,12 @@ Rim light first, then bloom …
 - **What's left out:** hidden reasoning, tool calls and system messages.
 - **Everything is searchable:** press <kbd>/</kbd> and type anything you
   remember from a chat.
-- **Chat text stays plain text in your brain.** A `[[Gate]]`, `#portal` or
-  `- [ ] add bloom` inside a chat is written escaped (`[\[Gate]]`, `\#portal`,
-  `- \[ ] add bloom`). It reads the same, but it won't create links, tags or
-  to-dos on your Today hub. Code blocks are never touched.
+- **Chat text stays plain text in your brain.** Each message is kept whole
+  inside a quote (`> `), so nothing a chat opens (a code block, a list) can spill
+  into the rest of the note. A `[[Gate]]`, `#portal` or `- [ ] add bloom` inside
+  a chat is written escaped (`\[\[Gate\]\]`, `\#portal`, `- \[ ] add bloom`). It
+  reads the same, but it won't create links, tags or to-dos on your Today hub.
+  Code blocks are never touched.
 - **Your own notes go above `## Transcript`** (or below the line
   `*— end of transcript —*`). Write your thoughts, `[[links]]` and
   `- [ ] tasks` there, and they count like in any note.

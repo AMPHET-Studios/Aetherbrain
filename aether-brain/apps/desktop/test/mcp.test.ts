@@ -745,9 +745,9 @@ describe('save_chat', () => {
     expect(text).toMatch(/^---\ntitle: \d{4}-\d{2}-\d{2} Gate glow\ntags: \[ai-chat, claude\]/)
     expect(text).toContain('## Summary\n\nRim light wins.')
     expect(text).toContain('## Transcript\n\n*2 messages')
-    expect(text).toContain('### You\n\nHow should the gate glow? - [ ] not a task \\#nottag')
-    expect(text).toContain('- \\[ ] also not a task')
-    expect(text).toContain('Like [\\[Glyphs]].')
+    expect(text).toContain('### You\n\n> How should the gate glow? - [ ] not a task \\#nottag')
+    expect(text).toContain('> - \\[ ] also not a task')
+    expect(text).toContain('> Like \\[\\[Glyphs\\]\\].')
     // Only the summary's task and link count.
     const note = json(await call(client, 'read_note', { note: rel }))
     expect(note.tasks.map((t: { text: string }) => t.text)).toEqual(['Try bloom on [[PORTALz]]'])
