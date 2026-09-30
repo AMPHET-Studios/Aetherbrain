@@ -73,6 +73,34 @@ export function tokenizeWikilinks(text: string): WikilinkToken[] {
   return out
 }
 
+/** CommonMark backslash escapes resolved (`\[` → `[`): what a text node's value holds for its source. */
+function unescapeMarkdown(text: string): string {
+  return text.replace(/\\([!-/:-@[-`{-~])/g, '$1')
+}
+
+/**
+ * The wikilinks of a markdown text node that are really written in its
+ * source. `value` is the node's text (escapes resolved); `source` is the
+ * markdown the node was parsed from. An escaped bracket (`[\[x]]`,
+ * `\[\[x]]`) is how markdown writes a literal `[[`, so it is not a link
+ * (imported AI chats rely on this). Escapes inside a link still count
+ * (`[[Note\|alias]]` in a table cell). Tokens keep their index in `value`.
+ */
+export function textWikilinks(value: string, source?: string | null): WikilinkToken[] {
+  const tokens = tokenizeWikilinks(value)
+  if (!tokens.length || source == null || source === value) return tokens
+  const written = tokenizeWikilinks(source).map((t) => `${t.embed ? '!' : ''}${unescapeMarkdown(t.raw)}`)
+  const out: WikilinkToken[] = []
+  let from = 0
+  for (const t of tokens) {
+    const at = written.indexOf(`${t.embed ? '!' : ''}${t.raw}`, from)
+    if (at < 0) continue
+    from = at + 1
+    out.push(t)
+  }
+  return out
+}
+
 export interface WikilinkNode {
   type: 'wikilink'
   target: string
@@ -108,10 +136,13 @@ export interface RemarkWikilinkOptions {
  */
 export const remarkWikilink: Plugin<[RemarkWikilinkOptions?], Root> = (options = {}) => {
   const resolve = options.resolve
-  return (tree) => {
+  return (tree, file) => {
+    const doc = typeof file?.value === 'string' ? file.value : null
     visit(tree, 'text', (node: Text, index, parent: Parent | undefined) => {
       if (!parent || index === undefined) return
-      const tokens = tokenizeWikilinks(node.value)
+      const start = node.position?.start.offset
+      const end = node.position?.end.offset
+      const tokens = textWikilinks(node.value, doc !== null && start !== undefined && end !== undefined ? doc.slice(start, end) : null)
       if (tokens.length === 0) return
       const pieces: PhrasingContent[] = []
       let cursor = 0

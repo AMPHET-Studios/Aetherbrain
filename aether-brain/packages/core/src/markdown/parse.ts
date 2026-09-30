@@ -6,7 +6,7 @@ import { toString as mdToString } from 'mdast-util-to-string'
 import type { Root, Heading as MdHeading, Text } from 'mdast'
 import type { Heading, Link, NoteMeta, ParsedNote, VaultFile } from '../types'
 import { asIsoDate, asString, asStringArray, splitFrontmatter } from './frontmatter'
-import { tokenizeWikilinks } from './wikilink'
+import { textWikilinks } from './wikilink'
 import {
   areaFromFolder,
   basenameOf,
@@ -83,6 +83,27 @@ export function extractInlineTags(text: string): string[] {
   return [...out]
 }
 
+/** Offsets of the `#` of every inline tag in `text` (what `extractInlineTags` would read). */
+export function inlineTagOffsets(text: string): number[] {
+  const out: number[] = []
+  INLINE_TAG_RE.lastIndex = 0
+  let m: RegExpExecArray | null
+  while ((m = INLINE_TAG_RE.exec(text))) {
+    const tag = m[2] ?? ''
+    if (tag && !/^\d+$/.test(tag)) out.push(m.index + (m[1] ?? '').length)
+  }
+  return out
+}
+
+/**
+ * The source of a text node, as tags are read from it: backslash escapes
+ * resolved except `\#`, so an escaped `\#word` stays text (markdown's way to
+ * write a literal hash) while `#multi\_word` still reads `multi_word`.
+ */
+function tagSource(source: string): string {
+  return source.replace(/\\([!-/:-@[-`{-~])/g, (m, c: string) => (c === '#' ? m : c))
+}
+
 export function normalizeTag(tag: string): string {
   return tag.replace(/^#/, '').trim().toLowerCase()
 }
@@ -106,6 +127,7 @@ export function parseNote(file: VaultFile): ParsedNote {
   const headings: Heading[] = []
   let firstH1: string | null = null
   const textChunks: string[] = []
+  const tagChunks: string[] = []
   const links: Link[] = []
 
   visit(tree, (node) => {
@@ -120,8 +142,14 @@ export function parseNote(file: VaultFile): ParsedNote {
     if (node.type === 'text') {
       const t = node as Text
       textChunks.push(t.value)
-      const base = t.position?.start.offset ?? 0
-      for (const tok of tokenizeWikilinks(t.value)) {
+      const start = t.position?.start.offset
+      const end = t.position?.end.offset
+      // Links and tags are read from the markdown as written, so escaped
+      // brackets and hashes (`[\[x]]`, `\#word`) stay plain text.
+      const source = start !== undefined && end !== undefined ? body.slice(start, end) : null
+      tagChunks.push(source === null ? t.value : tagSource(source))
+      const base = start ?? 0
+      for (const tok of textWikilinks(t.value, source)) {
         const link: Link = {
           from: id,
           to: tok.target,
@@ -149,7 +177,7 @@ export function parseNote(file: VaultFile): ParsedNote {
     .trim()
 
   const fmTags = asStringArray(frontmatter['tags']).map(normalizeTag).filter(Boolean)
-  const inlineTags = extractInlineTags(textChunks.join('\n'))
+  const inlineTags = extractInlineTags(tagChunks.join('\n'))
   const tags = uniq([...fmTags, ...inlineTags])
 
   const fmTitle = asString(frontmatter['title'])

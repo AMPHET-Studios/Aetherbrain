@@ -47,7 +47,8 @@ How to work with it:
 - daily_brief is the user's Today: overdue tasks, tasks due or scheduled today (📅 / ⏳ dates, #today, today's daily note) and the next task of each active project. Tick one off with set_task_done, passing the row's path as project and its line.
 - New notes go to the Inbox unless you give a folder. Nothing is overwritten (a taken name gets " 2"), only .md notes and folders are created, and no tool deletes a note.
 - A planet is a folder inside a project's home folder: create_folder with project and path.
-- Prefer small edits (edit_note, append_to_note, add_task) over rewriting whole notes, and keep the user's own words.`
+- Prefer small edits (edit_note, append_to_note, add_task) over rewriting whole notes, and keep the user's own words.
+- When the user asks to save or remember this conversation, call save_chat: a title, a short summary (next steps as tasks) and the messages as faithfully as you can.`
 
 /** Every tool: title, description (also used for the Claude Desktop extension manifest) and whether it writes. */
 export const TOOLS = {
@@ -137,6 +138,12 @@ export const TOOLS = {
     write: true,
     description: 'Use this when setting or removing frontmatter (YAML) properties of a note, such as status, tags, area, type or aliases. A null value removes the key.',
   },
+  save_chat: {
+    title: 'Save this chat',
+    write: true,
+    description:
+      "Use this when the user asks to save, keep or remember this conversation in their brain: writes it as a chat note, a short summary on top (live markdown: [[links]] and \"- [ ] next step\" tasks count) and then the transcript, under AI Chats (or a project's AI Chats planet). Pass the messages as faithfully as you can. With the chat's web address as url, saving again updates the same note.",
+  },
   capture: {
     title: 'Quick capture',
     write: true,
@@ -209,6 +216,9 @@ export const MAX_TEXT_ARG = 200_000
 export const MAX_LINE_ARG = 4_000
 /** Longest list argument (tags, first tasks, keys to remove). */
 export const MAX_LIST_ARG = 200
+/** Most messages one save_chat call takes, and most characters in all (messages + summary). */
+export const MAX_CHAT_MESSAGES = 2_000
+export const MAX_CHAT_CHARS = 2_000_000
 
 /** A markdown text argument. */
 const mdText = () => z.string().max(MAX_TEXT_ARG)
@@ -479,6 +489,40 @@ export function createMcpServer(brain: Brain, opts: McpServerOptions): McpServer
     async ({ title, folder, content, tags, type }) => {
       const n = await brain.createNote({ title, ...(folder ? { folder } : {}), ...(content ? { content } : {}), ...(tags ? { tags } : {}), ...(type ? { type } : {}) })
       return { text: reply(`Created ${n.path}.`, n), summary: `created ${quote(n.title)}`, path: n.path }
+    },
+  )
+
+  tool(
+    'save_chat',
+    {
+      title: oneLine().min(1).describe('What the chat was about, e.g. "Portal lighting". The note is named "<today> <title>".'),
+      messages: z
+        .array(
+          z.object({
+            role: z.enum(['user', 'assistant']).describe('user: the person; assistant: you.'),
+            text: mdText().describe('The message, as written (markdown).'),
+          }),
+        )
+        .max(MAX_CHAT_MESSAGES)
+        .default([])
+        .describe('The conversation, oldest first.'),
+      summary: mdText().optional().describe('A short summary for the top of the note: decisions, ideas, next steps as "- [ ] task" lines.'),
+      source: z.enum(['claude', 'chatgpt']).optional().describe('Who you are (default: from the client name).'),
+      url: oneLine().optional().describe('The chat\'s web address (https://claude.ai/chat/… or https://chatgpt.com/c/…), if you know it.'),
+      project: oneLine().optional().describe('Save into this project\'s "AI Chats" planet and link it.'),
+      folder: oneLine().optional().describe('Or a folder vault path to save into.'),
+    },
+    ADDS,
+    async ({ title, messages, summary, source, url, project, folder }) => {
+      const total = messages.reduce((n, m) => n + m.text.length, 0) + (summary?.length ?? 0)
+      if (total > MAX_CHAT_CHARS) throw new Error(`The chat is too long to save in one call (${total.toLocaleString('en-US')} characters, at most ${MAX_CHAT_CHARS.toLocaleString('en-US')})`)
+      const who = source ?? (/gpt|openai/i.test(client()) ? 'chatgpt' : 'claude')
+      const n = await brain.saveChat({ title, messages, source: who, ...(summary ? { summary } : {}), ...(url ? { url } : {}), ...(project ? { project } : {}), ...(folder ? { folder } : {}) })
+      return {
+        text: reply(`${n.updated ? 'Updated' : 'Saved'} ${n.path}.`, n),
+        summary: `${n.updated ? 'updated' : 'saved'} the chat ${quote(n.title)}`,
+        path: n.path,
+      }
     },
   )
 

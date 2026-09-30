@@ -5,6 +5,7 @@ import {
   TODAY_ID,
   addTask as addTaskToNote,
   applyChanges,
+  applyChatUpdate,
   areaFromFolder,
   asString,
   basenameOf,
@@ -45,6 +46,7 @@ import {
   normalizeGrade,
   normalizePath,
   parseWikilinkRaw,
+  planChatImport,
   portableFolderRef,
   projectFolderOf,
   projectNote,
@@ -57,6 +59,8 @@ import {
   type Area,
   type BriefTask,
   type BuildGraphOptions,
+  type ChatArchive,
+  type ChatImportPlan,
   type GraphData,
   type GraphOptionsFn,
   type NoteId,
@@ -557,6 +561,39 @@ export interface AetherState {
   forgeProjects(): ForgeProject[]
   /** File a graded drawing (PNG + critique note) into a project's Critique planet. Rejects with a readable message. */
   saveCritique(input: CritiqueSave): Promise<CritiqueSaved>
+  /**
+   * Where imported AI chats go: `<home>Resources/AI Chats` when the vault has
+   * a Resources folder, else `<home>AI Chats` (spelled as on disk).
+   */
+  chatImportBase(): string
+  /**
+   * Import Claude and ChatGPT chats read from their data exports: plan
+   * against the vault (`planChatImport`), ask `confirm` with the plan, then
+   * create every new note and picture (never over anything), rewrite the
+   * transcript of each chat that grew, and apply it all as one batch. Null
+   * when there is nothing to do, it was cancelled or it can't be done (the
+   * reason is toasted).
+   */
+  importChats(input: ChatImportInput): Promise<ChatImportResult | null>
+}
+
+/** An export read by the UI (see `importChats`). */
+export interface ChatImportInput {
+  archive: ChatArchive
+  /** The export's picture files (paths in the plan's `from`) and how to read one. */
+  pictures?: { files: string[]; read(path: string): Promise<Uint8Array> }
+  /** Asked before anything is written; false cancels. */
+  confirm?: (plan: ChatImportPlan, base: string) => boolean | Promise<boolean>
+}
+
+export interface ChatImportResult {
+  base: string
+  created: number
+  updated: number
+  unchanged: number
+  pictures: number
+  /** Files that could not be written, with the reason. */
+  failed: string[]
 }
 
 /** A project a graded drawing can go to (the Forge window's picker). */
@@ -881,13 +918,96 @@ export const useAether = create<AetherState>()((set, get) => {
    * that folder is not on disk yet (it is created on the first save).
    */
   const critiqueTarget = (note: ParsedNote): { home: string | null; dir: string } => {
+    const home = projectHomeOf(note)
+    const dir = folderSpelling(`${home}/Critique`) ?? `${home}/Critique`
+    return { home: get().folders.has(home) ? home : null, dir }
+  }
+
+  /** A project's home folder: its bound folder, else the one a new project folder would get (spelled as on disk). */
+  const projectHomeOf = (note: ParsedNote): string => {
     const { folders, roots } = get()
     let home = projectFolderOf(note, folders) ?? defaultProjectFolder(note)
     // A `folder:` for a folder not made yet is written relative to the note's own drive.
     if (roots.length > 1 && !roots.some((r) => r.mount === mountOf(home, roots))) home = `${mountOf(note.meta.path, roots)}/${home}`
-    home = canonicalFolder(home)
-    const dir = folderSpelling(`${home}/Critique`) ?? `${home}/Critique`
-    return { home: folders.has(home) ? home : null, dir }
+    return canonicalFolder(home)
+  }
+
+  /**
+   * The writing half of `importChats`, inside `batched`: folders, new notes
+   * and pictures are written create-only and applied together at the end;
+   * transcripts of grown chats go through `rewriteNote` (draft saved first,
+   * the file on disk as the starting point).
+   */
+  const writeChatImport = async (plan: ChatImportPlan, input: ChatImportInput, base: string): Promise<ChatImportResult> => {
+    const { adapter } = get()
+    const result: ChatImportResult = { base, created: 0, updated: 0, unchanged: plan.unchanged, pictures: 0, failed: [] }
+    if (!adapter) return result
+    const changes: VaultChange[] = []
+    const mtime = Date.now()
+    // Every folder spelled the vault's way (a Claude/ folder on disk as claude/ is the same folder).
+    const dirOf = new Map<string, string>()
+    const spell = (dir: string): string => {
+      let out = dirOf.get(dir)
+      if (out === undefined) {
+        out = canonicalFolder(dir)
+        dirOf.set(dir, out)
+      }
+      return out
+    }
+    const made = new Set<string>()
+    const ensure = async (dir: string): Promise<boolean> => {
+      if (!dir || get().folders.has(dir) || made.has(dir)) return true
+      if (!adapter.createFolder) return true
+      try {
+        await adapter.createFolder(dir)
+        made.add(dir)
+        changes.push({ kind: 'addDir', path: dir })
+        return true
+      } catch (err) {
+        result.failed.push(`${dir}: ${errText(err)}`)
+        return false
+      }
+    }
+    for (const dir of plan.folders) await ensure(spell(dir))
+
+    for (const note of plan.create) {
+      const dir = spell(folderOf(note.path))
+      const path = `${dir ? `${dir}/` : ''}${note.path.slice(note.path.lastIndexOf('/') + 1)}`
+      try {
+        const done = await createNew(path, note.content)
+        if (done) {
+          changes.push({ kind: 'add', path: done.path, content: done.content, mtime })
+          result.created++
+        }
+      } catch (err) {
+        result.failed.push(`${path}: ${errText(err)}`)
+      }
+    }
+
+    if (plan.pictures.length && input.pictures && adapter.createAsset) {
+      const taken = takenImages()
+      for (const pic of plan.pictures) {
+        const dir = spell(folderOf(pic.path))
+        const file = pic.path.slice(pic.path.lastIndexOf('/') + 1)
+        const m = IMAGE_NAME.exec(file)
+        try {
+          const data = await input.pictures.read(pic.from)
+          if (data.byteLength > MAX_IMAGE_BYTES) throw new Error('larger than 40 MB')
+          const path = await createAssetNew(dir, m?.[1] ?? file, m?.[2] ?? '', data, taken)
+          changes.push({ kind: 'add', path, mtime, size: data.byteLength })
+          result.pictures++
+        } catch (err) {
+          result.failed.push(`${file}: ${errText(err)}`)
+        }
+      }
+    }
+    if (changes.length) get().applyExternal(changes)
+
+    for (const u of plan.update) {
+      const done = await rewriteNote(u.noteId, (raw) => applyChatUpdate(raw, u) ?? raw, `update ${basenameOf(u.path)}`)
+      if (done) result.updated++
+    }
+    return result
   }
 
   /** The project a selection stands for: a project note, or the note of a project star. */
@@ -2245,6 +2365,63 @@ export const useAether = create<AetherState>()((set, get) => {
         get().toast(`Could not save the critique: ${message}`, 'error')
         throw err instanceof Error ? err : new Error(message)
       }
+    },
+
+    chatImportBase() {
+      const home = get().homePrefix()
+      const resources = folderSpelling(`${home}Resources`)
+      return canonicalFolder(resources ? `${resources}/AI Chats` : `${home}AI Chats`)
+    },
+
+    async importChats(input) {
+      const { adapter, status } = get()
+      if (!adapter || status !== 'ready') {
+        get().toast(adapter && status === 'loading' ? 'The vault is still loading; try again in a moment' : 'Open your vault first', 'error')
+        return null
+      }
+      if (adapter.readOnly) {
+        get().toast('This vault is read-only', 'error')
+        return null
+      }
+      const { archive } = input
+      if (!archive.conversations.length && !archive.projects.length) {
+        get().toast('No Claude or ChatGPT chats found in that file (use the data export zip, or its conversations.json)', 'error')
+        return null
+      }
+      const base = get().chatImportBase()
+      const projects = [...get().notes.values()]
+        .filter((n) => n.meta.area !== 'archive' && isProjectNote(n))
+        .map((n) => ({ title: n.meta.title, home: projectHomeOf(n) }))
+      const plan = planChatImport(archive, get().notes.values(), {
+        base,
+        projects,
+        pictureFiles: adapter.createAsset ? (input.pictures?.files ?? []) : [],
+        existingPictures: get().assets.keys(),
+      })
+      if (!plan.create.length && !plan.update.length && !plan.pictures.length) {
+        get().toast(`Nothing new: ${plural(plan.unchanged, 'chat')} already in your brain`)
+        return null
+      }
+      if (input.confirm && !(await input.confirm(plan, base))) return null
+      const total = plan.create.length + plan.pictures.length + plan.update.length
+      if (total > 20) get().toast(`Importing ${total.toLocaleString('en-US')} files…`)
+      const result = await batched(() => writeChatImport(plan, input, base))
+      const what = [
+        result.created ? plural(result.created, 'note') : '',
+        result.pictures ? plural(result.pictures, 'picture') : '',
+        result.updated ? `${result.updated.toLocaleString('en-US')} updated` : '',
+      ].filter(Boolean)
+      if (what.length) {
+        const show = () => {
+          get().showFolder(base)
+          if (get().graph?.index.has(folderKey(base))) showNode(folderKey(base))
+        }
+        get().toast(`AI chats imported: ${what.join(', ')} → ${base || 'the vault root'}`, 'success', { label: 'Show', run: show })
+      }
+      if (result.failed.length) {
+        get().toast(`Could not write ${truncate(result.failed[0] ?? '', 80)}${result.failed.length > 1 ? ` (and ${result.failed.length - 1} more)` : ''}`, 'error')
+      }
+      return result
     },
   }
 })

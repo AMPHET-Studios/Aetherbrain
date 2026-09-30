@@ -729,6 +729,71 @@ describe('daily brief', () => {
   })
 })
 
+describe('save_chat', () => {
+  const messages = [
+    { role: 'user', text: 'How should the gate glow? - [ ] not a task #nottag' },
+    { role: 'assistant', text: 'Rim light, then bloom.\n\n- [ ] also not a task\n\nLike [[Glyphs]].' },
+  ]
+
+  it('saves the conversation as a chat note: summary on top (live), transcript below (inert)', async () => {
+    const client = await connect(await open())
+    const r = await call(client, 'save_chat', { title: 'Gate glow', summary: 'Rim light wins.\n\n- [ ] Try bloom on [[PORTALz]]', messages })
+    const n = json(r)
+    const rel = `Resources/AI Chats/Claude/${TODAY} Gate glow.md`
+    expect(n).toMatchObject({ path: rel, title: `${TODAY} Gate glow`, updated: false })
+    const text = await disk(rel)
+    expect(text).toMatch(/^---\ntitle: \d{4}-\d{2}-\d{2} Gate glow\ntags: \[ai-chat, claude\]/)
+    expect(text).toContain('## Summary\n\nRim light wins.')
+    expect(text).toContain('## Transcript\n\n*2 messages')
+    expect(text).toContain('### You\n\nHow should the gate glow? - [ ] not a task \\#nottag')
+    expect(text).toContain('- \\[ ] also not a task')
+    expect(text).toContain('Like [\\[Glyphs]].')
+    // Only the summary's task and link count.
+    const note = json(await call(client, 'read_note', { note: rel }))
+    expect(note.tasks.map((t: { text: string }) => t.text)).toEqual(['Try bloom on [[PORTALz]]'])
+    expect(note.links.map((l: { title: string }) => l.title)).toEqual(['PORTALz'])
+    expect(activity.find((x) => x.tool === 'save_chat')).toMatchObject({ summary: `saved the chat "${TODAY} Gate glow"`, path: rel, write: true })
+    expect(client.getInstructions()).toMatch(/save_chat/)
+  })
+
+  it("files into a project's AI Chats planet, and ChatGPT's chats under ChatGPT", async () => {
+    const client = await connect(await open())
+    const a = json(await call(client, 'save_chat', { title: 'Hero monolith', project: 'PORTALz', messages }))
+    expect(a.path).toBe(`Projects/PORTALz/AI Chats/${TODAY} Hero monolith.md`)
+    expect(await disk(a.path)).toContain('Project: [[PORTALz]]')
+    const b = json(await call(client, 'save_chat', { title: 'Hero monolith', source: 'chatgpt', messages }))
+    // Another chat of the same name gets its own title (links find notes by title).
+    expect(b.path).toBe(`Resources/AI Chats/ChatGPT/${TODAY} Hero monolith 2.md`)
+    expect(await disk(b.path)).toContain('### ChatGPT')
+  })
+
+  it("with the chat's web address, saving again updates the same note and keeps what was written above the transcript", async () => {
+    const client = await connect(await open())
+    const url = 'https://claude.ai/chat/0f3c2b1a-aaaa-bbbb-cccc-1234567890ab'
+    const first = json(await call(client, 'save_chat', { title: 'Gate glow', url, messages }))
+    const before = await disk(first.path)
+    expect(before).toContain(`Source: <${url}>`)
+    await put(first.path, before.replace('## Transcript', 'My own note.\n\n## Transcript'))
+    const more = [...messages, { role: 'user', text: 'And the fog?' }]
+    const second = json(await call(client, 'save_chat', { title: 'Renamed', url, messages: more }))
+    expect(second).toMatchObject({ path: first.path, updated: true })
+    const after = await disk(first.path)
+    expect(after).toContain('My own note.')
+    expect(after).toContain('And the fog?')
+    expect(after).toContain('*3 messages')
+    expect(activity.at(-1)?.summary).toMatch(/^updated the chat/)
+  })
+
+  it('refuses a wrong address, an empty chat and one too long for a call', async () => {
+    const client = await connect(await open())
+    expect(errorOf(await call(client, 'save_chat', { title: 'x', url: 'https://evil.example/c/1', messages }))).toMatch(/web address/)
+    expect(errorOf(await call(client, 'save_chat', { title: 'x', messages: [] }))).toMatch(/Nothing to save/)
+    const big = Array.from({ length: 12 }, () => ({ role: 'user', text: 'x'.repeat(190_000) }))
+    expect(errorOf(await call(client, 'save_chat', { title: 'x', messages: big }))).toMatch(/too long/)
+    expect(existsSync(path.join(root, 'Resources', 'AI Chats'))).toBe(false)
+  })
+})
+
 describe('create-only notes', () => {
   it('a new note never lands on a file the index has not seen, in any letter case', async () => {
     const client = await connect(await open())

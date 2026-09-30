@@ -1,4 +1,5 @@
 import { folderPathOf, imagePathOf, isFolderId, isImageId, type NoteId } from '@aether/core'
+import { importChatsFromDialog } from './components/chats'
 import { copyEmbed, importPicturesFromDialog } from './components/pictures'
 import type { AetherState } from './store'
 import { MOD } from './util'
@@ -79,6 +80,15 @@ export const COMMANDS: Command[] = [
     group: 'vault',
     when: (s) => writable(s) && !!s.adapter?.createAsset,
     run: () => importPicturesFromDialog(),
+  },
+  {
+    id: 'import-chats',
+    title: 'Import AI chats (Claude / ChatGPT export)…',
+    hint: 'the data export zip, or its conversations.json',
+    keys: 'i',
+    group: 'vault',
+    when: (s) => writable(s),
+    run: () => importChatsFromDialog(),
   },
   {
     id: 'close-editor',

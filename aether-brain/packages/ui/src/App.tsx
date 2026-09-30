@@ -14,6 +14,7 @@ import { ProjectsView } from './components/ProjectsView'
 import { Help } from './components/Help'
 import { Toasts } from './components/Toasts'
 import { Welcome, type VaultSource } from './components/Welcome'
+import { importChatFiles, isChatExportFile, isChatExportType } from './components/chats'
 import { importPictureFiles } from './components/pictures'
 import { cx } from './util'
 
@@ -203,17 +204,22 @@ function Hint() {
   )
 }
 
-/** Why dropped pictures can't be saved right now, or null when they can. */
-function dropBlocker(s: AetherState): string | null {
-  if (s.status !== 'ready' || !s.adapter) return 'Open a vault first to add pictures'
+/** Why dropped pictures (or, with `chats`, AI chat exports) can't be saved right now, or null when they can. */
+function dropBlocker(s: AetherState, chats = false): string | null {
+  if (s.status !== 'ready' || !s.adapter) return chats ? 'Open a vault first to import your chats' : 'Open a vault first to add pictures'
   if (s.adapter.readOnly) return 'This vault is read-only'
-  if (!s.adapter.createAsset) return 'This vault can’t save pictures'
+  if (!chats && !s.adapter.createAsset) return 'This vault can’t save pictures'
   return null
 }
 
 /** True when a drag carries files (not text or a link dragged inside the page). */
 function hasFiles(e: DragEvent): boolean {
   return !!e.dataTransfer && Array.from(e.dataTransfer.types).includes('Files')
+}
+
+/** True when a drag carries a zip or JSON file (a Claude / ChatGPT export); names are only known at the drop. */
+function draggingChats(e: DragEvent): boolean {
+  return Array.from(e.dataTransfer?.items ?? []).some((i) => i.kind === 'file' && isChatExportType(i.type))
 }
 
 /**
@@ -224,7 +230,7 @@ function hasFiles(e: DragEvent): boolean {
  */
 function DropZone() {
   /** What the overlay says; null while no files are dragged over the window. */
-  const [message, setMessage] = useState<{ text: string; ok: boolean } | null>(null)
+  const [message, setMessage] = useState<{ text: string; ok: boolean; chats: boolean } | null>(null)
 
   useEffect(() => {
     // dragenter / dragleave fire for every element crossed: count them to know when the drag left the window.
@@ -237,22 +243,26 @@ function DropZone() {
     const end = () => {
       inside = false
     }
-    const describe = () => {
+    const describe = (chats: boolean) => {
       const s = useAether.getState()
-      const blocker = dropBlocker(s)
-      if (blocker) return { text: blocker, ok: false }
+      const blocker = dropBlocker(s, chats)
+      if (blocker) return { text: blocker, ok: false, chats }
+      if (chats) {
+        const base = s.chatImportBase()
+        return { text: `Drop your Claude / ChatGPT export to import the chats into ${base ? `${base}/` : 'the vault'}`, ok: true, chats }
+      }
       const target = s.importTarget()
-      return { text: `Drop pictures into ${target ? `${target}/` : 'the vault'}`, ok: true }
+      return { text: `Drop pictures into ${target ? `${target}/` : 'the vault'}`, ok: true, chats }
     }
     const enter = (e: DragEvent) => {
       if (inside || !hasFiles(e)) return
       e.preventDefault()
-      if (depth++ === 0) setMessage(describe())
+      if (depth++ === 0) setMessage(describe(draggingChats(e)))
     }
     const over = (e: DragEvent) => {
       if (inside || !hasFiles(e)) return
       e.preventDefault()
-      if (e.dataTransfer) e.dataTransfer.dropEffect = dropBlocker(useAether.getState()) ? 'none' : 'copy'
+      if (e.dataTransfer) e.dataTransfer.dropEffect = dropBlocker(useAether.getState(), draggingChats(e)) ? 'none' : 'copy'
     }
     const leave = (e: DragEvent) => {
       if (inside || !hasFiles(e)) return
@@ -265,12 +275,20 @@ function DropZone() {
       depth = 0
       setMessage(null)
       const s = useAether.getState()
-      const blocker = dropBlocker(s)
-      if (blocker) {
-        s.toast(blocker, 'error')
-        return
+      const files = Array.from(e.dataTransfer?.files ?? [])
+      // Chat exports (.zip, .json) are imported as chats; everything else is taken as pictures.
+      const chats = files.filter((f) => isChatExportFile(f.name))
+      const rest = files.filter((f) => !isChatExportFile(f.name))
+      if (chats.length) {
+        const blocker = dropBlocker(s, true)
+        if (blocker) s.toast(blocker, 'error')
+        else void importChatFiles(chats)
       }
-      void importPictureFiles(Array.from(e.dataTransfer?.files ?? []))
+      if (rest.length) {
+        const blocker = dropBlocker(s)
+        if (blocker) s.toast(blocker, 'error')
+        else void importPictureFiles(rest)
+      }
     }
     window.addEventListener('dragstart', start)
     window.addEventListener('dragend', end)
@@ -293,10 +311,16 @@ function DropZone() {
     <div className="pointer-events-none absolute inset-0 z-[60] grid place-items-center bg-black/45 p-6" aria-live="polite">
       <div className={cx('panel drop-frame rise flex flex-col items-center gap-2 px-10 py-8 text-center', !message.ok && 'blocked')}>
         <span className="text-[34px] leading-none" aria-hidden>
-          🖼
+          {message.chats ? '💬' : '🖼'}
         </span>
         <span className={cx('text-[15px] font-semibold', message.ok ? 'text-white' : 'text-danger')}>{message.text}</span>
-        {message.ok && <span className="text-[12px] text-dim">png · jpg · webp · gif · bmp · avif — never replaces a file (a taken name gets “ 2”)</span>}
+        {message.ok && (
+          <span className="text-[12px] text-dim">
+            {message.chats
+              ? 'the .zip from Claude or ChatGPT, or its conversations.json — plain markdown notes, nothing overwritten'
+              : 'png · jpg · webp · gif · bmp · avif — never replaces a file (a taken name gets “ 2”)'}
+          </span>
+        )}
       </div>
     </div>
   )
