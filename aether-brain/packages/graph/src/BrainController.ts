@@ -3,6 +3,12 @@ import { LayoutEngine } from './layout/LayoutEngine'
 import type { LayoutMode } from './layout/protocol'
 import { nodeRadius, type ColorMode } from './theme'
 
+/**
+ * Loads a picture preview: at most `size` px on its longer side, or null when
+ * it can't be read. Set from the vault adapter's `thumbnail`.
+ */
+export type ThumbnailLoader = (path: string, size: number) => Promise<Blob | null>
+
 export interface BrainEvents {
   onSelect?: (id: NoteId | null) => void
   onOpen?: (id: NoteId) => void
@@ -69,6 +75,10 @@ export class BrainController {
   /** Show labels for the largest hubs even when nothing is selected. */
   hubLabels = true
   bloom = true
+  /** Where image moons get their pictures (null: plain moons, no thumbnails). */
+  thumbnails: ThumbnailLoader | null = null
+  /** Draw picture thumbnails on image moons (when a loader is set). */
+  showThumbnails = true
   /** Bumped whenever a visual property changes; the scene diffs against it. */
   version = 0
   events: BrainEvents = {}

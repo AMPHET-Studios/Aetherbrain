@@ -9,7 +9,9 @@
  * Every edit works on lines split at `\n` and rejoined the same way, so lines
  * that are not touched stay byte-identical (CRLF files keep their `\r`).
  */
+import type { ParsedNote } from '../types'
 import { joinFrontmatter } from './frontmatter'
+import { extractInlineTags } from './parse'
 import { normalizeFolderPath, slugifyTitle, todayIso } from '../vault/paths'
 
 export interface TaskItem {
@@ -23,6 +25,16 @@ export interface TaskItem {
   /** Nearest preceding heading text ('' if none). */
   section: string
   indent: number
+  /**
+   * Due date written in the task (YYYY-MM-DD), or null: `📅 2026-10-01`
+   * (Obsidian Tasks), `[due:: 2026-10-01]` (Dataview), `@due(2026-10-01)`
+   * (TaskPaper) or `due:2026-10-01` (todo.txt). The first one wins.
+   */
+  due: string | null
+  /** Scheduled date (`⏳ 2026-10-01` or `[scheduled:: 2026-10-01]`), or null. */
+  scheduled: string | null
+  /** Inline #tags in the task text, lowercased, without `#`. */
+  tags: string[]
 }
 
 const FENCE_RE = /^\s*(```|~~~)/
@@ -145,13 +157,18 @@ function scan(lines: string[]): { tasks: TaskItem[]; headings: number[] } {
     const m = taskParts(line)
     if (!m) continue
     const stamp = stampOf(m.rest)
+    const text = (stamp ? m.rest.slice(0, stamp.index) : m.rest).trim()
+    const dates = taskDates(text)
     tasks.push({
       line: i,
-      text: (stamp ? m.rest.slice(0, stamp.index) : m.rest).trim(),
+      text,
       done: m.mark !== ' ',
       doneAt: stamp?.date ?? null,
       section,
       indent: m.indent.length,
+      due: dates.due,
+      scheduled: dates.scheduled,
+      tags: text.includes('#') ? extractInlineTags(text) : [],
     })
   }
   return { tasks, headings }
@@ -160,6 +177,95 @@ function scan(lines: string[]): { tasks: TaskItem[]; headings: number[] } {
 /** Every task line outside fenced code, in file order. */
 export function extractTasks(raw: string): TaskItem[] {
   return scan(raw.split('\n')).tasks
+}
+
+/** Tasks per parsed note object: a note is re-parsed into a new object when its file changes. */
+const taskCache = new WeakMap<ParsedNote, TaskItem[]>()
+
+/**
+ * `extractTasks(note.raw)`, remembered per parsed note (the same object always
+ * has the same text), so the daily brief can look at every note on every graph
+ * rebuild. Notes without an open or done checkbox are skipped without a scan.
+ * Treat the result as read-only.
+ */
+export function tasksOf(note: ParsedNote): TaskItem[] {
+  let tasks = taskCache.get(note)
+  if (!tasks) {
+    const raw = note.raw
+    tasks = raw.includes('[ ]') || raw.includes('[x]') || raw.includes('[X]') ? extractTasks(raw) : []
+    taskCache.set(note, tasks)
+  }
+  return tasks
+}
+
+/** Real calendar date in YYYY-MM-DD form. */
+function isRealDate(d: string): boolean {
+  if (!DATE_RE.test(d)) return false
+  const y = Number(d.slice(0, 4))
+  const m = Number(d.slice(5, 7))
+  const day = Number(d.slice(8, 10))
+  if (m < 1 || m > 12 || day < 1) return false
+  const last = new Date(Date.UTC(y, m, 0)).getUTCDate()
+  return day <= last
+}
+
+/** The date right at `i` (after up to two spaces), or null. The next character must not be a digit. */
+function dateAt(text: string, i: number): string | null {
+  let j = i
+  if (text[j] === '\uFE0F') j++
+  for (let k = 0; k < 2 && text[j] === ' '; k++) j++
+  const d = text.slice(j, j + 10)
+  const after = text[j + 10]
+  if (after !== undefined && after >= '0' && after <= '9') return null
+  return isRealDate(d) ? d : null
+}
+
+/** First date after any of `markers` (emoji), or null. Linear: one indexOf pass per marker. */
+function dateAfterMarker(text: string, markers: string[]): string | null {
+  let best: { at: number; date: string } | null = null
+  for (const mk of markers) {
+    for (let at = text.indexOf(mk); at >= 0; at = text.indexOf(mk, at + mk.length)) {
+      const d = dateAt(text, at + mk.length)
+      if (d) {
+        if (!best || at < best.at) best = { at, date: d }
+        break
+      }
+    }
+  }
+  return best?.date ?? null
+}
+
+function isWordChar(ch: string | undefined): boolean {
+  return ch !== undefined && /[\p{L}\p{N}_]/u.test(ch)
+}
+
+/**
+ * First date written as `<word>:: date`, `<word>::date`, `@<word>(date)` or
+ * `<word>:date` (todo.txt, only for `due`), where `<word>` stands alone.
+ */
+function dateAfterWord(text: string, word: string, todoTxt: boolean): string | null {
+  const lower = text.toLowerCase()
+  for (let at = lower.indexOf(word); at >= 0; at = lower.indexOf(word, at + word.length)) {
+    if (isWordChar(text[at - 1])) continue
+    let j = at + word.length
+    if (text.startsWith('::', j)) j += 2
+    else if (text[j] === '(' && text[at - 1] === '@') j += 1
+    else if (todoTxt && text[j] === ':') j += 1
+    else continue
+    const d = dateAt(text, j)
+    if (d) return d
+  }
+  return null
+}
+
+/**
+ * Due and scheduled dates written in a task's text (see TaskItem.due). Linear
+ * time: task text can come from an AI client.
+ */
+export function taskDates(text: string): { due: string | null; scheduled: string | null } {
+  const due = dateAfterMarker(text, ['📅', '🗓']) ?? dateAfterWord(text, 'due', true)
+  const scheduled = dateAfterMarker(text, ['⏳']) ?? dateAfterWord(text, 'scheduled', false)
+  return { due, scheduled }
 }
 
 export function taskProgress(tasks: TaskItem[]): { done: number; total: number; pct: number } {

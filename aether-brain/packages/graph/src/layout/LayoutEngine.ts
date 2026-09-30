@@ -2,7 +2,7 @@ import type { FolderRole, GraphData, NodeKind } from '@aether/core'
 import type { LayoutEdgeInput, LayoutKind, LayoutMode, LayoutNodeInput, LayoutRole, MainToWorker, WorkerToMain } from './protocol'
 import { AREA_INDEX, nodeRadius } from '../theme'
 
-const KIND_CODE: Record<NodeKind, LayoutKind> = { note: 0, ghost: 1, folder: 2 }
+const KIND_CODE: Record<NodeKind, LayoutKind> = { note: 0, ghost: 1, folder: 2, today: 3, image: 4 }
 const ROLE_CODE: Record<FolderRole, LayoutRole> = { root: 0, mount: 1, project: 2, folder: 3 }
 
 export type TickListener = (engine: LayoutEngine) => void

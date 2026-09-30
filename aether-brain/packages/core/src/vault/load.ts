@@ -1,7 +1,8 @@
-import type { GraphData, NoteId, ParsedNote, VaultAdapter, VaultChange } from '../types'
+import type { GraphData, NoteId, ParsedNote, VaultAdapter, VaultAsset, VaultChange } from '../types'
 import { parseNote } from '../markdown/parse'
 import { buildGraph, type BuildGraphOptions } from '../graph/build'
 import { SearchIndex } from '../search/index'
+import { assetMap, isImagePath } from './assets'
 import { folderOf, idFromPath, isIgnoredPath, isMarkdownPath, normalizeFolderPath, normalizePath } from './paths'
 
 export interface LoadedVault {
@@ -10,6 +11,8 @@ export interface LoadedVault {
   search: SearchIndex
   /** Every folder in the vault (vault paths, root '' excluded). */
   folders: Set<string>
+  /** Every image file (vault path → asset); empty when the adapter can't list them. */
+  assets: Map<string, VaultAsset>
 }
 
 export interface LoadProgress {
@@ -18,8 +21,11 @@ export interface LoadProgress {
   total: number
 }
 
-/** Graph options computed from the current folders and notes (e.g. the system layout's folder options). */
-export type GraphOptionsFn = (folders: Set<string>, notes: Map<NoteId, ParsedNote>) => BuildGraphOptions
+/**
+ * Graph options computed from the current folders, notes and images (e.g. the
+ * system layout's folder options, image moons, the Today hub).
+ */
+export type GraphOptionsFn = (folders: Set<string>, notes: Map<NoteId, ParsedNote>, assets: Map<string, VaultAsset>) => BuildGraphOptions
 
 /** Add a folder and its ancestors to `folders` ('' and ignored paths are skipped). */
 function addFolder(folders: Set<string>, path: string): void {
@@ -60,6 +66,14 @@ export async function loadVault(
       console.warn('[aether] failed to list folders', err)
     }
   }
+  let assets = new Map<string, VaultAsset>()
+  if (adapter.listAssets) {
+    try {
+      assets = assetMap(await adapter.listAssets())
+    } catch (err) {
+      console.warn('[aether] failed to list images', err)
+    }
+  }
   const notes = new Map<NoteId, ParsedNote>()
   const BATCH = 150
   for (let i = 0; i < files.length; i++) {
@@ -81,9 +95,9 @@ export async function loadVault(
   await new Promise<void>((r) => setTimeout(r, 0))
   const folders = foldersOfNotes(notes.values())
   for (const f of listed ?? []) addFolder(folders, f)
-  const graph = buildGraph(notes, graphOptions?.(folders, notes))
+  const graph = buildGraph(notes, graphOptions?.(folders, notes, assets))
   search.rebuild(notes.values())
-  return { notes, graph, search, folders }
+  return { notes, graph, search, folders, assets }
 }
 
 /**
@@ -99,14 +113,27 @@ export async function loadVault(
  * the batch adds and removes no folder (copy on write): the folder index of
  * the system layout is memoized per Set (`folderUniverse`), so an autosave
  * doesn't re-index a whole drive's folders.
+ *
+ * Images (`isImagePath`): add / change set the asset (mtime, size), unlink
+ * drops it, and `unlinkDir` drops every image under the folder. `opts.assets`
+ * is copied on write the same way and returned as it is when no image changed.
  */
 export function applyChanges(
   notes: Map<NoteId, ParsedNote>,
   changes: VaultChange[],
   search: SearchIndex,
-  opts: { folders?: Set<string>; graph?: GraphOptionsFn } = {},
-): { notes: Map<NoteId, ParsedNote>; graph: GraphData; touched: NoteId[]; folders: Set<string> } {
+  opts: { folders?: Set<string>; assets?: Map<string, VaultAsset>; graph?: GraphOptionsFn } = {},
+): { notes: Map<NoteId, ParsedNote>; graph: GraphData; touched: NoteId[]; folders: Set<string>; assets: Map<string, VaultAsset> } {
   const next = new Map(notes)
+  let assets = opts.assets ?? new Map<string, VaultAsset>()
+  let assetsOwned = !opts.assets
+  const writableAssets = (): Map<string, VaultAsset> => {
+    if (!assetsOwned) {
+      assets = new Map(assets)
+      assetsOwned = true
+    }
+    return assets
+  }
   let folders = opts.folders ?? foldersOfNotes(notes.values())
   let owned = !opts.folders
   /** The folder set, copied the first time the batch really changes it. */
@@ -142,6 +169,22 @@ export function applyChanges(
         cur = cur.slice(0, i)
       }
     }
+    // Images under a removed folder go with it.
+    if (assets.size) {
+      const lost: string[] = []
+      for (const p of assets.keys()) {
+        for (let cur = folderOf(p); cur !== ''; cur = folderOf(cur)) {
+          if (gone.has(cur)) {
+            lost.push(p)
+            break
+          }
+        }
+      }
+      if (lost.length) {
+        const m = writableAssets()
+        for (const p of lost) m.delete(p)
+      }
+    }
     gone.clear()
     if (doomed.length === 0) return
     const set = writable()
@@ -159,6 +202,22 @@ export function applyChanges(
       continue
     }
     const p = normalizePath(c.path)
+    if (isImagePath(p)) {
+      if (isIgnoredPath(p)) continue
+      if (c.kind === 'unlink') {
+        if (assets.has(p)) writableAssets().delete(p)
+        continue
+      }
+      const before = assets.get(p)
+      const asset: VaultAsset = { path: p }
+      if (c.mtime !== undefined && Number.isFinite(c.mtime)) asset.mtime = c.mtime
+      if (c.size !== undefined && Number.isFinite(c.size)) asset.size = c.size
+      if (before && before.mtime === asset.mtime && before.size === asset.size) continue
+      dropGone()
+      writableAssets().set(p, asset)
+      addFolderOnce(folderOf(p))
+      continue
+    }
     if (!isMarkdownPath(p) || isIgnoredPath(p)) continue
     const id = idFromPath(p)
     if (c.kind === 'unlink') {
@@ -184,6 +243,6 @@ export function applyChanges(
   dropGone()
   // buildGraph re-resolves every link from its raw text, so untouched notes
   // don't need a re-parse even when a ghost target just became real.
-  const graph = buildGraph(next, opts.graph?.(folders, next))
-  return { notes: next, graph, touched, folders }
+  const graph = buildGraph(next, opts.graph?.(folders, next, assets))
+  return { notes: next, graph, touched, folders, assets }
 }

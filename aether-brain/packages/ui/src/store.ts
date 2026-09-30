@@ -49,8 +49,10 @@ import {
   type ParsedNote,
   type ProjectPatch,
   type VaultAdapter,
+  type VaultAsset,
   type VaultChange,
   type VaultRootInfo,
+  type DailyBrief,
 } from '@aether/core'
 import { BrainController, type ColorMode, type LayoutMode } from '@aether/graph'
 import { moveTaskOnBoard } from './projects'
@@ -102,6 +104,12 @@ export interface Settings {
   folderDepth: number
   /** System layout: planets and moons orbit their parents. */
   motion: boolean
+  /** System layout: each shown folder's newest pictures orbit it as moons. */
+  imageMoons: boolean
+  /** Picture moons show their thumbnails. */
+  thumbnails: boolean
+  /** The glowing Today hub (daily brief) is in the graph. */
+  todayHub: boolean
   /** Settings version; 2 = the solar-system layout became the default. */
   v: number
 }
@@ -129,6 +137,9 @@ const DEFAULT_SETTINGS: Settings = {
   previewMode: 'split',
   folderDepth: 3,
   motion: true,
+  imageMoons: true,
+  thumbnails: true,
+  todayHub: true,
   v: SETTINGS_VERSION,
 }
 
@@ -417,6 +428,60 @@ export interface AetherState {
   archiveProject(id: NoteId): Promise<void>
   /** Delete the project note (the UI confirms first). Its folder stays on disk. */
   deleteProject(id: NoteId): Promise<void>
+
+  /* ---- v0.4: pictures, the Today hub, the Concept Forge link ---- */
+
+  /** Every image file of the vault (vault path → asset). */
+  assets: Map<string, VaultAsset>
+  /** Today's brief (recomputed with every graph rebuild), null before a vault is ready. */
+  brief: DailyBrief | null
+  /** Recompute the brief; rebuilds the graph when the day changed (App calls it every minute and on focus). */
+  refreshBrief(): void
+  /** Turn the Today hub on if needed, select it and fly to it (its brief shows in the Inspector). */
+  showToday(): void
+  /** Open a picture in the OS default app (desktop), else explain why not. */
+  openImage(path: string): Promise<void>
+  /**
+   * Save picture files into the vault, create-only (`name 2.png` when taken).
+   * Target: `folder`, else the selected folder, else the selected project's
+   * Critique planet, else `<home>Inbox`. Returns the vault paths written.
+   */
+  importImages(files: { name: string; data: Uint8Array }[], folder?: string): Promise<string[]>
+  /** Projects a Concept Forge drawing can be saved to (active first). */
+  forgeProjects(): ForgeProject[]
+  /** File a graded drawing (PNG + critique note) into a project's Critique planet. Rejects with a readable message. */
+  saveCritique(input: CritiqueSave): Promise<CritiqueSaved>
+}
+
+/** A project a graded drawing can go to (the Forge window's picker). */
+export interface ForgeProject {
+  id: NoteId
+  title: string
+  status: string | null
+  /** Home folder, or null when the project has none yet (created on save). */
+  home: string | null
+  /** Folder the critique lands in (its Critique planet; created on save when missing). */
+  critique: string
+}
+
+/** One graded drawing (see `AetherState.saveCritique`). */
+export interface CritiqueSave {
+  projectId: NoteId
+  title: string
+  /** PNG bytes. */
+  png: Uint8Array
+  /** The grader's raw grade object (read with `normalizeGrade`), or null. */
+  grade?: unknown
+  /** First fix due tomorrow (default true). */
+  practiceTomorrow?: boolean
+}
+
+export interface CritiqueSaved {
+  noteId: NoteId
+  notePath: string
+  imagePath: string
+  /** Project title. */
+  project: string
 }
 
 let toastSeq = 1
@@ -529,7 +594,7 @@ export const useAether = create<AetherState>()((set, get) => {
       controller.setLayoutMode(settings.layoutMode)
       return
     }
-    const graph = buildGraph(notes, graphOptions(folders, notes))
+    const graph = buildGraph(notes, graphOptions(folders, notes, new Map()))
     set((s) => ({ graph, revision: s.revision + 1 }))
     controller.setLayoutMode(settings.layoutMode, graph)
     syncHighlight()
@@ -1682,6 +1747,27 @@ export const useAether = create<AetherState>()((set, get) => {
         return
       }
       if (get().projectId === id) set({ projectId: null })
+    },
+
+    assets: new Map(),
+    brief: null,
+    refreshBrief() {
+      throw new Error('refreshBrief: not implemented yet')
+    },
+    showToday() {
+      throw new Error('showToday: not implemented yet')
+    },
+    async openImage() {
+      throw new Error('openImage: not implemented yet')
+    },
+    async importImages() {
+      throw new Error('importImages: not implemented yet')
+    },
+    forgeProjects() {
+      throw new Error('forgeProjects: not implemented yet')
+    },
+    async saveCritique() {
+      throw new Error('saveCritique: not implemented yet')
     },
   }
 })

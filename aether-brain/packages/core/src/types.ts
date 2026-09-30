@@ -69,6 +69,12 @@ export interface NoteMeta {
 
 export type LinkKind = 'wikilink' | 'embed' | 'tag'
 
+/**
+ * Kind of a graph edge: a link kind, or 'today' for the beams of the Today
+ * hub (graph-only: the hub → every note holding one of today's tasks).
+ */
+export type EdgeKind = LinkKind | 'today'
+
 export interface Link {
   from: NoteId
   /** Resolved target id, or the raw target text if unresolved (see `resolved`). */
@@ -117,8 +123,12 @@ export interface ParsedNote {
  * What a graph node stands for. Notes and ghosts are the classic neurons;
  * folder nodes only exist when the graph is built with folders (the "system"
  * layout), where folders become stars and planets and notes orbit them.
+ * Image nodes are picture files (id `image:<vault path>`): embedded ones
+ * (`![[art.png]]`) in every layout, and in the system layout the newest
+ * images of each shown folder as thumbnail moons. The Today hub (id
+ * `today:`) is one glowing node that gathers today's tasks from every note.
  */
-export type NodeKind = 'note' | 'ghost' | 'folder'
+export type NodeKind = 'note' | 'ghost' | 'folder' | 'image' | 'today'
 
 /**
  * Visual role of a folder node in the solar-system layout.
@@ -147,6 +157,34 @@ export interface FolderNodeInfo {
   notes: number
   /** Notes anywhere under this folder. */
   totalNotes: number
+  /** Image files directly inside this folder (on disk, shown or not). */
+  images: number
+  /** Image moons drawn for this folder (the newest `images`, up to the per-folder cap). */
+  shownImages: number
+}
+
+/** Present on image nodes. */
+export interface ImageNodeInfo {
+  /** Vault path of the picture, extension included (`Projects/PORTALz/Art/gate.png`). */
+  path: string
+  /** Last-modified epoch ms, when known. */
+  mtime: number | null
+  /** Bytes, when known. */
+  size: number | null
+  /** Notes that embed or link it. */
+  embeddedBy: number
+}
+
+/** Present on the Today hub: the counts of the daily brief it stands for. */
+export interface TodayNodeInfo {
+  /** The day the brief is for (YYYY-MM-DD, local time). */
+  date: string
+  overdue: number
+  /** Due or scheduled today, flagged #today, or in today's daily note. */
+  today: number
+  /** First open task of active projects with nothing due. */
+  next: number
+  total: number
 }
 
 export interface GraphNode {
@@ -166,6 +204,10 @@ export interface GraphNode {
   parent: NoteId | null
   /** Present on folder nodes only. */
   folder?: FolderNodeInfo
+  /** Present on image nodes only. */
+  image?: ImageNodeInfo
+  /** Present on the Today hub only. */
+  today?: TodayNodeInfo
   inDegree: number
   outDegree: number
   degree: number
@@ -177,7 +219,7 @@ export interface GraphNode {
 export interface GraphEdge {
   from: NoteId
   to: NoteId
-  kind: LinkKind
+  kind: EdgeKind
   /** Number of links collapsed into this edge. */
   weight: number
 }
@@ -222,7 +264,12 @@ export interface SearchHit {
   snippet: string
 }
 
-/** File changes, plus folder creation/removal ('addDir' / 'unlinkDir', path = the folder). */
+/**
+ * File changes, plus folder creation/removal ('addDir' / 'unlinkDir', path =
+ * the folder). Image files (`isImagePath`) come as add / change / unlink
+ * without `content` (mtime and size when known); everything that is not a
+ * note or an image is never reported.
+ */
 export type VaultChangeKind = 'add' | 'change' | 'unlink' | 'addDir' | 'unlinkDir'
 
 export interface VaultChange {
@@ -230,6 +277,16 @@ export interface VaultChange {
   path: string
   content?: string
   mtime?: number
+  /** Bytes (image changes, when known). */
+  size?: number
+}
+
+/** A picture file in the vault (png, jpg, jpeg, webp, gif, bmp, avif). */
+export interface VaultAsset {
+  /** Vault path, extension included. */
+  path: string
+  mtime?: number
+  size?: number
 }
 
 /** One folder on disk that is part of the vault. */
@@ -285,4 +342,19 @@ export interface VaultAdapter {
   createFolder?(path: string): Promise<void>
   /** Show a file or folder in the OS file manager (desktop only). */
   reveal?(path: string): Promise<void>
+  /** Every image file in the vault (skipped folders excluded). Absent: the vault has no images. */
+  listAssets?(): Promise<VaultAsset[]>
+  /**
+   * A small preview of an image, at most `size` px on its longer side (PNG or
+   * JPEG), or null when it can't be read or decoded. Absent: no thumbnails.
+   */
+  thumbnail?(path: string, size: number): Promise<Blob | null>
+  /**
+   * Create a NEW image file from its bytes (a PNG from Concept Forge, a
+   * dropped picture). Create-only like `create` (EEXIST when anything is
+   * there); only image paths. Reports an 'add' change for it.
+   */
+  createAsset?(path: string, data: Uint8Array): Promise<void>
+  /** Open an image in the OS default app (desktop only). */
+  openAsset?(path: string): Promise<void>
 }
