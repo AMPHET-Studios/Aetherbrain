@@ -253,7 +253,7 @@ Write tools (hidden when the link is read-only):
 | `update_project` | Rename (the old name stays as an alias, so links keep working), status, summary, tags, folder |
 | `create_folder` | A new folder, such as a planet inside a project's folder |
 | `link_notes` | Add `- Related: [[other note]]` to a note |
-| `save_chat` | Save the conversation as a chat note: a summary on top (its links and `- [ ]` tasks count), then the transcript, under `AI Chats` or a project's `AI Chats` planet. Given the chat's web address, saving again updates the same note ([AI-CHATS.md](AI-CHATS.md)) |
+| `save_chat` | Save the conversation as a chat note: a summary on top (its links and `- [ ]` tasks count), then the transcript, under `AI Chats` or a project's `AI Chats` planet. Given the chat's web address, saving again updates that chat note: a new summary, and a new transcript only when there are more messages ([AI-CHATS.md](AI-CHATS.md)) |
 
 The task tools name a task by its line number or its text. If the note changed
 after the AI listed its tasks (you edited it in the app, for example), a task

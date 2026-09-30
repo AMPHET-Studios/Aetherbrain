@@ -39,6 +39,9 @@ export const MAX_ARTIFACT_CHARS = 100_000
 export const MAX_DOC_CHARS = 200_000
 
 export const TRANSCRIPT_HEADING = '## Transcript'
+/** The last line of a transcript: what follows it (an AI's appended follow-up, the user's notes) is kept on update. */
+export const TRANSCRIPT_END = '*— end of transcript —*'
+export const SUMMARY_HEADING = '## Summary'
 export const PROJECT_HEADING = '## Project'
 
 const SOURCE_NAME: Record<ChatSource, string> = { claude: 'Claude', chatgpt: 'ChatGPT' }
@@ -84,6 +87,29 @@ function safeName(text: string, max = 80): string {
   return /^(con|prn|aux|nul|com\d|lpt\d|node_modules|__macosx)$/i.test(name) ? `${name} chat` : name
 }
 
+/** A fence line: up to three spaces, then three or more backticks or tildes (CommonMark). */
+const FENCE_LINE = /^ {0,3}(`{3,}|~{3,})(.*)$/
+
+/** For each line: true inside a fenced code block (fence lines included), CommonMark style. */
+function fenceMask(lines: string[]): boolean[] {
+  const out: boolean[] = []
+  let open: { ch: string; len: number } | null = null
+  for (const line of lines) {
+    const m = FENCE_LINE.exec(line)
+    if (!open) {
+      // A backtick fence's info string can't hold a backtick.
+      if (m && !(m[1]![0] === '`' && m[2]!.includes('`'))) {
+        open = { ch: m[1]![0]!, len: m[1]!.length }
+        out.push(true)
+      } else out.push(false)
+    } else {
+      out.push(true)
+      if (m && m[1]![0] === open.ch && m[1]!.length >= open.len && !m[2]!.trim()) open = null
+    }
+  }
+  return out
+}
+
 /**
  * Close a fenced code block a chat message left open, so it can't swallow
  * the rest of the note (CommonMark rules: same fence character, at least as
@@ -92,12 +118,11 @@ function safeName(text: string, max = 80): string {
 export function closeFences(text: string): string {
   let open: { ch: string; len: number } | null = null
   for (const line of text.split('\n')) {
-    const m = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line)
+    const m = FENCE_LINE.exec(line)
     if (!m) continue
     const fence = m[1]!
     const ch = fence[0]!
     if (!open) {
-      // A backtick fence's info string can't hold a backtick.
       if (ch === '`' && m[2]!.includes('`')) continue
       open = { ch, len: fence.length }
     } else if (ch === open.ch && fence.length >= open.len && !m[2]!.trim()) open = null
@@ -114,57 +139,132 @@ function fenceFor(content: string): string {
 
 /** HTML that opens a block only its end marker closes (CommonMark types 1–5): it would swallow what follows. */
 const HTML_OPENER = /^<(?:(?:script|pre|style|textarea)(?:[\s>]|$)|!--|\?|![A-Za-z]|!\[CDATA\[)/i
+/** The same opener at the start of a line (up to three spaces of indent). */
+const HTML_OPENER_LINE = /^( {0,3})<(?=(?:script|pre|style|textarea)(?:[\s>]|$)|!--|\?|![A-Za-z]|!\[CDATA\[)/i
+/** The `<` of such an opener anywhere (the fail-closed escape). */
+const HTML_OPENER_ANY = /<(?=(?:script|pre|style|textarea)(?:[\s>]|$)|!--|\?|![A-Za-z]|!\[CDATA\[)/gi
+
+/**
+ * Most emphasis delimiters (`*`, `_`) one paragraph of chat text keeps.
+ * micromark takes quadratic time on long runs of them (4,000 unmatched
+ * delimiters: most of a second; 40,000: minutes), and a chat is text from
+ * anywhere; past this, the paragraph's delimiters are escaped (shown as
+ * written, not as emphasis).
+ */
+export const MAX_DELIMITERS = 1000
+
+/** The characters of `line` at `i` is escaped by an odd run of backslashes before it. */
+function escapedAt(line: string, i: number): boolean {
+  let n = 0
+  for (let j = i - 1; j >= 0 && line[j] === '\\'; j--) n++
+  return n % 2 === 1
+}
+
+/**
+ * Chat markdown made safe to put in a note: an open fence closed, block HTML
+ * openers that would swallow the rest of the note escaped, and paragraphs
+ * with pathological runs of emphasis delimiters escaped. Code is left alone.
+ */
+export function tameChatMarkdown(text: string): string {
+  const lines = closeFences(text).split('\n')
+  const code = fenceMask(lines)
+  for (let i = 0; i < lines.length; i++) {
+    if (code[i]) continue
+    const m = HTML_OPENER_LINE.exec(lines[i]!)
+    if (m) lines[i] = `${m[1]}\\${lines[i]!.slice(m[1]!.length)}`
+  }
+  let start = 0
+  const paragraph = (end: number) => {
+    let count = 0
+    for (let i = start; i < end; i++) for (const ch of lines[i]!) if (ch === '*' || ch === '_') count++
+    if (count <= MAX_DELIMITERS) return
+    for (let i = start; i < end; i++) {
+      const line = lines[i]!
+      let out = ''
+      for (let j = 0; j < line.length; j++) {
+        const ch = line[j]!
+        out += (ch === '*' || ch === '_') && !escapedAt(line, j) ? `\\${ch}` : ch
+      }
+      lines[i] = out
+    }
+  }
+  for (let i = 0; i < lines.length; i++) {
+    if (code[i] || !lines[i]!.trim()) {
+      paragraph(i)
+      start = i + 1
+    }
+  }
+  paragraph(lines.length)
+  return lines.join('\n')
+}
+
+/** Headings of level 1 and 2 pushed down to 3 and 4 (outside code), so a summary can't start a section of the note. */
+function demoteHeadings(text: string): string {
+  const lines = text.split('\n')
+  const code = fenceMask(lines)
+  return lines.map((l, i) => (!code[i] && /^ {0,3}#{1,2}(\s|$)/.test(l) ? l.replace(/^( {0,3})/, '$1##') : l)).join('\n')
+}
 
 /**
  * Make chat text inert from offset `from` on: escape everything the brain
  * would read as a wikilink (`[[`), an inline tag (`#word`) or a task
- * (`- [ ]`), and every HTML opener that could swallow the rest of the note.
- * Code stays untouched. The markdown is parsed the way the brain parses notes,
- * so what is escaped is exactly what the brain would have picked up.
+ * (`- [ ]`). Code stays untouched. The markdown is parsed once, the way the
+ * brain parses notes, so what is escaped is exactly what the brain would
+ * have picked up. Text should come through `tameChatMarkdown` first; should
+ * a swallowing HTML block still be found, it fails closed (`blanketInert`).
  */
 export function inertMarkdown(body: string, from = 0): string {
-  let text = body
-  for (let round = 0; round < 50; round++) {
-    const tree = parseMarkdown(text)
-    const htmlAt: number[] = []
-    visit(tree, 'html', (node) => {
-      const at = node.position?.start.offset
-      if (at === undefined || at < from) return
-      if (HTML_OPENER.test(node.value.trimStart())) {
-        const lt = text.indexOf('<', at)
-        if (lt >= 0) htmlAt.push(lt)
-      }
-    })
-    if (htmlAt.length) {
-      // Escaping an opener can change how everything after it parses: fix, then look again.
-      text = insertBackslashes(text, htmlAt)
-      continue
-    }
-    const at = new Set<number>()
-    visit(tree, 'text', (node) => {
-      const start = node.position?.start.offset
-      const end = node.position?.end.offset
-      if (start === undefined || end === undefined || end <= from) return
-      const src = text.slice(start, end)
-      for (let i = src.indexOf('[['); i >= 0; i = src.indexOf('[[', i + 1)) if (start + i + 1 >= from) at.add(start + i + 1)
-      for (const i of inlineTagOffsets(src)) if (start + i >= from) at.add(start + i)
-    })
-    // Tasks are read line by line (tasks.ts), not from the tree: escape what that scan sees.
-    const lines = text.split('\n')
-    const lineStart: number[] = []
-    for (let i = 0, off = 0; i < lines.length; i++) {
-      lineStart.push(off)
-      off += lines[i]!.length + 1
-    }
-    for (const t of extractTasks(text)) {
-      const off = lineStart[t.line]
-      if (off === undefined || off < from) continue
-      const m = /^\s*[-*+]\s+\[/.exec(lines[t.line]!)
-      if (m) at.add(off + m[0].length - 1)
-    }
-    return insertBackslashes(text, [...at])
+  const tree = parseMarkdown(body)
+  let swallowing = false
+  visit(tree, 'html', (node) => {
+    const at = node.position?.start.offset
+    if (at !== undefined && at >= from && HTML_OPENER.test(node.value.trimStart())) swallowing = true
+  })
+  if (swallowing) return blanketInert(body, from)
+  const at = new Set<number>()
+  visit(tree, 'text', (node) => {
+    const start = node.position?.start.offset
+    const end = node.position?.end.offset
+    if (start === undefined || end === undefined || end <= from) return
+    const src = body.slice(start, end)
+    for (let i = src.indexOf('[['); i >= 0; i = src.indexOf('[[', i + 1)) if (start + i + 1 >= from) at.add(start + i + 1)
+    for (const i of inlineTagOffsets(src)) if (start + i >= from) at.add(start + i)
+  })
+  // Tasks are read line by line (tasks.ts), not from the tree: escape what that scan sees.
+  const lines = body.split('\n')
+  const lineStart: number[] = []
+  for (let i = 0, off = 0; i < lines.length; i++) {
+    lineStart.push(off)
+    off += lines[i]!.length + 1
   }
-  return text
+  for (const t of extractTasks(body)) {
+    const off = lineStart[t.line]
+    if (off === undefined || off < from) continue
+    const m = /^\s*[-*+]\s+\[/.exec(lines[t.line]!)
+    if (m) at.add(off + m[0].length - 1)
+  }
+  return insertBackslashes(body, [...at])
+}
+
+/**
+ * The fail-closed escape: from `from` on, every `[` after a `[`, every `#`
+ * before a word character, every task checkbox and every swallowing HTML
+ * opener is escaped, in code too (a stray backslash there is the price of
+ * never leaking a link, tag or task).
+ */
+export function blanketInert(body: string, from = 0): string {
+  const rest = body
+    .slice(from)
+    .split('\n')
+    .map((line) =>
+      line
+        .replace(/^(\s*[-*+]\s+)\[([ xX])\]/, '$1\\[$2]')
+        .replace(HTML_OPENER_ANY, '\\<')
+        .replace(/(?<=\[)\[/g, '\\[')
+        .replace(/#(?=[\p{L}\p{N}_])/gu, (m, i: number, all: string) => (escapedAt(all, i) ? m : '\\#')),
+    )
+    .join('\n')
+  return body.slice(0, from) + rest
 }
 
 function insertBackslashes(text: string, offsets: number[]): string {
@@ -211,11 +311,12 @@ export interface ChatRenderOptions {
 /**
  * The web address of a chat as a `Source:` line carries it (the note's
  * identity on re-import), or null: `https://claude.ai/chat/<id>` or
- * `https://chatgpt.com/c/<id>` (`chat.openai.com` is ChatGPT's old address
- * for the same chat; a trailing slash, query or fragment is dropped).
+ * `https://chatgpt.com/c/<id>`. ChatGPT's other spellings of the same chat
+ * (`chat.openai.com`, `www.`, `/g/g-p-…/c/<id>` inside a project or GPT)
+ * become that one; a trailing slash, query or fragment is dropped.
  */
 export function chatUrlOf(url: string): string | null {
-  const m = /^https:\/\/(claude\.ai\/chat|chatgpt\.com\/c|chat\.openai\.com\/c)\/([A-Za-z0-9_-]{6,80})\/?(?:[?#][^\s]*)?$/.exec(url.trim())
+  const m = /^https:\/\/(?:www\.)?(claude\.ai\/chat|(?:chatgpt\.com|chat\.openai\.com)(?:\/g\/g-[A-Za-z0-9-]{1,120})?\/c)\/([A-Za-z0-9_-]{6,80})\/?(?:[?#]\S*)?$/.exec(url.trim())
   if (!m) return null
   return m[1] === 'claude.ai/chat' ? `https://claude.ai/chat/${m[2]}` : `https://chatgpt.com/c/${m[2]}`
 }
@@ -252,7 +353,7 @@ function messageBlock(m: ChatMessage, speaker: string, day: { last: string | nul
     day.last = at.day
   }
   const out: string[] = [`### ${speaker}${stamp}`, '']
-  if (m.text) out.push(closeFences(cleanText(m.text, MAX_MESSAGE_CHARS)), '')
+  if (m.text) out.push(tameChatMarkdown(cleanText(m.text, MAX_MESSAGE_CHARS)), '')
   for (const img of m.images) {
     const file = opts.pictures?.get(img.fileId)
     out.push(file ? live.add(`![[${file}]]`) : '🖼 *picture not imported*', '')
@@ -288,7 +389,16 @@ export function renderTranscript(conv: ChatConversation, opts: ChatRenderOptions
   const blocks = conv.messages.map((m) => messageBlock(m, m.role === 'user' ? 'You' : assistant, day, opts, live))
   const head = `${TRANSCRIPT_HEADING}\n\n*${facts.join(' · ')}*\n\n`
   const body = inertMarkdown(head + blocks.join('\n'), head.length)
-  return `${live.fill(body).replace(/\n{3,}/g, '\n\n').trimEnd()}\n`
+  return `${live.fill(body).replace(/\n{3,}/g, '\n\n').trimEnd()}\n\n${TRANSCRIPT_END}\n`
+}
+
+/**
+ * A summary for the top of a chat note (`## Summary` and its text). Live
+ * markdown — its links, tags and tasks count — but tamed like chat text,
+ * and its own headings pushed below level 2 so it can't start a section.
+ */
+export function renderSummary(text: string): string {
+  return `${SUMMARY_HEADING}\n\n${demoteHeadings(tameChatMarkdown(cleanText(text.trim(), MAX_MESSAGE_CHARS)))}\n\n`
 }
 
 /** Header lines of a chat note (between its title and the transcript). */
@@ -312,7 +422,7 @@ export function renderChatNote(conv: ChatConversation, title: string, opts: Chat
   const fm: Record<string, unknown> = { title, tags: ['ai-chat', conv.source] }
   if (created) fm.created = created
   if (updated) fm.updated = updated
-  const summary = opts.summary?.trim() ? `## Summary\n\n${closeFences(cleanText(opts.summary.trim(), MAX_MESSAGE_CHARS))}\n\n` : ''
+  const summary = opts.summary?.trim() ? renderSummary(opts.summary) : ''
   const body = `# ${inlineText(title, 200)}\n\n${chatHeader(conv, opts)}\n\n${summary}${renderTranscript(conv, opts)}`
   return joinFrontmatter(fm, body)
 }
@@ -345,8 +455,8 @@ export interface ProjectRenderOptions {
 export function renderProjectSection(project: ChatProject, opts: ProjectRenderOptions = {}): string {
   const live = new Live()
   const out: string[] = [PROJECT_HEADING, '']
-  if (project.description) out.push(closeFences(cleanText(project.description, MAX_DOC_CHARS)), '')
-  if (project.instructions) out.push('### Instructions', '', closeFences(cleanText(project.instructions, MAX_DOC_CHARS)), '')
+  if (project.description) out.push(tameChatMarkdown(cleanText(project.description, MAX_DOC_CHARS)), '')
+  if (project.instructions) out.push('### Instructions', '', tameChatMarkdown(cleanText(project.instructions, MAX_DOC_CHARS)), '')
   if (opts.docs?.length) out.push('### Knowledge', '', ...opts.docs.map((t) => live.add(`- [[${t}]]`)), '')
   if (opts.chats?.length) out.push('### Chats', '', ...opts.chats.map((t) => live.add(`- [[${t}]]`)), '')
   const text = inertMarkdown(out.join('\n'), PROJECT_HEADING.length)
@@ -375,7 +485,7 @@ export function renderProjectDoc(project: ChatProject, doc: { name: string; cont
   const live = new Live()
   const head = `# ${inlineText(title, 200)}\n\nKnowledge of ${live.add(`[[${hubTitle}]]`)} · ${inlineText(doc.name, 200)}\n\n## Document\n\n`
   let body: string
-  if (lang === null) body = inertMarkdown(head + closeFences(content), 0)
+  if (lang === null) body = inertMarkdown(head + tameChatMarkdown(content), 0)
   else {
     const fence = fenceFor(content)
     body = inertMarkdown(`${head}${fence}${lang}\n${content}\n${fence}`, 0)
@@ -385,55 +495,126 @@ export function renderProjectDoc(project: ChatProject, doc: { name: string; cont
 
 // ------------------------------------------------------------------ re-import
 
-/** `Source: <url>` lines of notes the importer wrote: url → note. */
+/** Lines of a note's header: after the frontmatter, before its first `## ` heading (where the importer writes `Source:`). */
+function headerLines(raw: string): string[] {
+  const { bodyOffset } = splitFrontmatter(raw)
+  const out: string[] = []
+  for (const line of raw.slice(bodyOffset).split('\n')) {
+    const l = line.replace(/\r$/, '')
+    if (/^##\s/.test(l)) break
+    out.push(l)
+  }
+  return out
+}
+
+/** True for a note the importer (or save_chat) wrote as a chat. */
+export function isChatNote(note: ParsedNote): boolean {
+  return note.meta.tags.includes('ai-chat')
+}
+
+/** True for a project hub the importer wrote. */
+export function isProjectHub(note: ParsedNote): boolean {
+  return note.meta.tags.includes('ai-project')
+}
+
+/**
+ * Notes the importer wrote, by the `Source: <url>` line in their header
+ * (above the first `## ` heading: a line quoted in a transcript or summary
+ * never counts): url → note. A note tagged `ai-chat` / `ai-project` wins
+ * over another note carrying the same line.
+ */
 export function importedNotes(notes: Iterable<ParsedNote>): Map<string, ParsedNote> {
   const out = new Map<string, ParsedNote>()
   for (const n of notes) {
     if (!n.raw.includes('Source: <https://')) continue
-    for (const m of n.raw.matchAll(/^Source: <(https:\/\/[^>\s]+)>/gm)) {
+    const own = isChatNote(n) || isProjectHub(n)
+    for (const line of headerLines(n.raw)) {
+      const m = /^Source: <(https:\/\/[^>\s]+)>\s*$/.exec(line)
+      if (!m) continue
       const url = m[1]!
-      if (!out.has(url)) out.set(url, n)
+      const had = out.get(url)
+      if (!had || (own && !(isChatNote(had) || isProjectHub(had)))) out.set(url, n)
     }
   }
   return out
 }
 
-/** Folders of ChatGPT projects already imported: project url → folder of one of its chats. */
+/** Folders of ChatGPT projects already imported: project url → folder of one of its chats (header lines only). */
 function chatgptProjectFolders(notes: Iterable<ParsedNote>): Map<string, string> {
   const out = new Map<string, string>()
   for (const n of notes) {
-    if (!n.raw.includes('ChatGPT project: <')) continue
-    const m = /^ChatGPT project: <(https:\/\/[^>\s]+)>/m.exec(n.raw)
-    if (m && !out.has(m[1]!)) out.set(m[1]!, n.meta.folder)
+    if (!n.raw.includes('ChatGPT project: <') || !isChatNote(n)) continue
+    for (const line of headerLines(n.raw)) {
+      const m = /^ChatGPT project: <(https:\/\/[^>\s]+)>/.exec(line)
+      if (m && !out.has(m[1]!)) out.set(m[1]!, n.meta.folder)
+    }
   }
   return out
 }
 
-/**
- * `raw` with everything from the line `heading` on replaced by `section`
- * (which starts with that heading), or null when the note has no such line
- * outside its frontmatter. Line endings follow the note's.
- */
-export function replaceSection(raw: string, heading: string, section: string): string | null {
+/** Where a section of `raw` is: the line `heading` (the first, after the frontmatter) to the last line `end` after it (or the end). */
+function sectionSpan(raw: string, heading: string, end?: string): { from: number; to: number } | null {
   const { bodyOffset } = splitFrontmatter(raw)
-  const eol = raw.includes('\r\n') ? '\r\n' : '\n'
   let at = bodyOffset
+  let from = -1
   for (;;) {
-    const end = raw.indexOf('\n', at)
-    const line = raw.slice(at, end < 0 ? raw.length : end).replace(/\r$/, '')
-    if (line.trimEnd() === heading) break
-    if (end < 0) return null
-    at = end + 1
+    const stop = raw.indexOf('\n', at)
+    const line = raw.slice(at, stop < 0 ? raw.length : stop).replace(/\r$/, '')
+    if (line.trimEnd() === heading) {
+      from = at
+      break
+    }
+    if (stop < 0) return null
+    at = stop + 1
   }
-  return raw.slice(0, at) + (eol === '\n' ? section : section.replace(/\n/g, '\r\n'))
+  let to = raw.length
+  if (end) {
+    let last = -1
+    for (let i = raw.indexOf('\n', from); i >= 0 && i < raw.length; i = raw.indexOf('\n', i + 1)) {
+      const next = raw.indexOf('\n', i + 1)
+      const line = raw.slice(i + 1, next < 0 ? raw.length : next).replace(/\r$/, '')
+      if (line.trimEnd() === end) last = next < 0 ? raw.length : next + 1
+    }
+    if (last >= 0) to = last
+  }
+  return { from, to }
 }
 
-/** The section of `raw` from the line `heading` on, or null. */
-export function sectionOf(raw: string, heading: string): string | null {
-  const marker = `\u0001`
-  const replaced = replaceSection(raw, heading, marker)
-  if (replaced === null) return null
-  return raw.slice(replaced.length - marker.length).replace(/\r\n/g, '\n')
+/**
+ * `raw` with its section `heading` … `end` (the last `end` line after the
+ * heading, inclusive; no `end`: to the end of the note) replaced by
+ * `section`, or null when the note has no such heading outside its
+ * frontmatter. What follows the end line stays. Line endings follow the note's.
+ */
+export function replaceSection(raw: string, heading: string, section: string, end?: string): string | null {
+  const span = sectionSpan(raw, heading, end)
+  if (!span) return null
+  const eol = raw.includes('\r\n') ? '\r\n' : '\n'
+  const text = eol === '\n' ? section : section.replace(/\n/g, '\r\n')
+  const after = raw.slice(span.to)
+  return raw.slice(0, span.from) + text + (after && !text.endsWith(eol) ? eol : '') + after
+}
+
+/** The section of `raw` from the line `heading` to the last `end` line (or the end), or null. */
+export function sectionOf(raw: string, heading: string, end?: string): string | null {
+  const span = sectionSpan(raw, heading, end)
+  return span ? raw.slice(span.from, span.to).replace(/\r\n/g, '\n') : null
+}
+
+/**
+ * `raw` with its summary set to `text`: the `## Summary` section (up to the
+ * transcript) replaced, or a new one put before `## Transcript`. Null when
+ * the note has neither heading.
+ */
+export function replaceSummary(raw: string, text: string): string | null {
+  const summary = renderSummary(text)
+  const eol = raw.includes('\r\n') ? '\r\n' : '\n'
+  const s = sectionSpan(raw, SUMMARY_HEADING)
+  const t = sectionSpan(raw, TRANSCRIPT_HEADING)
+  if (!t) return null
+  const block = eol === '\n' ? summary : summary.replace(/\n/g, '\r\n')
+  if (s && s.from < t.from) return raw.slice(0, s.from) + block + raw.slice(t.from)
+  return raw.slice(0, t.from) + block + raw.slice(t.from)
 }
 
 // ------------------------------------------------------------------ plan
@@ -519,6 +700,7 @@ export function planChatImport(archive: ChatArchive, existing: Iterable<ParsedNo
   for (const n of notes) {
     titles.add(n.meta.title.trim().toLowerCase())
     titles.add(basenameOf(n.meta.path).toLowerCase())
+    for (const a of n.meta.aliases) titles.add(a.trim().toLowerCase())
   }
   const pictureTaken = new Set([...(opts.existingPictures ?? [])].map((p) => p.toLowerCase()))
   const byName = new Map<string, { title: string; home: string }>()
@@ -645,9 +827,10 @@ export function planChatImport(archive: ChatArchive, existing: Iterable<ParsedNo
     const renderOpts: ChatRenderOptions = { utc, pictures, projectLink: place?.hubTitle ?? null, aetherProject: place?.aether ?? null }
     if (place) place.chats.push({ title, created: conv.created ?? '' })
     if (existingNote) {
-      const current = sectionOf(existingNote.raw, TRANSCRIPT_HEADING)
+      const current = isChatNote(existingNote) ? sectionOf(existingNote.raw, TRANSCRIPT_HEADING, TRANSCRIPT_END) : null
       const count = current === null ? null : transcriptCount(current)
       // A transcript is rewritten only when the chat grew or brought new pictures: edits the user made stay.
+      // A note that is not a chat note (a user's note carrying the address) is never rewritten.
       if (current === null || (count === conv.messages.length && added === 0)) {
         plan.unchanged++
         continue
@@ -672,7 +855,7 @@ export function planChatImport(archive: ChatArchive, existing: Iterable<ParsedNo
     const chats = place.chats.sort((a, b) => b.created.localeCompare(a.created)).map((c) => c.title)
     const ropts: ProjectRenderOptions = { utc, docs: place.docs, chats, aetherProject: place.aether }
     if (place.hub) {
-      const current = sectionOf(place.hub.raw, PROJECT_HEADING)
+      const current = isProjectHub(place.hub) ? sectionOf(place.hub.raw, PROJECT_HEADING) : null
       const section = renderProjectSection(place.project, ropts)
       if (current === null || current === section) continue
       plan.update.push({ noteId: place.hub.meta.id, path: place.hub.meta.path, heading: PROJECT_HEADING, section, updated: dayOf(place.project.updated, utc), kind: 'project' })
@@ -689,7 +872,7 @@ export function planChatImport(archive: ChatArchive, existing: Iterable<ParsedNo
 
 /** Apply a planned update to the note's text on disk: the section replaced, `updated` patched. Null when the section is gone. */
 export function applyChatUpdate(raw: string, u: Pick<PlannedUpdate, 'heading' | 'section' | 'updated'>): string | null {
-  const next = replaceSection(raw, u.heading, u.section)
+  const next = replaceSection(raw, u.heading, u.section, u.heading === TRANSCRIPT_HEADING ? TRANSCRIPT_END : undefined)
   if (next === null) return null
   return u.updated ? updateFrontmatter(next, { updated: u.updated }) : next
 }

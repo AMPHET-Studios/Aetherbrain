@@ -23,7 +23,46 @@ const processor = unified().use(remarkParse).use(remarkGfm)
 
 /** Parse markdown into an mdast tree (cached processor, no stringify). */
 export function parseMarkdown(body: string): Root {
-  return processor.parse(tameNesting(body)) as Root
+  return processor.parse(tameDelimiters(tameNesting(body))) as Root
+}
+
+/** Most emphasis delimiters (`*`, `_`) a paragraph keeps for parsing (see `tameDelimiters`). */
+export const PARSE_MAX_DELIMITERS = 2000
+
+/**
+ * micromark takes quadratic time on long runs of emphasis delimiters in one
+ * paragraph (4,000 unmatched `*` or `_`: most of a second; 40,000: minutes,
+ * with the app frozen). In a paragraph (a run of lines without a blank one)
+ * holding more than PARSE_MAX_DELIMITERS of them, each is swapped for a
+ * look-alike that is no delimiter (`∗`, `＿`): same length, so every offset
+ * stays true; that paragraph just loses its emphasis. Real notes stay far
+ * below the limit.
+ */
+export function tameDelimiters(body: string): string {
+  let count = 0
+  for (let i = 0; i < body.length; i++) {
+    const c = body.charCodeAt(i)
+    if (c === 42 || c === 95) count++
+  }
+  if (count <= PARSE_MAX_DELIMITERS) return body
+  const lines = body.split('\n')
+  let start = 0
+  let changed = false
+  const paragraph = (end: number) => {
+    let n = 0
+    for (let i = start; i < end; i++) for (const ch of lines[i]!) if (ch === '*' || ch === '_') n++
+    if (n <= PARSE_MAX_DELIMITERS) return
+    changed = true
+    for (let i = start; i < end; i++) lines[i] = lines[i]!.replace(/\*/g, '\u2217').replace(/_/g, '\uff3f')
+  }
+  for (let i = 0; i < lines.length; i++) {
+    if (!lines[i]!.trim()) {
+      paragraph(i)
+      start = i + 1
+    }
+  }
+  paragraph(lines.length)
+  return changed ? lines.join('\n') : body
 }
 
 /** Deepest list / blockquote nesting kept for parsing; real notes stay far below it. */

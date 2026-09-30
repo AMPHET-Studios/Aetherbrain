@@ -8,8 +8,15 @@ import {
   applyChatUpdate,
   assetFileId,
   bytesZipSource,
+  TRANSCRIPT_END,
+  blanketInert,
+  chatUrlOf,
   closeFences,
+  importedNotes,
   inertMarkdown,
+  parseMarkdown,
+  replaceSummary,
+  tameChatMarkdown,
   isChatExportJson,
   parseNote,
   planChatImport,
@@ -17,6 +24,7 @@ import {
   remarkLiteralHashes,
   remarkWikilink,
   renderChatNote,
+  renderTranscript,
   sectionOf,
   splitFrontmatter,
   tasksOf,
@@ -275,7 +283,7 @@ describe('inert chat text', () => {
       '### Next heading',
       '- [ ] after the comment',
     ].join('\n')
-    const out = inertMarkdown(chat)
+    const out = inertMarkdown(tameChatMarkdown(chat))
     const { links, tags, tasks } = brainOf(out)
     expect(links).toEqual([])
     expect(tags).toEqual([])
@@ -285,6 +293,33 @@ describe('inert chat text', () => {
     expect(out).toContain('C# #1')
     // Idempotent: inert text stays as it is.
     expect(inertMarkdown(out)).toBe(out)
+  })
+
+  it('fails closed: a swallowing HTML block still found escapes everything, code too, in one pass', () => {
+    const chat = `${'<!--\n'.repeat(60)}- [ ] LIVE TASK\n[[Link]] #tag\n`
+    const out = inertMarkdown(chat)
+    expect(out).toBe(blanketInert(chat))
+    const { links, tags, tasks } = brainOf(out)
+    expect([links, tags, tasks]).toEqual([[], [], []])
+    // Through tameChatMarkdown (as every renderer does) the openers are escaped up front.
+    const tamed = inertMarkdown(tameChatMarkdown(chat))
+    expect(brainOf(tamed).tasks).toEqual([])
+    expect(tamed).toContain('\\<!--')
+  })
+
+  it('pathological emphasis runs cost milliseconds, in chats and in any note', () => {
+    let t = performance.now()
+    const tamed = tameChatMarkdown(`${'*a'.repeat(20000)}\n\nnormal *emphasis* stays`)
+    parseMarkdown(tamed)
+    expect(performance.now() - t).toBeLessThan(2000)
+    expect(tamed).toContain('\\*a\\*a')
+    expect(tamed).toContain('normal *emphasis* stays')
+    // The brain's own parser guards every note the same way (same length: offsets stay true).
+    t = performance.now()
+    const note = parseNote({ path: 'x.md', content: `# X\n\n${'**_'.repeat(20000)}\n\nSee [[Real]] #tag\n` })
+    expect(performance.now() - t).toBeLessThan(2000)
+    expect(note.links.map((l) => l.to)).toEqual(['Real'])
+    expect(note.meta.tags).toEqual(['tag'])
   })
 
   it('closes fences a message left open', () => {
@@ -391,6 +426,46 @@ describe('chat notes', () => {
     expect(sectionOf(next, TRANSCRIPT_HEADING)).toContain('*4 messages')
     // The hub lists its chats: unchanged, so not rewritten.
     expect(plan.update.filter((x) => x.kind === 'project')).toEqual([])
+  })
+
+  it('knows a note only by the Source line in its header, and rewrites only chat notes', () => {
+    const first = planChatImport(archive(), [], { base: 'AI Chats', utc: true })
+    const chatPath = 'AI Chats/Claude/2026-03-02 Portal lighting.md'
+    const chat = first.create.find((p) => p.path === chatPath)!
+    // A chat quoting another chat's address in its transcript or summary does not become that chat.
+    const quoting = chat.content.replace('Use rim light.', 'Use rim light.\n\nSource: <https://claude.ai/chat/c-2>')
+    const notes = [parseNote({ path: chatPath, content: quoting })]
+    expect(importedNotes(notes).get('https://claude.ai/chat/c-2')).toBeUndefined()
+    // A note of the user's carrying a chat's address is never rewritten (nor duplicated).
+    const mine = parseNote({ path: 'Areas/Meeting.md', content: '# Meeting\n\nSource: <https://claude.ai/chat/c-1>\n\n## Transcript\n\n*1 message*\n\n## My follow-ups\n\n- [ ] call Sam\n' })
+    const plan = planChatImport(archive(), [mine], { base: 'AI Chats', utc: true })
+    expect(plan.update).toEqual([])
+    expect(plan.create.map((p) => p.path)).not.toContain('AI Chats/Claude/2026-03-02 Portal lighting.md')
+    expect(plan.unchanged).toBe(1)
+  })
+
+  it('keeps what follows the end of the transcript, and a summary never moves where the transcript starts', () => {
+    const c = archive().conversations.find((x) => x.id === 'c-1')!
+    const note = renderChatNote(c, '2026-03-02 Portal lighting', { utc: true })
+    expect(note.trimEnd().endsWith(TRANSCRIPT_END)).toBe(true)
+    const withFollowUp = `${note}\n## Follow-up\n\n- [ ] try fog cards\n`
+    const grown = { ...c, messages: [...c.messages, { role: 'user' as const, time: null, text: 'more', attachments: [], images: [], artifacts: [] }] }
+    const next = applyChatUpdate(withFollowUp, { heading: TRANSCRIPT_HEADING, section: renderTranscript(grown, { utc: true }), updated: null })!
+    expect(next).toContain('## Follow-up\n\n- [ ] try fog cards')
+    expect(next.match(new RegExp(TRANSCRIPT_END.replace(/[*]/g, '\\*'), 'g'))).toHaveLength(1)
+    expect(sectionOf(next, TRANSCRIPT_HEADING, TRANSCRIPT_END)).toContain('*4 messages')
+    // A summary's own "## Transcript" heading is pushed down: the real one stays the first.
+    const summarized = replaceSummary(next, '## Transcript\n\n- [ ] keep me')!
+    expect(summarized).toContain('#### Transcript\n\n- [ ] keep me')
+    expect(sectionOf(summarized, TRANSCRIPT_HEADING, TRANSCRIPT_END)).toContain('*4 messages')
+  })
+
+  it('spells a chat address one way', () => {
+    expect(chatUrlOf('https://chat.openai.com/c/6650aa11-bb22')).toBe('https://chatgpt.com/c/6650aa11-bb22')
+    expect(chatUrlOf('https://www.chatgpt.com/g/g-p-abc123-portal/c/6650aa11-bb22/?model=x')).toBe('https://chatgpt.com/c/6650aa11-bb22')
+    expect(chatUrlOf('https://claude.ai/chat/5a1f0c1e-1111#top')).toBe('https://claude.ai/chat/5a1f0c1e-1111')
+    expect(chatUrlOf('https://evil.example/c/6650aa11')).toBeNull()
+    expect(chatUrlOf('https://claude.ai/chat/../x')).toBeNull()
   })
 
   it('never takes a path twice and never collides with a note in the vault', () => {

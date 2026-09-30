@@ -109,8 +109,9 @@ Rim light first, then bloom …
   `- [ ] add bloom` inside a chat is written escaped (`[\[Gate]]`, `\#portal`,
   `- \[ ] add bloom`). It reads the same, but it won't create links, tags or
   to-dos on your Today hub. Code blocks are never touched.
-- **Your own notes go above `## Transcript`.** Write your thoughts,
-  `[[links]]` and `- [ ] tasks` there, and they count like in any note.
+- **Your own notes go above `## Transcript`** (or below the line
+  `*— end of transcript —*`). Write your thoughts, `[[links]]` and
+  `- [ ] tasks` there, and they count like in any note.
 
 ## 4. Import again whenever you like
 
@@ -118,8 +119,9 @@ Export again later and import the new zip. The app recognizes every chat it
 brought in before by its `Source:` line, even if you moved or renamed the note.
 
 - New chats are added.
-- A chat that got longer has its `## Transcript` rewritten. Everything above
-  that heading is yours and stays.
+- A chat that got longer has its transcript rewritten, from `## Transcript` to
+  the `*— end of transcript —*` line. Everything above and below is yours and
+  stays.
 - Chats that didn't change are left alone. That includes any edits you made in
   their transcript.
 - Nothing is ever overwritten otherwise. A name that is taken gets ` 2`.
@@ -136,7 +138,9 @@ PORTALz"*. The AI calls `save_chat`:
   `[[links]]` and `- [ ] next steps` count like in any of your notes. Then comes
   the transcript, as faithfully as the AI can reproduce it;
 - if the AI knows the chat's web address, saving again later updates the same
-  note, and so does importing your export.
+  note. The summary is replaced, but the transcript only changes when the new
+  save has more messages. Importing your export also updates it. A note of
+  yours that happens to mention the address is never touched.
 
 An AI usually doesn't know its own chat's web address. A chat saved live
 without one gets a second note when you later import your export: the export
