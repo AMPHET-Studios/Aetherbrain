@@ -14,7 +14,7 @@ Aether Brain is a local-first **3D second brain**. Markdown files in a folder (o
 - **Writes on behalf of an AI** go through `FsVault` and only ever write `.md` notes; no MCP tool deletes a note.
 - **Pictures are written create-only and checked.** The renderer writes an image only through `createAsset` (image extension, ≤ 40 MB, file signature must match a real image, never over anything, EEXIST → the next ` 2` name); `openAsset` opens existing vault pictures only (`shell.openPath` would run anything else).
 - **Prefer fewer dependencies.** If a library fights the product, write the piece (see `frontmatter.ts`, `wikilink.ts`, the label overlay, the zip reader in `chats/zip.ts`).
-- **Imported chat text is inert.** What a chat says must never become a link, tag or task of the brain: `inertMarkdown` escapes it (`[\[`, `\#`, `- \[ ]`) exactly where the parsers would read one, and the parsers read links and tags from each text node's markdown source (so an escape holds). Only the note's own lines (header, hub lists, a `save_chat` summary) are live.
+- **Imported chat text is inert.** What a chat says must never become a link, tag or task of the brain. Each message is kept whole behind `> ` (`quoteMarkdown`: a quote closes whatever it holds, and the line-by-line task scan never reads a quoted line); `inertMarkdown` escapes what the parsers would still read (`\[\[x\]\]` on both sides, `\#`, a GFM task's `\[ ]`), parses again and fails closed (`blanketInert`); the parsers skip characters a text node's source wrote escaped (`charOrigins`). Only the note's own lines (header, hub lists, a `save_chat` summary) are live.
 
 ## Layout
 
@@ -70,13 +70,13 @@ Multi-root vaults (e.g. `D:\` + `F:\`): every vault path starts with the root's 
 pnpm install
 pnpm dev             # web app at http://localhost:5173  (?demo=1 auto-opens the demo, ?stress=1000 the synthetic vault)
 pnpm dev:desktop     # Electron + Vite dev server
-pnpm test            # vitest: packages/core, packages/graph, packages/ui, apps/desktop (546 tests in 26 files at v0.4)
+pnpm test            # vitest: packages/core, packages/graph, packages/ui, apps/desktop (597 tests in 28 files at v0.5)
 pnpm typecheck       # tsc for renderer code + Electron main + MCP server
 pnpm build           # web build → apps/web/dist
 pnpm build:desktop   # MCP bundle (vite) + main/preload (tsc) + renderer (vite) → apps/desktop/dist
 ```
 
-Tests (v0.4): core 132 (`packages/core/test`: parsing, folders, projects, tasks and dates, frontmatter, the brief, critiques, pictures), graph 51 (`packages/graph/test`: system layout and the hub, worker, engine, camera follow and range, thumbnails and picking), ui 93 (`packages/ui/test`: store, fsAccess adapter, folder search, v0.4 store, views and review fixes — the store, palette commands and the global key handler against a `MemoryVaultAdapter`, node env, no Worker, no DOM; views server-rendered), desktop 270 + 1 skipped (`apps/desktop/test`: FsVault, watcher, picture checks, the thumbnailer, preload, MCP tools, AI link, the Forge link — some tests drive real Chromium from /opt/pw-browsers and skip without it). Run one area with `pnpm exec vitest run packages/ui`.
+Tests (v0.5): core 163 (`packages/core/test`: parsing, folders, projects, tasks and dates, frontmatter, the brief, critiques, pictures, AI chat exports: zip, readers, inert notes, import plans), graph 51 (`packages/graph/test`: system layout and the hub, worker, engine, camera follow and range, thumbnails and picking), ui 104 (`packages/ui/test`: store, fsAccess adapter, folder search, v0.4 store, views and review fixes, chat import — the store, palette commands and the global key handler against a `MemoryVaultAdapter`, node env, no Worker, no DOM; views server-rendered), desktop 279 + 1 skipped (`apps/desktop/test`: FsVault, watcher, picture checks, the thumbnailer, preload, MCP tools incl. save_chat, AI link, the Forge link — some tests drive real Chromium from /opt/pw-browsers and skip without it). Run one area with `pnpm exec vitest run packages/ui`.
 
 ## Conventions
 
