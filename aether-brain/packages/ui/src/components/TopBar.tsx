@@ -114,14 +114,18 @@ export function TopBar({ onPickVault }: { onPickVault?: (() => void) | undefined
           <span className="max-w-[160px] truncate">{adapter?.name ?? 'No vault'}</span>
           {adapter?.readOnly && <span className="text-inbox">·ro</span>}
         </button>
-        <span title={`Neurons (notes) / synapses / missing${settings.layoutMode === 'system' ? ' / folders shown' : ''} / pictures shown`}>
+        {/* The counts need room: on narrower windows they give way to the views and the Today chip (the legend has them too). */}
+        <span
+          className="hidden whitespace-nowrap min-[1600px]:inline"
+          title={`Neurons (notes) / synapses / missing${settings.layoutMode === 'system' ? ' / folders shown' : ''} / pictures shown`}
+        >
           {status === 'ready'
             ? `${nodes}n · ${edges}s${ghosts ? ` · ${ghosts}?` : ''}${settings.layoutMode === 'system' && folders ? ` · ${folders}f` : ''}${pictures ? ` · ${pictures}🖼` : ''}`
             : status === 'loading'
               ? 'loading…'
               : ''}
         </span>
-        <span className={cx('tabular-nums', fps && fps < 45 ? 'text-inbox' : '')} title="Frames per second">
+        <span className={cx('whitespace-nowrap tabular-nums', fps && fps < 45 ? 'text-inbox' : '')} title="Frames per second">
           {fps ? `${fps} fps` : ''}
         </span>
         {dirty && <span className="text-inbox">●</span>}

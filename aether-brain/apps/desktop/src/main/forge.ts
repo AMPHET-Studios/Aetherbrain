@@ -457,11 +457,11 @@ export class ForgeHost {
       if (forgeNavigation(url, null) === 'external') void shell.openExternal(url)
       return { action: 'deny' }
     })
-    wc.on('will-navigate', (e, url) => {
-      const action = forgeNavigation(url, this.shown)
+    wc.on('will-navigate', (e) => {
+      const action = forgeNavigation(e.url, this.shown)
       if (action === 'allow') return
       e.preventDefault()
-      if (action === 'external') void shell.openExternal(url)
+      if (action === 'external') void shell.openExternal(e.url)
     })
     // A page that asks before unloading (unsaved drawing) would otherwise keep the window from closing, silently.
     wc.on('will-prevent-unload', (e) => {

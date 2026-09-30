@@ -7,6 +7,7 @@ import { ElectronVaultAdapter } from './vault/electron'
 import { RootsPanel } from './components/RootsPanel'
 import { AiLinkPanel } from './components/AiLinkPanel'
 import { activityFailed, clientLabel, errorText, flyToPath, openPanel, pushActivity, samePath, togglePanel, usePanel } from './panels'
+import './forge'
 
 const bridge = ElectronVaultAdapter.bridge()
 const isWindows = bridge?.platform === 'win32'

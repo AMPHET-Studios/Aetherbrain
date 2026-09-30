@@ -7,10 +7,11 @@
  *   - list the pictures in them, make thumbnails, create new pictures (never replacing anything) and open one in the OS
  *   - watch them (VaultWatcher) and stream debounced change batches to the renderer and the AI link
  *   - run the AI link (the in-app MCP server on 127.0.0.1) when the user switches it on
+ *   - open the user's Concept Forge page in a window of its own and relay its saves to the brain (ForgeHost)
  *
  * No telemetry. The renderer is sandboxed with context isolation and makes no network requests.
  */
-import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, shell, nativeTheme, session } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, shell, nativeTheme, screen, session } from 'electron'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -36,6 +37,7 @@ import {
   thumbPx,
 } from './assets.js'
 import { AiLinkHost, aiSettings, cleanPatch, type AiLinkSettings } from './ai-link.js'
+import { ForgeHost, forgeSettings, type ForgeSettings } from './forge.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const isDev = !!process.env['VITE_DEV_SERVER_URL']
@@ -53,6 +55,8 @@ interface Settings {
   /** Extra folder names skipped while scanning. */
   exclude?: string[]
   ai?: Partial<AiLinkSettings>
+  /** The Concept Forge link (the remembered concept-forge.html). */
+  forge?: ForgeSettings
 }
 
 let settings: Settings = {}
@@ -583,6 +587,33 @@ function requireAi(): AiLinkHost {
 }
 
 /* ------------------------------------------------------------------ */
+/* Concept Forge link                                                 */
+/* ------------------------------------------------------------------ */
+
+function createForge(): ForgeHost {
+  return new ForgeHost({
+    electron: { BrowserWindow, dialog, shell, session, screen },
+    settings: forgeSettings(settings.forge),
+    save: (s) => {
+      settings.forge = s
+      return saveSettings()
+    },
+    brain: () => win,
+    preload: path.join(__dirname, '..', 'preload', 'forge-preload.cjs'),
+    version: app.getVersion(),
+  })
+}
+
+/** The brain window opens the Forge window; the Forge window's requests go through the host to the brain window's store. */
+function registerForgeIpc(forge: ForgeHost): void {
+  ipcMain.handle(IPC.forgeOpen, (_e, opts: unknown) => forge.open(opts))
+  ipcMain.handle(IPC.forgeStatus, () => forge.status())
+  ipcMain.handle(IPC.forgeProjects, (e) => forge.projects(e.sender))
+  ipcMain.handle(IPC.forgeSave, (e, dto: unknown) => forge.save(e.sender, dto))
+  ipcMain.handle(IPC.forgeReply, (e, id: unknown, ok: unknown, value: unknown) => forge.reply(e.sender, id, ok, value))
+}
+
+/* ------------------------------------------------------------------ */
 /* IPC                                                                */
 /* ------------------------------------------------------------------ */
 
@@ -710,5 +741,6 @@ void app.whenReady().then(async () => {
   ai = createAiLink()
   registerIpc()
   createWindow()
+  registerForgeIpc(createForge())
   started = true
 })
