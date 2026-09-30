@@ -164,9 +164,10 @@ Task checkboxes in any preview (editor split view, review) are clickable too and
 | ----- | -------------------------------------------------------------------------------------- |
 | `v`   | Vault folders panel: add folders or whole drives (`D:\`, `F:\` …), skip folders, rescan |
 | `a`   | AI link panel: let Claude and ChatGPT read and write this brain (see [AI-LINK.md](AI-LINK.md)) |
+| `g`   | Concept Forge: open your `concept-forge.html` in its own window; its **🪐 Save to Brain** button (`Ctrl+Shift+B`) files a graded drawing into a project's Critique planet (see [FORGE-LINK.md](FORGE-LINK.md)) |
 
 Inside a panel: `Esc` closes it, its own key closes it too, the other panel's key switches, and `Tab` stays inside the panel. Clicking the vault name in the top bar opens the vault folders panel.
 
 ## Commands (palette `>`)
 
-Today — daily brief · Toggle Today hub · Import pictures… · Open the selected picture · Copy the embed of the selected picture · Toggle image moons · Toggle picture thumbnails · Move note → Projects / Areas / Resources / Archive · Set status → evergreen / seedling · Delete note · New project · New folder / new note in the selected folder · Make the selected folder a project · Open the selected star's project board · Show in the file manager (a note, folder or picture) · Cycle layout · Orbits moving / paused · Folder levels − / + · Expand / collapse folder · Reload vault from disk · Re-run layout physics · Vault folders · AI link (desktop) · everything above.
+Today — daily brief · Toggle Today hub · Import pictures… · Open the selected picture · Copy the embed of the selected picture · Toggle image moons · Toggle picture thumbnails · Move note → Projects / Areas / Resources / Archive · Set status → evergreen / seedling · Delete note · New project · New folder / new note in the selected folder · Make the selected folder a project · Open the selected star's project board · Show in the file manager (a note, folder or picture) · Cycle layout · Orbits moving / paused · Folder levels − / + · Expand / collapse folder · Reload vault from disk · Re-run layout physics · Vault folders · AI link · Concept Forge — open · Concept Forge — choose file… (desktop) · everything above.

@@ -1,6 +1,6 @@
 # Design: the Today hub, image moons, and the Concept Forge link (v0.4)
 
-Status: contract for v0.4. Interface files that are part of the contract (already
+Status: implemented in v0.4. Interface files that are part of the contract (already
 written; do not change their shapes without updating this doc):
 `packages/core/src/types.ts`, `apps/desktop/src/shared/ipc.ts`,
 `packages/graph/src/layout/protocol.ts`. The core pieces below are **already
