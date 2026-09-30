@@ -357,4 +357,9 @@ export interface VaultAdapter {
   createAsset?(path: string, data: Uint8Array): Promise<void>
   /** Open an image in the OS default app (desktop only). */
   openAsset?(path: string): Promise<void>
+  /**
+   * True when changes that arrived while the vault loaded could not all be
+   * kept (a huge burst on a whole drive): the app offers a rescan.
+   */
+  readonly overflowed?: boolean
 }

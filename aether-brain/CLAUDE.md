@@ -4,7 +4,8 @@ Aether Brain is a local-first **3D second brain**. Markdown files in a folder (o
 
 ## Non-negotiables
 
-- **Local-first.** No accounts, no telemetry, no analytics SDKs, no outbound requests from the renderer. Electron's main process blocks http(s) in production. The AI link's HTTP server binds `127.0.0.1` only and every request carries a secret token. The Concept Forge window is the one exception by design: it is the user's own page in its own session (`persist:forge`), so its Deep Critique can reach the vision AI the user configured there; the brain window's session still blocks everything, and the Forge page reaches the brain only through `window.aetherForge` (projects + save, validated in main).
+- **Local-first.** No accounts, no telemetry, no analytics SDKs, no outbound requests from the renderer. Electron's main process blocks http(s) in production. The AI link's HTTP server binds `127.0.0.1` only and every request carries a secret token. The Concept Forge window is the one exception by design: it is the user's own page in its own session (`persist:forge`), so its Deep Critique can reach the vision AI the user configured there; the brain window's session still blocks everything, and the Forge page reaches the brain only through `window.aetherForge` (projects + save, validated in main). The Forge session serves no file but the chosen page (its own `file:` handler plus a CSP header on the page, since workers bypass protocol handlers): the page can't read the vault.
+- **The main process never decodes pictures.** Thumbnails are made in the hidden helper window (`thumbnailer.ts`); `nativeImage` decoding runs on Windows' UI thread and freezes the app.
 - **Markdown is the format.** Never invent a proprietary note format. Frontmatter keys: `title, tags, created, updated, status, area, type, aliases`. Wikilinks: `[[Title]]`, `[[Title|alias]]`, `[[Title#Heading]]`, `![[Title]]`.
 - **TypeScript strict** everywhere, `noUncheckedIndexedAccess` on. Run `pnpm typecheck` before committing.
 - **Main thread stays free.** Graph physics runs in `packages/graph/src/layout/layout.worker.ts` (d3-force-3d; the system layout is the analytic `layout/system.ts`, also in the worker). Never run the simulation on the main thread.
@@ -22,12 +23,14 @@ apps/desktop
   src/main        Electron main: fsvault.ts (FsVault: multi-root scan of notes + pictures, path jail, atomic writes, create-only
                   binary writes — pure Node), watcher.ts (VaultWatcher: native recursive fs.watch, 250 ms debounce, self-write echo
                   suppression, addDir/unlinkDir, picture add/change/unlink — pure Node), assets.ts (pure checks behind the picture IPC:
-                  signatures, header pixel sizes, size caps, the thumbnail cache), ai-link.ts (HTTP MCP link lifecycle),
+                  signatures, header pixel sizes and orientation, size caps, the thumbnail cache), thumbnailer.ts (Thumbnailer:
+                  a hidden helper window decodes pictures off the main process; the pure ThumbQueue), ai-link.ts (HTTP MCP link lifecycle),
                   forge.ts (ForgeHost: the Concept Forge window, its persist:forge session, the relay of its saves to the brain
                   window; the checks are pure functions), main.ts (IPC per src/shared/ipc.ts)
   src/mcp         MCP server (Brain, tools, stdio + HTTP), bundled by vite.mcp.config.ts to dist/mcp/aether-mcp.mjs;
                   runs in-process for the AI link and standalone for Claude Desktop (.mcpb via scripts/pack-mcpb.mjs)
-  src/preload     preload.cts → window.aether (AetherBridge); forge-preload.cts → window.aetherForge + the injected Save to Brain UI
+  src/preload     preload.cts → window.aether (AetherBridge); forge-preload.cts → window.aetherForge + the injected Save to Brain UI;
+                  thumb-preload.cts → the thumbnail helper's decoder
   src/renderer    the same UI + ElectronVaultAdapter + RootsPanel (v), AiLinkPanel (a) and forge.ts (g), through the extension points
 packages/core     parse (frontmatter, wikilinks, tags), graph build + link resolution (+ folder nodes: vault/folders.ts, graph/build.ts;
                   image + Today nodes), projects (markdown/projects.ts), tasks with due/scheduled dates (markdown/tasks.ts), the daily
@@ -63,13 +66,13 @@ Multi-root vaults (e.g. `D:\` + `F:\`): every vault path starts with the root's 
 pnpm install
 pnpm dev             # web app at http://localhost:5173  (?demo=1 auto-opens the demo, ?stress=1000 the synthetic vault)
 pnpm dev:desktop     # Electron + Vite dev server
-pnpm test            # vitest: packages/core, packages/graph, packages/ui, apps/desktop (505 tests in 24 files at v0.4)
+pnpm test            # vitest: packages/core, packages/graph, packages/ui, apps/desktop (546 tests in 26 files at v0.4)
 pnpm typecheck       # tsc for renderer code + Electron main + MCP server
 pnpm build           # web build → apps/web/dist
 pnpm build:desktop   # MCP bundle (vite) + main/preload (tsc) + renderer (vite) → apps/desktop/dist
 ```
 
-Tests (v0.4): core 132 (`packages/core/test`: parsing, folders, projects, tasks and dates, frontmatter, the brief, critiques, pictures), graph 49 (`packages/graph/test`: system layout and the hub, worker, engine, camera follow and range, thumbnails), ui 85 (`packages/ui/test`: store, fsAccess adapter, folder search, v0.4 store and views — the store, palette commands and the global key handler against a `MemoryVaultAdapter`, node env, no Worker, no DOM; views server-rendered), desktop 239 + 1 skipped (`apps/desktop/test`: FsVault, watcher, picture checks, preload, MCP tools, AI link, the Forge link — 9 of its tests drive real Chromium from /opt/pw-browsers and skip without it). Run one area with `pnpm exec vitest run packages/ui`.
+Tests (v0.4): core 132 (`packages/core/test`: parsing, folders, projects, tasks and dates, frontmatter, the brief, critiques, pictures), graph 51 (`packages/graph/test`: system layout and the hub, worker, engine, camera follow and range, thumbnails and picking), ui 93 (`packages/ui/test`: store, fsAccess adapter, folder search, v0.4 store, views and review fixes — the store, palette commands and the global key handler against a `MemoryVaultAdapter`, node env, no Worker, no DOM; views server-rendered), desktop 270 + 1 skipped (`apps/desktop/test`: FsVault, watcher, picture checks, the thumbnailer, preload, MCP tools, AI link, the Forge link — some tests drive real Chromium from /opt/pw-browsers and skip without it). Run one area with `pnpm exec vitest run packages/ui`.
 
 ## Conventions
 

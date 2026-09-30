@@ -19,7 +19,7 @@ import {
 import { AREA_LABELS, IMAGE_COLOR, STAR_COLOR, SUN_COLOR, TODAY_COLOR, planetColor } from '@aether/graph'
 import { useAether } from '../store'
 import { cx, plural, relativeTime, truncate, MOD } from '../util'
-import { copyEmbed, formatBytes, importPicturesFromDialog } from './pictures'
+import { copyEmbed, formatBytes, importPicturesFromDialog, usePreview } from './pictures'
 
 /**
  * Right-hand inspector for the selected neuron: metadata, outgoing synapses,
@@ -512,6 +512,22 @@ export function briefChip(t: BriefTask, today: string): { text: string; tone: 'l
 const briefKey = (t: BriefTask) => `${t.section}\u0000${t.noteId}\u0000${t.line}`
 
 /**
+ * Tick a brief task in its note, with an Undo toast (exported for tests).
+ * The store may tick another line than `t.line` (it saves a pending editor
+ * draft of the note first and follows the task into it), so Undo reopens the
+ * line the store reports, counted in the text it wrote. No toast when nothing
+ * was written (the store toasts a failure itself).
+ */
+export async function tickBriefTask(t: BriefTask): Promise<void> {
+  const res = await useAether.getState().toggleTask(t.noteId, t.line, true)
+  if (!res) return
+  useAether.getState().toast(`Ticked “${truncate(t.label, 48)}”`, 'success', {
+    label: 'Undo',
+    run: () => void useAether.getState().toggleTask(t.noteId, res.line, false, res.after),
+  })
+}
+
+/**
  * The Today hub's inspector: the daily brief, today's to-dos from every note
  * in three sections (overdue, today, next up). Ticking a task writes it done
  * in its own note (the toast can undo it); a row's project chip selects the
@@ -524,8 +540,6 @@ function TodayInspector() {
   const readOnly = useAether((s) => !s.adapter || s.adapter.readOnly)
   const select = useAether((s) => s.select)
   const openNote = useAether((s) => s.openNote)
-  const toggleTask = useAether((s) => s.toggleTask)
-  const toast = useAether((s) => s.toast)
   const hover = useAether((s) => s.hover)
   const controller = useAether((s) => s.controller)
   const [pending, setPending] = useState<ReadonlySet<string>>(() => new Set())
@@ -564,9 +578,8 @@ function TodayInspector() {
     const key = briefKey(t)
     if (readOnly || pending.has(key)) return
     setPending((p) => new Set(p).add(key))
-    const before = useAether.getState().notes.get(t.noteId)?.raw
     try {
-      await toggleTask(t.noteId, t.line, true)
+      await tickBriefTask(t)
     } finally {
       setPending((p) => {
         const next = new Set(p)
@@ -576,11 +589,6 @@ function TodayInspector() {
       // The busy tick box lost the focus: give it back to this place in the list.
       if (hadFocus) setRefocus(index)
     }
-    // Unchanged: the store did not write it and has said why.
-    const after = useAether.getState().notes.get(t.noteId)?.raw
-    if (after === undefined || after === before) return
-    // The tick rewrites that one line in place, so the task is on the same line of `after`.
-    toast(`Ticked “${truncate(t.label, 48)}”`, 'success', { label: 'Undo', run: () => void toggleTask(t.noteId, t.line, false, after) })
   }
 
   /** Project chip: the project's star when the graph shows it, else the project note. */
@@ -742,42 +750,6 @@ function TodayInspector() {
       </div>
     </aside>
   )
-}
-
-/** Preview size asked of the adapter (px, longer side): sharp at the inspector's width on a 2× screen. */
-const PREVIEW_SIZE = 512
-
-type Preview = { url: string | null; state: 'loading' | 'ready' | 'none' }
-
-/**
- * A picture's preview as an object URL, revoked when the picture changes or
- * the inspector closes. The one place a component asks the adapter itself:
- * the store keeps no previews (`stamp` changes when the file does).
- */
-function usePreview(path: string, stamp: string): Preview {
-  const adapter = useAether((s) => s.adapter)
-  const preview = useAether((s) => s.preview)
-  const [state, setState] = useState<Preview>({ url: null, state: 'loading' })
-  useEffect(() => {
-    if (!adapter?.thumbnail) {
-      setState({ url: null, state: 'none' })
-      return
-    }
-    let live = true
-    let url: string | null = null
-    setState({ url: null, state: 'loading' })
-    void preview(path, PREVIEW_SIZE).then((blob) => {
-      if (!live) return
-      if (!blob) return setState({ url: null, state: 'none' })
-      url = URL.createObjectURL(blob)
-      setState({ url, state: 'ready' })
-    })
-    return () => {
-      live = false
-      if (url) URL.revokeObjectURL(url)
-    }
-  }, [adapter, preview, path, stamp])
-  return state
 }
 
 /**

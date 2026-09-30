@@ -30,8 +30,11 @@ async function openForge(bridge: AetherBridge, pick: boolean): Promise<void> {
 /** One relayed request, served by the store (a rejection reaches the Forge window as its message). */
 function serve(req: ForgeRequest): Promise<unknown> {
   const s = useAether.getState()
-  if (req.kind === 'projects') return Promise.resolve(s.forgeProjects())
-  return s.saveCritique(req.save)
+  if (req.kind === 'save') return s.saveCritique(req.save)
+  // Refused the way the store refuses a save: an empty list before the vault is in would read as "no projects yet, make one".
+  if (s.status === 'loading') return Promise.reject(new Error('The vault is still loading; try again in a moment'))
+  if (s.status !== 'ready') return Promise.reject(new Error('Open your vault in Aether Brain first'))
+  return Promise.resolve(s.forgeProjects())
 }
 
 const bridge = ElectronVaultAdapter.bridge()

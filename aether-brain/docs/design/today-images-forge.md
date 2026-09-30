@@ -294,11 +294,18 @@ list is hard-coded), `test/*` (not forge tests).
   unlinks its images, `addTree` reports images, resync diffs images (new /
   gone). No self-write suppression needed for images (adds are idempotent).
 - **IPC** (`main.ts`): `vault:assets` → `AssetListDto` from the last scan;
-  `vault:thumb(path, size)` → PNG bytes (`Uint8Array`) or null:
-  `assetAbs` → `nativeImage.createThumbnailFromPath(abs, {width,height})` on
-  win32/darwin (falls back on error), else `nativeImage.createFromPath(abs)`
-  (skip files > 64 MB), `.resize` to fit `size` (clamped 32–1024), `toPNG()`;
-  LRU cache (~1500 entries) keyed by abs + mtime + size; empty images → null.
+  `vault:thumb(path, size)` → PNG bytes (`Uint8Array`) or null: `assetAbs`,
+  the file read asynchronously (≤ 64 MB), its kind and pixel size read from
+  the header (≤ 64 MP, EXIF / AVIF orientation), then decoded **off the main
+  process** by `Thumbnailer` (`thumbnailer.ts`): a hidden helper window (its
+  own partition, every request refused, sandboxed) whose preload
+  `thumb-preload.cts` decodes with `createImageBitmap(…, { resizeWidth,
+  resizeHeight })` and encodes PNG from an OffscreenCanvas; at most 2 decodes
+  at once, 20 s per job (a hung helper is crashed and replaced), only the
+  helper may answer. (Review finding: `nativeImage.createThumbnailFromPath`
+  runs synchronously on Windows' UI thread, so uncached concept art froze
+  the app.) Size clamped 32–1024; LRU cache (~1500 entries, 96 MB) keyed by
+  abs + mtime + size.
   `vault:createAsset(path, data)`: image path, `Uint8Array` ≤ 40 MB, magic bytes
   must match a real image (PNG `89 50 4E 47`, JPEG `FF D8 FF`, GIF `GIF8`,
   WebP `RIFF….WEBP`, BMP `BM`, AVIF `….ftypavif`), then `createBinary`, then
@@ -343,6 +350,15 @@ if the new preload needs listing, new `docs/FORGE-LINK.md`, new
   Brain", dark background) with `webPreferences: { preload: forge-preload.cjs,
   partition: 'persist:forge', contextIsolation: true, sandbox: true,
   nodeIntegration: false }` and `loadFile(file)`.
+  - The page may read no other file (review finding: a `file://` page can
+    fetch, XHR or iframe any `file://` URL, the whole vault included, and
+    this session has network access). `persist:forge` handles the `file:`
+    scheme itself (`protocol.handle('file')`): only the chosen page is served
+    (`forgeFileRequest`), read from its own path, with the response header
+    `Content-Security-Policy: default-src http: https: ws: wss: data: blob:
+    'unsafe-inline' 'unsafe-eval'`, which also covers workers (they bypass the
+    protocol handler). Every other `file://` request fails. blob:, data: and
+    the network keep working. The brain window's session is untouched.
   - Its own session (`persist:forge`): the main session's production http(s)
     block does not apply, so the page's Deep Critique (vision AI with the
     user's own key) and random references keep working. Permissions on that
@@ -354,8 +370,12 @@ if the new preload needs listing, new `docs/FORGE-LINK.md`, new
   - Relay: `forge:win:projects` / `forge:win:save` from the Forge window are
     forwarded to the brain window as `forge:request` `{ id, kind, … }`; the
     reply arrives on `forge:reply` (id, ok, value|message). 30 s timeout;
-    clear errors: "Open your vault in Aether Brain first" (no brain window or
-    it doesn't answer), the store's own messages otherwise. Validate the save
+    clear errors: "Open your vault in Aether Brain first" (no brain window,
+    the send failed, the brain went away); a request that was sent but not
+    answered in time says so (`unanswered`: a save may still have landed, so
+    check the Critique planet before saving again); the renderer refuses
+    projects while the vault is still loading or not open; the store's own
+    messages otherwise. Validate the save
     DTO in main before relaying (projectId string, title ≤ 200 chars, png a
     Uint8Array ≤ 40 MB with PNG magic bytes, grade JSON-safe ≤ 256 KB).
   - IPC `forge:open`, `forge:status` for the brain window.

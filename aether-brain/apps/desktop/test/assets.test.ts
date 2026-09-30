@@ -3,18 +3,18 @@ import { promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import {
-  HEADER_BYTES,
   MAX_ASSET_BYTES,
   MAX_DECODE_PIXELS,
   ThumbCache,
   assetBytes,
   assetPath,
-  decodableInProcess,
   fitWithin,
   imageKindOf,
   imageSize,
-  readHeader,
+  readUpTo,
   thumbPx,
+  thumbTarget,
+  turnsSideways,
 } from '../src/main/assets.js'
 
 const bytes = (...parts: (number[] | string)[]) =>
@@ -47,6 +47,49 @@ const jpeg = (w: number, h: number, sof = 0xc0, exif = 300) =>
     [0xff, sof], be16(17), [8], be16(h), be16(w), [3, 1, 0x22, 0],
   )
 const avif = bytes(be32(28), 'ftyp', 'avif', be32(0), 'mif1', 'miaf', 'avif')
+
+/** EXIF data (a TIFF stream) whose IFD0 holds `tags` ([tag, type, value] SHORTs), little or big endian. */
+const tiff = (tags: [number, number, number][], little = false) => {
+  const u16 = (n: number) => (little ? le16(n) : be16(n))
+  const u32 = (n: number) => (little ? le32(n) : be32(n))
+  return [
+    ...(little ? [0x49, 0x49] : [0x4d, 0x4d]),
+    ...u16(42),
+    ...u32(8),
+    ...u16(tags.length),
+    ...tags.flatMap(([tag, type, value]) => [...u16(tag), ...u16(type), ...u32(1), ...u16(value), 0, 0]),
+    ...u32(0),
+  ]
+}
+const orientationTag = (o: number): [number, number, number] => [0x0112, 3, o]
+/** A JPEG whose first APP1 is EXIF data with orientation `o` (after an XMP APP1 with `xmpFirst`). */
+const jpegExif = (w: number, h: number, o: number, opts: { little?: boolean; xmpFirst?: boolean } = {}) => {
+  const exif = bytes('Exif', [0, 0], tiff([[0x010f, 2, 0], orientationTag(o)], opts.little))
+  const xmp = bytes('http://ns.adobe.com/xap/1.0/', [0], '<x:xmpmeta/>')
+  const app1 = (body: Uint8Array) => [0xff, 0xe1, ...be16(body.length + 2), ...body]
+  const rest = jpeg(w, h).subarray(2)
+  return bytes([0xff, 0xd8], opts.xmpFirst ? app1(xmp) : [], app1(exif), [...rest])
+}
+/** A PNG with an eXIf chunk (orientation `o`) before its image data, or after it with `late`. */
+const pngExif = (w: number, h: number, o: number, late = false) => {
+  const data = tiff([orientationTag(o)])
+  const chunk = (type: string, body: number[]) => [...be32(body.length), ...[...type].map((c) => c.charCodeAt(0)), ...body, 0, 0, 0, 0]
+  const head = [...png(w, h)]
+  const idat = chunk('IDAT', [0, 0, 0])
+  const exif = chunk('eXIf', data)
+  return new Uint8Array([...head, ...(late ? [...idat, ...exif] : [...exif, ...idat]), ...chunk('IEND', [])])
+}
+/** ISO-BMFF boxes: `box(type, ...body)`, a full box has version and flags first. */
+const box = (type: string, ...body: (number[] | string)[]) => {
+  const b = [...bytes(...body)]
+  return [...be32(8 + b.length), ...[...type].map((c) => c.charCodeAt(0)), ...b]
+}
+const fullBox = (type: string, ...body: (number[] | string)[]) => box(type, [0, 0, 0, 0], ...body)
+const ispe = (w: number, h: number) => fullBox('ispe', be32(w), be32(h))
+const irot = (quarterTurns: number) => box('irot', [quarterTurns])
+/** An AVIF with these item properties (meta → iprp → ipco). */
+const avifWith = (...props: number[][]) =>
+  bytes(box('ftyp', 'avif', be32(0), 'mif1', 'miaf'), fullBox('meta', fullBox('hdlr', be32(0), 'pict', new Array<number>(13).fill(0)), box('iprp', box('ipco', ...props))))
 
 describe('picture signatures', () => {
   it('knows each format the vault shows by its first bytes', () => {
@@ -111,21 +154,86 @@ describe('picture sizes from headers', () => {
     expect(imageSize(bytes('hello world, this is text'))).toBeNull()
   })
 
-  it('lets only PNG and JPEG with a sane pixel count be decoded in the app', () => {
-    expect(decodableInProcess(png(8000, 8000))).toBe(true)
-    expect(8000 * 8000).toBeLessThanOrEqual(MAX_DECODE_PIXELS)
-    expect(decodableInProcess(png(8001, 8000))).toBe(false)
-    // A few bytes claiming a 30 000 × 30 000 canvas (3.6 GB of pixels) are never decoded.
-    expect(decodableInProcess(png(30_000, 30_000))).toBe(false)
-    expect(decodableInProcess(jpeg(4000, 3000))).toBe(true)
-    expect(decodableInProcess(jpeg(65_535, 65_535))).toBe(false)
-    expect(decodableInProcess(png(640, 480).subarray(0, 20))).toBe(false)
-    expect(decodableInProcess(gif(10, 10))).toBe(false)
-    expect(decodableInProcess(bytes('MZ'))).toBe(false)
+  it('reads an AVIF size from its largest ispe property (a grid, not its tiles), 64-bit box sizes included', () => {
+    expect(imageSize(avifWith(ispe(512, 512), ispe(2048, 1536), ispe(512, 512)))).toEqual({ width: 2048, height: 1536 })
+    expect(imageSize(avifWith(ispe(0, 10)))).toBeNull()
+    expect(imageSize(avifWith(irot(1)))).toBeNull()
+    // A box whose size is in the 64-bit field (size 1).
+    const meta = fullBox('meta', box('iprp', box('ipco', ispe(3000, 2000))))
+    const large = [...be32(1), ...meta.slice(4, 8), ...be32(0), ...be32(meta.length + 8), ...meta.slice(8)]
+    expect(imageSize(bytes(box('ftyp', 'avif', be32(0), 'mif1'), large))).toEqual({ width: 3000, height: 2000 })
+    // Boxes that claim more than there is, or less than their own header, end the walk without throwing.
+    expect(imageSize(bytes(box('ftyp', 'avif', be32(0)), be32(4), 'meta'))).toBeNull()
+    expect(imageSize(avifWith(ispe(640, 480)).subarray(0, 60))).toBeNull()
   })
 })
 
-describe('reading a header', () => {
+describe('orientation', () => {
+  it('reads EXIF orientation from the first EXIF APP1 of a JPEG, either byte order, after an XMP APP1 too', () => {
+    for (const o of [5, 6, 7, 8]) expect(turnsSideways(jpegExif(40, 30, o)), `orientation ${o}`).toBe(true)
+    for (const o of [1, 2, 3, 4]) expect(turnsSideways(jpegExif(40, 30, o)), `orientation ${o}`).toBe(false)
+    expect(turnsSideways(jpegExif(40, 30, 6, { little: true }))).toBe(true)
+    expect(turnsSideways(jpegExif(40, 30, 6, { xmpFirst: true }))).toBe(true)
+    expect(imageSize(jpegExif(40, 30, 6))).toEqual({ width: 40, height: 30 })
+    // Out of range, or not a SHORT, is no orientation at all.
+    expect(turnsSideways(jpegExif(40, 30, 9))).toBe(false)
+    const long = bytes([0xff, 0xd8], [0xff, 0xe1], be16(2 + 6 + 26), 'Exif', [0, 0], tiff([[0x0112, 4, 6]]), [...jpeg(4, 3).subarray(2)])
+    expect(turnsSideways(long)).toBe(false)
+    expect(turnsSideways(jpeg(40, 30))).toBe(false)
+  })
+
+  it('reads a PNG eXIf chunk only before the image data (the decoder ignores a later one)', () => {
+    expect(turnsSideways(pngExif(40, 30, 6))).toBe(true)
+    expect(turnsSideways(pngExif(40, 30, 3))).toBe(false)
+    expect(turnsSideways(pngExif(40, 30, 6, true))).toBe(false)
+    expect(turnsSideways(png(40, 30))).toBe(false)
+  })
+
+  it('turns an AVIF rotated by an odd number of quarter turns, and nothing else', () => {
+    expect(turnsSideways(avifWith(ispe(40, 30), irot(1)))).toBe(true)
+    expect(turnsSideways(avifWith(ispe(40, 30), irot(3)))).toBe(true)
+    expect(turnsSideways(avifWith(ispe(40, 30), irot(2)))).toBe(false)
+    expect(turnsSideways(avifWith(ispe(40, 30)))).toBe(false)
+    expect(turnsSideways(gif(40, 30))).toBe(false)
+    expect(turnsSideways(bytes('not a picture at all'))).toBe(false)
+  })
+})
+
+describe('what the thumbnail helper is asked to make', () => {
+  it('fits the picture as shown within the thumbnail size, never enlarged, with its media type', () => {
+    expect(thumbTarget(png(4000, 3000), 128)).toEqual({ type: 'image/png', width: 128, height: 96 })
+    expect(thumbTarget(png(100, 50), 128)).toEqual({ type: 'image/png', width: 100, height: 50 })
+    expect(thumbTarget(jpeg(3000, 4000), 512)).toEqual({ type: 'image/jpeg', width: 384, height: 512 })
+    expect(thumbTarget(gif(320, 200), 128)).toEqual({ type: 'image/gif', width: 128, height: 80 })
+    expect(thumbTarget(webpLossy(1920, 1080), 128)).toEqual({ type: 'image/webp', width: 128, height: 72 })
+    expect(thumbTarget(bmp(800, -600), 128)).toEqual({ type: 'image/bmp', width: 128, height: 96 })
+    expect(thumbTarget(avifWith(ispe(2048, 1536)), 128)).toEqual({ type: 'image/avif', width: 128, height: 96 })
+  })
+
+  it('swaps width and height for a picture the decoder turns a quarter (it scales after turning)', () => {
+    // Stored 4000 × 3000, shown 3000 × 4000: asking for 128 × 96 would squash it.
+    expect(thumbTarget(jpegExif(4000, 3000, 6), 128)).toEqual({ type: 'image/jpeg', width: 96, height: 128 })
+    expect(thumbTarget(jpegExif(4000, 3000, 3), 128)).toEqual({ type: 'image/jpeg', width: 128, height: 96 })
+    expect(thumbTarget(pngExif(60, 20, 8), 128)).toEqual({ type: 'image/png', width: 20, height: 60 })
+    expect(thumbTarget(avifWith(ispe(400, 100), irot(1)), 128)).toEqual({ type: 'image/avif', width: 32, height: 128 })
+  })
+
+  it('makes nothing of a picture whose size it cannot read or that claims too many pixels', () => {
+    expect(thumbTarget(png(8000, 8000), 128)).toEqual({ type: 'image/png', width: 128, height: 128 })
+    expect(8000 * 8000).toBeLessThanOrEqual(MAX_DECODE_PIXELS)
+    expect(thumbTarget(png(8001, 8000), 128)).toBeNull()
+    // A few bytes claiming a 30 000 × 30 000 canvas (3.6 GB of pixels) are never decoded.
+    expect(thumbTarget(png(30_000, 30_000), 128)).toBeNull()
+    expect(thumbTarget(jpeg(65_535, 65_535), 128)).toBeNull()
+    expect(thumbTarget(avifWith(ispe(20_000, 20_000)), 128)).toBeNull()
+    expect(thumbTarget(png(640, 480).subarray(0, 20), 128)).toBeNull()
+    expect(thumbTarget(avif, 128)).toBeNull()
+    expect(thumbTarget(bytes('MZ', new Array<number>(64).fill(0)), 128)).toBeNull()
+    expect(thumbTarget(new Uint8Array(0), 128)).toBeNull()
+  })
+})
+
+describe('reading a picture', () => {
   let tmp: string
   beforeEach(async () => {
     tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'aether-assets-'))
@@ -134,18 +242,24 @@ describe('reading a header', () => {
     await fs.rm(tmp, { recursive: true, force: true })
   })
 
-  it('reads at most HEADER_BYTES, and all of a shorter file', async () => {
-    const big = path.join(tmp, 'big.png')
-    const data = new Uint8Array(HEADER_BYTES + 5000).fill(1)
-    data.set(png(10, 10))
-    await fs.writeFile(big, data)
-    const head = await readHeader(big)
-    expect(head.length).toBe(HEADER_BYTES)
-    expect(imageSize(head)).toEqual({ width: 10, height: 10 })
-    const small = path.join(tmp, 'small.gif')
-    await fs.writeFile(small, gif(3, 4))
-    expect(await readHeader(small)).toEqual(gif(3, 4))
-    await expect(readHeader(path.join(tmp, 'missing.png'))).rejects.toThrow()
+  it('reads a whole file of at most `max` bytes, and nothing of a bigger one', async () => {
+    const file = path.join(tmp, 'a.gif')
+    await fs.writeFile(file, gif(3, 4))
+    expect(await readUpTo(file, 1000)).toEqual(gif(3, 4))
+    expect(await readUpTo(file, gif(3, 4).length)).toEqual(gif(3, 4))
+    expect(await readUpTo(file, gif(3, 4).length - 1)).toBeNull()
+    const empty = path.join(tmp, 'empty.png')
+    await fs.writeFile(empty, '')
+    expect(await readUpTo(empty, 10)).toEqual(new Uint8Array(0))
+    await expect(readUpTo(path.join(tmp, 'missing.png'), 10)).rejects.toThrow()
+  })
+
+  it.skipIf(process.platform !== 'linux')('keeps reading past the size a stat gave, up to `max` (a file that grew)', async () => {
+    // /proc files stat as empty and read as text.
+    const text = await fs.readFile('/proc/self/mountinfo')
+    expect(text.length).toBeGreaterThan(10)
+    expect((await readUpTo('/proc/self/mountinfo', 1_000_000))?.length).toBeGreaterThan(10)
+    expect(await readUpTo('/proc/self/mountinfo', 5)).toBeNull()
   })
 })
 

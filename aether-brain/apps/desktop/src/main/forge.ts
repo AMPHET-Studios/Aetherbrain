@@ -4,14 +4,14 @@
  * "Save to Brain" button files a graded drawing into a project's Critique
  * planet. The Forge window never touches the vault: its requests (the project
  * list, a save) are checked here and relayed to the brain window, whose store
- * does the work and answers.
+ * does the work and answers, and its session serves it no file but the page.
  *
  * No electron import at runtime (types only) so it can be unit-tested:
  * main.ts hands in the Electron modules. The checks are pure functions.
  */
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import type {
   BrowserWindow,
   BrowserWindowConstructorOptions,
@@ -33,10 +33,17 @@ export const FORGE_TIMEOUT_MS = 30_000
 export const MAX_FORGE_TITLE = 200
 export const MAX_FORGE_PNG = MAX_ASSET_BYTES
 export const MAX_GRADE_BYTES = 256 * 1024
-/** What the brain says when it is not there, is not ready, or does not answer. */
+/** What the Forge window hears when there is no brain window to ask (or it went away). */
 export const NO_BRAIN = 'Open your vault in Aether Brain first'
 /** The only permissions the page gets: copy a drawing, go fullscreen, lock the pointer (pan / rotate tools). */
 export const FORGE_PERMISSIONS: ReadonlySet<string> = new Set(['clipboard-sanitized-write', 'fullscreen', 'pointerLock'])
+/**
+ * Sent with the page itself: the web, data: and blob: URLs, inline scripts and eval stay open to it (Deep
+ * Critique, random references, dropped pictures), file: is shut. The session's file handler refuses every other
+ * file:// request, but workers load and fetch through a loader of their own that no handler sees; this policy is
+ * what keeps them, and the blob: workers it is inherited into, off the disk.
+ */
+export const FORGE_CSP = "default-src http: https: ws: wss: data: blob: 'unsafe-inline' 'unsafe-eval'"
 
 const MAX_PROJECT_ID = 4096
 const MAX_PROJECTS = 5000
@@ -89,19 +96,41 @@ export function forgeNavigation(url: string, file: string | null, platform: Node
     return 'deny'
   }
   if (u.protocol === 'http:' || u.protocol === 'https:') return 'external'
-  if (u.protocol !== 'file:' || !file) return 'deny'
+  return isPageUrl(u, file, platform) ? 'allow' : 'deny'
+}
+
+/**
+ * Whether the Forge session serves a file:// request: only when it names the page on show (any query or
+ * hash). A page on file:// may otherwise fetch, embed or frame any file:// URL (Electron grants file pages
+ * that), so every other file on the disk, the vault's notes and pictures included, is refused.
+ */
+export function forgeFileRequest(url: string, file: string | null, platform: NodeJS.Platform = process.platform): boolean {
+  let u: URL
+  try {
+    u = new URL(url)
+  } catch {
+    return false
+  }
+  return isPageUrl(u, file, platform)
+}
+
+/** True when `u` is a file:// URL of `file` itself. */
+function isPageUrl(u: URL, file: string | null, platform: NodeJS.Platform): boolean {
+  if (u.protocol !== 'file:' || !file) return false
   const windows = platform === 'win32'
   let target: string
   try {
-    target = fileURLToPath(u, { windows })
+    // A `%` that starts no escape stays a `%` (Electron's loadFile leaves `100%/` so, and Chromium reads it so);
+    // fileURLToPath would refuse the page's own URL.
+    target = fileURLToPath(u.href.replace(/%(?![0-9a-f]{2})/gi, '%25'), { windows })
   } catch {
-    return 'deny'
+    return false
   }
   const p = windows ? path.win32 : path.posix
   const a = p.resolve(target)
   const b = p.resolve(file)
   // Windows and macOS file names are case-insensitive.
-  return (platform === 'linux' ? a === b : a.toLowerCase() === b.toLowerCase()) ? 'allow' : 'deny'
+  return platform === 'linux' ? a === b : a.toLowerCase() === b.toLowerCase()
 }
 
 /**
@@ -206,9 +235,22 @@ interface Waiting {
 type RelayRequest = { kind: 'projects' } | { kind: 'save'; save: ForgeSaveDto }
 
 /**
+ * What a request the brain got but did not answer in time says. The brain may
+ * still finish a save after that, so it must not invite another one (that
+ * files the drawing twice, as `… 2`): it says where to look first.
+ */
+export function unanswered(kind: ForgeRequest['kind'], timeoutMs: number): string {
+  const s = Math.ceil(timeoutMs / 1000)
+  return kind === 'save'
+    ? `Aether Brain hasn't answered in ${s} s; the drawing may still have been saved — check the project's Critique planet before saving again`
+    : `Aether Brain didn't answer in ${s} s; try again`
+}
+
+/**
  * Numbered requests to the brain window and their answers. Each one gets
- * exactly one outcome: the brain's value, the brain's error message, or
- * NO_BRAIN when there is no brain window or it does not answer in time.
+ * exactly one outcome: the brain's value, the brain's error message, NO_BRAIN
+ * when there is no brain window to send it to (or it goes away), or
+ * `unanswered` when the brain got it but did not answer in time.
  */
 export class ForgeRelay {
   private seq = 0
@@ -230,10 +272,7 @@ export class ForgeRelay {
     const id = ++this.seq
     const msg: ForgeRequest = req.kind === 'save' ? { id, kind: 'save', save: req.save } : { id, kind: 'projects' }
     return new Promise<unknown>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.waiting.delete(id)
-        reject(new Error(NO_BRAIN))
-      }, this.timeoutMs)
+      const timer = setTimeout(() => this.settle(id, false, unanswered(req.kind, this.timeoutMs)), this.timeoutMs)
       this.waiting.set(id, { resolve, reject, timer })
       try {
         t.send(IPC.forgeRequest, msg)
@@ -294,7 +333,7 @@ export interface ForgeHostOptions {
 export class ForgeHost {
   private settings: ForgeSettings
   private win: BrowserWindow | null = null
-  /** The file the window shows (navigation may not leave it). */
+  /** The file the window shows: navigation may not leave it, and it is the one file the Forge session serves. */
   private shown: string | null = null
   private opening: Promise<ForgeStatus> | null = null
   private sessionReady = false
@@ -411,12 +450,18 @@ export class ForgeHost {
       w.focus()
     }
     if (this.shown === file) return
+    const previous = this.shown
     this.shown = file
     try {
       await w.loadFile(file)
     } catch (err) {
-      // Closed while loading, or the page moved on by itself (ERR_ABORTED): nothing to report.
-      if (w.isDestroyed() || (err instanceof Error && (err as Error & { code?: unknown }).code === 'ERR_ABORTED')) return
+      if (w.isDestroyed()) return
+      if (err instanceof Error && (err as Error & { code?: unknown }).code === 'ERR_ABORTED') {
+        // The page moved on by itself (it stays on `file`), or it asked about unsaved changes and the answer
+        // was Stay: the previous page is still there, and its reloads and hash changes must keep working.
+        if (this.shown === file && forgeNavigation(w.webContents.getURL(), previous) === 'allow') this.shown = previous
+        return
+      }
       if (this.shown === file) this.shown = null
       throw new Error(`Could not open ${file}: ${err instanceof Error ? err.message : String(err)}`)
     }
@@ -491,13 +536,33 @@ export class ForgeHost {
     return w
   }
 
-  /** Permissions of the Forge session, set once: the three it needs, nothing else. */
+  /**
+   * The Forge session, set up once: the three permissions it needs, nothing else, and its own file://
+   * handler, which serves the page on show and nothing else (the brain window's session keeps the default).
+   */
   private prepareSession(): void {
     if (this.sessionReady) return
     this.sessionReady = true
     const ses = this.opts.electron.session.fromPartition(FORGE_PARTITION)
     ses.setPermissionRequestHandler((_wc, permission, cb) => cb(forgePermission(permission)))
     ses.setPermissionCheckHandler((_wc, permission) => forgePermission(permission))
+    ses.protocol.handle('file', (req) => this.serveFile(ses, req.url))
+  }
+
+  /** One file:// request of the Forge window: the page on show, read from disk and sent with FORGE_CSP, or a network error. */
+  private async serveFile(ses: Session, url: string): Promise<Response> {
+    const file = this.shown
+    if (!file || !forgeFileRequest(url, file)) return Response.error()
+    try {
+      // The file itself, not the URL asked for: whatever the URL spells, only the chosen page is ever read.
+      const res = await ses.fetch(pathToFileURL(file).href, { bypassCustomProtocolHandlers: true })
+      const headers = new Headers(res.headers)
+      headers.set('Content-Security-Policy', FORGE_CSP)
+      return new Response(res.body, { status: res.status, statusText: res.statusText, headers })
+    } catch {
+      // Moved or deleted while open: the window shows a load error, and the next `g` asks where it went.
+      return Response.error()
+    }
   }
 }
 

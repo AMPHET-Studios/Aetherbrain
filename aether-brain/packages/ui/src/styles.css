@@ -350,6 +350,43 @@ kbd {
   color: var(--text-faint);
   margin-bottom: 4px;
 }
+/* An embedded picture is a button (click, Enter or Space goes to it); a missing one is marked, never a ghost. */
+.md .embed-picture {
+  display: block;
+  max-width: 100%;
+  margin: 0.8em 0;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(4, 5, 13, 0.5);
+  overflow: hidden;
+  cursor: pointer;
+}
+.md .embed-picture:hover,
+.md .embed-picture:focus-visible {
+  border-color: var(--image);
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(244, 241, 255, 0.22);
+}
+.md .embed-picture img {
+  display: block;
+  max-height: 420px;
+  border-radius: 0;
+}
+.md .embed-picture-wait {
+  display: grid;
+  place-items: center;
+  min-width: 220px;
+  min-height: 120px;
+  padding: 0 16px;
+  font-size: 12px;
+  color: var(--text-faint);
+}
+.md .picture-missing {
+  color: var(--text-faint);
+  border-bottom: 1px dashed rgba(255, 62, 108, 0.55);
+  cursor: help;
+}
 .md ul,
 .md ol {
   padding-left: 1.4em;

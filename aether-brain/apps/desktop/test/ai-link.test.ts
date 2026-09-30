@@ -6,7 +6,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { MemoryVaultAdapter, type VaultChange } from '@aether/core'
 import { IPC, type AetherBridge, type AiActivityDto, type VaultChangeDto, type VaultFileDto, type VaultInfo } from '../src/shared/ipc.js'
-import { ElectronVaultAdapter } from '../src/renderer/vault/electron.js'
+import { ElectronVaultAdapter, MAX_HELD } from '../src/renderer/vault/electron.js'
 import { FsVault } from '../src/main/fsvault.js'
 import {
   AI_DEFAULT_PORT,
@@ -451,6 +451,56 @@ describe('ElectronVaultAdapter', () => {
         { kind: 'unlink', path: 'Art/old.webp' },
       ],
     ])
+  })
+
+  it('keeps every note change of a load behind a burst of pictures: pictures do not count against the budget', async () => {
+    const f = fakeBridge([])
+    const a = new ElectronVaultAdapter(f.bridge, INFO)
+    const pictures = (from: number, n: number): VaultChangeDto[] =>
+      Array.from({ length: n }, (_, i) => ({ kind: 'add' as const, path: `F/Refs/ref-${from + i}.png`, mtime: 1, size: 10 }))
+    f.onList(() => {
+      f.emit([{ kind: 'change', path: 'a.md', content: '# A2', mtime: 2 }])
+      // A 25 000-picture reference pack copied into F:\ while the load runs.
+      for (let i = 0; i < 25_000; i += 5000) f.emit(pictures(i, 5000))
+      f.emit([{ kind: 'addDir', path: 'F/Refs.png' }, { kind: 'add', path: 'b.md', content: '# B', mtime: 3 }])
+    })
+    await a.list()
+    const got: VaultChange[] = []
+    a.watch((c) => void got.push(...c))
+    expect(a.overflowed).toBe(false)
+    // Both notes and the folder (named like a picture, still a folder) are there; pictures only while there was room.
+    expect(got.filter((c) => !c.path.startsWith('F/Refs/'))).toEqual([
+      { kind: 'change', path: 'a.md', content: '# A2', mtime: 2 },
+      { kind: 'addDir', path: 'F/Refs.png' },
+      { kind: 'add', path: 'b.md', content: '# B', mtime: 3 },
+    ])
+    expect(got.filter((c) => c.path.startsWith('F/Refs/'))).toHaveLength(MAX_HELD - 1)
+    expect(got.at(-1)?.path).toBe('b.md')
+  })
+
+  it('gives up on a load that fell hopelessly behind on notes, and says so (overflowed) instead of dropping silently', async () => {
+    const f = fakeBridge([])
+    const a = new ElectronVaultAdapter(f.bridge, INFO)
+    const notes = (n: number): VaultChangeDto[] => Array.from({ length: n }, (_, i) => ({ kind: 'add' as const, path: `n${i}.md`, content: '', mtime: 1 }))
+    f.onList(() => {
+      f.emit(notes(MAX_HELD))
+      expect(a.overflowed).toBe(false)
+      f.emit([{ kind: 'unlinkDir', path: 'Old' }])
+    })
+    await a.list()
+    expect(a.overflowed).toBe(true)
+    // Nothing is held any more: the first watcher gets no stale half of it.
+    expect(f.subs.size).toBe(0)
+    const got: VaultChange[][] = []
+    const off = a.watch((c) => void got.push(c))
+    expect(got).toEqual([])
+    // A rescan (the store unwatches, then loads again) starts over.
+    off()
+    f.onList(() => f.emit([{ kind: 'add', path: 'c.md', content: '# C', mtime: 4 }]))
+    await a.list()
+    expect(a.overflowed).toBe(false)
+    a.watch((c) => void got.push(c))
+    expect(got).toEqual([[{ kind: 'add', path: 'c.md', content: '# C', mtime: 4 }]])
   })
 
   it('lists pictures, turns thumbnail bytes into PNG blobs, creates and opens pictures through main', async () => {

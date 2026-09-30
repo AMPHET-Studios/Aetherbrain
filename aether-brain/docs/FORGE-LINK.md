@@ -168,6 +168,11 @@ elements, is left out, and so is anything past 256 KB.
 - **The Forge window runs your page as it is.** It may use the internet for its
   own features, such as Deep Critique with your own API key and random
   references. It runs in a session of its own, separate from the brain.
+- **The page can't read your other files.** It runs from `concept-forge.html`
+  on your disk, but the Forge window gives it that one file and nothing else.
+  It can't open, fetch, embed or show any other file on your drives: not your
+  notes, not your pictures, not the files next to it. Pictures you drop into
+  the page, or pick with its own file button, still work.
 - **The page can't see your vault.** It can only ask for the list of your
   projects' names, and save one PNG with its critique note through the
   button. It can't read, change or delete anything.
@@ -196,9 +201,22 @@ you type goes to the dialog only.
 ## Troubleshooting
 
 **"Open your vault in Aether Brain first"**
-: The brain window has no vault open, or it didn't answer within 30 seconds.
-  Open your vault there, then press Save again. The dialog stays open, so you
-  lose nothing.
+: Aether Brain has no vault open, or its window is gone. Open your vault
+  there, then press Save again. The dialog stays open, so you lose nothing.
+
+**"The vault is still loading; try again in a moment"**
+: The brain is still reading your folders (whole drives take a while). When
+  the map shows up, press Save again, or close the dialog and open it again
+  to get the project list.
+
+**"Aether Brain hasn't answered in 30 s; the drawing may still have been saved"**
+: The brain got the drawing but didn't confirm it in time, for example while
+  it was busy with a big vault. It may still save it. Look in the project's
+  Critique planet (or its folder) before you press Save again, or you may end
+  up with a second copy (`… 2`).
+
+**"Aether Brain didn't answer in 30 s; try again"**
+: The project list didn't come back in time. Close the dialog and open it again.
 
 **"No projects in Aether Brain yet"**
 : Critiques go to projects. Make one in Aether Brain (<kbd>p</kbd> opens the
@@ -220,6 +238,11 @@ you type goes to the dialog only.
   site drawn into it. The link then tries to save the drawing layer on its own.
   If the reference image is drawn into your drawing layer itself, keep the
   reference on a separate layer or canvas.
+
+**Pictures, scripts or styles next to the page don't load**
+: The Forge window gives your page its own file only (see [Privacy](#privacy)).
+  Keep the page in one file: put its styles and scripts inside it or load them
+  from the web, and drop reference pictures into the page.
 
 **The wrong project is picked**
 : Pick the right one once. The dialog remembers it for next time.

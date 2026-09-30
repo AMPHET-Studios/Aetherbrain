@@ -6,8 +6,10 @@ import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import ts from 'typescript'
 import type { Browser, Page } from 'playwright-core'
-import { IPC, type AetherForgeBridge, type ForgeSaveDto } from '../src/shared/ipc.js'
+import { MemoryVaultAdapter, type VaultFile } from '@aether/core'
+import { IPC, type AetherForgeBridge, type ForgeRequest, type ForgeSaveDto } from '../src/shared/ipc.js'
 import {
+  FORGE_CSP,
   FORGE_PARTITION,
   FORGE_TIMEOUT_MS,
   ForgeHost,
@@ -19,10 +21,12 @@ import {
   cleanProjects,
   cleanSave,
   cleanSaved,
+  forgeFileRequest,
   forgeNavigation,
   forgePermission,
   forgeSettings,
   isPng,
+  unanswered,
   type ForgeElectron,
   type ForgeSettings,
   type RelayTarget,
@@ -136,6 +140,47 @@ describe('settings, options, permissions, navigation', () => {
     expect(forgeNavigation('file:///C:/Windows/System32/calc.exe', win, 'win32')).toBe('deny')
   })
 
+  it('serves the page itself to its session and no other file', () => {
+    const file = '/home/me/art/concept-forge.html'
+    // The page, a reload with any query or hash.
+    expect(forgeFileRequest('file:///home/me/art/concept-forge.html', file, 'linux')).toBe(true)
+    expect(forgeFileRequest('file:///home/me/art/concept-forge.html?drill=gesture#top', file, 'linux')).toBe(true)
+    expect(forgeFileRequest('file:///home/me/art/./x/../concept-forge.html', file, 'linux')).toBe(true)
+    // Spaces, # and % in the page's path are escaped in its URL.
+    const odd = '/home/me/My Art #2/concept 100%.html'
+    expect(forgeFileRequest(pathToFileURL(odd).href, odd, 'linux')).toBe(true)
+    expect(forgeFileRequest('file:///home/me/My Art %232/concept 100%25.html#top', odd, 'linux')).toBe(true)
+    // As Electron's loadFile spells it: `#` escaped, a `%` that starts no escape left as it is.
+    expect(forgeFileRequest('file:///home/me/My%20Art%20%232/concept%20100%.html', odd, 'linux')).toBe(true)
+    expect(forgeNavigation('file:///home/me/My%20Art%20%232/concept%20100%.html#x', odd, 'linux')).toBe('allow')
+    expect(forgeFileRequest('file:///home/me/My%20Art%20%232/other%20100%.html', odd, 'linux')).toBe(false)
+    // Anything else on the disk: the vault's notes and pictures, files next to the page, its folder, system files.
+    for (const url of [
+      'file:///D/vault/Projects/PORTALz.md',
+      'file:///home/me/art/refs/pose.png',
+      'file:///home/me/art/',
+      'file:///home/me/art',
+      'file:///etc/hostname',
+      'file:///home/me/art/Concept-Forge.html',
+      'file:///home/me/art/concept-forge.html/..',
+      'file:///home/me/art%2Fconcept-forge.html',
+      'file://server/home/me/art/concept-forge.html',
+    ]) {
+      expect(forgeFileRequest(url, file, 'linux')).toBe(false)
+    }
+    // Not a file URL, nothing on show, not a URL.
+    for (const url of ['https://example.com/concept-forge.html', 'blob:file:///1234', 'data:text/html,hi', 'not a url']) expect(forgeFileRequest(url, file, 'linux')).toBe(false)
+    expect(forgeFileRequest('file:///home/me/art/concept-forge.html', null, 'linux')).toBe(false)
+    // Windows: drive letters, backslashes and case don't matter; other drives and shares are refused.
+    const win = 'D:\\Art\\concept-forge.html'
+    expect(forgeFileRequest('file:///d:/art/CONCEPT-FORGE.html?x=1', win, 'win32')).toBe(true)
+    expect(forgeFileRequest('file:///D:/Notes/PORTALz.md', win, 'win32')).toBe(false)
+    expect(forgeFileRequest('file:///F:/Art/concept-forge.html', win, 'win32')).toBe(false)
+    expect(forgeFileRequest('file://nas/share/Art/concept-forge.html', win, 'win32')).toBe(false)
+    expect(forgeFileRequest('file:///D:/Art/concept-forge.html', '\\\\nas\\share\\concept-forge.html', 'win32')).toBe(false)
+    expect(forgeFileRequest('file://nas/share/concept-forge.html', '\\\\nas\\share\\concept-forge.html', 'win32')).toBe(true)
+  })
+
   it('reduces the brain answers to well-typed values', () => {
     const row = { id: 'Projects/PORTALz', title: 'PORTALz', status: 'active', home: 'Projects/PORTALz', critique: 'Projects/PORTALz/Critique' }
     expect(cleanProjects([row, { id: 3 }, null, { ...row, id: 'X', status: 5, home: null }])).toEqual([row, { ...row, id: 'X', status: null, home: null }])
@@ -208,22 +253,31 @@ describe('relay', () => {
     expect(relay.pending).toBe(0)
   })
 
-  it('times out after 30 s and forgets the request', async () => {
+  it('times out after 30 s, forgets the request, and never tells a sent save to open the vault', async () => {
     vi.useFakeTimers()
     const t = new FakeTarget()
     const relay = new ForgeRelay(() => t)
     expect(relay.timeoutMs).toBe(FORGE_TIMEOUT_MS)
-    const p = relay.request({ kind: 'projects' })
-    const settled = p.then(
-      () => 'resolved',
-      (err: Error) => err.message,
-    )
+    const outcome = (p: Promise<unknown>) =>
+      p.then(
+        () => 'resolved',
+        (err: Error) => err.message,
+      )
+    const projects = outcome(relay.request({ kind: 'projects' }))
+    const save = outcome(relay.request({ kind: 'save', save: cleanSave(dto()) }))
     vi.advanceTimersByTime(FORGE_TIMEOUT_MS - 1)
-    expect(relay.pending).toBe(1)
+    expect(relay.pending).toBe(2)
     vi.advanceTimersByTime(1)
-    await expect(settled).resolves.toBe(NO_BRAIN)
+    expect(await projects).toBe("Aether Brain didn't answer in 30 s; try again")
+    // The brain got the save and may still write it: saying so keeps the page from filing it twice.
+    expect(await save).toBe(
+      "Aether Brain hasn't answered in 30 s; the drawing may still have been saved — check the project's Critique planet before saving again",
+    )
     expect(relay.pending).toBe(0)
     expect(relay.reply(1, true, [])).toBe(false)
+    expect(relay.reply(2, true, {})).toBe(false)
+    // A short test timeout still reads as whole seconds.
+    expect(unanswered('projects', 50)).toBe("Aether Brain didn't answer in 1 s; try again")
   })
 
   it('fails everything waiting when the brain goes away', async () => {
@@ -248,12 +302,17 @@ class FakeContents extends EventEmitter {
   readonly id = nextContentsId++
   sent: unknown[][] = []
   destroyed = false
+  /** What the window shows (`getURL`). */
+  url = ''
   openHandler: ((d: { url: string }) => { action: string }) | null = null
   send(...args: unknown[]): void {
     this.sent.push(args)
   }
   isDestroyed(): boolean {
     return this.destroyed
+  }
+  getURL(): string {
+    return this.url
   }
   setWindowOpenHandler(fn: (d: { url: string }) => { action: string }): void {
     this.openHandler = fn
@@ -294,8 +353,12 @@ class FakeWindow extends EventEmitter {
     this.closed = true
     this.emit('closed')
   }
+  /** Set to make the next loads fail like Electron's (e.g. `ERR_ABORTED` when the page's "leave?" answer is Stay). */
+  loadError: (Error & { code?: string }) | null = null
   async loadFile(file: string): Promise<void> {
     this.loaded.push(file)
+    if (this.loadError) throw this.loadError
+    this.webContents.url = pathToFileURL(file).href
   }
 }
 
@@ -318,6 +381,9 @@ describe('host', () => {
   let saved: unknown[]
   let permissionHandler: ((wc: unknown, perm: string, cb: (ok: boolean) => void) => void) | null
   let checkHandler: ((wc: unknown, perm: string) => boolean) | null
+  let protocolHandlers: Map<string, (req: Request) => Response | Promise<Response>>
+  /** `session.fetch` of the Forge session: what the file handler read from disk. */
+  let sessionFetch: ReturnType<typeof vi.fn>
   let partitions: string[]
   let electron: {
     BrowserWindow: new (o: Record<string, unknown>) => FakeWindow
@@ -336,6 +402,8 @@ describe('host', () => {
     saved = []
     permissionHandler = null
     checkHandler = null
+    protocolHandlers = new Map()
+    sessionFetch = vi.fn(async (url: string) => new Response(`<!doctype html><title>${url}</title>`, { headers: { 'content-type': 'text/html' } }))
     partitions = []
     FakeWindow.made = []
     electron = {
@@ -359,6 +427,13 @@ describe('host', () => {
           return {
             setPermissionRequestHandler: (fn: typeof permissionHandler) => void (permissionHandler = fn),
             setPermissionCheckHandler: (fn: typeof checkHandler) => void (checkHandler = fn),
+            protocol: {
+              handle: (scheme: string, fn: (req: Request) => Response | Promise<Response>) => {
+                if (protocolHandlers.has(scheme)) throw new Error(`${scheme} is already handled`)
+                protocolHandlers.set(scheme, fn)
+              },
+            },
+            fetch: sessionFetch,
           }
         },
       },
@@ -494,6 +569,96 @@ describe('host', () => {
     expect(unload.prevented).toBe(true)
   })
 
+  it('serves the page to its window with a policy that shuts file:, and refuses every other file', async () => {
+    const h = host({ file })
+    await h.open()
+    const serve = protocolHandlers.get('file')
+    expect([...protocolHandlers.keys()]).toEqual(['file'])
+    const get = async (url: string) => {
+      const res = await serve!(new Request(url))
+      return { type: res.type, csp: res.headers.get('content-security-policy'), mime: res.headers.get('content-type'), body: res.type === 'error' ? null : await res.text() }
+    }
+    // The page (a reload, a query): read from disk as the chosen file, whatever the URL spells.
+    const page = await get(`${pathToFileURL(file).href}?drill=gesture`)
+    expect(page).toEqual({ type: 'default', csp: FORGE_CSP, mime: 'text/html', body: `<!doctype html><title>${pathToFileURL(file).href}</title>` })
+    expect(sessionFetch).toHaveBeenCalledWith(pathToFileURL(file).href, { bypassCustomProtocolHandlers: true })
+    // Everything else: a network error, and nothing is read.
+    sessionFetch.mockClear()
+    for (const url of [pathToFileURL(path.join(dir, 'secrets.md')).href, pathToFileURL(dir).href, 'file:///etc/hostname']) {
+      expect((await get(url)).type).toBe('error')
+    }
+    expect(sessionFetch).not.toHaveBeenCalled()
+    // The policy keeps the web, data: and blob: open, and file: shut (workers fetch around the handler).
+    expect(FORGE_CSP).toMatch(/^default-src /)
+    for (const source of ['https:', 'http:', 'data:', 'blob:', "'unsafe-inline'", "'unsafe-eval'"]) expect(FORGE_CSP.split(' ')).toContain(source)
+    expect(FORGE_CSP).not.toMatch(/file:|\*|'self'/)
+
+    // Another page chosen: only that one is served now. A page gone from disk: an error, not a throw.
+    const other = path.join(dir, 'forge-v2.html')
+    await fs.writeFile(other, '<!doctype html>')
+    picks.push(other)
+    await h.open({ pick: true })
+    expect((await get(pathToFileURL(file).href)).type).toBe('error')
+    expect((await get(pathToFileURL(other).href)).type).toBe('default')
+    sessionFetch.mockRejectedValueOnce(new Error('ERR_FILE_NOT_FOUND'))
+    expect((await get(pathToFileURL(other).href)).type).toBe('error')
+    // Closed: nothing is served.
+    FakeWindow.made[0]!.close()
+    expect((await get(pathToFileURL(other).href)).type).toBe('error')
+    // One handler for the session, however often the window opens.
+    await h.open()
+    expect(protocolHandlers.size).toBe(1)
+    expect(partitions).toEqual(['persist:forge'])
+  })
+
+  it('keeps the page on show when it answers Stay to switching pages, and switches on the next open', async () => {
+    const h = host({ file })
+    await h.open()
+    const w = FakeWindow.made[0]!
+    const wc = w.webContents
+    const other = path.join(dir, 'forge-v2.html')
+    await fs.writeFile(other, '<!doctype html>')
+    // The page asks about unsaved changes, the answer is Stay: the load is aborted, the old page stays.
+    w.loadError = Object.assign(new Error("ERR_ABORTED (-3) loading 'file:///forge-v2.html'"), { code: 'ERR_ABORTED' })
+    picks.push(other)
+    await expect(h.open({ pick: true })).resolves.toEqual({ file: other, open: true })
+    expect(w.loaded).toEqual([file, other])
+    expect(wc.getURL()).toBe(pathToFileURL(file).href)
+    // The old page keeps its reloads and hash changes; the file handler still serves it.
+    const hash = navEvent(`${pathToFileURL(file).href}#drill`)
+    wc.emit('will-navigate', hash)
+    expect(hash.prevented).toBe(false)
+    const res = await protocolHandlers.get('file')!(new Request(pathToFileURL(file).href))
+    expect(res.type).toBe('default')
+    // The next open tries the switch again instead of only focusing.
+    w.loadError = null
+    await h.open()
+    expect(w.loaded).toEqual([file, other, other])
+    expect(wc.getURL()).toBe(pathToFileURL(other).href)
+    const back = navEvent(pathToFileURL(file).href)
+    wc.emit('will-navigate', back)
+    expect(back.prevented).toBe(true)
+  })
+
+  it('stays on the new page when it moved on by itself while loading', async () => {
+    const h = host({ file })
+    await h.open()
+    const w = FakeWindow.made[0]!
+    const other = path.join(dir, 'forge-v2.html')
+    await fs.writeFile(other, '<!doctype html>')
+    // The new page changed its own query while loading: aborted, but it is the page on show.
+    w.loadError = Object.assign(new Error('ERR_ABORTED (-3)'), { code: 'ERR_ABORTED' })
+    w.webContents.url = `${pathToFileURL(other).href}?drill=hands`
+    picks.push(other)
+    await h.open({ pick: true })
+    const same = navEvent(`${pathToFileURL(other).href}#top`)
+    w.webContents.emit('will-navigate', same)
+    expect(same.prevented).toBe(false)
+    w.loadError = null
+    await h.open()
+    expect(w.loaded).toEqual([file, other])
+  })
+
   it('relays the Forge window requests to the brain and only takes the brain answers', async () => {
     const h = host({ file })
     await h.open()
@@ -551,6 +716,52 @@ describe('host', () => {
     brain.close()
     expect(FakeWindow.made[0]?.closed).toBe(true)
     expect(h.status()).toEqual({ file, open: false })
+  })
+})
+
+/* ------------------------------------------------------------------ */
+/* Brain side: the store serves the relayed requests                  */
+/* ------------------------------------------------------------------ */
+
+describe('brain side (renderer)', () => {
+  afterEach(() => void vi.unstubAllGlobals())
+
+  it('answers the project list only once the vault is in, as it does a save', async () => {
+    const stored = new Map<string, string>()
+    vi.stubGlobal('localStorage', {
+      getItem: (k: string) => stored.get(k) ?? null,
+      setItem: (k: string, v: string) => void stored.set(k, String(v)),
+      removeItem: (k: string) => void stored.delete(k),
+      clear: () => stored.clear(),
+    })
+    const { useAether } = await import('@aether/ui')
+    // The brain window with its bridge: the module hands its request handler to it on import.
+    let serve: ((req: ForgeRequest) => Promise<unknown>) | null = null
+    vi.stubGlobal('window', { addEventListener: vi.fn(), aether: { onForgeRequest: (fn: typeof serve) => void (serve = fn), forgeOpen: vi.fn() } })
+    await import('../src/renderer/forge.js')
+    expect(serve).not.toBeNull()
+    const projects = () => serve!({ id: 1, kind: 'projects' })
+    await expect(projects()).rejects.toThrow('Open your vault in Aether Brain first')
+
+    // A long load (whole drives): the page must not hear "no projects yet, make one".
+    let release = () => {}
+    const listed = new Promise<void>((r) => (release = r))
+    class SlowVault extends MemoryVaultAdapter {
+      override async list(): Promise<VaultFile[]> {
+        await listed
+        return super.list()
+      }
+    }
+    const opening = useAether.getState().openVault(new SlowVault([{ path: 'Projects/PORTALz.md', content: '---\nstatus: active\n---\n# PORTALz\n', mtime: 1 }]))
+    expect(useAether.getState().status).toBe('loading')
+    await expect(projects()).rejects.toThrow('The vault is still loading; try again in a moment')
+    release()
+    await opening
+    expect(useAether.getState().status).toBe('ready')
+    await expect(projects()).resolves.toMatchObject([{ id: 'Projects/PORTALz', title: 'PORTALz', critique: 'Projects/PORTALz/Critique' }])
+    // A vault that failed to open.
+    useAether.setState({ status: 'error' })
+    await expect(projects()).rejects.toThrow('Open your vault in Aether Brain first')
   })
 })
 

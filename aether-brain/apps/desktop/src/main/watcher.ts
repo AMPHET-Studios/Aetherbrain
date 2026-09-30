@@ -59,6 +59,13 @@ export interface KnownPaths {
   folders: Iterable<string>
   /** Picture files (the scan's assets); none when omitted. */
   images?: Iterable<string>
+  /**
+   * The scan stopped at its picture cap (`assetsTruncated`): `images` is
+   * partial on purpose. A resync then takes no scanned picture it does not
+   * know for new, or it would add back what the cap left out (the scan's cap
+   * is shared by every root, a rescan's is one root's own).
+   */
+  imagesCapped?: boolean
 }
 
 export interface VaultWatcherOptions {
@@ -93,6 +100,8 @@ export class VaultWatcher {
    */
   private images: Map<string, string>
   private readonly trackImages: boolean
+  /** The known pictures are the scan's capped list: see KnownPaths.imagesCapped. */
+  private imagesCapped: boolean
   /** False until the known sets exist (constructed with `known` null, then seed()): events are only buffered. */
   private seeded: boolean
   private readonly debounceMs: number
@@ -138,6 +147,7 @@ export class VaultWatcher {
     this.files = new Set(known?.files ?? [])
     this.folders = new Set(known?.folders ?? [])
     this.images = this.knownImages(known)
+    this.imagesCapped = known?.imagesCapped ?? false
     this.seeded = known !== null
     this.debounceMs = opts.debounceMs ?? 250
     this.resyncMs = opts.resyncMs ?? 2000
@@ -188,6 +198,7 @@ export class VaultWatcher {
     this.files = new Set(known.files)
     this.folders = new Set(known.folders)
     this.images = this.knownImages(known)
+    this.imagesCapped = known.imagesCapped ?? false
     this.seeded = true
     if (!this.running) return
     if (this.pending.size) this.schedule()
@@ -405,9 +416,11 @@ export class VaultWatcher {
    * Rescan `root` and queue every path where disk and the known sets may
    * disagree: new notes, pictures and folders, known ones gone from a folder
    * the rescan did read, and known notes modified since `since` (pictures are
-   * not stat'ed: a whole drive can hold hundreds of thousands). The normal
-   * flush then decides from what is on disk at that moment (so live events
-   * that raced the rescan are not undone). False when the root could not be read.
+   * not stat'ed: a whole drive can hold hundreds of thousands). New pictures
+   * only while the known ones are not a capped list (a picture made while
+   * events were lost then waits for the next full scan). The normal flush
+   * then decides from what is on disk at that moment (so live events that
+   * raced the rescan are not undone). False when the root could not be read.
    */
   private async reconcile(root: MountedRoot, since: number, gen: number): Promise<boolean> {
     const scan = await this.vault.scanRoot(root)
@@ -428,7 +441,7 @@ export class VaultWatcher {
       const pictures = new Set<string>()
       for (const a of scan.assets) {
         pictures.add(a.path)
-        if (!this.images.has(a.path)) suspects.add(a.path)
+        if (!this.imagesCapped && !this.images.has(a.path)) suspects.add(a.path)
       }
       // A rescan that stopped at the picture cap did not list every picture: none is taken for gone.
       if (!scan.assetsTruncated) {

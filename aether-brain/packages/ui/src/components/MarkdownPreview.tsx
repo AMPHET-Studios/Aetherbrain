@@ -1,9 +1,24 @@
-import { useMemo, type MouseEvent } from 'react'
-import ReactMarkdown, { type Components } from 'react-markdown'
+import { useMemo, useState, type ComponentProps, type MouseEvent, type ReactNode } from 'react'
+import ReactMarkdown, { type Components, type ExtraProps } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { LinkResolver, extractTasks, remarkWikilink, splitFrontmatter, type NoteId } from '@aether/core'
+import {
+  AssetResolver,
+  LinkResolver,
+  extractTasks,
+  folderOf,
+  imageFileName,
+  imageKey,
+  imagePathOf,
+  isImagePath,
+  remarkWikilink,
+  splitFrontmatter,
+  type NoteId,
+  type ParsedNote,
+  type VaultAsset,
+} from '@aether/core'
 import { useAether } from '../store'
 import { cx } from '../util'
+import { usePreview } from './pictures'
 
 interface Props {
   /** Full raw markdown (frontmatter is stripped for display). */
@@ -17,68 +32,39 @@ interface Props {
 /**
  * Markdown preview with [[wikilinks]], ![[embeds]] (rendered inline, one
  * level deep) and #tags. Clicking a wikilink opens the note; clicking a ghost
- * link creates it.
+ * link creates it. Picture targets (`![[gate.png]]`) resolve to the vault's
+ * pictures like the graph does: an embed shows the picture, a click goes to
+ * it, and a missing one is never a note to create.
  */
 export function MarkdownPreview({ source, selfId = null, depth = 0, className }: Props) {
   const notes = useAether((s) => s.notes)
+  const assets = useAether((s) => s.assets)
   const revision = useAether((s) => s.revision)
-  const openNote = useAether((s) => s.openNote)
-  const createGhost = useAether((s) => s.createGhost)
   const toggleTag = useAether((s) => s.toggleTag)
   const toggleTask = useAether((s) => s.toggleTask)
 
   const resolver = useMemo(() => new LinkResolver(notes.values()), [notes, revision])
+  // Relative picture links (`![[Art/gate.png]]`, `![[../gate.png]]`) count from the note's folder.
+  const folder = selfId ? (notes.get(selfId)?.meta.folder ?? folderOf(selfId)) : ''
   const { body, fmLines } = useMemo(() => {
     const split = splitFrontmatter(source)
     // Lines the frontmatter block occupies, so preview line numbers map back to the raw file.
     const fm = (source.slice(0, split.bodyOffset).match(/\n/g) ?? []).length
     return { body: split.body, fmLines: fm }
   }, [source])
-  const plugins = useMemo(() => [remarkGfm, [remarkWikilink, { resolve: (t: string) => resolver.resolve(t) }]] as const, [resolver])
+  const plugins = useMemo(() => {
+    const pictures = picturesOf(assets)
+    const resolve = (t: string): string | null => {
+      if (!isImagePath(t)) return resolver.resolve(t)
+      const path = pictures.resolve(t, folder)
+      return path === null ? null : imageKey(path)
+    }
+    return [remarkGfm, [remarkWikilink, { resolve }]] as const
+  }, [resolver, assets, folder])
 
   const components = useMemo<Components>(
     () => ({
-      a: (props) => {
-        const { node: _node, className: cls, children, ...rest } = props as typeof props & {
-          'data-target'?: string
-          'data-id'?: string
-          'data-embed'?: string
-          'data-heading'?: string
-        }
-        const target = (rest as Record<string, string | undefined>)['data-target']
-        if (!target) {
-          return (
-            <a {...rest} className={cls} target="_blank" rel="noreferrer">
-              {children}
-            </a>
-          )
-        }
-        const id = (rest as Record<string, string | undefined>)['data-id'] ?? null
-        const embed = (rest as Record<string, string | undefined>)['data-embed'] === 'true'
-        if (embed && id && depth < 1 && id !== selfId) {
-          const n = notes.get(id)
-          if (n) {
-            return (
-              <span className="embed block">
-                <span className="embed-title">
-                  ⤷ {n.meta.title}
-                </span>
-                <MarkdownPreview source={n.raw} selfId={id} depth={depth + 1} className="md !p-0" />
-              </span>
-            )
-          }
-        }
-        const onClick = (e: MouseEvent) => {
-          e.preventDefault()
-          if (id) openNote(id, { fly: true })
-          else void createGhost(`ghost:${target}`)
-        }
-        return (
-          <a {...rest} className={cls} onClick={onClick} title={id ? id : `Create "${target}"`}>
-            {children}
-          </a>
-        )
-      },
+      a: (props) => previewLink(props, { notes, assets, selfId, depth }),
       p: ({ node: _node, children, ...rest }) => <p {...rest}>{tagify(children, toggleTag)}</p>,
       li: ({ node, children, ...rest }) => {
         // Task-list items: a click on the checkbox writes `[x] … ✅ date` back
@@ -108,7 +94,7 @@ export function MarkdownPreview({ source, selfId = null, depth = 0, className }:
       },
       input: ({ node: _node, ...rest }) => <input {...rest} readOnly={!selfId} onChange={() => undefined} className={cx(selfId && 'cursor-pointer')} />,
     }),
-    [notes, depth, selfId, openNote, createGhost, toggleTag, toggleTask, fmLines, source],
+    [notes, assets, depth, selfId, toggleTag, toggleTask, fmLines, source],
   )
 
   return (
@@ -117,6 +103,127 @@ export function MarkdownPreview({ source, selfId = null, depth = 0, className }:
         {body}
       </ReactMarkdown>
     </div>
+  )
+}
+
+/**
+ * The picture resolver of an asset map, one per map: indexing a drive's
+ * pictures takes a moment, and every preview shares it until a picture
+ * changes (the store copies the map only then).
+ */
+const pictureResolvers = new WeakMap<ReadonlyMap<string, VaultAsset>, AssetResolver>()
+
+function picturesOf(assets: ReadonlyMap<string, VaultAsset>): AssetResolver {
+  let r = pictureResolvers.get(assets)
+  if (!r) pictureResolvers.set(assets, (r = new AssetResolver(assets.keys())))
+  return r
+}
+
+/** The preview a link is rendered in. */
+export interface LinkContext {
+  notes: ReadonlyMap<NoteId, ParsedNote>
+  assets: ReadonlyMap<string, VaultAsset>
+  selfId: NoteId | null
+  depth: number
+}
+
+/**
+ * One `<a>` of the preview (exported for tests: a plain function, so the
+ * handlers it renders can be called without a DOM). Links without
+ * `data-target` are ordinary links. A wikilink to a note opens it, an embed of
+ * one renders it inline; an unresolved one is a ghost link that creates the
+ * note. A picture target resolved to `image:<path>` (`data-id`) renders the
+ * picture (embed) or a link, and a click goes to the picture (`openNote` of
+ * an image id selects it, so the inspector shows it, and opens it in the
+ * image app); an unresolved one is plain text marked missing.
+ */
+export function previewLink(props: ComponentProps<'a'> & ExtraProps, ctx: LinkContext): ReactNode {
+  const { node: _node, className: cls, children, ...rest } = props
+  const data = rest as Record<string, string | undefined>
+  const target = data['data-target']
+  if (!target) {
+    return (
+      <a {...rest} className={cls} target="_blank" rel="noreferrer">
+        {children}
+      </a>
+    )
+  }
+  const id = data['data-id'] ?? null
+  const embed = data['data-embed'] === 'true'
+  if (isImagePath(target)) {
+    if (!id) {
+      return (
+        <span className="picture-missing" title={`No picture “${target}” in the vault`}>
+          {embed ? target : children}
+        </span>
+      )
+    }
+    const path = imagePathOf(id)
+    // Show the picture (its moon and inspector, where Open is one key away) rather than launch another app from a click in the text.
+    const show = () => useAether.getState().select(imageKey(path), { fly: true })
+    if (embed) {
+      const asset = ctx.assets.get(path)
+      return <PictureEmbed path={path} stamp={`${asset?.mtime ?? ''}:${asset?.size ?? ''}`} onOpen={show} />
+    }
+    return (
+      <a
+        {...rest}
+        className="wikilink wikilink-picture"
+        onClick={(e: MouseEvent) => {
+          e.preventDefault()
+          show()
+        }}
+        title={path}
+      >
+        {children}
+      </a>
+    )
+  }
+  if (embed && id && ctx.depth < 1 && id !== ctx.selfId) {
+    const n = ctx.notes.get(id)
+    if (n) {
+      return (
+        <span className="embed block">
+          <span className="embed-title">⤷ {n.meta.title}</span>
+          <MarkdownPreview source={n.raw} selfId={id} depth={ctx.depth + 1} className="md !p-0" />
+        </span>
+      )
+    }
+  }
+  const onClick = (e: MouseEvent) => {
+    e.preventDefault()
+    if (id) useAether.getState().openNote(id, { fly: true })
+    else void useAether.getState().createGhost(`ghost:${target}`)
+  }
+  return (
+    <a {...rest} className={cls} onClick={onClick} title={id ? id : `Create "${target}"`}>
+      {children}
+    </a>
+  )
+}
+
+/**
+ * An embedded picture (`![[gate.png]]`), shown from the store's preview
+ * (a placeholder while it loads, the file name when there is none). A real
+ * button, so Tab reaches it and Enter or Space goes to the picture.
+ */
+function PictureEmbed({ path, stamp, onOpen }: { path: string; stamp: string; onOpen: () => void }) {
+  const preview = usePreview(path, stamp)
+  /** The object URL the browser could not decode (then the file name shows instead). */
+  const [broken, setBroken] = useState<string | null>(null)
+  const name = imageFileName(path)
+  const url = preview.url !== broken ? preview.url : null
+  return (
+    <button type="button" className="embed-picture" onClick={onOpen} title={path}>
+      {url ? (
+        <img src={url} alt={name} draggable={false} onError={() => setBroken(url)} />
+      ) : (
+        <span className="embed-picture-wait">
+          🖼 {name}
+          {preview.state === 'loading' ? ' …' : ''}
+        </span>
+      )}
+    </button>
   )
 }
 

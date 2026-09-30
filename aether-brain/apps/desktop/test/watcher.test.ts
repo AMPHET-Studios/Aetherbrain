@@ -704,6 +704,37 @@ describe('VaultWatcher pictures', () => {
     expect(changes.filter((c) => c.kind === 'unlink')).toEqual([])
   })
 
+  it('never adds back, on a resync of one root, the pictures the shared cap of a multi-root scan left out', async () => {
+    const other = path.join(tmp, 'Other')
+    await put('vault/a2.png', 'a')
+    await put('Other/b1.png', 'b')
+    await put('Other/b2.png', 'b')
+    await put('Other/b3.png', 'b')
+    // One cap for both roots (breadth first: vault's two top pictures, then two of Other's).
+    const vault = new FsVault([root, other], { maxAssets: 4 })
+    const scan = await vault.scan()
+    expect(scan.assetsTruncated).toBe(true)
+    const known = scan.assets.map((a) => a.path)
+    expect(known.filter((p) => p.startsWith('Other/'))).toHaveLength(2)
+    watcher = new VaultWatcher(
+      vault,
+      { files: scan.files.map((f) => f.path), folders: scan.folders, images: known, imagesCapped: scan.assetsTruncated },
+      (batch) => changes.push(...batch),
+      { debounceMs: 20, resyncMs: 20, watch: fake.fn },
+    )
+    await watcher.start()
+    // Events on Other are lost; its rescan (a cap of four for Other alone) lists all three of its pictures.
+    await put('Other/late.md', 'late')
+    fake.of(other).listener('rename', null)
+    await waitChange('add', 'Other/late.md')
+    await sleep(100)
+    expect(changes.filter((c) => /\.png$/.test(c.path))).toEqual([])
+    // A picture really made now still arrives through its own event.
+    await put('Other/b4.png', 'new')
+    fake.of(other).listener('rename', 'b4.png')
+    expect((await waitChange('add', 'Other/b4.png')).size).toBe(3)
+  })
+
   it('reports no pictures when told not to (the AI link brain)', async () => {
     await watched({ images: false })
     await put('vault/Art/gate.png', 'x')

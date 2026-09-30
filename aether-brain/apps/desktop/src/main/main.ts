@@ -11,7 +11,7 @@
  *
  * No telemetry. The renderer is sandboxed with context isolation and makes no network requests.
  */
-import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, shell, nativeTheme, screen, session } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, shell, nativeTheme, screen, session } from 'electron'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -26,16 +26,8 @@ import {
 } from '../shared/ipc.js'
 import { FsVault, within } from './fsvault.js'
 import { VaultWatcher } from './watcher.js'
-import {
-  MAX_THUMB_FILE_BYTES,
-  ThumbCache,
-  assetBytes,
-  assetPath,
-  decodableInProcess,
-  fitWithin,
-  readHeader,
-  thumbPx,
-} from './assets.js'
+import { MAX_THUMB_FILE_BYTES, ThumbCache, assetBytes, assetPath, readUpTo, thumbPx, thumbTarget } from './assets.js'
+import { THUMB_IPC, Thumbnailer } from './thumbnailer.js'
 import { AiLinkHost, aiSettings, cleanPatch, type AiLinkSettings } from './ai-link.js'
 import { ForgeHost, forgeSettings, type ForgeSettings } from './forge.js'
 
@@ -273,7 +265,9 @@ async function listFiles(): Promise<VaultFileDto[]> {
         }
         throw err
       })
-    if (latest()) w.seed({ files: scan.files.map((f) => f.path), folders: scan.folders, images: scan.assets.map((a) => a.path) })
+    if (latest()) {
+      w.seed({ files: scan.files.map((f) => f.path), folders: scan.folders, images: scan.assets.map((a) => a.path), imagesCapped: scan.assetsTruncated })
+    }
     const found = scan.files.length
     const files = await v.readAll(scan.files, (done) => progress({ phase: 'reading', files: done, found, dirs: scan.dirs, done: false }))
     progress({ phase: 'done', files: files.length, found, dirs: scan.dirs, done: true })
@@ -390,6 +384,11 @@ async function reveal(p: unknown): Promise<void> {
 /** Thumbnails already made, and the ones being made (two requests for the same one share the work). */
 const thumbs = new ThumbCache()
 const thumbsInFlight = new Map<string, Promise<Uint8Array | null>>()
+/** Decodes pictures in a hidden helper renderer, never in this process (see thumbnailer.ts). */
+const thumbnailer = new Thumbnailer({
+  electron: { BrowserWindow, session },
+  preload: path.join(__dirname, '..', 'preload', 'thumb-preload.cjs'),
+})
 /**
  * Longest wait for one thumbnail: a share that stopped answering must not hold
  * the renderer's few requests in flight forever (it gets null, a plain moon).
@@ -420,43 +419,34 @@ async function thumbnail(p: unknown, size: unknown): Promise<Uint8Array | null> 
   if (hit !== undefined) return hit
   let job = thumbsInFlight.get(key)
   if (!job) {
-    // A picture that cannot be decoded is an answer too (null, cached for this version of the
-    // file): the renderer shows a plain moon, and asks again once the file changes.
     job = renderThumb(abs, px)
-      .catch(() => null)
-      .then((png) => {
-        thumbs.set(key, png)
-        thumbsInFlight.delete(key)
-        return png
-      })
+      .then(
+        (png) => {
+          // A picture that cannot be decoded is an answer too (null, cached for this version of the
+          // file): the renderer shows a plain moon, and asks again once the file changes.
+          thumbs.set(key, png)
+          return png
+        },
+        // No answer this time (the file could not be read, the helper was stopped): not remembered.
+        () => null,
+      )
+      .finally(() => thumbsInFlight.delete(key))
     thumbsInFlight.set(key, job)
   }
   return job
 }
 
 /**
- * Windows and macOS ask the OS thumbnailer (it knows every format the system
- * does, keeps its own cache and runs out of process). Elsewhere, or when it
- * fails, Electron decodes PNG and JPEG itself: synchronously, in this
- * process, so only files whose header promises a sane pixel count.
+ * Reads the picture here (asynchronously, never more than 64 MB) and has the
+ * thumbnail helper decode it, fitted to `px` from the size its header claims:
+ * decoding in this process would block the whole app (nativeImage decodes on
+ * the UI thread, Windows' thumbnailer too for a picture not in its cache).
  */
 async function renderThumb(abs: string, px: number): Promise<Uint8Array | null> {
-  let img: Electron.NativeImage | null = null
-  if (process.platform === 'win32' || process.platform === 'darwin') {
-    img = await nativeImage.createThumbnailFromPath(abs, { width: px, height: px }).catch(() => null)
-  }
-  if (!img || img.isEmpty()) {
-    if (!decodableInProcess(await readHeader(abs))) return null
-    img = nativeImage.createFromPath(abs)
-    if (img.isEmpty()) return null
-  }
-  // Windows sizes by width only: a tall picture comes back taller than asked.
-  const { width, height } = img.getSize()
-  const fit = fitWithin(width, height, px)
-  if (fit) img = img.resize({ ...fit, quality: 'better' })
-  const png = img.toPNG()
-  // A copy of its own: the bytes cross IPC whole.
-  return png.length ? new Uint8Array(png) : null
+  const bytes = await readUpTo(abs, MAX_THUMB_FILE_BYTES)
+  if (!bytes) return null
+  const target = thumbTarget(bytes, px)
+  return target ? thumbnailer.render({ bytes, ...target }) : null
 }
 
 /**
@@ -661,6 +651,9 @@ function registerIpc(): void {
   ipcMain.handle(IPC.reveal, (_e, p: unknown) => reveal(p))
   ipcMain.handle(IPC.assets, () => listAssets())
   ipcMain.handle(IPC.thumb, (_e, p: unknown, size: unknown) => within(thumbnail(p, size), THUMB_TIMEOUT, null))
+  // From the thumbnail helper only: the thumbnailer ignores every other sender.
+  ipcMain.on(THUMB_IPC.ready, (e) => thumbnailer.ready(e.sender))
+  ipcMain.on(THUMB_IPC.done, (e, id: unknown, png: unknown) => thumbnailer.done(e.sender, id, png))
   ipcMain.handle(IPC.createAsset, (_e, p: unknown, data: unknown) => createAsset(p, data))
   ipcMain.handle(IPC.openAsset, (_e, p: unknown) => openAsset(p))
   ipcMain.handle(IPC.aiStatus, () => requireAi().status())
@@ -712,7 +705,12 @@ function createWindow(): void {
   } else {
     void win.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'))
   }
-  win.on('closed', () => (win = null))
+  win.on('closed', () => {
+    win = null
+    // Nothing asks for thumbnails without the brain window, and a hidden helper left open
+    // would keep 'window-all-closed' from ever firing (the app would not quit).
+    thumbnailer.stop()
+  })
 }
 
 app.on('window-all-closed', () => {
@@ -726,6 +724,7 @@ app.on('activate', () => {
 app.on('before-quit', () => {
   watcher?.stop()
   watcher = null
+  thumbnailer.stop()
   void ai?.stop()
 })
 

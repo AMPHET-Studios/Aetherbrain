@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react'
 import { IMAGE_EXTENSIONS, imageFileName, isImagePath, type VaultAsset } from '@aether/core'
 import { MAX_IMAGE_BYTES, useAether } from '../store'
 import { plural, truncate } from '../util'
@@ -95,19 +96,31 @@ export function importPicturesFromDialog(folder?: string): void {
   pickPictureFiles((files) => void importPictureFiles(files, folder))
 }
 
+/** What a wikilink target can't hold: `#` starts a heading, `|` an alias, a bracket ends the link. */
+const NOT_IN_WIKILINK = /[#[\]|]/
+
 /**
  * The `![[…]]` that embeds a picture: its file name, or its vault path when
  * another picture has the same name (in any letter case), so the embed can't
- * resolve to the other one.
+ * resolve to the other one. An error instead when that text holds `#`, `[`,
+ * `]` or `|` (all legal in Windows file names): such an embed would link to a
+ * heading of a note, or to nothing.
  */
-export function embedOf(path: string, assets: ReadonlyMap<string, VaultAsset>): string {
+export function embedOf(path: string, assets: ReadonlyMap<string, VaultAsset>): { embed: string } | { error: string } {
   const name = imageFileName(path)
   const lower = name.toLowerCase()
+  let target = name
   let same = 0
   for (const p of assets.keys()) {
-    if (imageFileName(p).toLowerCase() === lower && ++same > 1) return `![[${path}]]`
+    if (imageFileName(p).toLowerCase() === lower && ++same > 1) {
+      target = path
+      break
+    }
   }
-  return `![[${name}]]`
+  // Name the part to rename: the file, or the folder of the path that has to be written out.
+  const bad = target.split('/').find((seg) => NOT_IN_WIKILINK.test(seg))
+  if (bad !== undefined) return { error: `Rename “${truncate(bad, 64)}” to embed it: # [ ] | can’t be in a wikilink` }
+  return { embed: `![[${target}]]` }
 }
 
 /**
@@ -125,16 +138,57 @@ export async function copyText(text: string): Promise<void> {
   }
 }
 
-/** Copy a picture's embed and say so (a toast either way). */
+/** Copy a picture's embed and say so (a toast either way; nothing is copied when no embed can link to it). */
 export async function copyEmbed(path: string): Promise<void> {
   const s = useAether.getState()
-  const embed = embedOf(path, s.assets)
+  const res = embedOf(path, s.assets)
+  if ('error' in res) {
+    s.toast(res.error, 'error')
+    return
+  }
+  const { embed } = res
   try {
     await copyText(embed)
     s.toast(`Copied ${embed} — paste it into a note`, 'success')
   } catch (err) {
     s.toast(`Could not copy ${embed}: ${err instanceof Error ? err.message : String(err)}`, 'error')
   }
+}
+
+/** Preview size asked of the adapter (px, longer side): sharp in the inspector and in a note's preview on a 2× screen. */
+const PREVIEW_SIZE = 512
+
+export type Preview = { url: string | null; state: 'loading' | 'ready' | 'none' }
+
+/**
+ * A picture's preview (`store.preview`, `PREVIEW_SIZE`) as an object URL,
+ * revoked when the picture changes or the component unmounts. The store
+ * keeps no previews: `stamp` changes when the file does.
+ */
+export function usePreview(path: string, stamp: string): Preview {
+  const adapter = useAether((s) => s.adapter)
+  const preview = useAether((s) => s.preview)
+  const [state, setState] = useState<Preview>({ url: null, state: 'loading' })
+  useEffect(() => {
+    if (!adapter?.thumbnail) {
+      setState({ url: null, state: 'none' })
+      return
+    }
+    let live = true
+    let url: string | null = null
+    setState({ url: null, state: 'loading' })
+    void preview(path, PREVIEW_SIZE).then((blob) => {
+      if (!live) return
+      if (!blob) return setState({ url: null, state: 'none' })
+      url = URL.createObjectURL(blob)
+      setState({ url, state: 'ready' })
+    })
+    return () => {
+      live = false
+      if (url) URL.revokeObjectURL(url)
+    }
+  }, [adapter, preview, path, stamp])
+  return state
 }
 
 /** A file size for people: `812 B`, `4.2 KB`, `31 KB`, `2.4 MB`. */

@@ -495,9 +495,12 @@ export interface AetherState {
    * Tick/untick the task on a raw-file line; writes `[x] … ✅ date` into the note.
    * Task lines count in `from`, the text the caller showed (the editor's draft,
    * a board card), else in the saved note; the store finds that task again in
-   * the file it rewrites (a pending draft is saved first).
+   * the file it rewrites (a pending draft is saved first), so the line it
+   * ticks can differ from `line`. Resolves to that line and the note's text
+   * after, for an Undo that reopens the same task (`toggleTask(id, line,
+   * !done, after)`); null when nothing was written (a failure is toasted).
    */
-  toggleTask(id: NoteId, line: number, done: boolean, from?: string): Promise<void>
+  toggleTask(id: NoteId, line: number, done: boolean, from?: string): Promise<{ line: number; after: string } | null>
   /** Append a task under `## To do` (created if missing). */
   addTask(id: NoteId, text: string, section?: string): Promise<NoteId | null>
   /** Replace a task's text (`line` and `from` as for `toggleTask`). */
@@ -1431,6 +1434,8 @@ export const useAether = create<AetherState>()((set, get) => {
         set({ search, status: 'ready', loadProgress: null })
         setLoaded(loaded.notes, loaded.graph, loaded.folders, loaded.assets)
         unwatch = adapter.watch((changes) => get().applyExternal(changes))
+        // Too many changes arrived while a big vault loaded: some are lost, only a rescan catches up.
+        if (adapter.overflowed) get().toast('Many files changed while the vault loaded; rescan to catch up', 'info', { label: 'Rescan', run: () => void get().reload() })
       } catch (err) {
         set({ status: 'error', error: errText(err) })
       }
@@ -2020,7 +2025,8 @@ export const useAether = create<AetherState>()((set, get) => {
     },
 
     async toggleTask(id, line, done, from) {
-      await rewriteNote(id, (raw, at) => setTaskDone(raw, at, done), 'update the task', line, from)
+      const res = await rewriteNote(id, (raw, at) => setTaskDone(raw, at, done), 'update the task', line, from)
+      return res && { line: res.line, after: res.after }
     },
 
     async addTask(id, text, section = 'To do') {
