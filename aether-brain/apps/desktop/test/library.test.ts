@@ -5,8 +5,9 @@ import path from 'node:path'
 import zlib from 'node:zlib'
 import { dateFromName, exifDay, readMeta } from '../src/main/library/meta'
 import { GENRES, LABEL_SETS, VISION_TYPES, safeName, tasteTags, typeByRules } from '../src/main/library/classify'
-import { assignDests, freeName, libraryNotes, mergeNote, newNote, picksOf, place, type Picture, type PlanItem, type Seen } from '../src/main/library/plan'
+import { LIBRARY_END, LIBRARY_START, assignDests, freeName, libraryNotes, mergeNote, newNote, picksOf, place, type Picture, type PlanItem, type Seen } from '../src/main/library/plan'
 import { LookCache, MANIFEST, analyze, copyPlan, inside, labelsKey, type Eyes } from '../src/main/library/library'
+import { vi } from 'vitest'
 import { visionAnswerOf, type VisionJob } from '../src/main/library/vision'
 import { VisionModel, VISION_MODEL_FILES } from '../src/main/library/vision-model'
 
@@ -105,7 +106,7 @@ function jpeg(w: number, h: number, exif: { make?: string; model?: string; taken
   return Buffer.concat([Buffer.from([0xff, 0xd8]), seg(0xe1, app1Body), seg(0xc0, sof), filler, Buffer.from([0xff, 0xd9])])
 }
 
-const meta0 = { kind: 'png' as const, width: 800, height: 600, taken: null, make: null, model: null, software: null, ai: null }
+const meta0 = { kind: 'png' as const, width: 800, height: 600, turned: false, taken: null, make: null, model: null, software: null, ai: null }
 const pic = (rel: string, over: Partial<Picture> = {}): Picture => ({ abs: `/src/${rel}`, rel, size: 50_000, mtime: Date.UTC(2024, 2, 1), meta: { ...meta0 }, ...over })
 /** Picks saying `label` of `set` with probability `p`. */
 const sees = (picks: Record<string, [number, number][]>, colours: Seen['colours'] = null): Seen => ({ colours, picks })
@@ -150,6 +151,29 @@ describe('types by rules', () => {
     expect(typeByRules(meta0, 'a.png', 'Concept Art/a.png')).toMatchObject({ type: 'Concept Art', sure: false })
     expect(typeByRules({ ...meta0, software: 'Blender 4.1' }, 'a.png', 'a.png')).toMatchObject({ type: 'Renders', sure: false })
     expect(typeByRules(meta0, 'a.png', 'stuff/a.png')).toMatchObject({ type: null, sure: false })
+  })
+
+  it('reads folder names as whole words, the nearest folder first', () => {
+    const t = (rel: string) => typeByRules(meta0, rel.slice(rel.lastIndexOf('/') + 1), rel).type
+    expect(t('Documents/My Art/Concept/x.png')).toBe('Concept Art')
+    expect(t('Pictures/Concept Art/x.png')).toBe('Concept Art')
+    expect(t('Party/x.png')).toBeNull()
+    expect(t('Martin/x.png')).toBeNull()
+    expect(t('Firefox Downloads/x.png')).toBeNull()
+    expect(t('Games/3DS/x.png')).toBeNull()
+    expect(t('Documents/x.png')).toBeNull()
+    expect(t('Art/3D/x.png')).toBe('Renders')
+    expect(t('concept_art/x.png')).toBe('Concept Art')
+    expect(t('Old Scans/x.png')).toBe('Documents')
+  })
+
+  it('reads genre words at the start of words only', () => {
+    const g = (rel: string, fam: 'art' | 'photo' = 'art') => place(pic(rel), sees({ type: [[typeIndex(fam === 'art' ? 'Concept Art' : 'Photos'), 0.9]] })).genre
+    expect(g('Art/Workspace/x.png')).toBe('Unsorted')
+    expect(g('Art/Space Battles/x.png')).toBe('Sci-Fi')
+    expect(g('Art/futuristic city/x.png')).toBe('Sci-Fi')
+    expect(g('Photos/Scary/x.jpg', 'photo')).toBe('Unsorted')
+    expect(g('Photos/cars/x.jpg', 'photo')).toBe('Vehicles')
   })
 
   it('names colour moods', () => {
@@ -210,6 +234,15 @@ describe('names in the library', () => {
     expect(freeName('a:b.png', new Set())).toBe('a_b.png')
   })
 
+  it('names ten thousand pictures of one name in one folder in linear time', () => {
+    const items: PlanItem[] = Array.from({ length: 10_000 }, (_, id) => ({ id, pic: pic(`d${id}/image.png`), placement: { type: 'Other', genre: null, year: '2024', dateFrom: 'file', tags: [], why: '' }, dest: '', status: 'new' }))
+    const t0 = performance.now()
+    assignDests(items, [])
+    expect(performance.now() - t0).toBeLessThan(1000)
+    expect(new Set(items.map((i) => i.dest)).size).toBe(10_000)
+    expect(items[9_999]!.dest).toBe('Other/2024/image (10000).png')
+  })
+
   it('gives every new picture a free path in its folder', () => {
     const item = (id: number, rel: string, status: PlanItem['status'] = 'new'): PlanItem => ({ id, pic: pic(rel), placement: { type: 'Concept Art', genre: 'Sci-Fi', year: '2024', dateFrom: 'file', tags: [], why: '' }, dest: '', status })
     const items = [item(0, 'a/gate.png'), item(1, 'b/gate.png'), item(2, 'c/GATE.png'), item(3, 'd/other.png', 'duplicate')]
@@ -254,16 +287,27 @@ describe('index notes', () => {
     expect(byPath('Documents/Documents.md').section).toContain('![[2020/scan.jpg]]')
   })
 
-  it('rewrites only the Library section and the updated date of a note the user edited', () => {
+  it('rewrites only the librarian\'s block and the updated date, whatever the user wrote around it', () => {
     const first = newNote(byPath('Concept Art/Sci-Fi/Sci-Fi.md'), '2026-09-01')
-    const edited = first.replace('# MASTERIMAGES · Concept Art · Sci-Fi', '# My sci-fi refs\n\nMy own words.') + '\n## Ideas\n\nKeep these.\n\n\n\nSpaced.\n'
+    expect(first).toContain(`${LIBRARY_START}\n## Library`)
+    expect(first.trimEnd().endsWith(LIBRARY_END)).toBe(true)
+    const edited = first.replace('# MASTERIMAGES · Concept Art · Sci-Fi', '# My sci-fi refs\n\nMy own words.') + '\nA paragraph at the bottom.\n\n# My notes\n\nKeep these.\n\n\n\nSpaced.\n'
     const merged = mergeNote(edited, '## Library\n\nNew numbers\n', '2026-10-01')
     expect(merged).toContain('updated: 2026-10-01')
     expect(merged).toContain('created: 2026-09-01')
     expect(merged).toContain('My own words.')
-    expect(merged).toContain('## Library\n\nNew numbers\n\n## Ideas\n\nKeep these.\n\n\n\nSpaced.')
+    expect(merged).toContain(`${LIBRARY_START}\n## Library\n\nNew numbers\n${LIBRARY_END}\n\nA paragraph at the bottom.\n\n# My notes\n\nKeep these.\n\n\n\nSpaced.\n`)
     expect(merged).not.toContain('![[2024/gate.png]]')
-    expect(mergeNote('# Mine\n\nText', '## Library\n\nX\n', '2026-10-01')).toBe('# Mine\n\nText\n\n## Library\n\nX\n')
+    // A note with no block (or a broken one) gets one at the end; nothing of it goes.
+    expect(mergeNote('# Mine\n\n## Library\n\nmy own list\n', '## Library\n\nX\n', '2026-10-01')).toBe(`# Mine\n\n## Library\n\nmy own list\n\n${LIBRARY_START}\n## Library\n\nX\n${LIBRARY_END}\n`)
+    // An unclosed code fence of the user's does not hide the block (it is found by its marker).
+    const fenced = mergeNote(`${first}\n\`\`\`\nunclosed`, '## Library\n\nY\n', '2026-10-01')
+    expect(fenced.split(LIBRARY_START)).toHaveLength(2)
+    expect(mergeNote(fenced, '## Library\n\nZ\n', '2026-10-01').split(LIBRARY_START)).toHaveLength(2)
+    // Windows line endings stay.
+    const crlf = mergeNote(first.replace(/\n/g, '\r\n'), '## Library\n\nW\n', '2026-10-01')
+    expect(crlf).toContain('\r\n## Library\r\n\r\nW\r\n')
+    expect(crlf.replace(/\r\n/g, '')).not.toContain('\n')
   })
 })
 
@@ -319,6 +363,16 @@ async function listing(dir: string): Promise<string[]> {
   }
   await walk(dir)
   return out.sort()
+}
+
+/** The library paths the manifest (JSON lines, later lines win) holds now, deleted ones left out. */
+async function manifestDests(dest: string): Promise<string[]> {
+  const last = new Map<string, { gone?: boolean }>()
+  for (const line of (await fs.readFile(path.join(dest, MANIFEST), 'utf8')).split('\n').filter(Boolean)) {
+    const e = JSON.parse(line) as { dest: string; gone?: boolean }
+    last.set(e.dest, e)
+  }
+  return [...last].filter(([, e]) => !e.gone).map(([d]) => d).sort()
 }
 
 /** Eyes that see every picture as dark sci-fi concept art of a character (or nothing, for colours only). */
@@ -389,7 +443,7 @@ describe('analyze and copy', () => {
     expect(await fs.readFile(path.join(dest, 'Concept Art', 'Sci-Fi', '2023', 'random (2).png'))).toEqual(png(300, 200, 3))
     const files = (await listing(dest)).map((l) => l.split('\t')[0])
     expect(files.filter((f) => !f!.endsWith('.md'))).toEqual([
-      '.aether-library.json',
+      '.aether-library.jsonl',
       'AI Generated/Sci-Fi/2024/00012-123456789.png',
       'Concept Art/Ancient High-Tech/2024/gate.png',
       'Concept Art/Sci-Fi/2023/random (2).png',
@@ -410,7 +464,7 @@ describe('analyze and copy', () => {
 
     // A second run copies nothing new; a picture the user deleted from the library stays out.
     await fs.rm(path.join(dest, 'Concept Art', 'Sci-Fi', '2023', 'random.png'))
-    await fs.writeFile(path.join(dest, 'Concept Art', 'Sci-Fi', 'Sci-Fi.md'), sci.replace('## Library', 'My notes.\n\n## Library'))
+    await fs.writeFile(path.join(dest, 'Concept Art', 'Sci-Fi', 'Sci-Fi.md'), sci.replace(LIBRARY_START, `My notes.\n\n${LIBRARY_START}`))
     const again = await analyze({ source: src, dest, eyes: fakeEyes(), model: true, cache: LookCache.memory() })
     expect(again.items.filter((i) => i.status === 'new')).toEqual([])
     expect(again.items.find((i) => i.pic.rel === 'misc/random.png')!.status).toBe('removed')
@@ -435,8 +489,7 @@ describe('analyze and copy', () => {
     const r = await copyPlan(a)
     expect(r.failed).toEqual([])
     expect(await fs.readFile(path.join(dest, 'Other', '2023', 'random.png'), 'utf8')).toBe('mine')
-    const manifest = JSON.parse(await fs.readFile(path.join(dest, MANIFEST), 'utf8')) as { entries: Record<string, unknown> }
-    expect(Object.keys(manifest.entries).filter((k) => k.startsWith('Other/2023/')).sort()).toEqual(['Other/2023/random (2).png', 'Other/2023/random (3).png'])
+    expect((await manifestDests(dest)).filter((k) => k.startsWith('Other/2023/'))).toEqual(['Other/2023/random (2).png', 'Other/2023/random (3).png'])
   })
 
   it('keeps the library out of the source it is sorted from', async () => {
@@ -470,6 +523,63 @@ describe('analyze and copy', () => {
     expect(other.get(path.join(src, 'misc', 'random.png'), st.size, st.mtimeMs)?.picks).toBeNull()
   })
 
+  it('keeps a picture the user deleted out, even when it comes back under another name', async () => {
+    const src = await source()
+    const dest = path.join(tmp, 'F', 'DEL')
+    await copyPlan(await analyze({ source: src, dest, eyes: null, model: false, cache: LookCache.memory() }))
+    const kept = (await manifestDests(dest)).find((d) => d.endsWith('/gate.png'))!
+    await fs.rm(path.join(dest, ...kept.split('/')))
+    // The same bytes again, as a renamed copy in the source.
+    await put('D/elsewhere/gate-final.png', png(400, 300, 1), day2024)
+    const again = await analyze({ source: src, dest, eyes: null, model: false, cache: LookCache.memory() })
+    const by = (rel: string) => again.items.find((i) => i.pic.rel === rel)!
+    expect(by('Art/Portals/gate.png').status).toBe('removed')
+    expect(by('Art/Portals/gate copy.png').status).toBe('removed')
+    expect(by('elsewhere/gate-final.png')).toMatchObject({ status: 'removed', duplicateOf: kept })
+    expect((await copyPlan(again)).copied).toBe(0)
+    // Back in the library (restored by the user): no longer deleted.
+    await fs.writeFile(path.join(dest, ...kept.split('/')), png(400, 300, 1))
+    const third = await analyze({ source: src, dest, eyes: null, model: false, cache: LookCache.memory() })
+    expect(third.items.find((i) => i.pic.rel === 'Art/Portals/gate.png')!.status).toBe('copied')
+  })
+
+  it('never copies over anything on a drive without hard links, with both workers racing for names', async () => {
+    const src = path.join(tmp, 'S')
+    await put('S/a/gate.png', png(300, 200, 21), day2023)
+    await put('S/b/gate.png', png(300, 200, 22), day2023)
+    await put('S/c/gate.png', png(300, 200, 23), day2023)
+    const dest = path.join(tmp, 'F', 'EXFAT')
+    const a = await analyze({ source: src, dest, eyes: null, model: false, cache: LookCache.memory() })
+    expect(a.items.map((i) => i.dest).sort()).toEqual(['Other/2023/gate (2).png', 'Other/2023/gate (3).png', 'Other/2023/gate.png'])
+    // A file nobody planned sits at the first name (a crash orphan, or the user's own).
+    await put('F/EXFAT/Other/2023/gate.png', 'not mine to replace')
+    const link = vi.spyOn(fs, 'link').mockRejectedValue(Object.assign(new Error('EPERM: links unsupported'), { code: 'EPERM' }))
+    try {
+      const r = await copyPlan(a)
+      expect(r).toMatchObject({ copied: 3, failed: [] })
+    } finally {
+      link.mockRestore()
+    }
+    expect(await fs.readFile(path.join(dest, 'Other', '2023', 'gate.png'), 'utf8')).toBe('not mine to replace')
+    const names = (await fs.readdir(path.join(dest, 'Other', '2023'))).sort()
+    expect(names).toEqual(['gate (2).png', 'gate (3).png', 'gate (4).png', 'gate.png'])
+    const bodies = await Promise.all(names.filter((n) => n !== 'gate.png').map((n) => fs.readFile(path.join(dest, 'Other', '2023', n))))
+    const want = [png(300, 200, 21), png(300, 200, 22), png(300, 200, 23)]
+    expect(want.every((w) => bodies.some((b) => b.equals(w)))).toBe(true)
+    expect((await manifestDests(dest)).filter((d) => d.startsWith('Other/'))).toEqual(['Other/2023/gate (2).png', 'Other/2023/gate (3).png', 'Other/2023/gate (4).png'])
+  })
+
+  it('cleans temp files a crash left, and keeps the manifest small across runs', async () => {
+    const src = await source()
+    const dest = path.join(tmp, 'F', 'CRASH')
+    await put('F/CRASH/Other/2023/random.png.deadbeef.aether-tmp', 'half a copy')
+    await copyPlan(await analyze({ source: src, dest, eyes: null, model: false, cache: LookCache.memory() }))
+    expect((await listing(dest)).some((l) => l.includes('aether-tmp'))).toBe(false)
+    for (let i = 0; i < 3; i++) await copyPlan(await analyze({ source: src, dest, eyes: null, model: false, cache: LookCache.memory() }))
+    const lines = (await fs.readFile(path.join(dest, MANIFEST), 'utf8')).split('\n').filter(Boolean)
+    expect(lines.length).toBeLessThan(20)
+  })
+
   it('stops between pictures when asked, keeping what it copied', async () => {
     const src = await source()
     const dest = path.join(tmp, 'F', 'STOP')
@@ -479,8 +589,7 @@ describe('analyze and copy', () => {
     expect(r.stopped).toBe(true)
     expect(r.copied).toBeGreaterThanOrEqual(1)
     expect(r.copied).toBeLessThan(6)
-    const manifest = JSON.parse(await fs.readFile(path.join(dest, MANIFEST), 'utf8')) as { entries: Record<string, unknown> }
-    expect(Object.keys(manifest.entries)).toHaveLength(r.copied)
+    expect(await manifestDests(dest)).toHaveLength(r.copied)
   })
 })
 

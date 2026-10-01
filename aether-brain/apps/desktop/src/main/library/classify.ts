@@ -53,61 +53,66 @@ interface Genre {
   words: RegExp
 }
 
+/** `alts` as whole words of a folder or file name (`art` in `My Art`, never in `Martin` or `Party`). */
+const word = (alts: string): RegExp => new RegExp(`(?<![a-z0-9])(?:${alts})(?![a-z0-9])`, 'i')
+/** `alts` at the start of a word (`futur` in `Futuristic`, never `space` in `Workspace`). */
+const stem = (alts: string): RegExp => new RegExp(`(?<![a-z0-9])(?:${alts})`, 'i')
+
 /** The genres of each family: what they are called, how the vision model is asked, which names say them. */
 export const GENRES: Record<Family, Genre[]> = {
   art: [
-    { name: 'Ancient High-Tech', prompt: 'ancient stone ruins with glowing high-tech portals and monoliths', words: /portal|monolith|ruins?|ancient[\s_-]?tech|relic/i },
-    { name: 'Sci-Fi', prompt: 'science fiction art with spaceships, robots and futuristic technology', words: /sci[\s_-]?fi|space|robot|mech|futur|alien|starship/i },
-    { name: 'Cyberpunk', prompt: 'a cyberpunk city at night with neon lights', words: /cyber|neon/i },
-    { name: 'Fantasy', prompt: 'fantasy art with castles, magic and dragons', words: /fantasy|dragon|elf|elves|wizard|magic|castle/i },
-    { name: 'Dark Fantasy', prompt: 'dark gothic fantasy art, grim and shadowy', words: /dark[\s_-]?fantasy|gothic|grimdark/i },
-    { name: 'Horror', prompt: 'horror art, creepy and frightening', words: /horror|creepy|zombie|monster|demon/i },
-    { name: 'Post-Apocalyptic', prompt: 'a post-apocalyptic wasteland with abandoned ruins', words: /post[\s_-]?apoc|apocalyp|wasteland/i },
-    { name: 'Steampunk', prompt: 'steampunk machines with brass, gears and steam', words: /steampunk|clockwork/i },
-    { name: 'Nature', prompt: 'a nature landscape painting with forests, mountains and water', words: /nature|forest|landscape|mountain|jungle|rainforest|ocean/i },
-    { name: 'Urban', prompt: 'a modern city street with buildings', words: /urban|city|street|town/i },
-    { name: 'Historical', prompt: 'a historical scene from medieval or ancient times', words: /histor|medieval|viking|samurai|roman|egypt/i },
-    { name: 'Stylized & Anime', prompt: 'an anime or cartoon style illustration', words: /anime|manga|cartoon|toon|stylized|chibi/i },
-    { name: 'Abstract', prompt: 'abstract art with shapes, patterns and colours', words: /abstract|pattern/i },
+    { name: 'Ancient High-Tech', prompt: 'ancient stone ruins with glowing high-tech portals and monoliths', words: stem('portal|monolith|ruin|ancient[\\s_-]?tech|relic') },
+    { name: 'Sci-Fi', prompt: 'science fiction art with spaceships, robots and futuristic technology', words: stem('sci[\\s_-]?fi|spaces?(?![a-z])|spaceship|spacecraft|robot|mech(?:a|s)?(?![a-z])|futur|alien|starship') },
+    { name: 'Cyberpunk', prompt: 'a cyberpunk city at night with neon lights', words: stem('cyber|neon') },
+    { name: 'Fantasy', prompt: 'fantasy art with castles, magic and dragons', words: stem('fantasy|dragon|elf(?![a-z])|elves|wizard|magic|castle') },
+    { name: 'Dark Fantasy', prompt: 'dark gothic fantasy art, grim and shadowy', words: stem('dark[\\s_-]?fantasy|gothic|grimdark') },
+    { name: 'Horror', prompt: 'horror art, creepy and frightening', words: stem('horror|creepy|zombie|monster|demon') },
+    { name: 'Post-Apocalyptic', prompt: 'a post-apocalyptic wasteland with abandoned ruins', words: stem('post[\\s_-]?apoc|apocalyp|wasteland') },
+    { name: 'Steampunk', prompt: 'steampunk machines with brass, gears and steam', words: stem('steampunk|clockwork') },
+    { name: 'Nature', prompt: 'a nature landscape painting with forests, mountains and water', words: stem('nature|forest|landscape|mountain|jungle|rainforest|ocean') },
+    { name: 'Urban', prompt: 'a modern city street with buildings', words: stem('urban|city|cities|street|towns?(?![a-z])') },
+    { name: 'Historical', prompt: 'a historical scene from medieval or ancient times', words: stem('histor|medieval|viking|samurai|romans?(?![a-z])|egypt') },
+    { name: 'Stylized & Anime', prompt: 'an anime or cartoon style illustration', words: stem('anime|manga|cartoon|toons?(?![a-z])|styli[sz]ed|chibi') },
+    { name: 'Abstract', prompt: 'abstract art with shapes, patterns and colours', words: stem('abstract|pattern') },
   ],
   photo: [
-    { name: 'Family & Friends', prompt: 'a photo of family and friends together', words: /family|friends|kids|baby|mom|mum|dad|wedding/i },
-    { name: 'Portraits', prompt: 'a portrait photo of one person', words: /portrait|selfie|headshot/i },
-    { name: 'Pets & Animals', prompt: 'a photo of a pet or an animal', words: /pets?|dog|cat|puppy|kitten|animal|bird|zoo/i },
-    { name: 'Nature & Landscapes', prompt: 'a landscape photo of nature, mountains, forest or the sea', words: /nature|landscape|forest|beach|mountain|hike|lake|park/i },
-    { name: 'City & Architecture', prompt: 'a photo of buildings, streets and architecture', words: /city|architecture|building|street|downtown/i },
-    { name: 'Travel', prompt: 'a travel photo of a famous place or a trip', words: /travel|trip|vacation|holiday|tour/i },
-    { name: 'Food', prompt: 'a photo of food or a meal', words: /food|meal|dinner|lunch|breakfast|recipe|cake/i },
-    { name: 'Events & Parties', prompt: 'a photo of a party, concert or celebration', words: /party|birthday|christmas|concert|event|graduation|halloween/i },
-    { name: 'Vehicles', prompt: 'a photo of a car, motorcycle or other vehicle', words: /car|cars|truck|bike|motorcycle|vehicle/i },
-    { name: 'Art & Museums', prompt: 'a photo of artwork, sculptures or a museum', words: /museum|gallery|exhibit|sculpture/i },
-    { name: 'Everyday', prompt: 'an everyday snapshot of things at home', words: /home|house|room|desk/i },
+    { name: 'Family & Friends', prompt: 'a photo of family and friends together', words: word('family|friends?|kids?|baby|babies|mom|mum|dad|wedding') },
+    { name: 'Portraits', prompt: 'a portrait photo of one person', words: stem('portrait|selfie|headshot') },
+    { name: 'Pets & Animals', prompt: 'a photo of a pet or an animal', words: word('pets?|dogs?|cats?|puppy|puppies|kittens?|animals?|birds?|zoo') },
+    { name: 'Nature & Landscapes', prompt: 'a landscape photo of nature, mountains, forest or the sea', words: stem('nature|landscape|forest|beach|mountain|hike|hiking|lakes?(?![a-z])|parks?(?![a-z])') },
+    { name: 'City & Architecture', prompt: 'a photo of buildings, streets and architecture', words: stem('city|cities|architect|building|street|downtown') },
+    { name: 'Travel', prompt: 'a travel photo of a famous place or a trip', words: stem('travel|trips?(?![a-z])|vacation|holiday|tours?(?![a-z])') },
+    { name: 'Food', prompt: 'a photo of food or a meal', words: stem('food|meal|dinner|lunch|breakfast|recipe|cake') },
+    { name: 'Events & Parties', prompt: 'a photo of a party, concert or celebration', words: stem('party|parties|birthday|christmas|concert|event|graduation|halloween') },
+    { name: 'Vehicles', prompt: 'a photo of a car, motorcycle or other vehicle', words: word('cars?|trucks?|bikes?|motorcycles?|vehicles?') },
+    { name: 'Art & Museums', prompt: 'a photo of artwork, sculptures or a museum', words: stem('museum|gallery|galleries|exhibit|sculpture') },
+    { name: 'Everyday', prompt: 'an everyday snapshot of things at home', words: word('home|house|room|desk') },
   ],
   screen: [
-    { name: 'Games', prompt: 'a screenshot of a video game', words: /game|steam|unreal|unity|minecraft|fortnite/i },
-    { name: 'Art Software', prompt: 'a screenshot of art or 3D software like Photoshop or Blender', words: /photoshop|blender|krita|zbrush|substance|maya/i },
-    { name: 'Web & Apps', prompt: 'a screenshot of a website or app', words: /web|site|browser|app/i },
-    { name: 'Chats & Social', prompt: 'a screenshot of a chat or social media post', words: /chat|discord|twitter|instagram|whatsapp|message|tweet/i },
-    { name: 'Video & Movies', prompt: 'a screenshot from a movie or video', words: /movie|film|video|youtube|netflix|frame/i },
-    { name: 'Documents & Text', prompt: 'a screenshot of a document or text', words: /doc|text|pdf|code/i },
+    { name: 'Games', prompt: 'a screenshot of a video game', words: stem('game|steam(?![a-z])|unreal|unity|minecraft|fortnite') },
+    { name: 'Art Software', prompt: 'a screenshot of art or 3D software like Photoshop or Blender', words: stem('photoshop|blender|krita|zbrush|substance|maya(?![a-z])') },
+    { name: 'Web & Apps', prompt: 'a screenshot of a website or app', words: word('web|websites?|sites?|browsers?|apps?') },
+    { name: 'Chats & Social', prompt: 'a screenshot of a chat or social media post', words: stem('chat|discord|twitter|instagram|whatsapp|message|tweet') },
+    { name: 'Video & Movies', prompt: 'a screenshot from a movie or video', words: stem('movie|film|video|youtube|netflix|frame') },
+    { name: 'Documents & Text', prompt: 'a screenshot of a document or text', words: word('docs?|documents?|text|pdfs?|code') },
   ],
   texture: [
-    { name: 'Stone & Rock', prompt: 'a texture of stone or rock', words: /stone|rock|cliff|marble|granite|concrete/i },
-    { name: 'Wood', prompt: 'a texture of wood', words: /wood|bark|plank|timber/i },
-    { name: 'Metal', prompt: 'a texture of metal', words: /metal|steel|iron|rust|copper|brass/i },
-    { name: 'Ground & Dirt', prompt: 'a texture of ground, soil, mud or sand', words: /ground|dirt|soil|mud|sand|gravel/i },
-    { name: 'Foliage', prompt: 'a texture of leaves, grass or moss', words: /foliage|leaf|leaves|grass|moss|plant/i },
-    { name: 'Fabric & Leather', prompt: 'a texture of fabric, cloth or leather', words: /fabric|cloth|leather|textile|cotton|wool/i },
-    { name: 'Sci-Fi Panels', prompt: 'a sci-fi metal panel texture', words: /sci[\s_-]?fi|panel|hull|tech/i },
-    { name: 'Tiles & Bricks', prompt: 'a texture of tiles or bricks', words: /tile|brick|cobble|pavement/i },
-    { name: 'Organic', prompt: 'an organic texture of skin, flesh or scales', words: /skin|flesh|scale|organic|creature/i },
-    { name: 'Water & Ice', prompt: 'a texture of water, ice or snow', words: /water|ice|snow|frost/i },
+    { name: 'Stone & Rock', prompt: 'a texture of stone or rock', words: stem('stone|rock|cliff|marble|granite|concrete') },
+    { name: 'Wood', prompt: 'a texture of wood', words: stem('wood|bark|plank|timber') },
+    { name: 'Metal', prompt: 'a texture of metal', words: stem('metal|steel|iron|rust|copper|brass') },
+    { name: 'Ground & Dirt', prompt: 'a texture of ground, soil, mud or sand', words: stem('ground|dirt|soil|mud(?![a-z])|sand(?![a-z])|gravel') },
+    { name: 'Foliage', prompt: 'a texture of leaves, grass or moss', words: stem('foliage|leaf|leaves|grass|moss|plant') },
+    { name: 'Fabric & Leather', prompt: 'a texture of fabric, cloth or leather', words: stem('fabric|cloth|leather|textile|cotton|wool') },
+    { name: 'Sci-Fi Panels', prompt: 'a sci-fi metal panel texture', words: stem('sci[\\s_-]?fi|panel|hull|tech(?![a-z])') },
+    { name: 'Tiles & Bricks', prompt: 'a texture of tiles or bricks', words: stem('tile|brick|cobble|pavement') },
+    { name: 'Organic', prompt: 'an organic texture of skin, flesh or scales', words: stem('skin|flesh|scale|organic|creature') },
+    { name: 'Water & Ice', prompt: 'a texture of water, ice or snow', words: stem('water|ice(?![a-z])|snow|frost') },
   ],
   web: [
-    { name: 'Memes', prompt: 'a funny internet meme', words: /meme|funny|lol/i },
-    { name: 'Quotes & Text', prompt: 'an image of a quote or text', words: /quote|text/i },
-    { name: 'Logos & Icons', prompt: 'a logo or icon', words: /logo|icon|badge|emblem/i },
-    { name: 'Infographics', prompt: 'an infographic or chart', words: /infographic|chart|diagram/i },
+    { name: 'Memes', prompt: 'a funny internet meme', words: stem('meme|funny|lol(?![a-z])') },
+    { name: 'Quotes & Text', prompt: 'an image of a quote or text', words: stem('quote|text') },
+    { name: 'Logos & Icons', prompt: 'a logo or icon', words: stem('logo|icon|badge|emblem') },
+    { name: 'Infographics', prompt: 'an infographic or chart', words: stem('infographic|chart|diagram') },
   ],
   doc: [{ name: 'Documents', prompt: 'a scanned document', words: /./ }],
 }
@@ -153,6 +158,20 @@ const SCREEN_SIZES = new Set([
   '1920x1080', '2560x1440', '3840x2160', '1366x768', '1280x720', '1600x900', '1440x900', '1680x1050', '2560x1080', '3440x1440',
   '1280x800', '2880x1800', '1080x1920', '1080x2400', '1170x2532', '1284x2778', '1179x2556', '1290x2796', '750x1334', '1242x2688',
 ])
+/**
+ * Folder names that say a type, as whole words. Windows' own library folders
+ * (Pictures, Documents, Downloads, Desktop) say nothing: anything lands there.
+ */
+const FOLDER_TYPES: [RegExp, LibraryType][] = [
+  [word('screen ?shots?|screencaps?|screen ?captures?|snips?'), 'Screenshots'],
+  [word('renders?|rendering|blender|3d|cgi'), 'Renders'],
+  [word('sketch(?:es|book|books)?|drawings?|doodles?|line ?art'), 'Sketches'],
+  [word('memes?|reactions?'), 'Memes & Web'],
+  [word('scans?|scanned|receipts?|invoices?|paperwork'), 'Documents'],
+  [word('photos?|photography|camera(?: ?roll| ?uploads)?|dcim|iphone|android|phone|selfies?'), 'Photos'],
+  [word('concepts?|concept ?art|art(?:work)?s?|digital ?art|paintings?|illustrations?|artstation|refs?|references?|portfolio|speed ?paints?|studies'), 'Concept Art'],
+]
+
 const RENDER_TOOLS = /blender|substance|marmoset|keyshot|octane|cinema ?4d|maya|3ds ?max|houdini|unreal|unity|redshift|v-?ray|arnold|zbrush|eevee|cycles/i
 const PAINT_TOOLS = /photoshop|krita|clip ?studio|celsys|procreate|paint ?tool ?sai|affinity|rebelle|painter|artrage|medibang|ibis/i
 
@@ -170,14 +189,13 @@ export function typeByRules(meta: PictureMeta, name: string, rel: string): RuleT
   if (meta.make || meta.model) return { type: 'Photos', sure: true, why: `camera ${[meta.make, meta.model].filter(Boolean).join(' ')}`.trim() }
   if (/^(img|dsc|dscn|dscf|pxl|mvimg|pano|gopr|dji|p\d{7}|photo)[_-]?\d/i.test(name) || /(^|\/)dcim(\/|$)/i.test(folders)) return { type: 'Photos', sure: true, why: 'camera file name' }
   if (meta.software && RENDER_TOOLS.test(meta.software)) return { type: 'Renders', sure: false, why: meta.software }
-  if (/(^|\/)[^/]*(render|blender|3d)[^/]*(\/|$)/i.test(folders)) return { type: 'Renders', sure: false, why: 'folder name' }
-  if (/(^|\/)[^/]*(sketch|drawing|doodle)[^/]*(\/|$)/i.test(folders)) return { type: 'Sketches', sure: false, why: 'folder name' }
-  if (/(^|\/)[^/]*(meme|reaction)[^/]*(\/|$)/i.test(folders)) return { type: 'Memes & Web', sure: false, why: 'folder name' }
-  if (/(^|\/)[^/]*(scan|document|receipt)[^/]*(\/|$)/i.test(folders)) return { type: 'Documents', sure: false, why: 'folder name' }
-  if (/(^|\/)[^/]*screenshot[^/]*(\/|$)/i.test(folders)) return { type: 'Screenshots', sure: false, why: 'folder name' }
-  if (/(^|\/)[^/]*(photos?|pictures|camera|phone)[^/]*(\/|$)/i.test(folders)) return { type: 'Photos', sure: false, why: 'folder name' }
+  // The nearest folder that says what it holds (`Documents/My Art/Concepts/x.png` is concept art).
+  const segs = folders ? folders.split('/') : []
+  for (let i = segs.length - 1; i >= 0; i--) {
+    const hit = FOLDER_TYPES.find(([re]) => re.test(segs[i] ?? ''))
+    if (hit) return { type: hit[1], sure: false, why: `folder ${segs[i]}` }
+  }
   if (meta.software && PAINT_TOOLS.test(meta.software)) return { type: 'Concept Art', sure: false, why: meta.software }
-  if (/(^|\/)[^/]*(concept|art|paint|illustration|artstation|refs?|reference)[^/]*(\/|$)/i.test(folders)) return { type: 'Concept Art', sure: false, why: 'folder name' }
   if (meta.kind === 'png' && meta.width && meta.height && SCREEN_SIZES.has(`${meta.width}x${meta.height}`)) return { type: 'Screenshots', sure: false, why: 'screen-sized PNG' }
   return { type: null, sure: false, why: '' }
 }

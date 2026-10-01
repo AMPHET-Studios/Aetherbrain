@@ -9,18 +9,24 @@
  * never written, moved or deleted. Each picture is copied to a temp sibling,
  * its date set, its size checked, then put in place without replacing
  * anything (a hard link, or a rename after checking the name is free where
- * links are not supported). The library's manifest (`.aether-library.json`)
- * remembers what came from where, so a second run copies only what is new,
- * leaves out what the user deleted from the library, and the notes always
- * cover the whole library.
+ * links are not supported: an exclusive empty placeholder first, then the
+ * copy renamed over it). The library's manifest (`.aether-library.jsonl`)
+ * remembers what came from where and each copy's SHA-256, so a second run
+ * copies only what is new, leaves out what the user deleted from the library
+ * (under any source name), and the notes always cover the whole library.
+ *
+ * Big drives mean hundreds of thousands of pictures: the manifest and the look
+ * cache are JSON lines, appended as work is done and read and rewritten a few
+ * thousand lines at a time, so the main thread never stalls on them.
  *
  * The source is walked with the brain's own rules (FsVault): installed games
  * and programs, system and build folders, hidden folders stay out, and so
  * does the library itself when it sits inside the source.
  */
 import { createHash, randomUUID } from 'node:crypto'
-import { constants, createReadStream, promises as fs } from 'node:fs'
+import { createReadStream, createWriteStream, promises as fs } from 'node:fs'
 import path from 'node:path'
+import { Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { FsVault, isImageName } from '../fsvault.js'
 import { IMAGE_MIME, MAX_DECODE_PIXELS, MAX_THUMB_FILE_BYTES, readHead, readUpTo } from '../assets.js'
@@ -47,7 +53,7 @@ export const HEAD_BYTES = 64 * 1024
 /** Smaller than this (bytes), or both sides under TINY_SIDE px: an icon or a cache thumbnail, left out unless asked. */
 export const TINY_BYTES = 4 * 1024
 export const TINY_SIDE = 160
-export const MANIFEST = '.aether-library.json'
+export const MANIFEST = '.aether-library.jsonl'
 /** Pictures read at once (headers), looked at at once, copied at once. */
 const READ_CONCURRENCY = 16
 const LOOK_CONCURRENCY = 3
@@ -149,28 +155,106 @@ export function inside(parent: string, child: string): string | null {
 
 const srcKey = (abs: string, size: number, mtime: number) => `${pathKey(abs)}|${size}|${Math.round(mtime)}`
 
+/** Let other work run (IPC, the watcher, the renderer's requests) between chunks of a long loop. */
+const yieldNow = () => new Promise<void>((resolve) => setImmediate(resolve))
+
+function errCode(err: unknown): string | undefined {
+  return (err as NodeJS.ErrnoException | null)?.code
+}
+
+/** fs.rename, retried briefly when Windows reports the target busy (an indexer or antivirus holding it). */
+async function renameRetry(from: string, to: string): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await fs.rename(from, to)
+    } catch (err) {
+      const busy = ['EPERM', 'EBUSY', 'EACCES'].includes(errCode(err) ?? '')
+      if (attempt >= 4 || !busy || process.platform !== 'win32') throw err
+      await new Promise((r) => setTimeout(r, 50 * (attempt + 1)))
+    }
+  }
+}
+
+/** Every line of a JSON-lines file as parsed, a few thousand at a time; false when there is no file. A cut-off last line is skipped. */
+async function readLines(file: string, onValue: (v: unknown) => void): Promise<boolean> {
+  let text: string
+  try {
+    text = await fs.readFile(file, 'utf8')
+  } catch {
+    return false
+  }
+  for (let at = 0, n = 0; at < text.length; n++) {
+    let nl = text.indexOf('\n', at)
+    if (nl < 0) nl = text.length
+    const line = text.slice(at, nl).trim()
+    at = nl + 1
+    if (line) {
+      try {
+        onValue(JSON.parse(line))
+      } catch {
+        /* a line a crash cut short */
+      }
+    }
+    if (n % 4000 === 3999) await yieldNow()
+  }
+  return true
+}
+
+/** Replace `file` with `lines` (one JSON value each), written a few thousand at a time to a temp sibling and renamed into place. */
+async function writeLines(file: string, lines: Iterable<string>, active: Set<string>): Promise<void> {
+  const tmp = `${file}.${randomUUID().slice(0, 8)}${TMP_SUFFIX}`
+  active.add(tmp)
+  try {
+    const h = await fs.open(tmp, 'wx')
+    try {
+      let buf: string[] = []
+      for (const l of lines) {
+        buf.push(l)
+        if (buf.length >= 2000) {
+          await h.write(buf.join('\n') + '\n')
+          buf = []
+          await yieldNow()
+        }
+      }
+      if (buf.length) await h.write(buf.join('\n') + '\n')
+    } finally {
+      await h.close()
+    }
+    await renameRetry(tmp, file)
+  } catch (err) {
+    await fs.rm(tmp, { force: true }).catch(() => undefined)
+    throw err
+  } finally {
+    active.delete(tmp)
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* What the helper saw, remembered                                      */
 /* ------------------------------------------------------------------ */
-
-interface CacheEntry {
-  /** lum, sat, warm, contrast. */
-  c: [number, number, number, number] | null
-  p?: Record<string, [number, number][]>
-  /** Which descriptions `p` answers (labelsKey). */
-  l?: string
-}
 
 /** A short key of the descriptions the pictures are compared with: picks for other descriptions are not reused. */
 export const labelsKey = (sets: Record<string, readonly string[]> = LABEL_SETS): string => createHash('sha256').update(JSON.stringify(sets)).digest('hex').slice(0, 16)
 
 /** Most pictures remembered; the oldest go first. */
 const CACHE_MAX = 400_000
+/** New looks are appended to the file this often (and when a job ends). */
+const CACHE_FLUSH_MS = 2000
 
-/** What the vision helper saw in each picture (by path, size and date), kept in the app's data folder between runs. */
+/**
+ * What the vision helper saw in each picture (by path, size and date), kept
+ * in the app's data folder between runs as JSON lines
+ * `[key, colours, picks, labels]`, appended as pictures are looked at and
+ * compacted when the file has grown well past what it holds. Each entry is
+ * kept as its JSON text (one string, not a tree of small objects).
+ */
 export class LookCache {
-  private entries = new Map<string, CacheEntry>()
-  private dirty = false
+  private entries = new Map<string, string>()
+  private pending: string[] = []
+  private timer: ReturnType<typeof setTimeout> | null = null
+  private flushing: Promise<void> = Promise.resolve()
+  private onDisk = 0
+  private active = new Set<string>()
 
   private constructor(
     private file: string | null,
@@ -184,15 +268,14 @@ export class LookCache {
 
   static async load(file: string, labels = labelsKey()): Promise<LookCache> {
     const cache = new LookCache(file, labels)
-    try {
-      const raw: unknown = JSON.parse(await fs.readFile(file, 'utf8'))
-      const entries = raw && typeof raw === 'object' ? (raw as { entries?: unknown }).entries : null
-      if (entries && typeof entries === 'object') {
-        for (const [k, v] of Object.entries(entries as Record<string, CacheEntry>)) if (v && typeof v === 'object') cache.entries.set(k, v)
+    await readLines(file, (v) => {
+      cache.onDisk++
+      if (Array.isArray(v) && typeof v[0] === 'string') {
+        cache.entries.delete(v[0])
+        cache.entries.set(v[0], JSON.stringify(v.slice(1)))
       }
-    } catch {
-      /* none yet, or unreadable: start empty */
-    }
+    })
+    cache.trim()
     return cache
   }
 
@@ -202,33 +285,67 @@ export class LookCache {
 
   /** What was seen in this picture (picks only when they answer today's descriptions), or undefined. */
   get(abs: string, size: number, mtime: number): Seen | undefined {
-    const e = this.entries.get(srcKey(abs, size, mtime))
-    if (!e) return undefined
-    const [lum = 0, sat = 0, warm = 0, contrast = 0] = e.c ?? []
-    return { colours: e.c ? { lum, sat, warm, contrast } : null, picks: e.l === this.labels && e.p ? e.p : null }
+    const text = this.entries.get(srcKey(abs, size, mtime))
+    if (text === undefined) return undefined
+    const [c, p, l] = JSON.parse(text) as [[number, number, number, number] | null, Record<string, [number, number][]> | null, string | null]
+    const colours = c ? { lum: c[0], sat: c[1], warm: c[2], contrast: c[3] } : null
+    return { colours, picks: l === this.labels && p ? p : null }
   }
 
   set(abs: string, size: number, mtime: number, seen: Seen): void {
     const key = srcKey(abs, size, mtime)
-    const c = seen.colours
-    const e: CacheEntry = { c: c ? [c.lum, c.sat, c.warm, c.contrast].map((x) => Math.round(x * 1000) / 1000) as CacheEntry['c'] : null }
-    if (seen.picks) {
-      e.p = seen.picks
-      e.l = this.labels
-    }
+    const c = seen.colours ? [seen.colours.lum, seen.colours.sat, seen.colours.warm, seen.colours.contrast].map((x) => Math.round(x * 1000) / 1000) : null
+    const value = [c, seen.picks ?? null, seen.picks ? this.labels : null]
     this.entries.delete(key)
-    this.entries.set(key, e)
-    while (this.entries.size > CACHE_MAX) this.entries.delete(this.entries.keys().next().value!)
-    this.dirty = true
+    this.entries.set(key, JSON.stringify(value))
+    this.trim()
+    if (!this.file) return
+    this.pending.push(JSON.stringify([key, ...value]))
+    this.timer ??= setTimeout(() => {
+      this.timer = null
+      void this.flush().catch(() => undefined)
+    }, CACHE_FLUSH_MS)
   }
 
+  /** Append what was seen since the last save, and compact the file when it holds far more lines than pictures. */
   async save(): Promise<void> {
-    if (!this.file || !this.dirty) return
-    this.dirty = false
-    await fs.mkdir(path.dirname(this.file), { recursive: true })
-    const tmp = `${this.file}.${randomUUID().slice(0, 8)}.tmp`
-    await fs.writeFile(tmp, JSON.stringify({ version: 1, entries: Object.fromEntries(this.entries) }))
-    await fs.rename(tmp, this.file)
+    if (this.timer) clearTimeout(this.timer)
+    this.timer = null
+    await this.flush()
+    if (this.file && this.onDisk > this.entries.size * 1.5 + 1000) {
+      const file = this.file
+      // After a failed write too: one failure must not stop every later save.
+      this.flushing = this.flushing
+        .catch(() => undefined)
+        .then(async () => {
+          await writeLines(file, this.lines(), this.active)
+          this.onDisk = this.entries.size
+        })
+      await this.flushing
+    }
+  }
+
+  private flush(): Promise<void> {
+    const file = this.file
+    if (!file || !this.pending.length) return this.flushing
+    const lines = this.pending
+    this.pending = []
+    this.flushing = this.flushing
+      .catch(() => undefined)
+      .then(async () => {
+        await fs.mkdir(path.dirname(file), { recursive: true })
+        await fs.appendFile(file, lines.join('\n') + '\n')
+        this.onDisk += lines.length
+      })
+    return this.flushing
+  }
+
+  private *lines(): Iterable<string> {
+    for (const [k, v] of this.entries) yield `[${JSON.stringify(k)},${v.slice(1)}`
+  }
+
+  private trim(): void {
+    while (this.entries.size > CACHE_MAX) this.entries.delete(this.entries.keys().next().value!)
   }
 }
 
@@ -245,43 +362,81 @@ export interface ManifestEntry {
   genre: string | null
   year: string
   tags: string[]
-  /** SHA-256, once it was needed to tell duplicates apart. */
+  /** SHA-256 of its bytes (taken while copying). */
   sha?: string
   /** Day it was copied. */
   added: string
-  /** Deleted from the library since: never copied again, left out of the notes. */
+  /** Not in the library any more (the user deleted it): never copied again, left out of the notes. Cleared if it comes back. */
   gone?: boolean
 }
 
+/** One line of the manifest: an entry and its library path. Later lines for the same path win. */
+type ManifestLine = ManifestEntry & { dest: string }
+
+/**
+ * The library's memory, `<library>/.aether-library.jsonl`: one JSON line per
+ * picture copied, appended as they are copied (later lines win), compacted
+ * once a run is done.
+ */
 export class Manifest {
   /** By library path. */
   readonly entries = new Map<string, ManifestEntry>()
   private bySrc = new Map<string, string>()
+  private pending: string[] = []
+  private onDisk = 0
+  /** Temp files being written right now (a sweep of leftovers must not take them). */
+  readonly active = new Set<string>()
 
   constructor(readonly dest: string) {}
 
+  get file(): string {
+    return path.join(this.dest, MANIFEST)
+  }
+
   static async load(dest: string): Promise<Manifest> {
     const m = new Manifest(dest)
-    let raw: unknown
-    try {
-      raw = JSON.parse(await fs.readFile(path.join(dest, MANIFEST), 'utf8'))
-    } catch {
-      return m
-    }
-    const entries = raw && typeof raw === 'object' ? (raw as { entries?: unknown }).entries : null
-    if (!entries || typeof entries !== 'object') return m
-    const list = Object.entries(entries as Record<string, unknown>).filter((kv): kv is [string, ManifestEntry] => isEntry(kv[1]))
-    // A picture the user deleted from the library stays out of it.
-    await each(list, READ_CONCURRENCY, async ([dest, e]) => {
-      if (!e.gone && !(await fs.stat(path.join(m.dest, ...dest.split('/'))).catch(() => null))) e.gone = true
+    await readLines(m.file, (v) => {
+      m.onDisk++
+      if (!isLine(v)) return
+      const { dest: at, ...e } = v
+      m.entries.set(at, e)
     })
-    for (const [dest, e] of list) m.add(dest, e)
+    // Gone: deleted from the library (only "no such file" says so; a drive that is busy or
+    // unplugged for a moment does not). Back again: no longer gone. One folder listing per
+    // library folder, not one stat per picture (a library holds hundreds of thousands).
+    const byFolder = new Map<string, string[]>()
+    for (const at of m.entries.keys()) {
+      const folder = at.slice(0, Math.max(0, at.lastIndexOf('/')))
+      const list = byFolder.get(folder)
+      if (list) list.push(at)
+      else byFolder.set(folder, [at])
+    }
+    await each([...byFolder], READ_CONCURRENCY, async ([folder, list]) => {
+      let names: Set<string> | null
+      try {
+        const dirents = await fs.readdir(path.join(m.dest, ...folder.split('/').filter(Boolean)), { withFileTypes: true })
+        names = new Set(dirents.filter((d) => d.isFile()).map((d) => nameKey(d.name)))
+      } catch (err) {
+        const code = errCode(err)
+        if (code !== 'ENOENT' && code !== 'ENOTDIR') return
+        names = null
+      }
+      for (const at of list) {
+        const e = m.entries.get(at)!
+        const there = names?.has(nameKey(at.slice(at.lastIndexOf('/') + 1))) ?? false
+        if (e.gone && there) m.change(at, { ...e, gone: false })
+        else if (!e.gone && !there) m.change(at, { ...e, gone: true })
+      }
+      await yieldNow()
+    })
+    for (const [at, e] of m.entries) m.bySrc.set(srcKey(e.src, e.size, e.mtime), at)
     return m
   }
 
-  add(dest: string, e: ManifestEntry): void {
-    this.entries.set(dest, e)
-    this.bySrc.set(srcKey(e.src, e.size, e.mtime), dest)
+  /** Remember a picture copied (or a change to one), appended at the next flush. */
+  add(at: string, e: ManifestEntry): void {
+    this.change(at, e)
+    this.bySrc.set(srcKey(e.src, e.size, e.mtime), at)
   }
 
   /** The library path of the picture copied from this source file before, if any. */
@@ -298,19 +453,47 @@ export class Manifest {
     return out
   }
 
-  async save(): Promise<void> {
-    await fs.mkdir(this.dest, { recursive: true })
-    const file = path.join(this.dest, MANIFEST)
-    const tmp = `${file}.${randomUUID().slice(0, 8)}${TMP_SUFFIX}`
-    await fs.writeFile(tmp, JSON.stringify({ version: 1, entries: Object.fromEntries(this.entries) }, null, 1))
-    await fs.rename(tmp, file)
+  /** Append the changes since the last flush. */
+  async flush(): Promise<void> {
+    if (!this.pending.length) return
+    const lines = this.pending
+    this.pending = []
+    let written = 0
+    try {
+      await fs.mkdir(this.dest, { recursive: true })
+      // A few thousand lines at a time (a library folder that went away changes them all at once).
+      for (; written < lines.length; written += 4000) {
+        await fs.appendFile(this.file, lines.slice(written, written + 4000).join('\n') + '\n')
+        this.onDisk += Math.min(4000, lines.length - written)
+      }
+    } catch (err) {
+      this.pending = [...lines.slice(written), ...this.pending]
+      throw err
+    }
+  }
+
+  /** Flush, then rewrite the file with one line per picture when it holds many more. */
+  async compact(): Promise<void> {
+    await this.flush()
+    if (this.onDisk <= this.entries.size + 500) return
+    const entries = this.entries
+    await writeLines(this.file, (function* () {
+      for (const [dest, e] of entries) yield JSON.stringify({ dest, ...e })
+    })(), this.active)
+    this.onDisk = this.entries.size
+  }
+
+  private change(at: string, e: ManifestEntry): void {
+    this.entries.set(at, e)
+    this.pending.push(JSON.stringify({ dest: at, ...e }))
   }
 }
 
-function isEntry(v: unknown): v is ManifestEntry {
+function isLine(v: unknown): v is ManifestLine {
   if (!v || typeof v !== 'object') return false
   const e = v as Record<string, unknown>
   return (
+    typeof e['dest'] === 'string' &&
     typeof e['src'] === 'string' &&
     typeof e['size'] === 'number' &&
     typeof e['mtime'] === 'number' &&
@@ -332,7 +515,7 @@ async function sha256(abs: string, signal?: AbortSignal): Promise<string> {
   return h.digest('hex')
 }
 
-const EMPTY_META: PictureMeta = { kind: null, width: null, height: null, taken: null, make: null, model: null, software: null, ai: null }
+const EMPTY_META: PictureMeta = { kind: null, width: null, height: null, turned: false, taken: null, make: null, model: null, software: null, ai: null }
 
 /** Look through the source and plan the library. Writes nothing but the look cache. */
 export async function analyze(o: AnalyzeOptions): Promise<Analysis> {
@@ -389,6 +572,7 @@ export async function analyze(o: AnalyzeOptions): Promise<Analysis> {
       items.push(it)
       fresh.push(it)
     }
+    if (items.length % 2000 === 0) await yieldNow()
   }
 
   // 4. Colours and (with the model) what each new picture looks like.
@@ -404,12 +588,16 @@ export async function analyze(o: AnalyzeOptions): Promise<Analysis> {
       let seen = o.cache.get(abs, size, mtime)
       if ((!seen || (useModel && !seen.picks)) && eyes && meta.kind && (meta.width ?? 1) * (meta.height ?? 1) <= MAX_DECODE_PIXELS) {
         const bytes = await readUpTo(abs, MAX_THUMB_FILE_BYTES).catch(() => null)
-        if (bytes) {
+        aborted(signal)
+        if (bytes && eyes) {
+          // The size it is shown at (after its EXIF turn): the helper decodes it already scaled.
+          const [width, height] = meta.turned ? [meta.height, meta.width] : [meta.width, meta.height]
           let answer: VisionAnswer | null = null
           try {
-            answer = await eyes.look({ bytes, type: IMAGE_MIME[meta.kind], width: meta.width, height: meta.height, sets: useModel ? LABEL_SETS : null })
+            answer = await eyes.look({ bytes, type: IMAGE_MIME[meta.kind], width, height, sets: useModel ? LABEL_SETS : null })
           } catch (err) {
             if (!(err instanceof VisionUnavailable)) throw err
+            aborted(signal)
             // No helper: the rest is sorted by its metadata, names and folders.
             vision.error = err.message
             eyes = null
@@ -430,13 +618,14 @@ export async function analyze(o: AnalyzeOptions): Promise<Analysis> {
         it.placement = place(it.pic, seen, o.now)
       }
       progress({ phase: 'looking', done: ++looked, total: fresh.length })
-      if (looked % 500 === 0) await o.cache.save().catch(() => undefined)
     },
     signal,
   ).finally(() => o.cache.save().catch(() => undefined))
 
-  // 5. The same bytes twice (in the source, or already in the library): copied once.
-  await markDuplicates(fresh, manifest, signal, (done, total) => progress({ phase: 'comparing', done, total }))
+  // 5. The same bytes twice (in the source, already in the library, or deleted from it): copied once, or not again.
+  const removed = new Map<string, PlanItem>()
+  for (const it of items) if (it.status === 'removed') removed.set(it.dest, it)
+  await markDuplicates(fresh, manifest, removed, signal, (done, total) => progress({ phase: 'comparing', done, total }))
 
   // 6. Names in each library folder, free of each other and of what is there.
   assignDests(items, manifest.entries.keys())
@@ -455,39 +644,58 @@ export async function analyze(o: AnalyzeOptions): Promise<Analysis> {
   }
 }
 
+/** A member of a group of same-size files: a new picture, a picture in the library, or one deleted from it. */
+interface Member {
+  item?: PlanItem
+  dest?: string
+  gone?: boolean
+}
+
 /**
- * New pictures whose bytes are already in the library, or repeat an earlier
- * new picture, become duplicates. Only files of the same size are hashed.
+ * New pictures whose bytes are in the library already, or repeat an earlier
+ * new picture, become duplicates; those whose bytes the user deleted from
+ * the library (under any source name) become removed. Only files of the same
+ * size are hashed. `removed`: this run's pictures whose copy was deleted, by
+ * library path (their source is read for an entry kept without a hash).
  */
-async function markDuplicates(fresh: PlanItem[], manifest: Manifest, signal: AbortSignal | undefined, onProgress: (done: number, total: number) => void): Promise<void> {
-  const bySize = new Map<number, { item?: PlanItem; dest?: string }[]>()
+async function markDuplicates(
+  fresh: PlanItem[],
+  manifest: Manifest,
+  removed: Map<string, PlanItem>,
+  signal: AbortSignal | undefined,
+  onProgress: (done: number, total: number) => void,
+): Promise<void> {
+  const bySize = new Map<number, Member[]>()
   const at = (size: number) => {
     let l = bySize.get(size)
     if (!l) bySize.set(size, (l = []))
     return l
   }
   for (const it of fresh) at(it.pic.size).push({ item: it })
-  for (const [dest, e] of manifest.entries) if (!e.gone && bySize.has(e.size)) at(e.size).push({ dest })
+  for (const [dest, e] of manifest.entries) if (bySize.has(e.size)) at(e.size).push({ dest, gone: !!e.gone })
   const groups = [...bySize.values()].filter((g) => g.length > 1 && g.some((x) => x.item))
   const total = groups.reduce((a, g) => a + g.length, 0)
   let done = 0
+  // The library first (a new copy of one of its pictures is the duplicate), then what was deleted from
+  // it, then the oldest file, then the shortest path: `gate.png` is kept, `gate copy.png` repeats it.
+  const rank = (x: Member): [number, number, number] => (x.dest ? [x.gone ? 1 : 0, 0, 0] : [2, x.item!.pic.mtime, x.item!.pic.rel.length])
   for (const g of groups) {
-    // Pictures already in the library come first (a new copy of one of them is the duplicate), then
-    // the oldest file, then the shortest path: `gate.png` is kept, `gate copy.png` is its duplicate.
-    const rank = (x: { item?: PlanItem; dest?: string }) => (x.dest ? [0, 0, 0] : [1, x.item!.pic.mtime, x.item!.pic.rel.length])
     g.sort((a, b) => {
       const [ra, rb] = [rank(a), rank(b)]
-      return ra[0]! - rb[0]! || ra[1]! - rb[1]! || ra[2]! - rb[2]! || (a.item?.pic.rel ?? '').localeCompare(b.item?.pic.rel ?? '')
+      return ra[0] - rb[0] || ra[1] - rb[1] || ra[2] - rb[2] || (a.item?.pic.rel ?? '').localeCompare(b.item?.pic.rel ?? '')
     })
-    const firstOf = new Map<string, string>()
+    const firstOf = new Map<string, Member>()
     for (const x of g) {
       aborted(signal)
       let sha: string | null = null
       try {
         if (x.dest) {
           const e = manifest.entries.get(x.dest)!
-          sha = e.sha ?? (e.sha = await sha256(path.join(manifest.dest, ...x.dest.split('/')), signal))
-        } else sha = await sha256(x.item!.pic.abs, signal)
+          const was = removed.get(x.dest)
+          // A deleted copy is known by its hash, or by its source when it is still there.
+          sha = e.sha ?? (x.gone ? (was ? await sha256(was.pic.abs, signal) : null) : await sha256(path.join(manifest.dest, ...x.dest.split('/')), signal))
+          if (sha) e.sha = sha
+        } else sha = x.item!.pic.sha ?? (await sha256(x.item!.pic.abs, signal))
       } catch (err) {
         if ((err as Error).name === 'AbortError') throw err
       }
@@ -496,14 +704,15 @@ async function markDuplicates(fresh: PlanItem[], manifest: Manifest, signal: Abo
       const first = firstOf.get(sha)
       if (x.item) {
         x.item.pic.sha = sha
-        if (first !== undefined) {
-          x.item.status = 'duplicate'
-          x.item.duplicateOf = first
+        if (first) {
+          x.item.status = first.gone ? 'removed' : 'duplicate'
+          x.item.duplicateOf = first.dest ?? `#${first.item!.id}`
           continue
         }
       }
-      if (first === undefined) firstOf.set(sha, x.dest ?? `#${x.item!.id}`)
+      if (!first) firstOf.set(sha, x)
     }
+    await yieldNow()
   }
 }
 
@@ -528,14 +737,27 @@ export interface CopyResult {
   /** Library paths of the index notes (the hub first). */
   notePaths: string[]
   stopped: boolean
-}
-
-function errCode(err: unknown): string | undefined {
-  return (err as NodeJS.ErrnoException | null)?.code
+  /** Something went wrong that is no picture's fault (the manifest could not be written), or null. */
+  warning: string | null
 }
 
 function localDay(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+/** Copy `src` to `tmp` (which must not exist), hashing the bytes on the way. */
+async function copyHashed(src: string, tmp: string, signal?: AbortSignal): Promise<{ size: number; sha: string }> {
+  const hash = createHash('sha256')
+  let size = 0
+  const tap = new Transform({
+    transform(chunk: Buffer, _enc, cb) {
+      hash.update(chunk)
+      size += chunk.length
+      cb(null, chunk)
+    },
+  })
+  await pipeline(createReadStream(src), tap, createWriteStream(tmp, { flags: 'wx' }), { signal })
+  return { size, sha: hash.digest('hex') }
 }
 
 /** True when `abs` holds exactly the bytes of `pic` (same size, same SHA-256). */
@@ -546,10 +768,13 @@ async function sameBytes(abs: string, pic: Picture, signal?: AbortSignal): Promi
   return (await sha256(abs, signal)) === pic.sha
 }
 
+const exists = () => Object.assign(new Error('EEXIST: the name is taken'), { code: 'EEXIST' })
+
 /**
  * `tmp` put in place at `final` without replacing anything: a hard link
- * (fails when anything is there), or where the file system has none (exFAT,
- * FAT32) a rename after checking the name is free.
+ * (fails when anything is there). Where the drive has no hard links (exFAT,
+ * FAT32), an empty placeholder is created exclusively first, then the copy
+ * renamed over that placeholder, which is ours.
  */
 async function placeNew(tmp: string, final: string): Promise<void> {
   try {
@@ -559,22 +784,59 @@ async function placeNew(tmp: string, final: string): Promise<void> {
   } catch (err) {
     if (errCode(err) === 'EEXIST') throw err
   }
-  if (await fs.lstat(final).catch(() => null)) throw Object.assign(new Error(`EEXIST: ${final}`), { code: 'EEXIST' })
-  await fs.rename(tmp, final)
+  const placeholder = await fs.open(final, 'wx')
+  await placeholder.close()
+  try {
+    await renameRetry(tmp, final)
+  } catch (err) {
+    // Only our own empty placeholder is taken away.
+    const st = await fs.stat(final).catch(() => null)
+    if (st?.size === 0) await fs.rm(final, { force: true }).catch(() => undefined)
+    throw err
+  }
 }
 
-/** Copy one picture to `dest` inside the library; on a taken name, the same bytes count as copied, else the next free name. Returns the library path used. */
-async function copyOne(lib: string, it: PlanItem, signal?: AbortSignal): Promise<{ dest: string; there: boolean }> {
+/** One copy run's shared state: names reserved by either worker, folders swept, temp files in use. */
+interface CopyRun {
+  lib: string
+  /** nameKeys of every library path planned or chosen this run (and the manifest's). */
+  reserved: Set<string>
+  swept: Set<string>
+  active: Set<string>
+  signal?: AbortSignal
+}
+
+/** Remove temp files a crash left in `dir` (not the ones being written now). Once per folder per run. */
+async function sweep(run: CopyRun, dir: string): Promise<void> {
+  const key = nameKey(dir)
+  if (run.swept.has(key)) return
+  run.swept.add(key)
+  for (const n of await fs.readdir(dir).catch(() => [] as string[])) {
+    const abs = path.join(dir, n)
+    if (n.endsWith(TMP_SUFFIX) && !run.active.has(abs)) await fs.rm(abs, { force: true }).catch(() => undefined)
+  }
+}
+
+/**
+ * Copy one picture into the library at its planned path; when something took
+ * that name since, the same bytes count as copied, else the next name free on
+ * disk and in this run. Returns the library path used.
+ */
+async function copyOne(run: CopyRun, it: PlanItem): Promise<{ dest: string; there: boolean }> {
   let dest = it.dest
+  const fileName = it.pic.rel.slice(it.pic.rel.lastIndexOf('/') + 1)
   for (let attempt = 0; attempt < 50; attempt++) {
-    const final = path.join(lib, ...dest.split('/'))
-    await fs.mkdir(path.dirname(final), { recursive: true })
-    if (await sameBytes(final, it.pic, signal)) return { dest, there: true }
+    const final = path.join(run.lib, ...dest.split('/'))
+    const dir = path.dirname(final)
+    await fs.mkdir(dir, { recursive: true })
+    await sweep(run, dir)
+    if (await sameBytes(final, it.pic, run.signal)) return { dest, there: true }
     const tmp = `${final}.${randomUUID().slice(0, 8)}${TMP_SUFFIX}`
+    run.active.add(tmp)
     try {
-      await fs.copyFile(it.pic.abs, tmp, constants.COPYFILE_EXCL)
-      const st = await fs.stat(tmp)
-      if (st.size !== it.pic.size) throw new Error(`Copied ${st.size} of ${it.pic.size} bytes`)
+      const { size, sha } = await copyHashed(it.pic.abs, tmp, run.signal)
+      if (size !== it.pic.size) throw new Error(`Copied ${size} of ${it.pic.size} bytes (the file changed while it was copied)`)
+      it.pic.sha = sha
       // The picture keeps its date in the library.
       await fs.utimes(tmp, new Date(), new Date(it.pic.mtime))
       await placeNew(tmp, final)
@@ -582,10 +844,15 @@ async function copyOne(lib: string, it: PlanItem, signal?: AbortSignal): Promise
     } catch (err) {
       await fs.rm(tmp, { force: true }).catch(() => undefined)
       if (errCode(err) !== 'EEXIST') throw err
-      // Something else took the name since the plan: the next free one in that folder.
+      // Taken since the plan: the next name free on disk and not reserved by either worker.
       const folder = dest.slice(0, dest.lastIndexOf('/'))
-      const names = new Set((await fs.readdir(path.dirname(final)).catch(() => [] as string[])).map(nameKey))
-      dest = `${folder}/${freeName(it.pic.rel.slice(it.pic.rel.lastIndexOf('/') + 1), names)}`
+      const taken = new Set((await fs.readdir(dir).catch(() => [] as string[])).map(nameKey))
+      const prefix = `${nameKey(folder)}/`
+      for (const r of run.reserved) if (r.startsWith(prefix)) taken.add(r.slice(prefix.length))
+      dest = `${folder}/${freeName(fileName, taken)}`
+      run.reserved.add(nameKey(dest))
+    } finally {
+      run.active.delete(tmp)
     }
   }
   throw new Error('No free name')
@@ -603,15 +870,20 @@ export async function writeNotes(lib: string, shelved: Shelved[], source: string
     const text = existing === null ? newNote(n, day) : mergeNote(existing, n.section, day)
     if (text === existing) continue
     const tmp = `${abs}.${randomUUID().slice(0, 8)}${TMP_SUFFIX}`
-    await fs.writeFile(tmp, text, existing === null ? { flag: 'wx' } : {})
-    if (existing === null) await placeNew(tmp, abs).catch(async (err: unknown) => {
-      await fs.rm(tmp, { force: true })
+    await fs.writeFile(tmp, text, { flag: 'wx' })
+    try {
+      if (existing === null) await placeNew(tmp, abs)
+      else await renameRetry(tmp, abs)
+    } catch (err) {
+      await fs.rm(tmp, { force: true }).catch(() => undefined)
       throw err
-    })
-    else await fs.rename(tmp, abs)
+    }
   }
   return notes.map((n) => n.path)
 }
+
+/** The manifest is appended to this often while copying (and once at the end). */
+const MANIFEST_FLUSH_MS = 2000
 
 /** Carry out a plan: copy its new pictures, remember them in the manifest, write the index notes. */
 export async function copyPlan(a: Analysis, o: CopyOptions = {}): Promise<CopyResult> {
@@ -620,21 +892,42 @@ export async function copyPlan(a: Analysis, o: CopyOptions = {}): Promise<CopyRe
   const progress = reporter(o.onProgress)
   const manifest = await Manifest.load(a.dest)
   const todo = a.items.filter((it) => it.status === 'new')
-  const result: CopyResult = { copied: 0, bytes: 0, alreadyThere: 0, failed: [], notes: 0, notePaths: [], stopped: false }
+  const result: CopyResult = { copied: 0, bytes: 0, alreadyThere: 0, failed: [], notes: 0, notePaths: [], stopped: false, warning: null }
+  const run: CopyRun = { lib: a.dest, reserved: new Set(), swept: new Set(), active: manifest.active, ...(signal ? { signal } : {}) }
+  for (const it of todo) run.reserved.add(nameKey(it.dest))
+  for (const k of manifest.entries.keys()) run.reserved.add(nameKey(k))
+  await fs.mkdir(a.dest, { recursive: true })
+  await sweep(run, a.dest)
+  // The manifest is written apart from the pictures: failing to write it is no picture's fault.
+  let lastFlush = Date.now()
+  const flush = async (force: boolean) => {
+    if (!force && Date.now() - lastFlush < MANIFEST_FLUSH_MS) return
+    lastFlush = Date.now()
+    try {
+      await manifest.flush()
+    } catch (err) {
+      result.warning = `The library's manifest could not be written (${err instanceof Error ? err.message : String(err)}): the next run checks the pictures again.`
+    }
+  }
   let done = 0
-  let sinceSave = 0
   progress({ phase: 'copying', done: 0, total: todo.length }, true)
   try {
     await each(
       todo,
       COPY_CONCURRENCY,
       async (it) => {
+        let copied: { dest: string; there: boolean } | null = null
         try {
-          const { dest, there } = await copyOne(a.dest, it, signal)
-          it.dest = dest
+          copied = await copyOne(run, it)
+        } catch (err) {
+          if ((err as Error).name === 'AbortError') throw err
+          result.failed.push({ rel: it.pic.rel, error: err instanceof Error ? err.message : String(err) })
+        }
+        if (copied) {
+          it.dest = copied.dest
           it.status = 'copied'
           const pl = it.placement
-          manifest.add(dest, {
+          manifest.add(copied.dest, {
             src: it.pic.abs,
             size: it.pic.size,
             mtime: it.pic.mtime,
@@ -645,19 +938,13 @@ export async function copyPlan(a: Analysis, o: CopyOptions = {}): Promise<CopyRe
             ...(it.pic.sha ? { sha: it.pic.sha } : {}),
             added: localDay(now),
           })
-          if (there) result.alreadyThere++
+          if (copied.there) result.alreadyThere++
           else {
             result.copied++
             result.bytes += it.pic.size
           }
-          if (++sinceSave >= 200) {
-            sinceSave = 0
-            await manifest.save()
-          }
-        } catch (err) {
-          if ((err as Error).name === 'AbortError') throw err
-          result.failed.push({ rel: it.pic.rel, error: err instanceof Error ? err.message : String(err) })
         }
+        await flush(false)
         progress({ phase: 'copying', done: ++done, total: todo.length })
       },
       signal,
@@ -666,7 +953,8 @@ export async function copyPlan(a: Analysis, o: CopyOptions = {}): Promise<CopyRe
     if ((err as Error).name !== 'AbortError') throw err
     result.stopped = true
   } finally {
-    await manifest.save()
+    await flush(true)
+    await manifest.compact().catch(() => undefined)
   }
   // The notes cover whatever is in the library now, stopped or not.
   progress({ phase: 'indexing', done: 0, total: 1 }, true)

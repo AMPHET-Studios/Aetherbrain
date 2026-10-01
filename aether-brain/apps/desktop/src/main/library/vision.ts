@@ -246,6 +246,8 @@ export class VisionHelper {
     wc.once('destroyed', gone)
     wc.setWindowOpenHandler(() => ({ action: 'deny' }))
     wc.on('will-navigate', (e) => e.preventDefault())
+    // No WebRTC either (its UDP never passes through the session's request filter).
+    wc.setWebRTCIPHandlingPolicy('disable_non_proxied_udp')
     w.loadURL(VISION_PAGE).catch(gone)
     return {
       id,
@@ -264,6 +266,8 @@ export class VisionHelper {
     this.sessionReady = true
     const ses = this.opts.electron.session.fromPartition(VISION_PARTITION)
     ses.webRequest.onBeforeRequest((details, cb) => cb({ cancel: !(details.url.startsWith(VISION_ORIGIN) || details.url.startsWith('blob:')) }))
+    // Belt and braces: anything that got past the filter would go to a proxy that is not there.
+    void ses.setProxy({ mode: 'fixed_servers', proxyRules: 'http://127.0.0.1:9', proxyBypassRules: '' })
     ses.protocol.handle(VISION_SCHEME, (req) => this.serve(req.url, req.method))
     ses.setPermissionRequestHandler((_wc, _permission, cb) => cb(false))
     ses.setPermissionCheckHandler(() => false)

@@ -152,7 +152,6 @@ export class LibraryHost {
   private modelJob: AbortController | null = null
   private modelInfo = { ready: false, bytes: 0, done: 0, total: null as number | null, error: null as string | null }
   private lastProgress = 0
-  private cache: Promise<LookCache> | null = null
 
   constructor(private opts: LibraryHostOptions) {
     this.settings = librarySettings(opts.initial)
@@ -299,16 +298,20 @@ export class LibraryHost {
   }
 
   private async runAnalyze(ac: AbortController): Promise<void> {
+    // Stop ends the looks in flight at once (the helper is let go of), not after they finish.
+    const rest = () => this.opts.restEyes()
+    ac.signal.addEventListener('abort', rest, { once: true })
     try {
       const modelReady = (await this.opts.model.state()).ready
-      this.cache ??= LookCache.load(this.opts.cacheFile)
+      // Loaded for this job only: it can hold hundreds of thousands of pictures.
+      const cache = await LookCache.load(this.opts.cacheFile)
       const a = await analyze({
         source: this.source,
         dest: this.dest,
         includeTiny: this.settings.includeTiny ?? false,
         eyes: this.opts.eyes(),
         model: modelReady,
-        cache: await this.cache,
+        cache,
         signal: ac.signal,
         onProgress: this.onProgress,
       })
@@ -319,6 +322,7 @@ export class LibraryHost {
       this.state = 'idle'
       if (!isAbort(err)) this.error = err instanceof Error ? err.message : String(err)
     } finally {
+      ac.signal.removeEventListener('abort', rest)
       if (this.job === ac) this.job = null
       this.progress = null
       this.opts.restEyes()
@@ -337,6 +341,7 @@ export class LibraryHost {
         failed: r.failed.slice(0, 50),
         notes: r.notes,
         stopped: r.stopped,
+        warning: r.warning,
         hubPath: r.notes ? this.opts.toVault(path.join(a.dest, `${name}.md`)) : null,
         inVault: this.opts.toVault(a.dest) !== null,
       }

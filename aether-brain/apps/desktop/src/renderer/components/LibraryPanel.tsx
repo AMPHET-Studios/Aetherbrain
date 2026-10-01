@@ -142,23 +142,43 @@ const TASTE_SWATCH: Record<string, string> = {
 
 /** Made thumbnails (data URLs; null: none), per plan item id. */
 const thumbs = new Map<number, Promise<string | null>>()
+/** Thumbnails main may make at once for the panel: each one is a whole file read in main, and the brain's own thumbnails share the helper. */
+const THUMB_SLOTS = 4
 let inFlight = 0
 const waiting: (() => void)[] = []
 
-/** A plan item's thumbnail, at most four asked of main at once (the brain's own thumbnails share the helper). */
+/** A slot, taken at once when one is free (counted before anything else can run), else when one is handed over. */
+function acquire(): Promise<void> {
+  if (inFlight < THUMB_SLOTS) {
+    inFlight++
+    return Promise.resolve()
+  }
+  return new Promise<void>((go) => waiting.push(go))
+}
+
+/** Hand the slot to the next waiting thumbnail, or free it. */
+function release(): void {
+  const next = waiting.shift()
+  if (next) next()
+  else inFlight--
+}
+
+/** A plan item's thumbnail, at most THUMB_SLOTS asked of main at once. */
 function thumbOf(id: number): Promise<string | null> {
   let p = thumbs.get(id)
   if (!p) {
-    p = new Promise<void>((go) => (inFlight < 4 ? go() : waiting.push(go)))
-      .then(() => {
-        inFlight++
-        return bridge ? bridge.libraryThumb(id) : null
-      })
-      .catch(() => null)
-      .finally(() => {
-        inFlight--
-        waiting.shift()?.()
-      })
+    p = acquire().then(() =>
+      (bridge ? bridge.libraryThumb(id) : Promise.resolve(null)).then(
+        (src) => {
+          release()
+          return src
+        },
+        () => {
+          release()
+          return null
+        },
+      ),
+    )
     thumbs.set(id, p)
   }
   return p
@@ -381,6 +401,18 @@ export function LibraryPanel() {
 
   const s = status
   const busy = s?.state === 'analyzing' || s?.state === 'copying'
+
+  // A new step brings new buttons: keyboard focus goes to its main one instead of being lost.
+  const stateNow = s?.state
+  useEffect(() => {
+    const raf = requestAnimationFrame(() => {
+      const dialog = document.querySelector<HTMLElement>('[role="dialog"][aria-label="Librarian"]')
+      const focused = document.activeElement
+      if (!dialog || (focused && focused !== document.body && dialog.contains(focused))) return
+      dialog.querySelector<HTMLElement>('[data-autofocus]:not([disabled])')?.focus()
+    })
+    return () => cancelAnimationFrame(raf)
+  }, [stateNow])
   const from = s ? s.source : ''
   const to = s ? s.dest : ''
 
@@ -483,6 +515,7 @@ export function LibraryPanel() {
                 {s.result.alreadyThere ? `, ${num(s.result.alreadyThere)} were there already` : ''}, and wrote {plural(s.result.notes, 'index note')}.
                 {s.result.stopped ? ' The rest are copied the next time you run it.' : ''}
               </p>
+              {s.result.warning && <p className="mb-3 text-[12px] text-danger">{s.result.warning}</p>}
               {s.result.failed.length > 0 && (
                 <details className="mb-3 text-[12px] text-danger">
                   <summary>{plural(s.result.failed.length, 'picture')} could not be copied</summary>

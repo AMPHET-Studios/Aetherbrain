@@ -78,6 +78,8 @@ export interface LibraryResultDto {
   failed: { rel: string; error: string }[]
   notes: number
   stopped: boolean
+  /** Something no picture is to blame for (the manifest could not be written), or null. */
+  warning: string | null
   /** The hub note as a vault path, when the library is inside the brain's folders. */
   hubPath: string | null
   /** The library folder is inside the brain's folders (else the panel offers to add it). */

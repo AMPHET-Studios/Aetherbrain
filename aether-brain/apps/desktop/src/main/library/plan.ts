@@ -138,15 +138,24 @@ export function folderOf(pl: Placement): string {
 /** A file name as compared for "the same name" (Windows and macOS ignore letter case). */
 export const nameKey = (name: string): string => name.normalize('NFC').toLowerCase()
 
-/** `gate.png`, then `gate (2).png`, `gate (3).png` …: the first not in `taken` (nameKeys). */
-export function freeName(name: string, taken: Set<string>): string {
+/**
+ * `gate.png`, then `gate (2).png`, `gate (3).png` …: the first not in `taken`
+ * (nameKeys). `counters` (per folder) remembers where each name's count got
+ * to, so ten thousand `image.png` in one folder cost ten thousand steps, not
+ * fifty million.
+ */
+export function freeName(name: string, taken: Set<string>, counters?: Map<string, number>): string {
   const safe = safeName(name)
-  if (!taken.has(nameKey(safe))) return safe
+  const key = nameKey(safe)
+  if (!taken.has(key)) return safe
   const dot = safe.lastIndexOf('.')
   const [stem, ext] = dot > 0 ? [safe.slice(0, dot), safe.slice(dot)] : [safe, '']
-  for (let n = 2; ; n++) {
+  for (let n = counters?.get(key) ?? 2; ; n++) {
     const next = `${stem} (${n})${ext}`
-    if (!taken.has(nameKey(next))) return next
+    if (!taken.has(nameKey(next))) {
+      counters?.set(key, n + 1)
+      return next
+    }
   }
 }
 
@@ -179,10 +188,16 @@ export interface PlanItem {
  */
 export function assignDests(items: PlanItem[], taken: Iterable<string>): void {
   const byFolder = new Map<string, Set<string>>()
+  const countsByFolder = new Map<string, Map<string, number>>()
   const used = (folder: string) => {
     let s = byFolder.get(folder)
     if (!s) byFolder.set(folder, (s = new Set()))
     return s
+  }
+  const counts = (folder: string) => {
+    let m = countsByFolder.get(folder)
+    if (!m) countsByFolder.set(folder, (m = new Map()))
+    return m
   }
   for (const t of taken) {
     const i = t.lastIndexOf('/')
@@ -192,7 +207,7 @@ export function assignDests(items: PlanItem[], taken: Iterable<string>): void {
     if (it.status !== 'new') continue
     const folder = folderOf(it.placement)
     const names = used(nameKey(folder))
-    const name = freeName(it.pic.rel.slice(it.pic.rel.lastIndexOf('/') + 1), names)
+    const name = freeName(it.pic.rel.slice(it.pic.rel.lastIndexOf('/') + 1), names, counts(nameKey(folder)))
     names.add(nameKey(name))
     it.dest = `${folder}/${name}`
   }
@@ -239,9 +254,16 @@ export interface LibraryNote {
   tags: string[]
   /** What the note says above its Library section the first time it is written (the rest of the note is the user's). */
   intro: string
-  /** The `## Library` section, rewritten on every run. */
+  /** The `## Library` section, rewritten on every run (between the LIBRARY_START and LIBRARY_END markers). */
   section: string
 }
+
+/**
+ * The librarian's own block of a note starts and ends with these (HTML
+ * comments: no preview shows them). Everything outside it is the user's.
+ */
+export const LIBRARY_START = '<!-- aether:library: the librarian rewrites this block on every run; write outside it -->'
+export const LIBRARY_END = '<!-- /aether:library -->'
 
 /** `concept-art`, `sci-fi`, `memes-web`: a name as a tag. */
 export function tagOf(name: string): string {
@@ -426,42 +448,37 @@ export function newNote(n: LibraryNote, day: string): string {
     '',
     n.intro,
     '',
-    n.section,
+    LIBRARY_START,
+    n.section.replace(/\n+$/, ''),
+    LIBRARY_END,
+    '',
   ].join('\n')
 }
 
-const FENCE = /^\s*(```|~~~)/
-
 /**
- * `existing` with its `## Library` section replaced by `section` (up to the
- * next `##` heading or the end; appended when there is none) and its
- * `updated:` date moved to `day`. Everything else is the user's and stays.
+ * `existing` with the librarian's block (LIBRARY_START … LIBRARY_END)
+ * replaced by `section` (appended when there is none) and its frontmatter's
+ * `updated:` moved to `day`. Everything else is the user's and stays as it
+ * was, its line endings too.
  */
 export function mergeNote(existing: string, section: string, day: string): string {
+  const eol = existing.includes('\r\n') ? '\r\n' : '\n'
   const lines = existing.split(/\r?\n/)
-  let start = -1
-  let end = lines.length
-  let fenced = false
-  for (let i = 0; i < lines.length; i++) {
-    const l = lines[i]!
-    if (FENCE.test(l)) fenced = !fenced
-    if (fenced) continue
-    if (start < 0 && /^##\s+Library\s*$/.test(l)) start = i
-    else if (start >= 0 && /^##\s/.test(l)) {
-      end = i
-      break
-    }
-  }
-  const body = section.replace(/\n+$/, '').split('\n')
+  const start = lines.findIndex((l) => l.trim().startsWith('<!-- aether:library'))
+  const end = start < 0 ? -1 : lines.findIndex((l, i) => i > start && l.trim() === LIBRARY_END)
+  const block = [LIBRARY_START, ...section.replace(/\n+$/, '').split('\n'), LIBRARY_END]
   let out: string[]
-  if (start < 0) out = [...lines.join('\n').replace(/\s+$/, '').split('\n'), '', ...body, '']
-  else out = [...lines.slice(0, start), ...body, ...(end < lines.length ? ['', ...lines.slice(end)] : [''])]
-  let text = out.join('\n')
-  // Only the frontmatter's own `updated:` line.
-  const fm = /^---\r?\n([\s\S]*?)\r?\n---(\r?\n|$)/.exec(text)
-  if (fm) {
-    const head = fm[1]!.replace(/^updated:.*$/m, `updated: ${day}`)
-    text = `---\n${head}\n---${fm[2]}` + text.slice(fm[0].length)
+  if (start >= 0 && end > start) out = [...lines.slice(0, start), ...block, ...lines.slice(end + 1)]
+  else {
+    // No block (or a broken one): a new block at the end, nothing of the note removed.
+    const body = [...lines]
+    while (body.length && body[body.length - 1]!.trim() === '') body.pop()
+    out = [...body, '', ...block, '']
   }
-  return text
+  // Only the frontmatter's own `updated:` line.
+  if (out[0] === '---') {
+    const close = out.findIndex((l, i) => i > 0 && l === '---')
+    for (let i = 1; i > 0 && i < close; i++) if (/^updated:/.test(out[i]!)) out[i] = `updated: ${day}`
+  }
+  return out.join(eol)
 }

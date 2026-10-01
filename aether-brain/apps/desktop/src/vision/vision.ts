@@ -51,8 +51,6 @@ const STD = [0.26862954, 0.26130258, 0.27577711] as const
 const LOGIT_SCALE = 100
 /** Colours are measured on a picture this small: plenty for averages. */
 const COLOUR_SIDE = 48
-/** A panorama is cropped to its middle square like any picture, but not decoded wider than this many squares. */
-const MAX_RATIO = 4
 
 env.allowRemoteModels = false
 env.allowLocalModels = true
@@ -127,16 +125,19 @@ function embedTexts(c: Clip, labels: string[]): Promise<Float32Array[]> {
   return hit
 }
 
-/** The picture decoded, already scaled so that its shorter side is about SIDE px (a small one as it is). */
+/**
+ * The picture decoded, already scaled (high quality) so that its shorter side
+ * is SIDE px; a smaller one as it is. `width` × `height` is the size it is
+ * shown at, after its EXIF turn (main reads it from the header).
+ */
 function decode(job: VisionJobIn): Promise<ImageBitmap> {
   const blob = new Blob([job.bytes as Uint8Array<ArrayBuffer>], { type: job.type })
   const { width: w, height: h } = job
   if (w && h) {
-    // Width only: the height follows the picture's own proportions, after its EXIF rotation,
-    // so whichever way it turns, its shorter side ends up at least SIDE.
-    const ratio = Math.min(MAX_RATIO, Math.max(w, h) / Math.min(w, h))
-    const target = Math.round(SIDE * ratio)
-    if (target < Math.max(w, h)) return createImageBitmap(blob, { resizeWidth: target, resizeQuality: 'high' })
+    const scale = SIDE / Math.min(w, h)
+    if (scale < 1) {
+      return createImageBitmap(blob, { resizeWidth: Math.max(1, Math.round(w * scale)), resizeHeight: Math.max(1, Math.round(h * scale)), resizeQuality: 'high' })
+    }
   }
   return createImageBitmap(blob)
 }
@@ -153,6 +154,7 @@ function colours(bmp: ImageBitmap): ColourStats {
   const w = Math.max(1, Math.round(bmp.width * scale))
   const h = Math.max(1, Math.round(bmp.height * scale))
   const ctx = context(w, h)
+  ctx.imageSmoothingQuality = 'high'
   ctx.drawImage(bmp, 0, 0, w, h)
   const px = ctx.getImageData(0, 0, w, h).data
   let n = 0
@@ -188,6 +190,7 @@ function colours(bmp: ImageBitmap): ColourStats {
 /** CLIP's input: the middle square of the picture at SIDE × SIDE (on white, for see-through pictures), normalized, channels first. */
 function pixelValues(bmp: ImageBitmap): Tensor {
   const ctx = context(SIDE, SIDE)
+  ctx.imageSmoothingQuality = 'high'
   ctx.fillStyle = '#fff'
   ctx.fillRect(0, 0, SIDE, SIDE)
   const side = Math.min(bmp.width, bmp.height)

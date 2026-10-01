@@ -5,12 +5,14 @@
  * markers, Midjourney / DALL·E / Firefly traces). Pure: header bytes in,
  * facts out. Nothing here decodes a picture.
  */
-import { fourcc, has, imageKindOf, imageSize, jpegSegments, u16be, u16le, u32be, u32le, type ImageKind } from '../assets.js'
+import { fourcc, has, imageKindOf, imageSize, jpegSegments, turnsSideways, u16be, u16le, u32be, u32le, type ImageKind } from '../assets.js'
 
 export interface PictureMeta {
   kind: ImageKind | null
   width: number | null
   height: number | null
+  /** Shown turned a quarter (EXIF orientation 5–8): its shown width is `height`. */
+  turned: boolean
   /** EXIF DateTimeOriginal (else digitized, else DateTime) as `YYYY-MM-DD`, or null. */
   taken: string | null
   make: string | null
@@ -216,6 +218,7 @@ export function readMeta(head: Uint8Array): PictureMeta {
     kind,
     width: size?.width ?? null,
     height: size?.height ?? null,
+    turned: kind ? turnsSideways(head) : false,
     taken: exifDay(exif.original) ?? exifDay(exif.digitized) ?? exifDay(exif.dateTime),
     make: exif.make ?? null,
     model: exif.model ?? null,

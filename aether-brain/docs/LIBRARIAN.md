@@ -18,7 +18,7 @@ It **copies**. Nothing in the source is moved, renamed, changed or deleted, ever
 
 | | Decided by |
 | --- | --- |
-| **Type** | Photos · Screenshots · Concept Art · Renders · Sketches · AI Generated · Textures · Memes & Web · Documents · Other. Sure signs first: an image generator's settings or a C2PA "made by AI" mark (AI Generated), a screenshot's file name, a texture map's suffix (`_normal`, `_roughness` …), a camera in the EXIF or a camera file name (`IMG_…`, `PXL_…`, `DCIM/`). Then the vision model when it is confident (60 %+), then folder names and the program that saved it (`Blender`, `Photoshop` …), then the model at 40 %+, else Other. AI Generated comes from metadata and names only: a picture does not show reliably whether a generator made it. |
+| **Type** | Photos · Screenshots · Concept Art · Renders · Sketches · AI Generated · Textures · Memes & Web · Documents · Other. Sure signs first: an image generator's settings or a C2PA "made by AI" mark (AI Generated), a screenshot's file name, a texture map's suffix (`_normal`, `_roughness` …), a camera in the EXIF or a camera file name (`IMG_…`, `PXL_…`, `DCIM/`). Then the vision model when it is confident (60 %+), then the nearest folder whose name says it (whole words: `My Art`, `Concepts`, `Renders`, `Scans`; Windows' own Pictures, Documents, Downloads and Desktop say nothing) and the program that saved it (`Blender`, `Photoshop` …), then the model at 40 %+, else Other. AI Generated comes from metadata and names only: a picture does not show reliably whether a generator made it. |
 | **Genre** | Words in its folders and name first (`Portals/` → Ancient High-Tech, `cyberpunk refs/` → Cyberpunk), then the vision model (35 %+), else `Unsorted`. Art: Ancient High-Tech, Sci-Fi, Cyberpunk, Fantasy, Dark Fantasy, Horror, Post-Apocalyptic, Steampunk, Nature, Urban, Historical, Stylized & Anime, Abstract. Photos: Family & Friends, Portraits, Pets & Animals, Nature & Landscapes, City & Architecture, Travel, Food, Events & Parties, Vehicles, Art & Museums, Everyday. Screenshots, textures and web graphics have their own. |
 | **Year** | The photo's own date (EXIF), else a date in its name (`IMG_20240612…`, `Screenshot 2024-06-12…`), else the file's date, else `Undated`. The copy keeps the original's modified date. |
 | **Taste** | From the picture's colours: dark & moody, bright, monochrome, muted, vibrant, warm, cool, high contrast. Each taste gets a note gathering its pictures (the files stay in their type folders). |
@@ -28,7 +28,7 @@ What stays out: icons and cache thumbnails (under 160 px or 4 KB; a checkbox kee
 
 ## Duplicates and second runs
 
-Pictures with the same bytes are copied once (only files of the same size are compared, by SHA-256). The library's `.aether-library.json` remembers what came from where, so running it again copies only what is new. A picture you delete from the library stays out on later runs. Two different pictures with the same name in one folder become `gate.png` and `gate (2).png`; nothing is ever copied over a file that is there.
+Pictures with the same bytes are copied once (only files of the same size are compared, by SHA-256). The library's `.aether-library.jsonl` remembers what came from where (and each copy's SHA-256), so running it again copies only what is new. A picture you delete from the library stays out on later runs, even when the same picture turns up again under another name; put it back and it counts again. Two different pictures with the same name in one folder become `gate.png` and `gate (2).png`; nothing is ever copied over a file that is there.
 
 ## The notes
 
@@ -39,7 +39,7 @@ Pictures with the same bytes are copied once (only files of the same size are co
 | `<Type>/<Genre>/<Genre>.md` | The same for one genre, linked up to its type. |
 | `Taste/<Taste>.md` | Pictures of that colour mood, by type. |
 
-Each note has a `## Library` section the librarian rewrites on every run; everything else in the note is yours and stays.
+The librarian's part of each note sits between two hidden markers (`<!-- aether:library … -->` and `<!-- /aether:library -->`) and is rewritten on every run; everything outside them is yours and stays, line endings included.
 
 ## Privacy
 

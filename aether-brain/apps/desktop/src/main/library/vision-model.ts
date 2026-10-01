@@ -125,7 +125,9 @@ export class VisionModel {
       signal.throwIfAborted()
       const res = await this.fetchFn(this.base + f, { signal })
       if (!res.ok || !res.body) throw new Error(`Could not download ${f} (HTTP ${res.status})`)
-      const length = Number(res.headers.get('content-length') ?? NaN)
+      // A compressed answer is unpacked by fetch: its Content-Length is the packed size, not the file's.
+      const encoding = (res.headers.get('content-encoding') ?? 'identity').toLowerCase()
+      const length = encoding === 'identity' ? Number(res.headers.get('content-length') ?? NaN) : NaN
       const known = Number.isFinite(length) && length >= 0
       if (known && length > MAX_FILE_BYTES) throw new Error(`${f} is too big to be the model`)
       // The total grows file by file: the server says each length only when asked for it.
