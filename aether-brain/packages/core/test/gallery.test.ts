@@ -146,11 +146,11 @@ function countFolders(g: { nodes: { folder?: unknown }[] }): number {
 
 describe('videos', () => {
   it('are media the brain shows, never pictures it writes', () => {
-    for (const p of ['a/turntable.mp4', 'b/Clip.MOV', 'c/x.webm', 'd/y.m4v', 'e/z.ogv']) {
+    for (const p of ['a/turntable.mp4', 'b/Clip.MOV', 'c/x.webm', 'd/y.m4v']) {
       expect([isVideoPath(p), isMediaPath(p), isImagePath(p)]).toEqual([true, true, false])
     }
-    expect([isVideoPath('a/gate.png'), isMediaPath('a/gate.png'), isMediaPath('a/notes.md'), isMediaPath('a/x.mkv')]).toEqual([false, true, false, false])
-    expect([mimeOf('a.mp4'), mimeOf('a.MOV'), mimeOf('a.webm'), mimeOf('a.ogv'), mimeOf('a.m4v')]).toEqual(['video/mp4', 'video/quicktime', 'video/webm', 'video/ogg', 'video/mp4'])
+    expect([isVideoPath('a/gate.png'), isMediaPath('a/gate.png'), isMediaPath('a/notes.md'), isMediaPath('a/x.mkv'), isMediaPath('a/old.ogv')]).toEqual([false, true, false, false, false])
+    expect([mimeOf('a.mp4'), mimeOf('a.MOV'), mimeOf('a.webm'), mimeOf('a.m4v')]).toEqual(['video/mp4', 'video/quicktime', 'video/webm', 'video/mp4'])
     expect(imageBaseName('Art/turntable.final.mp4')).toBe('turntable.final')
     expect([...assetMap([{ path: 'Art/t.mp4', mtime: 1 }, { path: 'Art/x.mkv' }]).keys()]).toEqual(['Art/t.mp4'])
   })

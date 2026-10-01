@@ -20,11 +20,11 @@ export function isImagePath(p: string): boolean {
   return IMAGE_RE.test(p)
 }
 
-/** Video extensions the brain shows as a still frame (lowercase, no dot): what Chromium can decode. */
-export const VIDEO_EXTENSIONS: readonly string[] = ['mp4', 'm4v', 'mov', 'webm', 'ogv']
+/** Video extensions the brain shows as a still frame (lowercase, no dot): what Chromium decodes (no Ogg Theora). */
+export const VIDEO_EXTENSIONS: readonly string[] = ['mp4', 'm4v', 'mov', 'webm']
 
-const VIDEO_RE = /\.(mp4|m4v|mov|webm|ogv)$/i
-const MEDIA_RE = /\.(png|jpe?g|webp|gif|bmp|avif|mp4|m4v|mov|webm|ogv)$/i
+const VIDEO_RE = /\.(mp4|m4v|mov|webm)$/i
+const MEDIA_RE = /\.(png|jpe?g|webp|gif|bmp|avif|mp4|m4v|mov|webm)$/i
 
 /** True for a path (or file name) with a video extension, any letter case. */
 export function isVideoPath(p: string): boolean {

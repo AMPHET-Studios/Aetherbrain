@@ -50,7 +50,7 @@ export function isNoteName(name: string): boolean {
  */
 const IMAGE_RE = /\.(png|jpe?g|webp|gif|bmp|avif)$/i
 /** Video extensions: the same list as `isVideoPath` in @aether/core. Shown as a still, opened in the OS player. */
-const VIDEO_RE = /\.(mp4|m4v|mov|webm|ogv)$/i
+const VIDEO_RE = /\.(mp4|m4v|mov|webm)$/i
 /** Names Windows keeps for devices, alone or with an extension (`CON`, `nul.png`). */
 const WIN_DEVICE = /^(con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³])\s*(\.|$)/i
 

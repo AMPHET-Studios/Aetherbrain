@@ -108,4 +108,45 @@ describe('videoStill in Chromium', () => {
       await page.close()
     }
   }, 60_000)
+
+  it('keeps the frame of a video with a transparent background, and takes many stills at once', async (ctx) => {
+    if (!browser) return ctx.skip()
+    const clip = Array.from(new Uint8Array(await fs.readFile(CLIP)))
+    const page = await browser.newPage()
+    try {
+      await page.setContent('<!doctype html><title>still</title>')
+      const out = await page.evaluate(
+        async ({ js, clip }) => {
+          const { videoStill } = new Function(`${js}; return { videoStill }`)() as { videoStill(b: Blob, size: number): Promise<Blob | null> }
+          // A clip recorded here with a transparent background and one opaque square in a corner.
+          const c = document.createElement('canvas')
+          c.width = 160
+          c.height = 90
+          const g = c.getContext('2d')!
+          const type = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8'].find((t) => MediaRecorder.isTypeSupported(t))
+          if (!type) return { alpha: 'no recorder' }
+          const rec = new MediaRecorder(c.captureStream(30), { mimeType: type })
+          const chunks: Blob[] = []
+          rec.ondataavailable = (e) => chunks.push(e.data)
+          const draw = setInterval(() => {
+            g.clearRect(0, 0, 160, 90)
+            g.fillStyle = '#e33'
+            g.fillRect(0, 0, 20, 20)
+          }, 30)
+          rec.start(100)
+          await new Promise((r) => setTimeout(r, 800))
+          rec.stop()
+          clearInterval(draw)
+          await new Promise((r) => (rec.onstop = r))
+          const alpha = await videoStill(new Blob(chunks, { type: 'video/webm' }), 64)
+          const many = await Promise.all(Array.from({ length: 12 }, () => videoStill(new Blob([new Uint8Array(clip)], { type: 'video/webm' }), 32)))
+          return { alpha: alpha?.type ?? null, many: many.filter((b) => b?.type === 'image/png').length }
+        },
+        { js, clip },
+      )
+      expect(out).toEqual({ alpha: 'image/png', many: 12 })
+    } finally {
+      await page.close()
+    }
+  }, 60_000)
 })

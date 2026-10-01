@@ -643,8 +643,8 @@ describe('FsVault pictures', () => {
   })
 
   it('knows videos by name, with the same safety rules; writes stay pictures only', async () => {
-    for (const n of ['a.mp4', 'B.MOV', 'c.webm', 'd.m4v', 'e.ogv', 'Turntable final.Mp4']) expect([isVideoName(n), isMediaName(n), isImageName(n)], n).toEqual([true, true, false])
-    for (const n of ['a.mkv', 'a.avi', 'a.mp4x', '~$a.mp4', 'mp4']) expect(isMediaName(n), n).toBe(false)
+    for (const n of ['a.mp4', 'B.MOV', 'c.webm', 'd.m4v', 'Turntable final.Mp4']) expect([isVideoName(n), isMediaName(n), isImageName(n)], n).toEqual([true, true, false])
+    for (const n of ['a.mkv', 'a.avi', 'a.ogv', 'a.mp4x', '~$a.mp4', 'mp4']) expect(isMediaName(n), n).toBe(false)
     for (const n of ['tool.exe:x.mp4', 'nul.webm']) expect(isMediaName(n, 'win32'), n).toBe(false)
     expect(isMediaName('gate.png')).toBe(true)
     await put('Art/turntable.mp4', 'x')

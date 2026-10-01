@@ -29,7 +29,11 @@ const STILL_AT = 0.1
 const STILL_MAX_S = 5
 /** A video that has not given its still by then gets none (before main's own timeout ends the helper). */
 const VIDEO_TIMEOUT_MS = 15_000
-/** `seeked` can come a moment before the frame can be drawn: a still that comes out see-through is drawn again, this often at most, this far apart. */
+/**
+ * `seeked` can come a moment before the frame can be drawn: a still that comes
+ * out see-through is drawn again, this often at most, this far apart; then it
+ * is kept as drawn when the video has its frame (a transparent background).
+ */
 const DRAW_TRIES = 25
 const DRAW_WAIT_MS = 40
 
@@ -112,7 +116,10 @@ async function videoStill(url: string, px: number): Promise<Uint8Array | null> {
       ctx.clearRect(0, 0, canvas.width, canvas.height)
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
       if (painted(ctx, canvas.width, canvas.height)) break
-      if (tries >= DRAW_TRIES) return null
+      if (tries >= DRAW_TRIES) {
+        if (video.readyState >= 2) break
+        return null
+      }
       await new Promise((r) => setTimeout(r, DRAW_WAIT_MS))
     }
     const png = await canvas.convertToBlob({ type: 'image/png' })

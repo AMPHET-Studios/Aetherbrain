@@ -26,7 +26,7 @@ Every feature has a key. `⌘` is `Ctrl` on Windows/Linux. Single keys are ignor
 | click · double-click | Select · open in editor (a folder: expand / collapse it) |
 | drag a neuron        | Pin it somewhere else (physics adapts; in the system layout its moons come along) |
 | click a ghost `+ Title` | Create the missing note in Inbox             |
-| `e` · `Enter`        | Open selected in editor (a folder: expand / collapse · a picture: open it in your image app · the Today hub: focus its first task) |
+| `e` · `Enter`        | Open selected in editor (a folder: expand / collapse · a picture: open it in your image app · a video: play it in your video player · the Today hub: focus its first task) |
 | `f`                  | Fly to selected                                 |
 | `Tab` · `⇧ Tab`      | Cycle through the selection's neighbors (a folder: its parent, planets and moons; nothing selected: the biggest hub) |
 | `← → ↑ ↓`            | Orbit camera · with `⇧`: pan                    |
@@ -51,7 +51,7 @@ The default layout. The vault is the sun at the centre; with several roots (e.g.
 | `⇧ G`       | Star gallery: every picture of the selected ★ star (or of the star the selection belongs to, else the nearest star) floats around it in 3D, and the camera flies there; again: fold it |
 | `t`         | Leave / come back to the system layout                            |
 
-**Star galleries.** Fly close to a ★ star (within about two and a half times the size of its system: selecting it and pressing `f` is close enough) and every picture under its folder, subfolders included, grows out of the star as a card on a slowly turning sphere around it, newest at the top (up to 480 more than the ones already orbiting as picture moons). Flying past a star on the way somewhere else opens nothing: the gallery opens once the camera settles near it. Pull back and the cards fold into the star again. Cards are pictures like any other: click one to see it in the inspector, `e` opens it in your image app, `Tab` walks its neighbors. `⇧ G` on a star whose gallery is open folds it until you leave that star; the palette's *Toggle star galleries* turns the fly-close opening off (`⇧ G` still works).
+**Star galleries.** Fly close to a ★ star (within about two and a half times the size of its system: selecting it and pressing `f` is close enough) and every picture under its folder, subfolders included, grows out of the star as a card on a slowly turning sphere around it, newest at the top (up to 480 more than the ones already orbiting as picture moons). Flying past a star on the way somewhere else opens nothing: the gallery opens once the camera settles near it. Pull back and the cards fold into the star again. Cards are pictures (and videos) like any other: click one to see it in the inspector, `e` opens it in your image app (a video: your video player), `Tab` walks its neighbors. `⇧ G` on a star whose gallery is open folds it until you leave that star; the palette's *Toggle star galleries* turns the fly-close opening off (`⇧ G` still works).
 
 The legend shows the same depth `−` / `+` and the motion switch. Selecting a folder opens the **folder inspector**: its path and counts, its planets (click = fly, double-click = expand) and moons, and buttons for *+ Note here*, *+ Folder here*, *★ Make project* (writes the folder note `<folder>/<name>.md`) or *★ Project board*, *Expand* / *Collapse* and *Reveal* (desktop: show it in Explorer / Finder). In the graph `Tab` walks the neighbors rather than the buttons, so every inspector action has a key or a palette command instead: `p` opens a star's board, `x` expands / collapses, and the palette (`>` folder) has *New note / New folder in the selected folder*, *Make the selected folder a project*, *Open the selected star's project board* and *Show in the file manager*.
 
@@ -72,11 +72,11 @@ The **☀ Today hub** is a glowing node that gathers today's to-dos from every n
 
 Focusing a task lights up its note in the graph. With no tasks the brief says *All clear for today* and how to put things there: `- [ ] Ink the gate 📅 2026-10-01`, `⏳ 2026-10-01`, `#today`, or today's daily note (`d`).
 
-**Pictures** (png, jpg, webp, gif, bmp, avif) and **videos** (mp4, m4v, mov, webm, ogv) are part of the brain: a note that embeds one (`![[gate.png]]`) links to it in every layout, and in the system layout each folder's newest pictures orbit it as **🖼 picture moons**, drawn as thumbnails. Select one to see its preview, where it lives, its size and date, and the notes it is embedded in. A video shows one still frame (a tenth of the way in, at most 5 s) with a ▶ badge — on its moon, its gallery card, its inspector and a note's `![[turntable.mp4]]` — and never plays in the brain: `e` plays it in your video player (desktop). Videos are shown, not imported: copy them into a vault folder and they appear.
+**Pictures** (png, jpg, webp, gif, bmp, avif) and **videos** (mp4, m4v, mov, webm) are part of the brain: a note that embeds one (`![[gate.png]]`) links to it in every layout, and in the system layout each folder's newest pictures orbit it as **🖼 picture moons**, drawn as thumbnails. Select one to see its preview, where it lives, its size and date, and the notes it is embedded in. A video shows one still frame (a tenth of the way in, at most 5 s) with a ▶ badge — on its moon, its gallery card, its inspector and a note's `![[turntable.mp4]]` — and never plays in the brain: `e` plays it in your video player (desktop). Videos are shown, not imported: copy them into a vault folder and they appear.
 
 | Key / gesture        | Action                                                        |
 | -------------------- | ------------------------------------------------------------- |
-| `e` · `Enter` · double-click | Open the selected picture in your image app (desktop)  |
+| `e` · `Enter` · double-click | Open the selected picture in your image app, or play the selected video in your video player (desktop) |
 | `Tab` · `⇧ Tab`      | The notes that embed it, and its folder                       |
 | drop files on the window | Import pictures into the selected folder, a selected project's *Critique* planet, else `Inbox` — never replaces a file (`gate 2.png`); up to 40 MB each |
 

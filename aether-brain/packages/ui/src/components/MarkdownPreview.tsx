@@ -1,4 +1,4 @@
-import { useMemo, useState, type ComponentProps, type MouseEvent, type ReactNode } from 'react'
+import { useMemo, useRef, useState, type ComponentProps, type MouseEvent, type ReactNode } from 'react'
 import ReactMarkdown, { type Components, type ExtraProps } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
@@ -65,9 +65,14 @@ export function MarkdownPreview({ source, selfId = null, depth = 0, className }:
     return [remarkGfm, [remarkWikilink, { resolve }]] as const
   }, [resolver, assets, folder])
 
+  // What the renderers read that changes with every keystroke or vault change: through a ref, so the
+  // renderers keep their identity and react-markdown updates links and embeds instead of remounting
+  // them (an embedded video would take its still again on every keystroke).
+  const live = useRef({ notes, assets, fmLines, source })
+  live.current = { notes, assets, fmLines, source }
   const components = useMemo<Components>(
     () => ({
-      a: (props) => previewLink(props, { notes, assets, selfId, depth }),
+      a: (props) => previewLink(props, { notes: live.current.notes, assets: live.current.assets, selfId, depth }),
       p: ({ node: _node, children, ...rest }) => <p {...rest}>{tagify(children, toggleTag)}</p>,
       li: ({ node, children, ...rest }) => {
         // Task-list items: a click on the checkbox writes `[x] … ✅ date` back
@@ -84,6 +89,7 @@ export function MarkdownPreview({ source, selfId = null, depth = 0, className }:
                     if (t.tagName !== 'INPUT') return
                     e.preventDefault()
                     // The new state comes from the markdown shown, not from `checked` (already flipped by the click).
+                    const { fmLines, source } = live.current
                     const line = fmLines + bodyLine - 1
                     const task = extractTasks(source).find((x) => x.line === line)
                     if (task) void toggleTask(selfId!, line, !task.done, source)
@@ -97,7 +103,7 @@ export function MarkdownPreview({ source, selfId = null, depth = 0, className }:
       },
       input: ({ node: _node, ...rest }) => <input {...rest} readOnly={!selfId} onChange={() => undefined} className={cx(selfId && 'cursor-pointer')} />,
     }),
-    [notes, assets, depth, selfId, toggleTag, toggleTask, fmLines, source],
+    [depth, selfId, toggleTag, toggleTask],
   )
 
   return (

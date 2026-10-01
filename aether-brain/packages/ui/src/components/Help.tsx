@@ -27,7 +27,7 @@ const GROUPS: HelpGroup[] = [
     rows: [
       ['click · dbl-click', 'Select · open (a folder: expand)'],
       ['drag node', 'Pin it somewhere else'],
-      ['e · Enter', 'Open selected (a folder: expand · a picture: image app)'],
+      ['e · Enter', 'Open selected (a folder: expand · a picture: image app · a video: video player)'],
       ['f', 'Fly to selected'],
       ['Tab · ⇧Tab', 'Cycle neighbors (a folder: parent + children)'],
       ['← → ↑ ↓', 'Orbit camera (⇧ = pan)'],
@@ -55,7 +55,7 @@ const GROUPS: HelpGroup[] = [
       ['y · 7', 'Fly to the ☀ Today hub; its brief shows on the right'],
       ['Tab · ↑ ↓', 'Into the brief · task to task'],
       ['Space', 'Tick the focused task (u undoes)'],
-      ['e · Enter', 'A picture: open it in your image app'],
+      ['e · Enter', 'A picture: open it in your image app · a video (a still, ▶): play it in your player'],
       ['drop files', 'Import pictures into the selected folder'],
       ['drop a .zip', 'Import a Claude / ChatGPT export (i picks one)'],
       ['> picture', 'Palette: import, copy embed, moons, thumbnails'],

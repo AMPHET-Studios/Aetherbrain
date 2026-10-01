@@ -376,6 +376,8 @@ kbd {
 /* A video's still: a play badge over it (it plays in the OS player, never here). */
 .still {
   position: relative;
+}
+.md .embed-picture .still {
   display: block;
 }
 .play-badge {

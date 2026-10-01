@@ -300,9 +300,9 @@ export interface SearchHit {
 
 /**
  * File changes, plus folder creation/removal ('addDir' / 'unlinkDir', path =
- * the folder). Image files (`isImagePath`) come as add / change / unlink
- * without `content` (mtime and size when known); everything that is not a
- * note or an image is never reported.
+ * the folder). Picture and video files (`isMediaPath`) come as add / change /
+ * unlink without `content` (mtime and size when known); everything that is
+ * not a note, a picture or a video is never reported.
  */
 export type VaultChangeKind = 'add' | 'change' | 'unlink' | 'addDir' | 'unlinkDir'
 

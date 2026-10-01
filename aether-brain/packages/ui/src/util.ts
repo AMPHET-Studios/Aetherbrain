@@ -66,9 +66,30 @@ const STILL_AT = 0.1
 const STILL_MAX_S = 5
 /** A video that has not given its still by then gets none. */
 const STILL_TIMEOUT_MS = 15_000
-/** `seeked` can come a moment before the frame can be drawn: a see-through still is drawn again, this often at most, this far apart. */
+/**
+ * `seeked` can come a moment before the frame can be drawn: a see-through
+ * still is drawn again, this often at most, this far apart. After that the
+ * frame is kept as drawn when the video has it (one with a transparent
+ * background, say).
+ */
 const DRAW_TRIES = 25
 const DRAW_WAIT_MS = 40
+/** Video stills taken at once: each holds a media player decoding the file. */
+const STILL_SLOTS = 3
+let stillsRunning = 0
+const stillsWaiting: (() => void)[] = []
+
+/** Run `job` when one of the STILL_SLOTS is free. */
+async function inSlot<T>(job: () => Promise<T>): Promise<T> {
+  if (stillsRunning >= STILL_SLOTS) await new Promise<void>((resolve) => stillsWaiting.push(resolve))
+  stillsRunning++
+  try {
+    return await job()
+  } finally {
+    stillsRunning--
+    stillsWaiting.shift()?.()
+  }
+}
 
 /**
  * One still frame of a video Blob (a file the browser adapters read, a
@@ -79,6 +100,10 @@ const DRAW_WAIT_MS = 40
  */
 export async function videoStill(source: Blob, size: number): Promise<Blob | null> {
   if (typeof document === 'undefined' || typeof URL.createObjectURL !== 'function' || source.size === 0) return null
+  return inSlot(() => takeStill(source, size))
+}
+
+async function takeStill(source: Blob, size: number): Promise<Blob | null> {
   const side = Math.min(1024, Math.max(32, Math.round(Number.isFinite(size) ? size : 128)))
   const url = URL.createObjectURL(source)
   const video = document.createElement('video')
@@ -126,7 +151,11 @@ export async function videoStill(source: Blob, size: number): Promise<Blob | nul
       ctx.clearRect(0, 0, canvas.width, canvas.height)
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
       if (painted()) break
-      if (tries >= DRAW_TRIES) return null
+      if (tries >= DRAW_TRIES) {
+        // See-through where it was sampled, though the video has its frame: a transparent background.
+        if (video.readyState >= 2) break
+        return null
+      }
       await new Promise((r) => setTimeout(r, DRAW_WAIT_MS))
     }
     return await new Promise<Blob | null>((resolve) => canvas.toBlob((b) => resolve(b), 'image/png'))

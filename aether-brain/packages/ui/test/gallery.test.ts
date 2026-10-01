@@ -245,6 +245,41 @@ describe('star galleries in the app', () => {
     expect(await stillOf(new Blob([new Uint8Array([1])], { type: 'video/mp4' }), 128)).toBeNull()
   })
 
+  it('takes a video\'s still once per size and file version, shared by the scene and the inspector; pictures go straight through', async () => {
+    const { s } = await freshStore()
+    vi.useRealTimers()
+    /** A vault whose thumbnails count their calls, and give a still for a video as the desktop does. */
+    class CountingVault extends MemoryVaultAdapter {
+      calls: string[] = []
+      override async thumbnail(path: string, size: number): Promise<Blob | null> {
+        this.calls.push(`${path}@${size}`)
+        return new Blob([new Uint8Array([137, 80, 78, 71, size & 255])], { type: 'image/png' })
+      }
+    }
+    const v = new CountingVault(notes(), {
+      assets: [
+        { path: 'Projects/Gate/Art/ring.png', data: bytes(10), mtime: 1 },
+        { path: 'Projects/Gate/Art/turntable.mp4', data: bytes(30), mtime: 2 },
+      ],
+    })
+    await s().openVault(v)
+    const video = 'Projects/Gate/Art/turntable.mp4'
+    const a = await s().preview(video, 512)
+    const b = await s().preview(video, 512)
+    await s().controller.thumbnails!(video, 512)
+    expect(b).toBe(a)
+    expect(v.calls.filter((c) => c === `${video}@512`)).toHaveLength(1)
+    await s().preview(video, 256)
+    expect(v.calls.filter((c) => c.startsWith(video))).toHaveLength(2)
+    await s().preview('Projects/Gate/Art/ring.png', 512)
+    await s().preview('Projects/Gate/Art/ring.png', 512)
+    expect(v.calls.filter((c) => c.startsWith('Projects/Gate/Art/ring.png'))).toHaveLength(2)
+    // The file changed: a new still.
+    s().applyExternal([{ kind: 'change', path: video, mtime: 99, size: 31 }])
+    await s().preview(video, 512)
+    expect(v.calls.filter((c) => c === `${video}@512`)).toHaveLength(2)
+  })
+
   it('counts pictures under a folder and finds the star of a node', async () => {
     const { s, store } = await freshStore()
     await openVault(s)

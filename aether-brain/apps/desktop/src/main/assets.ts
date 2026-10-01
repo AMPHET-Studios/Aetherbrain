@@ -348,14 +348,13 @@ export async function readUpTo(abs: string, max: number): Promise<Uint8Array | n
 
 /* ---- videos ---- */
 
-export type VideoKind = 'mp4' | 'quicktime' | 'webm' | 'ogg'
+export type VideoKind = 'mp4' | 'quicktime' | 'webm'
 
 /** The media type a video is served to the thumbnail helper as. */
 export const VIDEO_MIME: Record<VideoKind, string> = {
   mp4: 'video/mp4',
   quicktime: 'video/quicktime',
   webm: 'video/webm',
-  ogg: 'video/ogg',
 }
 
 /** Bytes read from the start of a video to tell its kind. */
@@ -365,11 +364,10 @@ const QT_BOXES = ['moov', 'mdat', 'wide', 'free', 'skip', 'pnot'].map(ascii)
 /** `ftyp` brands of pictures (AVIF, HEIF), not videos. */
 const STILL_BRANDS = ['avif', 'avis', 'mif1', 'msf1', 'heic', 'heix'].map(ascii)
 const EBML = [0x1a, 0x45, 0xdf, 0xa3]
-const OGGS = ascii('OggS')
 
 /**
  * What kind of video the first bytes start with (ISO BMFF: mp4, m4v, mov;
- * Matroska / WebM; Ogg), or null for anything else, a picture in an
+ * Matroska / WebM), or null for anything else, a picture in an
  * ISO BMFF box (AVIF, HEIF) included. A video is opened with the OS player:
  * a file named `.mp4` that is not one is never handed over.
  */
@@ -380,7 +378,6 @@ export function videoKindOf(b: Uint8Array): VideoKind | null {
   }
   if (QT_BOXES.some((box) => has(b, 4, box))) return 'quicktime'
   if (has(b, 0, EBML)) return 'webm'
-  if (has(b, 0, OGGS)) return 'ogg'
   return null
 }
 

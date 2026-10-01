@@ -833,9 +833,9 @@ function ImageInspector({ id }: { id: NoteId }) {
         </div>
       </div>
 
-      <div className="mx-4 mb-3 grid h-44 place-items-center overflow-hidden rounded-lg border border-[var(--line)] bg-black/40">
+      <div className="mx-4 mb-3 grid h-44 grid-cols-[minmax(0,1fr)] grid-rows-[minmax(0,1fr)] place-items-center overflow-hidden rounded-lg border border-[var(--line)] bg-black/40">
         {preview.url && !broken ? (
-          <span className="still grid h-full w-full place-items-center">
+          <span className="still grid h-full w-full grid-cols-[minmax(0,1fr)] grid-rows-[minmax(0,1fr)] place-items-center">
             <img src={preview.url} alt={name} className="max-h-full max-w-full object-contain" draggable={false} onError={() => setBroken(true)} />
             {video && (
               <span className="play-badge" aria-hidden title="A still: it plays in your video player (e)">

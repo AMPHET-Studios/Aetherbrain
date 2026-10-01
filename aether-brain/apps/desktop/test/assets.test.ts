@@ -366,7 +366,7 @@ describe('videos', () => {
     expect(videoKindOf(bytes(be32(8), 'wide', be32(100), 'mdat'))).toBe('quicktime')
     expect(videoKindOf(bytes(be32(100), 'moov'))).toBe('quicktime')
     expect(videoKindOf(bytes([0x1a, 0x45, 0xdf, 0xa3, 0x9f]))).toBe('webm')
-    expect(videoKindOf(bytes('OggS', [0, 2]))).toBe('ogg')
+    expect(videoKindOf(bytes('OggS', [0, 2]))).toBeNull()
     expect(videoKindOf(bytes(be32(28), 'ftypavif'))).toBeNull()
     expect(videoKindOf(bytes(be32(28), 'ftypheic'))).toBeNull()
     expect(videoKindOf(png(4, 4))).toBeNull()

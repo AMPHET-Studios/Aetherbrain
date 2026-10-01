@@ -713,6 +713,34 @@ export const useAether = create<AetherState>()((set, get) => {
   }
   /** The first gallery of a session says how it works (later ones open quietly). */
   let galleryHinted = false
+
+  /**
+   * Video stills already asked for, by path, size and file version (newest
+   * last): taking one decodes the video, so the scene, the inspector and a
+   * note's embeds share it. Pictures go straight through. Emptied for another vault.
+   */
+  const stills = new Map<string, Promise<Blob | null>>()
+  const STILLS_MAX = 64
+  const stillFor = (path: string, size: number, fetch: () => Promise<Blob | null>): Promise<Blob | null> => {
+    const take = () => fetch().then((blob) => stillOf(blob, size))
+    if (!isVideoPath(path)) return take()
+    const a = get().assets.get(path)
+    const key = `${path}\n${size}\n${a?.mtime ?? ''}\n${a?.size ?? ''}`
+    let p = stills.get(key)
+    if (p) stills.delete(key)
+    else {
+      const made = take().catch(() => null)
+      // No still this time (the browser could not decode it in time): asked again later, not kept.
+      void made.then((blob) => blob === null && stills.get(key) === made && stills.delete(key))
+      p = made
+    }
+    stills.set(key, p)
+    for (const old of stills.keys()) {
+      if (stills.size <= STILLS_MAX) break
+      stills.delete(old)
+    }
+    return p
+  }
   /** A rebuild for a gallery alone keeps today's brief (no note changed): set around that rebuild. */
   let keepBrief = false
 
@@ -1672,6 +1700,7 @@ export const useAether = create<AetherState>()((set, get) => {
       // The previous vault's pictures are not this one's, nor are its galleries.
       controller.thumbnails = null
       controller.resetGallery()
+      stills.clear()
       set({
         adapter,
         roots: adapter.roots ?? [],
@@ -1704,7 +1733,7 @@ export const useAether = create<AetherState>()((set, get) => {
         )
         const thumbnail = adapter.thumbnail?.bind(adapter)
         // A video comes from the browser adapters as itself: the scene gets one still frame of it.
-        controller.thumbnails = thumbnail ? async (path, size) => stillOf(await thumbnail(path, size), size) : null
+        controller.thumbnails = thumbnail ? (path, size) => stillFor(path, size, () => thumbnail(path, size)) : null
         set({ search, status: 'ready', loadProgress: null })
         setLoaded(loaded.notes, loaded.graph, loaded.folders, loaded.assets)
         unwatch = adapter.watch((changes) => get().applyExternal(changes))
@@ -2504,7 +2533,8 @@ export const useAether = create<AetherState>()((set, get) => {
       const thumbnail = get().adapter?.thumbnail
       if (!thumbnail) return null
       try {
-        return await stillOf(await thumbnail.call(get().adapter, path, size), size)
+        const adapter = get().adapter
+        return await stillFor(path, size, () => thumbnail.call(adapter, path, size))
       } catch {
         return null
       }

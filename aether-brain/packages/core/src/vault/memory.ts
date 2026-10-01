@@ -278,6 +278,5 @@ export function mimeOf(path: string): string {
   if (ext === 'mp4' || ext === 'm4v') return 'video/mp4'
   if (ext === 'mov') return 'video/quicktime'
   if (ext === 'webm') return 'video/webm'
-  if (ext === 'ogv') return 'video/ogg'
   return 'application/octet-stream'
 }
