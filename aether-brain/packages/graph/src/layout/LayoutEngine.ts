@@ -26,7 +26,15 @@ export class LayoutEngine {
    * qx, qy, qz, qw; see protocol). Empty in the other modes.
    */
   rings: Float32Array = new Float32Array(0)
-  /** Bumped whenever `rings` is replaced. */
+  /**
+   * System layout, per node: the radius each star gallery card is drawn with
+   * (0 for other nodes), and the radius of each node's system. Empty in the
+   * other modes, and until the worker has laid out the current node set
+   * (re-indexed from the previous one meanwhile).
+   */
+  cards: Float32Array = new Float32Array(0)
+  extents: Float32Array = new Float32Array(0)
+  /** Bumped whenever `rings` is replaced (and with it `cards` and `extents`). */
   ringsVersion = 0
   /** System layout: planets and moons orbit while on (mirrors what the worker was told). */
   motion = true
@@ -71,6 +79,11 @@ export class LayoutEngine {
       kind: KIND_CODE[n.kind] ?? 0,
       role: n.folder ? (ROLE_CODE[n.folder.role] ?? 3) : -1,
     }))
+    graph.nodes.forEach((n, i) => {
+      const card = n.image?.gallery
+      const anchor = card ? graph.index.get(card.star) : undefined
+      if (card && anchor !== undefined) nodes[i]!.gallery = { anchor, rank: card.rank, only: card.only }
+    })
     const edges: LayoutEdgeInput[] = []
     for (const e of graph.edges) {
       const s = graph.index.get(e.from)
@@ -85,6 +98,8 @@ export class LayoutEngine {
     // where their parent was, so they grow out of it instead of the origin.
     const next = new Float32Array(nodes.length * 3)
     let rings: Float32Array = new Float32Array(0)
+    let cards: Float32Array = new Float32Array(0)
+    let extents: Float32Array = new Float32Array(0)
     if (prev) {
       const pi = new Map(prev.ids.map((id, i) => [id, i]))
       nodes.forEach((n, i) => {
@@ -107,8 +122,22 @@ export class LayoutEngine {
         }
         rings = new Float32Array(out)
       }
+      // The same for the card sizes and system radii: a rebuild while a gallery is open keeps its cards' size.
+      if (mode === 'system' && this.cards.length === prev.ids.length && this.extents.length === prev.ids.length) {
+        const pi = new Map(prev.ids.map((id, i) => [id, i]))
+        cards = new Float32Array(nodes.length)
+        extents = new Float32Array(nodes.length)
+        nodes.forEach((n, i) => {
+          const j = pi.get(n.id)
+          if (j === undefined) return
+          cards[i] = n.gallery ? this.cards[j]! : 0
+          extents[i] = this.extents[j]!
+        })
+      }
     }
     this.rings = rings
+    this.cards = cards
+    this.extents = extents
     this.ringsVersion++
     this.positions = next
     this.settled = false
@@ -124,8 +153,10 @@ export class LayoutEngine {
     if (this.mode === mode) return
     this.mode = mode
     this.settled = false
-    if (mode !== 'system' && this.rings.length) {
+    if (mode !== 'system' && (this.rings.length || this.cards.length || this.extents.length)) {
       this.rings = new Float32Array(0)
+      this.cards = new Float32Array(0)
+      this.extents = new Float32Array(0)
       this.ringsVersion++
     }
     this.post({ type: 'mode', mode })
@@ -185,6 +216,10 @@ export class LayoutEngine {
     if (msg.type === 'ready' || msg.generation !== this.generation) return
     if (msg.type === 'rings') {
       this.rings = msg.rings
+      // Per-node arrays only when they fit the node set.
+      const n = this.ids.length
+      this.cards = msg.cards.length === n ? msg.cards : new Float32Array(0)
+      this.extents = msg.extent.length === n ? msg.extent : new Float32Array(0)
       this.ringsVersion++
       return
     }

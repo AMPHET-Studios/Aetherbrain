@@ -24,6 +24,7 @@ import {
   THUMB_SIZE,
   THUMB_TICK_MS,
   ThumbScheduler,
+  cardFade,
   coverRect,
   rankThumbCandidates,
   thumbKey,
@@ -68,6 +69,8 @@ export interface ThumbView {
   radii: Float32Array
   /** 4 floats per node; [1] is the dim state (0.12..1). */
   glow: { array: ArrayLike<number> }
+  /** 1 per star gallery card: it fades when the camera comes very close (see `cardFade`). */
+  isCard?: ArrayLike<number>
 }
 
 type Ctx2D = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D
@@ -89,6 +92,8 @@ export class ThumbLayer {
   private readonly size: InstancedBufferAttribute
   private readonly layer: InstancedBufferAttribute
   private readonly alpha: InstancedBufferAttribute
+  /** Opacity per instance: 1, or less for a gallery card the camera is passing. */
+  private readonly fade: InstancedBufferAttribute
   private readonly scheduler: ThumbScheduler<Uint8ClampedArray>
   private texture: DataArrayTexture | null = null
   private ctx: Ctx2D | null = null
@@ -121,10 +126,12 @@ export class ThumbLayer {
     this.size = attr(1, true)
     this.layer = attr(1, false)
     this.alpha = attr(1, true)
+    this.fade = attr(1, true)
     this.geometry.setAttribute('iCenter', this.center)
     this.geometry.setAttribute('iSize', this.size)
     this.geometry.setAttribute('iLayer', this.layer)
     this.geometry.setAttribute('iAlpha', this.alpha)
+    this.geometry.setAttribute('iFade', this.fade)
     this.geometry.instanceCount = 0
     this.material = createThumbMaterial()
     this.mesh = new Mesh(this.geometry, this.material)
@@ -207,7 +214,9 @@ export class ThumbLayer {
     const center = this.center.array as Float32Array
     const size = this.size.array as Float32Array
     const alpha = this.alpha.array as Float32Array
+    const fade = this.fade.array as Float32Array
     const glow = view.glow.array
+    const cards = view.isCard
     for (let j = 0; j < this.count; j++) {
       const i = this.instNode[j]!
       center[j * 3] = pos[i * 3] ?? 0
@@ -218,12 +227,14 @@ export class ThumbLayer {
       else if (i === hovI) s *= THUMB_HOVER_SCALE
       size[j] = s
       alpha[j] = glow[i * 4 + 1] ?? 1
+      fade[j] = cards?.[i] === 1 && i !== selI ? cardFade((view.screen[i * 4 + 3] ?? 0) * THUMB_SCALE, height) : 1
     }
     if (this.count > 0) {
       // Whole buffers (5 KB): update ranges would allocate every frame.
       this.center.needsUpdate = true
       this.size.needsUpdate = true
       this.alpha.needsUpdate = true
+      this.fade.needsUpdate = true
     }
     this.mesh.visible = this.count > 0 && this.texture !== null
     return changed

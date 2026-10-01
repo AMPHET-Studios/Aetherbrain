@@ -1,4 +1,4 @@
-import type { Area, FolderRole, FolderSelection, GraphData, GraphEdge, GraphNode, Link, NoteId, ParsedNote, VaultAsset } from '../types'
+import type { Area, FolderRole, FolderSelection, GalleryInfo, GraphData, GraphEdge, GraphNode, Link, NoteId, ParsedNote, VaultAsset } from '../types'
 import { LinkResolver } from './resolve'
 import { asString } from '../markdown/frontmatter'
 import type { DailyBrief } from '../markdown/brief'
@@ -29,7 +29,20 @@ export interface ImageGraphOptions {
   maxPerFolder?: number
   /** Most image nodes in the graph, embedded ones first (default 1500). */
   maxTotal?: number
+  /**
+   * With folders: the folder of a project star whose gallery is open. Every
+   * picture under it (subfolders included, newest first) becomes a card of
+   * the gallery: moons and linked pictures keep their node (and their orbit
+   * slot), the others get a node of their own parented to the star, up to
+   * `maxGallery`. Not a shown project star: no gallery.
+   */
+  gallery?: string | null
+  /** Most cards a gallery adds beyond the pictures already in the graph (default `GALLERY_MAX`). */
+  maxGallery?: number
 }
+
+/** Pictures a star gallery shows at most (besides moons and linked pictures, which always count). */
+export const GALLERY_MAX = 480
 
 export interface TodayGraphOptions {
   /** The brief the hub stands for (`dailyBrief`): its beams go to `brief.noteIds`. */
@@ -212,12 +225,14 @@ export function buildGraph(notes: Map<NoteId, ParsedNote>, opts: BuildGraphOptio
 
   const orphans = nodes.filter((n) => n.kind === 'note' && n.degree === 0).map((n) => n.id)
 
-  const folderSelection = opts.folders
+  const system = opts.folders
     ? addFolderSystem(notes, ids, nodes, index, unresolved, opts.folders, {
         images: assets,
         moons: !!opts.images?.moons,
         maxPerFolder: opts.images?.maxPerFolder ?? 24,
         budget: imageBudget,
+        gallery: opts.images?.gallery ?? null,
+        maxGallery: Math.max(0, opts.images?.maxGallery ?? GALLERY_MAX),
         backlinks,
         outlinks,
       })
@@ -225,7 +240,19 @@ export function buildGraph(notes: Map<NoteId, ParsedNote>, opts: BuildGraphOptio
 
   if (opts.today) addTodayHub(nodes, edges, index, backlinks, outlinks, opts.today.brief, opts.folders ? folderKey('') : null)
 
-  return { nodes, edges, index, backlinks, outlinks, unresolved, orphans, tagCounts, areaCounts, folderSelection }
+  return {
+    nodes,
+    edges,
+    index,
+    backlinks,
+    outlinks,
+    unresolved,
+    orphans,
+    tagCounts,
+    areaCounts,
+    folderSelection: system?.selection ?? null,
+    gallery: system?.gallery ?? null,
+  }
 }
 
 /** Append an image node (no parent yet; the folder system sets it). */
@@ -356,8 +383,28 @@ interface FolderImageOptions {
   maxPerFolder: number
   /** Image nodes still allowed (shared with the linked images). */
   budget: { left: number }
+  /** Folder of the project star whose gallery is open (null: none). */
+  gallery: string | null
+  /** Most cards the gallery adds. */
+  maxGallery: number
   backlinks: Map<NoteId, Set<NoteId>>
   outlinks: Map<NoteId, Set<NoteId>>
+}
+
+/** Pictures under `folder` (subfolders included), newest first (then by path), per asset map and folder. */
+const galleryCache = new WeakMap<Map<string, VaultAsset>, Map<string, string[]>>()
+
+function galleryImages(assets: Map<string, VaultAsset>, folder: string): string[] {
+  let perFolder = galleryCache.get(assets)
+  if (!perFolder) galleryCache.set(assets, (perFolder = new Map()))
+  let out = perFolder.get(folder)
+  if (out) return out
+  out = []
+  const inside = `${folder}/`
+  for (const [f, list] of imagesByFolder(assets)) if (f === folder || f.startsWith(inside)) out.push(...list)
+  out.sort((a, b) => (assets.get(b)?.mtime ?? 0) - (assets.get(a)?.mtime ?? 0) || (a < b ? -1 : a > b ? 1 : 0))
+  perFolder.set(folder, out)
+  return out
 }
 
 /**
@@ -373,7 +420,7 @@ function addFolderSystem(
   unresolved: Map<NoteId, Set<NoteId>>,
   opts: FolderGraphOptions,
   img: FolderImageOptions,
-): FolderSelection {
+): { selection: FolderSelection; gallery: GalleryInfo | null } {
   // Folders known on disk: everything listed, every note folder, and their
   // ancestors ('' included). Indexed once per folder Set, not on every rebuild.
   const known = folderUniverse(opts.all, ids.map((id) => notes.get(id)!.meta.folder)).all
@@ -477,6 +524,32 @@ function addFolderSystem(
     }
   }
 
+  // The open star gallery: every picture under the star's folder becomes a card, newest first.
+  // Pictures already in the graph keep their node and their orbit slot (nothing else moves);
+  // the others come in parented to the star, up to the cap.
+  let gallery: GalleryInfo | null = null
+  const gPath = img.gallery === null ? null : normalizeFolderPath(img.gallery)
+  const isStar = gPath !== null && gPath !== '' && !(opts.multiRoot && folderDepth(gPath) === 1) && projectAt.has(gPath)
+  if (isStar && img.images && visible.has(gPath)) {
+    const star = folderKey(gPath)
+    const all = galleryImages(img.images, gPath)
+    let cards = 0
+    let added = 0
+    for (const path of all) {
+      let node = nodes[index.get(imageKey(path)) ?? -1]
+      let only = false
+      if (!node) {
+        if (added >= img.maxGallery) continue
+        node = addImageNode(nodes, index, img.backlinks, img.outlinks, path, img.images.get(path))
+        node.parent = star
+        only = true
+        added++
+      }
+      if (node.image) node.image.gallery = { star, rank: cards++, only }
+    }
+    if (cards > 0) gallery = { star, path: gPath, cards, total: all.length }
+  }
+
   for (const path of visible) {
     const depth = folderDepth(path)
     const projectId = projectAt.get(path) ?? null
@@ -521,7 +594,7 @@ function addFolderSystem(
       wordCount: 0,
     })
   }
-  return selection
+  return { selection, gallery }
 }
 
 /** Folder path of a parent id (`folder:a/b` → `a/b`). */

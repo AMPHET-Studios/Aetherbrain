@@ -46,6 +46,7 @@ const GROUPS: HelpGroup[] = [
       ['x', 'Expand / collapse the selected folder'],
       ['[ ]', 'Show fewer / more folder levels'],
       ['o', 'Orbits moving / paused'],
+      ['⇧ G', "Star gallery: a star's pictures in 3D (also opens as you fly close)"],
     ],
   },
   {

@@ -252,13 +252,16 @@ export function createThumbMaterial(): ShaderMaterial {
       attribute float iSize;
       attribute float iLayer;
       attribute float iAlpha;
+      attribute float iFade;
       varying vec2 vUv;
       varying float vLayer;
       varying float vAlpha;
+      varying float vFade;
       void main() {
         vUv = uv;
         vLayer = iLayer;
         vAlpha = iAlpha;
+        vFade = iFade;
         vec4 viewCenter = viewMatrix * modelMatrix * vec4(iCenter, 1.0);
         viewCenter.xy += position.xy * iSize;
         viewCenter.z += iSize * 0.2;
@@ -270,6 +273,7 @@ export function createThumbMaterial(): ShaderMaterial {
       varying vec2 vUv;
       varying float vLayer;
       varying float vAlpha;
+      varying float vFade;
       // Signed distance to a rounded square of half-size b, corner radius r (negative inside).
       float roundedBox(vec2 p, float b, float r) {
         vec2 q = abs(p) - vec2(b - r);
@@ -278,7 +282,7 @@ export function createThumbMaterial(): ShaderMaterial {
       void main() {
         float d = roundedBox(vUv - 0.5, 0.5, 0.12);
         float aa = max(fwidth(d), 1e-4);
-        float mask = 1.0 - smoothstep(-aa, 0.0, d);
+        float mask = (1.0 - smoothstep(-aa, 0.0, d)) * vFade;
         if (mask < 0.01) discard;
         vec3 pic = texture(uMap, vec3(vUv.x, 1.0 - vUv.y, vLayer)).rgb;
         float rim = 1.0 - smoothstep(0.02, 0.02 + aa * 1.5, -d);

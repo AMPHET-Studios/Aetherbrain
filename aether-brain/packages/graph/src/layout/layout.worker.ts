@@ -228,9 +228,13 @@ function stopLoop(): void {
   timer = null
 }
 
-function postRings(rings: Float32Array): void {
-  const msg: WorkerToMain = { type: 'rings', rings, generation }
-  ctx.postMessage(msg, [rings.buffer])
+/** The system layout's per-generation data (nothing, outside the system layout). */
+function postRings(next: SystemLayout | null): void {
+  const rings = next ? next.rings.slice() : new Float32Array(0)
+  const cards = next ? next.card.slice() : new Float32Array(0)
+  const extent = next ? next.extent.slice() : new Float32Array(0)
+  const msg: WorkerToMain = { type: 'rings', rings, cards, extent, generation }
+  ctx.postMessage(msg, [rings.buffer, cards.buffer, extent.buffer])
 }
 
 function setGraph(input: LayoutNodeInput[], edges: LayoutEdgeInput[], prev?: { ids: string[]; positions: Float32Array }, seed?: number): void {
@@ -265,7 +269,7 @@ function setGraph(input: LayoutNodeInput[], edges: LayoutEdgeInput[], prev?: { i
     return
   }
   layout = null
-  postRings(new Float32Array(0))
+  postRings(null)
   createSimulation(prev)
   applyForces()
   start(prev ? 0.35 : 1)
@@ -288,6 +292,9 @@ function enterSystem(from: Float32Array, known: Uint8Array | null, keepOffsets: 
   const role = new Int8Array(n)
   const radius = new Float32Array(n)
   const ids = new Array<string>(n)
+  const gallery = new Int32Array(n).fill(-1)
+  const galleryRank = new Int32Array(n)
+  const galleryOnly = new Uint8Array(n)
   for (let i = 0; i < n; i++) {
     const d = inputs[i]!
     parent[i] = d.parent
@@ -295,8 +302,13 @@ function enterSystem(from: Float32Array, known: Uint8Array | null, keepOffsets: 
     role[i] = d.role
     radius[i] = d.radius
     ids[i] = d.id
+    if (d.gallery) {
+      gallery[i] = d.gallery.anchor
+      galleryRank[i] = d.gallery.rank
+      galleryOnly[i] = d.gallery.only ? 1 : 0
+    }
   }
-  const next = computeSystemLayout({ parent, kind, role, radius, ids })
+  const next = computeSystemLayout({ parent, kind, role, radius, ids, gallery, galleryRank, galleryOnly })
 
   const nextOffsets = new Float32Array(n * 3)
   if (keepOffsets && offsets.length) {
@@ -330,7 +342,7 @@ function enterSystem(from: Float32Array, known: Uint8Array | null, keepOffsets: 
     }
   }
   sysPos = new Float32Array(sysFrom)
-  postRings(next.rings.slice())
+  postRings(next)
   transitionStart = performance.now()
   startSystemLoop()
 }
@@ -426,7 +438,7 @@ function leaveSystem(): void {
     }
   }
   layout = null
-  postRings(new Float32Array(0))
+  postRings(null)
   applyForces()
   start(0.8)
 }

@@ -17,7 +17,7 @@ import {
   type NoteId,
 } from '@aether/core'
 import { AREA_LABELS, IMAGE_COLOR, STAR_COLOR, SUN_COLOR, TODAY_COLOR, planetColor } from '@aether/graph'
-import { useAether } from '../store'
+import { picturesUnder, useAether } from '../store'
 import { cx, plural, relativeTime, truncate, MOD } from '../util'
 import { copyEmbed, formatBytes, importPicturesFromDialog, usePreview } from './pictures'
 
@@ -258,6 +258,11 @@ function FolderInspector({ node }: { node: GraphNode }) {
   const setView = useAether((s) => s.setView)
   const reveal = useAether((s) => s.reveal)
   const controller = useAether((s) => s.controller)
+  const toggleGallery = useAether((s) => s.toggleGallery)
+  /** A star: its pictures (subfolders included) and whether its gallery is open. */
+  const assets = useAether((s) => s.assets)
+  const starPictures = useMemo(() => (info.role === 'project' ? picturesUnder(assets, info.path) : 0), [assets, info.role, info.path])
+  const galleryOpen = graph?.gallery?.star === node.id
   const [adding, setAdding] = useState<'note' | 'folder' | null>(null)
   const [name, setName] = useState('')
   /** Bumped per palette request so the field mounts again and takes the focus. */
@@ -348,6 +353,16 @@ function FolderInspector({ node }: { node: GraphNode }) {
           {(info.hiddenFolders > 0 || expanded) && (
             <button type="button" className="hud-btn primary" onClick={() => toggleFolder(info.path)} title="Expand / collapse (x)">
               {expanded ? 'Collapse' : `Expand +${info.hiddenFolders}`} <kbd className="!text-white/80">x</kbd>
+            </button>
+          )}
+          {starPictures > 0 && (
+            <button
+              type="button"
+              className="hud-btn"
+              onClick={toggleGallery}
+              title={galleryOpen ? 'Fold the pictures back into the star (Shift+G)' : `Every picture of ${node.title} in 3D around the star (Shift+G); flying close opens it too`}
+            >
+              🖼 {galleryOpen ? 'Fold gallery' : `Gallery · ${starPictures}`} <kbd>⇧G</kbd>
             </button>
           )}
           {info.projectId ? (

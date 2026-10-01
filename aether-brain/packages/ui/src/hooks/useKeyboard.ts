@@ -165,6 +165,10 @@ export function handleKey(e: KeyboardEvent): void {
     case 'x':
       if (s.selectedId && isFolderId(s.selectedId)) s.toggleFolder(folderPathOf(s.selectedId))
       return
+    case 'G':
+      // Shift+G: the star gallery (the selected star's pictures in 3D), or fold the open one.
+      s.toggleGallery()
+      return
     case 'm':
       s.cycleColorMode()
       return

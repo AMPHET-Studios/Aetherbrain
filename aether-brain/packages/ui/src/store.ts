@@ -130,6 +130,8 @@ export interface Settings {
   thumbnails: boolean
   /** The glowing Today hub (daily brief) is in the graph. */
   todayHub: boolean
+  /** System layout: a project star's pictures float around it in 3D when the camera comes close (Shift+G any time). */
+  starGalleries: boolean
   /** Settings version; 2 = the solar-system layout became the default. */
   v: number
 }
@@ -166,6 +168,7 @@ const DEFAULT_SETTINGS: Settings = {
   imageMoons: true,
   thumbnails: true,
   todayHub: true,
+  starGalleries: true,
   v: SETTINGS_VERSION,
 }
 
@@ -209,6 +212,7 @@ function loadSettings(): Settings {
   s.imageMoons = s.imageMoons !== false
   s.thumbnails = s.thumbnails !== false
   s.todayHub = s.todayHub !== false
+  s.starGalleries = s.starGalleries !== false
   if (stored && !(typeof stored.v === 'number' && stored.v >= SETTINGS_VERSION)) {
     s.layoutMode = 'system'
     s.v = SETTINGS_VERSION
@@ -580,6 +584,47 @@ export interface AetherState {
    * reason is toasted).
    */
   importChats(input: ChatImportInput): Promise<ChatImportResult | null>
+
+  /* ---- v0.6: star galleries ---- */
+
+  /**
+   * The project star (its folder's vault path) whose gallery the graph is
+   * built with: every picture under it floats around it in 3D (system layout
+   * only). Not persisted: the camera opens and folds galleries.
+   */
+  gallery: string | null
+  /** Show the gallery of this star (a folder id), or none (null): rebuilds the graph when its cards change. */
+  setGallery(star: NoteId | null): void
+  /**
+   * Shift+G: fold the open gallery, else open the gallery of the selected
+   * star (or of the star the selection belongs to, else the star the camera
+   * is closest to) and fly there.
+   */
+  toggleGallery(): void
+}
+
+/** Pictures under a folder, subfolders included. */
+export function picturesUnder(assets: Map<string, VaultAsset>, folder: string): number {
+  const inside = `${normalizeFolderPath(folder)}/`
+  let n = 0
+  for (const path of assets.keys()) if (path.startsWith(inside)) n++
+  return n
+}
+
+/**
+ * The project star a node belongs to (its folder id): the star itself, a
+ * gallery card's star, else the nearest project star up its parents (a
+ * project's note orbits its star). Null when there is none.
+ */
+export function starOf(graph: GraphData | null, id: NoteId | null): NoteId | null {
+  if (!graph || id === null) return null
+  let node = graph.nodes[graph.index.get(id) ?? -1]
+  if (node?.image?.gallery) return node.image.gallery.star
+  for (let steps = 0; node && steps < 64; steps++) {
+    if (node.folder?.role === 'project') return node.id
+    node = node.parent === null ? undefined : graph.nodes[graph.index.get(node.parent) ?? -1]
+  }
+  return null
 }
 
 /** An export read by the UI (see `importChats`). */
@@ -639,6 +684,11 @@ export interface CritiqueSaved {
 let toastSeq = 1
 let unwatch: (() => void) | null = null
 
+/** "12 pictures", or "the newest 480 of 900 pictures" when the gallery is capped. */
+function galleryCount(cards: number, total: number): string {
+  return cards < total ? `the newest ${cards.toLocaleString('en-US')} of ${total.toLocaleString('en-US')} pictures` : `${cards} picture${cards === 1 ? '' : 's'}`
+}
+
 export const useAether = create<AetherState>()((set, get) => {
   const controller = new BrainController()
   const settings = loadSettings()
@@ -648,12 +698,16 @@ export const useAether = create<AetherState>()((set, get) => {
   controller.hubLabels = settings.hubLabels
   controller.motion = settings.motion
   controller.showThumbnails = settings.thumbnails
+  controller.galleries = settings.starGalleries
 
   controller.events = {
     onSelect: (id) => get().select(id),
     onOpen: (id) => get().openNote(id, { fly: true }),
     onHover: (id) => set({ hoveredId: id }),
+    onGallery: (star) => get().setGallery(star),
   }
+  /** The first gallery of a session says how it works (later ones open quietly). */
+  let galleryHinted = false
 
   /** The brief the latest graph-options call computed: the store takes it together with the graph built from it. */
   let builtBrief: DailyBrief | null = null
@@ -672,7 +726,7 @@ export const useAether = create<AetherState>()((set, get) => {
     const brief = shown && sameBrief(shown, fresh) ? shown : fresh
     builtBrief = brief
     const system = settings.layoutMode === 'system'
-    const opts: BuildGraphOptions = { images: { all: assets, moons: system && settings.imageMoons } }
+    const opts: BuildGraphOptions = { images: { all: assets, moons: system && settings.imageMoons, gallery: system ? get().gallery : null } }
     if (settings.todayHub) opts.today = { brief }
     if (!system) return opts
     const mountLabels: Record<string, string> = {}
@@ -1607,8 +1661,9 @@ export const useAether = create<AetherState>()((set, get) => {
       unwatch = null
       // Changes a batch held for the previous vault are not this one's.
       held = []
-      // The previous vault's pictures are not this one's.
+      // The previous vault's pictures are not this one's, nor are its galleries.
       controller.thumbnails = null
+      controller.resetGallery()
       set({
         adapter,
         roots: adapter.roots ?? [],
@@ -1626,6 +1681,7 @@ export const useAether = create<AetherState>()((set, get) => {
         loadProgress: null,
         projectId: null,
         formRequest: null,
+        gallery: null,
       })
       try {
         const search = new SearchIndex()
@@ -2000,6 +2056,7 @@ export const useAether = create<AetherState>()((set, get) => {
       controller.setHubLabels(next.hubLabels)
       controller.setMotion(next.motion)
       controller.showThumbnails = next.thumbnails
+      controller.galleries = next.starGalleries
       // Only system graphs carry folder nodes and picture moons: crossing system ↔ others, a new
       // depth or moons on/off there rebuilds; so does the Today hub coming or going (every layout).
       const system = next.layoutMode === 'system'
@@ -2336,6 +2393,60 @@ export const useAether = create<AetherState>()((set, get) => {
 
     assets: new Map(),
     brief: null,
+    gallery: null,
+
+    setGallery(star) {
+      const path = star !== null && isFolderId(star) ? folderPathOf(star) : null
+      if (path === get().gallery) return
+      const shown = get().graph?.gallery ?? null
+      set({ gallery: path })
+      if (get().status !== 'ready' || get().settings.layoutMode !== 'system') return
+      // A star without pictures has no cards: nothing to rebuild for (unless a gallery is drawn now).
+      const cards = path !== null && picturesUnder(get().assets, path) > 0
+      if (!cards && !shown) return
+      rebuildGraph()
+      const open = get().graph?.gallery
+      if (open && !galleryHinted) {
+        galleryHinted = true
+        const title = nodeOf(get().graph, open.star)?.title ?? open.path
+        get().toast(`★ ${title}: ${galleryCount(open.cards, open.total)} in 3D around the star · Shift+G folds them`)
+      }
+    },
+
+    toggleGallery() {
+      const { graph, settings, selectedId, assets, view } = get()
+      if (get().status !== 'ready') return
+      if (settings.layoutMode !== 'system') {
+        get().toast('Star galleries live in the system layout: press t to get there')
+        return
+      }
+      // The open gallery folds, unless another star is selected: that one opens instead.
+      const selected = starOf(graph, selectedId)
+      const open = controller.gallery
+      if (open !== null && (selected === null || selected === open)) {
+        controller.closeGallery()
+        return
+      }
+      const star = selected ?? controller.nearestStar()
+      if (!star) {
+        get().toast('Select a project star (★) first, or fly close to one')
+        return
+      }
+      const title = nodeOf(graph, star)?.title ?? folderPathOf(star)
+      const total = picturesUnder(assets, folderPathOf(star))
+      if (total === 0) {
+        get().toast(`No pictures under ★ ${title} yet: drop some on the window`)
+        return
+      }
+      galleryHinted = true
+      if (COVERING_VIEWS.has(view)) set({ view: 'graph' })
+      controller.openGallery(star)
+      get().select(star, { fly: true })
+      // Once the cards have flown out, frame the whole gallery.
+      flyWhenSettled(star)
+      const cards = get().graph?.gallery?.cards ?? total
+      get().toast(`★ ${title}: ${galleryCount(cards, total)} in 3D · Shift+G folds them`)
+    },
 
     refreshBrief() {
       const { status, brief } = get()
