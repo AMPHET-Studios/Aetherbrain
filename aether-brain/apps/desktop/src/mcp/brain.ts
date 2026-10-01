@@ -94,6 +94,28 @@ import type {
 } from '@aether/core'
 import { FsVault } from '../main/fsvault.js'
 import { VaultWatcher } from '../main/watcher.js'
+import { PLAYBOOK_BODY, PLAYBOOK_TITLE } from './companion.js'
+import {
+  ABOUT_ME_SECTIONS,
+  ABOUT_ME_TITLE,
+  CHATS_FOLDER,
+  CHECKINS_FOLDER,
+  ME_FOLDER,
+  aboutMeNote,
+  checkInNote,
+  checkInRow,
+  checkInTitle,
+  checkInTrends,
+  emptySections,
+  factLine,
+  localDay,
+  localMonth,
+  parseCheckIns,
+  playbookNote,
+  type AboutMeArea,
+  type CheckIn,
+  type CheckInRow,
+} from './me.js'
 import type { VaultChangeDto } from '../shared/ipc.js'
 
 /** Files + folders a host already read, so the brain skips its own scan. */
@@ -1180,6 +1202,213 @@ export class Brain {
       }
       throw new Error(`No free file name for "${base}" in ${dir || 'the vault root'}`)
     })
+  }
+
+  /* ------------------------------ Me ------------------------------ */
+
+  /**
+   * What the user asked the companion to remember (Me/About me), which of its
+   * sections are still empty, and the trends of the last two weeks of
+   * check-ins. Read only: the note is made by the first remember_about_me (or
+   * when the brain's chat opens).
+   */
+  async aboutMe(now = new Date()) {
+    const d = await this.state()
+    const at = this.mePath(d, ABOUT_ME_TITLE)
+    const n = this.noteAt(d, at)
+    const raw = n ? await this.current(n) : null
+    const trends = await this.trendsOf(d, now, 14)
+    return {
+      path: n?.meta.path ?? at,
+      exists: raw !== null,
+      text: raw === null ? '' : splitFrontmatter(raw).body.trim(),
+      empty: raw === null ? Object.values(ABOUT_ME_SECTIONS) : emptySections(raw),
+      checkIns: trends,
+    }
+  }
+
+  /** Make Me/About me and Me/Wellbeing playbook when they are missing (never over anything). Returns the paths made. */
+  ensureMe(now = new Date()) {
+    return this.exclusive(async () => {
+      this.assertWritable()
+      const d = await this.state()
+      const today = localDay(now)
+      const made: string[] = []
+      for (const [title, content] of [
+        [ABOUT_ME_TITLE, aboutMeNote(today)],
+        [PLAYBOOK_TITLE, playbookNote(today)],
+      ] as const) {
+        const p = this.mePath(d, title)
+        if (this.noteAt(d, p)) continue
+        try {
+          made.push((await this.createFile(p, content)).meta.path)
+        } catch (err) {
+          // Already on disk (the watcher has not reported it yet): leave it.
+          if (!isExistsError(err)) throw err
+        }
+      }
+      return made
+    })
+  }
+
+  /**
+   * Remember one fact about the user: a dated bullet at the end of its
+   * section of Me/About me (made when missing). The companion asks first.
+   */
+  rememberAboutMe(area: AboutMeArea, fact: string, now = new Date()) {
+    return this.exclusive(async () => {
+      this.assertWritable()
+      const heading = ABOUT_ME_SECTIONS[area]
+      if (!heading) throw new Error(`Unknown area "${area}"; use one of: ${Object.keys(ABOUT_ME_SECTIONS).join(', ')}`)
+      if (!fact.trim()) throw new Error('Nothing to remember: the fact is empty')
+      const d = await this.state()
+      const today = localDay(now)
+      const p = this.mePath(d, ABOUT_ME_TITLE)
+      const n = this.noteAt(d, p)
+      const raw = n ? await this.current(n) : aboutMeNote(today)
+      const line = factLine(fact, today)
+      const next = appendText(raw, line, heading)
+      const note = n ? await this.writeNote(n.meta.path, touchUpdated(next, today)) : await this.createFile(p, next)
+      return { path: note.meta.path, section: heading, line }
+    })
+  }
+
+  /** Record a check-in: a row in Me/Check-ins/Check-ins YYYY-MM (made when missing). */
+  checkIn(entry: CheckIn, now = new Date()) {
+    return this.exclusive(async () => {
+      this.assertWritable()
+      if (!Number.isFinite(entry.mood)) throw new Error('A check-in needs a mood from 1 to 10')
+      const d = await this.state()
+      const today = localDay(now)
+      const month = localMonth(now)
+      const p = this.mePath(d, `${CHECKINS_FOLDER}/${checkInTitle(month)}`)
+      const n = this.noteAt(d, p)
+      const raw = n ? await this.current(n) : checkInNote(month, today)
+      const row = checkInRow(entry, now)
+      // The row goes right after the table's last row (or its header), whatever follows the table.
+      const lines = raw.split('\n')
+      let at = -1
+      for (let i = 0; i < lines.length; i++) if (/^\s*\|/.test(lines[i] ?? '')) at = i
+      const cr = raw.includes('\r\n') ? '\r' : ''
+      if (at < 0) lines.push('', row + cr)
+      else lines.splice(at + 1, 0, row + cr)
+      const next = lines.join('\n')
+      const note = n ? await this.writeNote(n.meta.path, touchUpdated(next, today)) : await this.createFile(p, next)
+      const trends = await this.trendsOf(await this.state(), now, 14)
+      return { path: note.meta.path, row, trends }
+    })
+  }
+
+  /** Trends of the check-ins over the last `days` (7–90): the last week against the weeks before, and plain-fact notices. */
+  async trends(days = 14, now = new Date()) {
+    return this.trendsOf(await this.state(), now, days)
+  }
+
+  /** The Wellbeing playbook: the user's copy (Me/Wellbeing playbook) when there is one, else the app's; one section with `topic`. */
+  async playbook(topic?: string) {
+    const d = await this.state()
+    const n = this.noteAt(d, this.mePath(d, PLAYBOOK_TITLE))
+    const text = n ? splitFrontmatter(await this.current(n)).body : PLAYBOOK_BODY
+    if (!topic?.trim()) return { path: n?.meta.path ?? null, text }
+    const want = topic.trim().toLowerCase()
+    const parts = text.split(/\n(?=#{2,3} )/)
+    const hit = parts.filter((s) => s.split('\n', 1)[0]!.toLowerCase().includes(want))
+    return { path: n?.meta.path ?? null, text: hit.length ? hit.join('\n') : text }
+  }
+
+  /**
+   * Save a conversation held in the brain's own chat as a note in Me/Chats:
+   * inert like an imported chat (the transcript is quoted; nothing in it
+   * becomes a link, tag or task). With `path` (what an earlier save of the
+   * same conversation returned) its transcript is rewritten in place; text
+   * the user added above it stays.
+   */
+  saveBrainChat(input: {
+    title: string
+    assistant: string
+    model: string
+    messages: { role: 'user' | 'assistant'; text: string; time: string }[]
+    path?: string | null
+    now?: Date
+  }) {
+    return this.exclusive(async () => {
+      this.assertWritable()
+      const d = await this.state()
+      const now = input.now ?? new Date()
+      const today = localDay(now)
+      const title = input.title.replace(/\s+/g, ' ').trim() || 'Brain chat'
+      const messages = input.messages.filter((m) => m.text.trim())
+      const conv: ChatConversation = {
+        source: 'claude',
+        id: '',
+        title,
+        created: messages[0]?.time ?? now.toISOString(),
+        updated: messages.at(-1)?.time ?? now.toISOString(),
+        url: '',
+        projectId: null,
+        gptId: null,
+        model: input.model || null,
+        messages: messages.map((m) => ({ role: m.role, time: m.time, text: m.text, attachments: [], images: [], artifacts: [] })),
+      }
+      const speaker = input.assistant.replace(/[\r\n#]/g, ' ').trim() || 'Companion'
+      const relabel = (text: string): string => text.replace(/^### Claude(?= ·|$)/gm, `### ${speaker}`)
+      const before = input.path ? this.noteAt(d, input.path) : undefined
+      if (before?.meta.tags.includes('brain-chat')) {
+        const raw = await this.current(before)
+        const next = applyChatUpdate(raw, { heading: TRANSCRIPT_HEADING, section: relabel(renderTranscript(conv)), updated: today })
+        if (next !== null) {
+          const note = next === raw ? before : await this.writeNote(before.meta.path, next)
+          return { path: note.meta.path, title: note.meta.title }
+        }
+      }
+      const dir = this.canonical(d, `${this.home}${ME_FOLDER}/${CHATS_FOLDER}`)
+      const base = noteBase(chatBaseName(conv))
+      for (let n = 1; n <= 500; n++) {
+        const name = n === 1 ? base : `${base} ${n}`
+        const p = `${dir}/${name}.md`
+        if (WIN_RESERVED.test(`${name}.md`) || isIgnoredPath(p) || this.vault.isIgnored(p)) continue
+        if (d.byId.has(idFromPath(p).toLowerCase())) continue
+        const rendered = relabel(renderChatNote(conv, name)).replace(/^Claude chat$/m, `Chat in the brain with ${speaker}`)
+        const split = splitFrontmatter(rendered)
+        const content = joinFrontmatter({ ...split.frontmatter, tags: ['ai-chat', 'brain-chat'] }, split.body)
+        try {
+          const note = await this.createFile(p, content)
+          return { path: note.meta.path, title: note.meta.title }
+        } catch (err) {
+          if (!isExistsError(err)) throw err
+        }
+      }
+      throw new Error(`No free file name for "${base}" in ${dir}`)
+    })
+  }
+
+  /** Vault path of the Me note `rel` (`Check-ins/Check-ins 2026-10`), in the vault's own spelling of its folders. */
+  private mePath(d: Derived, rel: string): string {
+    const parts = rel.split('/')
+    const file = parts.pop()!
+    return `${this.canonical(d, [`${this.home}${ME_FOLDER}`, ...parts].join('/'))}/${file}.md`
+  }
+
+  /** The note at vault path `p`, in any letter case, or undefined. */
+  private noteAt(d: Derived, p: string): ParsedNote | undefined {
+    const exact = this.notes.get(idFromPath(p))
+    if (exact) return exact
+    const ids = d.byId.get(idFromPath(p).toLowerCase())
+    return ids?.length === 1 ? this.notes.get(ids[0]!) : undefined
+  }
+
+  /** Every check-in of the months the last `days` reach into, then their trends. */
+  private async trendsOf(d: Derived, now: Date, days: number) {
+    const rows: CheckInRow[] = []
+    const span = Math.min(90, Math.max(7, Math.round(days)))
+    const months = new Set<string>()
+    for (let i = 0; i <= span; i += 7) months.add(localMonth(new Date(now.getTime() - i * 86_400_000)))
+    months.add(localMonth(new Date(now.getTime() - span * 86_400_000)))
+    for (const m of months) {
+      const n = this.noteAt(d, this.mePath(d, `${CHECKINS_FOLDER}/${checkInTitle(m)}`))
+      if (n) rows.push(...parseCheckIns(await this.current(n)))
+    }
+    return checkInTrends(rows, localDay(now), span)
   }
 
   /** Quick capture: a new Inbox note from free text. */

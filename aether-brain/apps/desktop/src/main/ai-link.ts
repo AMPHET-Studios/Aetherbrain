@@ -275,6 +275,8 @@ export class AiLinkHost {
   private mod: Promise<McpModule> | null = null
   private queue: Promise<void> = Promise.resolve()
   private stopped = false
+  /** The brain's chat uses the brain too: it stays open while the vault is, link on or off. */
+  private chatWanted = false
 
   constructor(opts: AiLinkHostOptions) {
     this.opts = opts
@@ -380,7 +382,30 @@ export class AiLinkHost {
   }
 
   private wanted(): boolean {
-    return !this.stopped && this.settings.enabled && this.target !== null
+    return !this.stopped && (this.settings.enabled || this.chatWanted) && this.target !== null
+  }
+
+  /**
+   * The brain's chat will use the brain: keep it open with the vault (and
+   * keep the next vault read as its preload), whether the HTTP link is on
+   * or not.
+   */
+  wantBrain(on: boolean): Promise<AiLinkStatus> {
+    this.chatWanted = on
+    return this.enqueue(() => this.sync())
+  }
+
+  /**
+   * The open brain and the bundle, for the brain's chat; opens the brain
+   * when needed (a whole drive takes a moment). Throws when no vault is open
+   * or the brain could not be opened.
+   */
+  async useBrain(): Promise<{ brain: Brain; mod: McpModule }> {
+    this.chatWanted = true
+    await this.enqueue(() => this.sync())
+    const brain = this.brain
+    if (!brain) throw new Error(this.target ? (this.error ?? 'The brain could not be opened') : 'Open a vault first')
+    return { brain, mod: await this.module() }
   }
 
   /**
@@ -452,6 +477,12 @@ export class AiLinkHost {
         const backlog = this.backlog?.key === key ? this.backlog.batches : []
         this.backlog = null
         for (const batch of backlog) brain.applyExternal(batch)
+      }
+      // Open for the chat only: no HTTP link.
+      if (!this.settings.enabled) {
+        await this.closeLink()
+        this.error = null
+        return
       }
       const lkey = JSON.stringify([port, token, readOnly])
       if (this.link && this.linkKey !== lkey) await this.closeLink()

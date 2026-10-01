@@ -103,6 +103,9 @@ export interface VaultProgressDto {
   done: boolean
 }
 
+import type { ChatEventDto, ChatPatch, ChatReplyDto, ChatStatusDto } from './chat.js'
+export type { ChatEventDto, ChatPatch, ChatReplyDto, ChatStatusDto } from './chat.js'
+
 export interface VaultRootDto {
   /** Absolute path on disk. */
   path: string
@@ -211,6 +214,17 @@ export interface AetherBridge {
   setFolderRules(rules: { hidden?: string[]; keep?: string[] }): Promise<VaultInfo>
   /** Installed games and programs left out so far. */
   skippedInstalls(): Promise<SkippedInstallDto[]>
+
+  /** The brain's chat: its settings and whether it can chat now. */
+  chatStatus(): Promise<ChatStatusDto>
+  chatConfigure(patch: ChatPatch): Promise<ChatStatusDto>
+  /** Send a message in conversation `conv` (an id the renderer makes); events stream through onChatEvent. */
+  chatSend(conv: string, text: string): Promise<ChatReplyDto>
+  /** Stop the answer being written. */
+  chatStop(conv: string): Promise<void>
+  /** Let go of a conversation (its note stays). */
+  chatForget(conv: string): Promise<void>
+  onChatEvent(cb: (e: ChatEventDto) => void): () => void
   /** Drive roots on Windows (`C:\`, `D:\`, …); empty elsewhere. */
   listDrives(): Promise<string[]>
   listFiles(): Promise<VaultFileDto[]>
@@ -271,6 +285,12 @@ export const IPC = {
   unhideFolder: 'vault:unhideFolder',
   setFolderRules: 'vault:setFolderRules',
   skippedInstalls: 'vault:skippedInstalls',
+  chatStatus: 'chat:status',
+  chatConfigure: 'chat:configure',
+  chatSend: 'chat:send',
+  chatStop: 'chat:stop',
+  chatForget: 'chat:forget',
+  chatEvent: 'chat:event',
   drives: 'vault:drives',
   list: 'vault:list',
   folders: 'vault:folders',

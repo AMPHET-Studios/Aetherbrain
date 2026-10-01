@@ -11,7 +11,7 @@
  *
  * No telemetry. The renderer is sandboxed with context isolation and makes no network requests.
  */
-import { app, BrowserWindow, clipboard, dialog, ipcMain, protocol, shell, nativeTheme, screen, session } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, protocol, safeStorage, shell, nativeTheme, screen, session } from 'electron'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -25,6 +25,7 @@ import {
   type VaultInfo,
   type VaultProgressDto,
 } from '../shared/ipc.js'
+import type { ChatPatch } from '../shared/chat.js'
 import { FsVault, isVideoName, within } from './fsvault.js'
 import { VaultWatcher } from './watcher.js'
 import {
@@ -43,6 +44,7 @@ import {
 import { THUMB_IPC, Thumbnailer, VIDEO_SCHEME } from './thumbnailer.js'
 import { AiLinkHost, aiSettings, cleanPatch, type AiLinkSettings, type LinkVault } from './ai-link.js'
 import { ForgeHost, forgeSettings, type ForgeSettings } from './forge.js'
+import { ChatHost, chatSettings, type ChatSettingsStored } from './chat-host.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -73,6 +75,8 @@ interface Settings {
   ai?: Partial<AiLinkSettings>
   /** The Concept Forge link (the remembered concept-forge.html). */
   forge?: ForgeSettings
+  /** The brain's chat (provider, models, the encrypted API key). */
+  chat?: ChatSettingsStored
 }
 
 let settings: Settings = {}
@@ -190,6 +194,7 @@ let opened = false
 let aiHeld: VaultChangeDto[][] | null = null
 let win: BrowserWindow | null = null
 let ai: AiLinkHost | null = null
+let chat: ChatHost | null = null
 
 /** Changes for the AI link's brain: held during a read, else applied now. */
 function toAi(changes: VaultChangeDto[]): void {
@@ -715,6 +720,35 @@ function createAiLink(): AiLinkHost {
   })
 }
 
+/* ------------------------------------------------------------------ */
+/* The brain's chat                                                   */
+/* ------------------------------------------------------------------ */
+
+function createChat(): ChatHost {
+  const initial = chatSettings(settings.chat)
+  return new ChatHost({
+    settings: initial,
+    save: (s) => {
+      settings.chat = s
+      return saveSettings()
+    },
+    brain: () => requireAi().useBrain(),
+    vaultOpen: () => vault !== null,
+    wantBrain: (on) => void ai?.wantBrain(on),
+    emit: (e) => toRenderer(IPC.chatEvent, e),
+    keychain: {
+      available: () => safeStorage.isEncryptionAvailable(),
+      encrypt: (text) => safeStorage.encryptString(text).toString('base64'),
+      decrypt: (b64) => safeStorage.decryptString(Buffer.from(b64, 'base64')),
+    },
+  })
+}
+
+function requireChat(): ChatHost {
+  if (!chat) throw new Error('The chat is not ready yet')
+  return chat
+}
+
 function requireAi(): AiLinkHost {
   if (!ai) throw new Error('The AI link is not ready yet')
   return ai
@@ -806,6 +840,11 @@ function registerIpc(): void {
   ipcMain.on(THUMB_IPC.done, (e, id: unknown, png: unknown) => thumbnailer.done(e.sender, id, png))
   ipcMain.handle(IPC.createAsset, (_e, p: unknown, data: unknown) => createAsset(p, data))
   ipcMain.handle(IPC.openAsset, (_e, p: unknown) => openAsset(p))
+  ipcMain.handle(IPC.chatStatus, () => requireChat().status())
+  ipcMain.handle(IPC.chatConfigure, (_e, patch: unknown) => requireChat().configure(patch && typeof patch === 'object' ? (patch as ChatPatch) : {}))
+  ipcMain.handle(IPC.chatSend, (_e, conv: unknown, text: unknown) => requireChat().send(conv, text))
+  ipcMain.handle(IPC.chatStop, (_e, conv: unknown) => requireChat().stop(conv))
+  ipcMain.handle(IPC.chatForget, (_e, conv: unknown) => requireChat().forget(conv))
   ipcMain.handle(IPC.aiStatus, () => requireAi().status())
   ipcMain.handle(IPC.aiConfigure, (_e, patch: unknown) => requireAi().configure(cleanPatch(patch)))
   ipcMain.handle(IPC.copy, (_e, text: unknown) => clipboard.writeText(String(text)))
@@ -875,6 +914,7 @@ app.on('before-quit', () => {
   watcher?.stop()
   watcher = null
   thumbnailer.stop()
+  void chat?.close()
   void ai?.stop()
 })
 
@@ -888,6 +928,7 @@ void app.whenReady().then(async () => {
   settings = loaded.settings
   if (loaded.migrated) void saveSettings()
   ai = createAiLink()
+  chat = createChat()
   registerIpc()
   createWindow()
   registerForgeIpc(createForge())

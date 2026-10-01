@@ -26,6 +26,8 @@ export type { BrainOptions, BrainPreload, FolderNode, NoteRef, ProjectBrief, Tas
 export { INSTRUCTIONS, SERVER_VERSION, TOOLS, createMcpServer } from './tools.js'
 export type { ActivityEvent, McpServerOptions, ToolName } from './tools.js'
 export { MAX_BODY_BYTES, clientFromUserAgent, startHttpLink } from './http.js'
+export { BrainTools, ChatThread, isLoopbackUrl, sessionBlock, timeLine } from './chat.js'
+export type { ChatContext, ChatSettings, TurnOptions, TurnResult } from './chat.js'
 export type { HttpLink, HttpLinkOptions } from './http.js'
 
 export interface CliOptions {

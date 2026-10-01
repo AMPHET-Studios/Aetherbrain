@@ -33,6 +33,7 @@
     "@aether/core": "workspace:*",
     "@aether/graph": "workspace:*",
     "@aether/ui": "workspace:*",
+    "@anthropic-ai/sdk": "0.131.0",
     "@modelcontextprotocol/sdk": "1.31.0",
     "@tailwindcss/vite": "^4.3.3",
     "@types/react": "^19.3.0",
