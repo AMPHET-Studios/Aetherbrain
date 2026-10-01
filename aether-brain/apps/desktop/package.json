@@ -1,7 +1,7 @@
 {
   "name": "@aether/desktop",
   "productName": "Aether Brain",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "private": true,
   "description": "Aether Brain desktop shell (Electron): pick a vault folder, watch it, render the 3D brain.",
   "author": "Aether Brain contributors",
@@ -18,7 +18,7 @@
     "build:mcp": "vite build --config vite.mcp.config.ts",
     "build:main": "tsc -p tsconfig.main.json",
     "build:renderer": "vite build",
-    "build": "pnpm build:mcp && pnpm build:main && pnpm build:renderer",
+    "build": "pnpm build:mcp && pnpm build:main && pnpm build:renderer && pnpm build:vision",
     "start": "pnpm build:main && electron .",
     "typecheck:main": "tsc -p tsconfig.main.json --noEmit",
     "typecheck:mcp": "tsc -p tsconfig.mcp.json --noEmit",
@@ -27,13 +27,15 @@
     "dist": "pnpm build && electron-builder --config electron-builder.config.cjs --publish never && pnpm pack:mcpb",
     "dist:win": "pnpm build && electron-builder --config electron-builder.config.cjs --win --publish never && pnpm pack:mcpb",
     "dist:mac": "pnpm build && electron-builder --config electron-builder.config.cjs --mac --publish never && pnpm pack:mcpb",
-    "dist:linux": "pnpm build && electron-builder --config electron-builder.config.cjs --linux --publish never && pnpm pack:mcpb"
+    "dist:linux": "pnpm build && electron-builder --config electron-builder.config.cjs --linux --publish never && pnpm pack:mcpb",
+    "build:vision": "vite build --config vite.vision.config.ts"
   },
   "devDependencies": {
     "@aether/core": "workspace:*",
     "@aether/graph": "workspace:*",
     "@aether/ui": "workspace:*",
     "@anthropic-ai/sdk": "0.131.0",
+    "@huggingface/transformers": "4.3.0",
     "@modelcontextprotocol/sdk": "1.31.0",
     "@tailwindcss/vite": "^4.3.3",
     "@types/react": "^19.3.0",

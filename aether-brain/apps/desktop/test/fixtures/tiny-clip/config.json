@@ -1,0 +1,20 @@
+{
+ "model_type": "clip",
+ "architectures": [
+  "CLIPModel"
+ ],
+ "projection_dim": 8,
+ "logit_scale_init_value": 4.6052,
+ "text_config": {
+  "model_type": "clip_text_model",
+  "hidden_size": 8,
+  "vocab_size": 44,
+  "max_position_embeddings": 77
+ },
+ "vision_config": {
+  "model_type": "clip_vision_model",
+  "hidden_size": 8,
+  "image_size": 224,
+  "patch_size": 32
+ }
+}

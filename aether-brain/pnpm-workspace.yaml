@@ -3,3 +3,8 @@ packages:
   - packages/*
 onlyBuiltDependencies:
   - electron
+# transformers.js (the librarian's vision helper) runs its web build only; its Node backends are
+# never loaded, so they are not installed (onnxruntime-node alone is ~290 MB of native binaries).
+overrides:
+  onnxruntime-node: '-'
+  sharp: '-'

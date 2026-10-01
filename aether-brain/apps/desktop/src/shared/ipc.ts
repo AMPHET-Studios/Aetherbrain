@@ -105,6 +105,8 @@ export interface VaultProgressDto {
 
 import type { ChatEventDto, ChatPatch, ChatReplyDto, ChatStatusDto } from './chat.js'
 export type { ChatEventDto, ChatPatch, ChatReplyDto, ChatStatusDto } from './chat.js'
+import type { LibraryEventDto, LibraryModelAction, LibraryPatch, LibraryStatusDto } from './library.js'
+export type * from './library.js'
 
 export interface VaultRootDto {
   /** Absolute path on disk. */
@@ -225,6 +227,23 @@ export interface AetherBridge {
   /** Let go of a conversation (its note stays). */
   chatForget(conv: string): Promise<void>
   onChatEvent(cb: (e: ChatEventDto) => void): () => void
+
+  /** The librarian: where from and to, the vision model, the job running, the plan, the last result. */
+  libraryStatus(): Promise<LibraryStatusDto>
+  libraryConfigure(patch: LibraryPatch): Promise<LibraryStatusDto>
+  /** Choose the folder to sort (`source`) or the library folder (`dest`) with the OS picker. */
+  libraryPick(which: 'source' | 'dest'): Promise<LibraryStatusDto>
+  /** Look through the pictures and plan the library (progress and the plan arrive through onLibraryEvent). */
+  libraryAnalyze(): Promise<LibraryStatusDto>
+  /** Copy the plan's new pictures into the library and write its notes. */
+  libraryCopy(): Promise<LibraryStatusDto>
+  /** Stop looking or copying (what is copied stays). */
+  libraryStop(): Promise<void>
+  /** Download the vision model (about 150 MB, once), stop the download, or delete the model. */
+  libraryModel(action: LibraryModelAction): Promise<LibraryStatusDto>
+  /** A small picture (data URL) of one picture of the plan, or null. */
+  libraryThumb(id: number): Promise<string | null>
+  onLibraryEvent(cb: (e: LibraryEventDto) => void): () => void
   /** Drive roots on Windows (`C:\`, `D:\`, …); empty elsewhere. */
   listDrives(): Promise<string[]>
   listFiles(): Promise<VaultFileDto[]>
@@ -291,6 +310,15 @@ export const IPC = {
   chatStop: 'chat:stop',
   chatForget: 'chat:forget',
   chatEvent: 'chat:event',
+  libraryStatus: 'library:status',
+  libraryConfigure: 'library:configure',
+  libraryPick: 'library:pick',
+  libraryAnalyze: 'library:analyze',
+  libraryCopy: 'library:copy',
+  libraryStop: 'library:stop',
+  libraryModel: 'library:model',
+  libraryThumb: 'library:thumb',
+  libraryEvent: 'library:event',
   drives: 'vault:drives',
   list: 'vault:list',
   folders: 'vault:folders',

@@ -13,6 +13,7 @@
  */
 import { app, BrowserWindow, clipboard, dialog, ipcMain, protocol, safeStorage, shell, nativeTheme, screen, session } from 'electron'
 import { promises as fs } from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
@@ -45,14 +46,22 @@ import { THUMB_IPC, Thumbnailer, VIDEO_SCHEME } from './thumbnailer.js'
 import { AiLinkHost, aiSettings, cleanPatch, type AiLinkSettings, type LinkVault } from './ai-link.js'
 import { ForgeHost, forgeSettings, type ForgeSettings } from './forge.js'
 import { ChatHost, chatSettings, type ChatSettingsStored } from './chat-host.js'
+import { LibraryHost, librarySettings, type LibrarySettings } from './library-host.js'
+import { VISION_IPC, VISION_SCHEME, VisionHelper } from './library/vision.js'
+import { VisionModel } from './library/vision-model.js'
+import type { LibraryModelAction, LibraryPatch } from '../shared/library.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
 // The thumbnail helper's session serves videos on this scheme (see thumbnailer.ts): its media
 // player streams them in ranges and draws a frame of them, so the scheme must be streamable and
 // CORS-enabled. Schemes can only be registered before the app is ready.
+// The librarian's vision helper loads its page, the ONNX runtime and the model files on its own
+// scheme (see library/vision.ts): standard and secure, so it is an origin that can be cross-origin
+// isolated (threads) and fetch from itself.
 protocol.registerSchemesAsPrivileged([
   { scheme: VIDEO_SCHEME, privileges: { standard: true, secure: true, stream: true, supportFetchAPI: true, corsEnabled: true } },
+  { scheme: VISION_SCHEME, privileges: { standard: true, secure: true, stream: true, supportFetchAPI: true, corsEnabled: true } },
 ])
 const isDev = !!process.env['VITE_DEV_SERVER_URL']
 const settingsFile = () => path.join(app.getPath('userData'), 'settings.json')
@@ -77,6 +86,8 @@ interface Settings {
   forge?: ForgeSettings
   /** The brain's chat (provider, models, the encrypted API key). */
   chat?: ChatSettingsStored
+  /** The librarian: where pictures are sorted from and to. */
+  library?: LibrarySettings
 }
 
 let settings: Settings = {}
@@ -195,6 +206,8 @@ let aiHeld: VaultChangeDto[][] | null = null
 let win: BrowserWindow | null = null
 let ai: AiLinkHost | null = null
 let chat: ChatHost | null = null
+let library: LibraryHost | null = null
+let vision: VisionHelper | null = null
 
 /** Changes for the AI link's brain: held during a read, else applied now. */
 function toAi(changes: VaultChangeDto[]): void {
@@ -749,6 +762,62 @@ function requireChat(): ChatHost {
   return chat
 }
 
+/* ------------------------------------------------------------------ */
+/* The librarian                                                      */
+/* ------------------------------------------------------------------ */
+
+/** The model is downloaded through a session of its own (in memory): the app's own session refuses the web. */
+const VISION_DOWNLOAD_PARTITION = 'aether-vision-download'
+
+/** Where pictures are sorted from and to until the user picks: `D:\` → `F:\MASTERIMAGES` on Windows. */
+function libraryDefaults(): { source: string; dest: string } {
+  if (process.platform === 'win32') return { source: 'D:\\', dest: 'F:\\MASTERIMAGES' }
+  return { source: path.join(os.homedir(), 'Pictures'), dest: path.join(os.homedir(), 'MASTERIMAGES') }
+}
+
+/** The vault path of an absolute path the brain shows (inside a root, not in a skipped folder), else null. */
+function shownVaultPath(abs: string): string | null {
+  if (!vault) return null
+  const vp = vault.toVault(abs)
+  return vp !== null && !vault.isIgnored(vp) ? vp : null
+}
+
+function createLibrary(): LibraryHost {
+  const userData = app.getPath('userData')
+  const model = new VisionModel(
+    path.join(userData, 'vision-models'),
+    (url, init) => session.fromPartition(VISION_DOWNLOAD_PARTITION).fetch(url, init),
+    process.env['AETHER_VISION_MODEL_URL'] || undefined,
+  )
+  const helper = new VisionHelper({
+    electron: { BrowserWindow, session },
+    preload: path.join(__dirname, '..', 'preload', 'vision-preload.cjs'),
+    appDir: path.join(__dirname, '..', 'vision'),
+    model,
+  })
+  vision = helper
+  return new LibraryHost({
+    initial: librarySettings(settings.library),
+    defaults: libraryDefaults(),
+    save: (s) => {
+      settings.library = s
+      void saveSettings()
+    },
+    emit: (e) => toRenderer(IPC.libraryEvent, e),
+    eyes: () => helper,
+    restEyes: () => helper.stop(),
+    model,
+    cacheFile: path.join(userData, 'library-looks.json'),
+    toVault: shownVaultPath,
+    thumb: (abs, px) => renderThumb(abs, px),
+  })
+}
+
+function requireLibrary(): LibraryHost {
+  if (!library) throw new Error('The librarian is not ready yet')
+  return library
+}
+
 function requireAi(): AiLinkHost {
   if (!ai) throw new Error('The AI link is not ready yet')
   return ai
@@ -845,6 +914,27 @@ function registerIpc(): void {
   ipcMain.handle(IPC.chatSend, (_e, conv: unknown, text: unknown) => requireChat().send(conv, text))
   ipcMain.handle(IPC.chatStop, (_e, conv: unknown) => requireChat().stop(conv))
   ipcMain.handle(IPC.chatForget, (_e, conv: unknown) => requireChat().forget(conv))
+  ipcMain.handle(IPC.libraryStatus, () => requireLibrary().status())
+  ipcMain.handle(IPC.libraryConfigure, (_e, patch: unknown) => requireLibrary().configure(patch && typeof patch === 'object' ? (patch as LibraryPatch) : {}))
+  ipcMain.handle(IPC.libraryPick, async (_e, which: unknown) => {
+    const lib = requireLibrary()
+    const dest = which === 'dest'
+    const dir = await chooseFolder(
+      dest ? 'Where should the library go?' : 'Which folder or drive should the librarian sort?',
+      dest ? 'Pictures are copied into this folder, sorted by type, genre and year.' : 'Every picture in it is copied (never moved or changed).',
+    )
+    return dir ? lib.configure(dest ? { dest: dir } : { source: dir }) : lib.status()
+  })
+  ipcMain.handle(IPC.libraryAnalyze, () => requireLibrary().analyze())
+  ipcMain.handle(IPC.libraryCopy, () => requireLibrary().copy())
+  ipcMain.handle(IPC.libraryStop, () => requireLibrary().stop())
+  ipcMain.handle(IPC.libraryModel, (_e, action: unknown) =>
+    requireLibrary().model(action === 'cancel' || action === 'remove' ? (action as LibraryModelAction) : 'download'),
+  )
+  ipcMain.handle(IPC.libraryThumb, (_e, id: unknown) => within(requireLibrary().thumb(id), THUMB_TIMEOUT, null))
+  // From the vision helper only: the helper ignores every other sender.
+  ipcMain.on(VISION_IPC.ready, (e) => vision?.ready(e.sender))
+  ipcMain.on(VISION_IPC.done, (e, id: unknown, answer: unknown) => vision?.done(e.sender, id, answer))
   ipcMain.handle(IPC.aiStatus, () => requireAi().status())
   ipcMain.handle(IPC.aiConfigure, (_e, patch: unknown) => requireAi().configure(cleanPatch(patch)))
   ipcMain.handle(IPC.copy, (_e, text: unknown) => clipboard.writeText(String(text)))
@@ -899,6 +989,8 @@ function createWindow(): void {
     // Nothing asks for thumbnails without the brain window, and a hidden helper left open
     // would keep 'window-all-closed' from ever firing (the app would not quit).
     thumbnailer.stop()
+    library?.close()
+    vision?.stop()
   })
 }
 
@@ -914,6 +1006,8 @@ app.on('before-quit', () => {
   watcher?.stop()
   watcher = null
   thumbnailer.stop()
+  library?.close()
+  vision?.stop()
   void chat?.close()
   void ai?.stop()
 })
@@ -929,6 +1023,7 @@ void app.whenReady().then(async () => {
   if (loaded.migrated) void saveSettings()
   ai = createAiLink()
   chat = createChat()
+  library = createLibrary()
   registerIpc()
   createWindow()
   registerForgeIpc(createForge())
