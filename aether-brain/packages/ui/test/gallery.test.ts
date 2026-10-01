@@ -84,7 +84,7 @@ describe('star galleries in the app', () => {
     vi.advanceTimersByTime(GALLERY_DWELL_MS)
     expect(s().gallery).toBe('Projects/Gate')
     const g = s().graph!
-    expect(g.gallery).toEqual({ star: STAR, path: 'Projects/Gate', cards: 32, total: 32 })
+    expect(g.gallery).toEqual({ star: STAR, path: 'Projects/Gate', cards: 32, videos: 0, total: 32 })
     expect(g.nodes.filter((n) => n.image?.gallery?.star === STAR)).toHaveLength(32)
     expect(g.index.has(imageKey('Projects/Gate/Art/Old/Deeper/first.png'))).toBe(true)
     expect(g.nodes.find((n) => n.id === imageKey('Resources/tree.png'))?.image?.gallery).toBeUndefined()
@@ -210,6 +210,39 @@ describe('star galleries in the app', () => {
     s().controller.nearStar(STAR)
     vi.advanceTimersByTime(GALLERY_DWELL_MS)
     expect(s().gallery).toBe('Projects/Gate')
+  })
+
+  it('shows videos as cards too: one still each, counted in the toast; the browser adapters hand stills over', async () => {
+    const { s, store } = await freshStore()
+    vi.useRealTimers()
+    const files = notes()
+    await s().openVault(
+      new MemoryVaultAdapter(files, {
+        assets: [
+          { path: 'Projects/Gate/Art/ring.png', data: bytes(10), mtime: 1 },
+          { path: 'Projects/Gate/Art/turntable.mp4', data: bytes(30), mtime: 2 },
+          { path: 'Projects/Gate/Renders/timelapse.webm', data: bytes(20), mtime: 3 },
+        ],
+      }),
+    )
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+    s().select(STAR)
+    s().toggleGallery()
+    const g = s().graph!
+    expect(g.gallery).toMatchObject({ cards: 3, videos: 2 })
+    expect(g.nodes.filter((n) => n.image?.video).map((n) => n.image!.path).sort()).toEqual(['Projects/Gate/Art/turntable.mp4', 'Projects/Gate/Renders/timelapse.webm'])
+    expect(s().toasts.at(-1)?.text).toBe('★ Gate: 1 picture and 2 videos in 3D · Shift+G folds them')
+    expect(store.picturesUnder(s().assets, 'Projects/Gate')).toBe(3)
+    // Node has no DOM to take a still with: a video previews as nothing, a picture as itself.
+    vi.useRealTimers()
+    expect(await s().preview('Projects/Gate/Art/turntable.mp4', 128)).toBeNull()
+    expect((await s().preview('Projects/Gate/Art/ring.png', 128))?.size).toBe(10)
+    const { stillOf } = await import('../src/util')
+    expect(await stillOf(null, 128)).toBeNull()
+    expect(await stillOf(new Blob([]), 128)).toBeNull()
+    const png = new Blob([new Uint8Array([1])], { type: 'image/png' })
+    expect(await stillOf(png, 128)).toBe(png)
+    expect(await stillOf(new Blob([new Uint8Array([1])], { type: 'video/mp4' }), 128)).toBeNull()
   })
 
   it('counts pictures under a folder and finds the star of a node', async () => {

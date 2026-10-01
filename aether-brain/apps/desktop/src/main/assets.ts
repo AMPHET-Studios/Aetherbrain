@@ -3,9 +3,12 @@
  * in the OS), as pure functions so they are tested without Electron: size
  * caps, the thumbnail size clamp, what a real picture's first bytes look
  * like, its pixel size and orientation from the header, what the thumbnail
- * helper is asked to make, and the thumbnail cache.
+ * helper is asked to make, and the thumbnail cache. Videos: what their first
+ * bytes look like, and the byte ranges of one served to the thumbnail helper
+ * (it takes a still frame; nothing here decodes).
  */
-import { promises as fs } from 'node:fs'
+import { createReadStream, promises as fs } from 'node:fs'
+import { Readable } from 'node:stream'
 import { isImageName } from './fsvault.js'
 
 /** Largest picture the renderer may write (a dropped file, a Concept Forge drawing). */
@@ -341,6 +344,97 @@ export async function readUpTo(abs: string, max: number): Promise<Uint8Array | n
   } finally {
     await handle.close()
   }
+}
+
+/* ---- videos ---- */
+
+export type VideoKind = 'mp4' | 'quicktime' | 'webm' | 'ogg'
+
+/** The media type a video is served to the thumbnail helper as. */
+export const VIDEO_MIME: Record<VideoKind, string> = {
+  mp4: 'video/mp4',
+  quicktime: 'video/quicktime',
+  webm: 'video/webm',
+  ogg: 'video/ogg',
+}
+
+/** Bytes read from the start of a video to tell its kind. */
+export const VIDEO_HEAD_BYTES = 64
+/** Boxes an old QuickTime movie may start with instead of `ftyp`. */
+const QT_BOXES = ['moov', 'mdat', 'wide', 'free', 'skip', 'pnot'].map(ascii)
+/** `ftyp` brands of pictures (AVIF, HEIF), not videos. */
+const STILL_BRANDS = ['avif', 'avis', 'mif1', 'msf1', 'heic', 'heix'].map(ascii)
+const EBML = [0x1a, 0x45, 0xdf, 0xa3]
+const OGGS = ascii('OggS')
+
+/**
+ * What kind of video the first bytes start with (ISO BMFF: mp4, m4v, mov;
+ * Matroska / WebM; Ogg), or null for anything else, a picture in an
+ * ISO BMFF box (AVIF, HEIF) included. A video is opened with the OS player:
+ * a file named `.mp4` that is not one is never handed over.
+ */
+export function videoKindOf(b: Uint8Array): VideoKind | null {
+  if (has(b, 4, FTYP)) {
+    if (STILL_BRANDS.some((brand) => has(b, 8, brand))) return null
+    return has(b, 8, ascii('qt  ')) ? 'quicktime' : 'mp4'
+  }
+  if (QT_BOXES.some((box) => has(b, 4, box))) return 'quicktime'
+  if (has(b, 0, EBML)) return 'webm'
+  if (has(b, 0, OGGS)) return 'ogg'
+  return null
+}
+
+/** The first `n` bytes of a file (fewer when it is shorter). */
+export async function readHead(abs: string, n: number): Promise<Uint8Array> {
+  const handle = await fs.open(abs, 'r')
+  try {
+    const buf = new Uint8Array(n)
+    const { bytesRead } = await handle.read(buf, 0, n, 0)
+    return buf.subarray(0, bytesRead)
+  } finally {
+    await handle.close()
+  }
+}
+
+/**
+ * The bytes asked for by an HTTP `Range` header over a file of `size` bytes
+ * (`bytes=a-b`, `bytes=a-`, `bytes=-n`; one range): null when there is no
+ * usable header (the whole file is sent), 'unsatisfiable' when it starts past
+ * the end.
+ */
+export function byteRange(header: string | null, size: number): { start: number; end: number } | null | 'unsatisfiable' {
+  const m = header ? /^bytes=(\d*)-(\d*)$/.exec(header.trim()) : null
+  if (!m || (m[1] === '' && m[2] === '')) return null
+  if (m[1] === '') {
+    // The last n bytes.
+    const n = Number(m[2])
+    if (!(n > 0) || size === 0) return 'unsatisfiable'
+    return { start: Math.max(0, size - n), end: size - 1 }
+  }
+  const start = Number(m[1])
+  if (!(start < size)) return 'unsatisfiable'
+  const end = m[2] === '' ? size - 1 : Math.min(size - 1, Number(m[2]))
+  return end < start ? 'unsatisfiable' : { start, end }
+}
+
+/**
+ * The answer to one request of the thumbnail helper for a video it was
+ * handed: the whole file or the range asked for, streamed from disk (never
+ * held whole), as `mime`, readable by the helper's page (CORS) so a frame of
+ * it can be drawn and saved.
+ */
+export async function serveVideo(abs: string, mime: string, rangeHeader: string | null): Promise<Response> {
+  const cors = { 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-store' }
+  const st = await fs.stat(abs).catch(() => null)
+  if (!st?.isFile()) return new Response(null, { status: 404, headers: cors })
+  const range = byteRange(rangeHeader, st.size)
+  if (range === 'unsatisfiable') return new Response(null, { status: 416, headers: { ...cors, 'Content-Range': `bytes */${st.size}` } })
+  const { start, end } = range ?? { start: 0, end: st.size - 1 }
+  const length = Math.max(0, end - start + 1)
+  const body = length > 0 ? (Readable.toWeb(createReadStream(abs, { start, end })) as ReadableStream<Uint8Array>) : null
+  const headers: Record<string, string> = { ...cors, 'Content-Type': mime, 'Content-Length': String(length), 'Accept-Ranges': 'bytes' }
+  if (range) headers['Content-Range'] = `bytes ${start}-${end}/${st.size}`
+  return new Response(body, { status: range ? 206 : 200, headers })
 }
 
 /** The thumbnail size the renderer asked for, in whole pixels, clamped to 32–1024. */

@@ -11,6 +11,7 @@ import {
   isGhostId,
   isImageId,
   isTodayId,
+  isVideoPath,
   type BriefTask,
   type DailyBrief,
   type GraphNode,
@@ -224,7 +225,10 @@ export function linkRow(
 ): { kind: 'note' | 'ghost' | 'image' | 'today' | 'folder'; label: string; hint: string; dot?: string; dotClass?: string } {
   if (isGhostId(id)) return { kind: 'ghost', label: `+ ${ghostTitle(id)}`, hint: 'Missing note — select to create', dotClass: 'bg-danger' }
   if (isImageId(id)) {
-    return { kind: 'image', label: `🖼 ${imageFileName(imagePathOf(id))}`, hint: 'Click: select · double-click: open in your image app', dot: IMAGE_COLOR }
+    const path = imagePathOf(id)
+    return isVideoPath(path)
+      ? { kind: 'image', label: `▶ ${imageFileName(path)}`, hint: 'Click: select · double-click: play in your video player', dot: IMAGE_COLOR }
+      : { kind: 'image', label: `🖼 ${imageFileName(path)}`, hint: 'Click: select · double-click: open in your image app', dot: IMAGE_COLOR }
   }
   if (isTodayId(id)) return { kind: 'today', label: '☀ Today', hint: "Click: select the daily brief", dot: TODAY_COLOR }
   if (isFolderId(id)) {
@@ -769,9 +773,10 @@ function TodayInspector() {
 }
 
 /**
- * Inspector for a picture: a preview, where it lives, its size and date, the
- * notes that embed it, and Open (the OS image app, `e`), Reveal and Copy
- * embed (`![[name.png]]`, to paste into a note).
+ * Inspector for a picture or a video: a preview (a video's still, with a
+ * play badge), where it lives, its size and date, the notes that embed it,
+ * and Open (the OS image app or video player, `e`), Reveal and Copy embed
+ * (`![[name.png]]`, to paste into a note).
  */
 function ImageInspector({ id }: { id: NoteId }) {
   const path = imagePathOf(id)
@@ -796,13 +801,14 @@ function ImageInspector({ id }: { id: NoteId }) {
   const name = imageFileName(path)
   const folder = folderOf(path)
   const refs = [...(embeddedIn ?? [])].sort()
+  const video = info?.video === true || isVideoPath(path)
 
   return (
     <aside className="panel rise flex max-h-full w-80 flex-col overflow-hidden" aria-label="Picture inspector">
       <div className="p-4 pb-3">
         <div className="section-title flex items-center gap-1.5">
           <span className="inline-block h-2 w-2 rounded-full" style={{ background: IMAGE_COLOR, boxShadow: `0 0 8px ${IMAGE_COLOR}` }} />
-          Picture
+          {video ? 'Video' : 'Picture'}
         </div>
         <button
           type="button"
@@ -829,14 +835,21 @@ function ImageInspector({ id }: { id: NoteId }) {
 
       <div className="mx-4 mb-3 grid h-44 place-items-center overflow-hidden rounded-lg border border-[var(--line)] bg-black/40">
         {preview.url && !broken ? (
-          <img src={preview.url} alt={name} className="max-h-full max-w-full object-contain" draggable={false} onError={() => setBroken(true)} />
+          <span className="still grid h-full w-full place-items-center">
+            <img src={preview.url} alt={name} className="max-h-full max-w-full object-contain" draggable={false} onError={() => setBroken(true)} />
+            {video && (
+              <span className="play-badge" aria-hidden title="A still: it plays in your video player (e)">
+                ▶
+              </span>
+            )}
+          </span>
         ) : (
           <span className="text-[11.5px] text-faint">{preview.state === 'loading' ? 'Loading preview…' : 'No preview'}</span>
         )}
       </div>
 
       <div className="flex flex-wrap gap-1.5 px-4 pb-3">
-        <button type="button" className="hud-btn primary" onClick={() => void openImage(path)} title="Open in your image app (e · Enter)">
+        <button type="button" className="hud-btn primary" onClick={() => void openImage(path)} title={video ? 'Play it in your video player (e · Enter)' : 'Open in your image app (e · Enter)'}>
           Open <kbd className="!text-white/80">e</kbd>
         </button>
         {canReveal && (

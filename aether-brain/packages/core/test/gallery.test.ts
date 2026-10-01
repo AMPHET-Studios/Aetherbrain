@@ -1,5 +1,22 @@
 import { describe, expect, it } from 'vitest'
-import { GALLERY_MAX, assetMap, buildGraph, folderKey, imageKey, parseNote, type BuildGraphOptions, type NoteId, type ParsedNote } from '../src'
+import {
+  GALLERY_MAX,
+  SearchIndex,
+  applyChanges,
+  assetMap,
+  buildGraph,
+  folderKey,
+  imageBaseName,
+  imageKey,
+  isImagePath,
+  isMediaPath,
+  isVideoPath,
+  mimeOf,
+  parseNote,
+  type BuildGraphOptions,
+  type NoteId,
+  type ParsedNote,
+} from '../src'
 
 function notesOf(files: Record<string, string>): Map<NoteId, ParsedNote> {
   const m = new Map<NoteId, ParsedNote>()
@@ -49,7 +66,7 @@ describe('star gallery', () => {
     expect(closed.nodes[closed.index.get(folderKey('Projects/PORTALz'))!]!.folder!.role).toBe('project')
     const open = build({ gallery: 'Projects/PORTALz' })
     const star = folderKey('Projects/PORTALz')
-    expect(open.gallery).toEqual({ star, path: 'Projects/PORTALz', cards: 5, total: 5 })
+    expect(open.gallery).toEqual({ star, path: 'Projects/PORTALz', cards: 5, videos: 0, total: 5 })
     // The linked picture and the moons stay where they orbit; the rest come in around the star.
     expect(cards(open)).toEqual([
       ['Projects/PORTALz/Art/ruins.JPG', 'folder:Projects/PORTALz/Art', 2, false],
@@ -126,3 +143,47 @@ describe('star gallery', () => {
 function countFolders(g: { nodes: { folder?: unknown }[] }): number {
   return g.nodes.filter((n) => n.folder).length
 }
+
+describe('videos', () => {
+  it('are media the brain shows, never pictures it writes', () => {
+    for (const p of ['a/turntable.mp4', 'b/Clip.MOV', 'c/x.webm', 'd/y.m4v', 'e/z.ogv']) {
+      expect([isVideoPath(p), isMediaPath(p), isImagePath(p)]).toEqual([true, true, false])
+    }
+    expect([isVideoPath('a/gate.png'), isMediaPath('a/gate.png'), isMediaPath('a/notes.md'), isMediaPath('a/x.mkv')]).toEqual([false, true, false, false])
+    expect([mimeOf('a.mp4'), mimeOf('a.MOV'), mimeOf('a.webm'), mimeOf('a.ogv'), mimeOf('a.m4v')]).toEqual(['video/mp4', 'video/quicktime', 'video/webm', 'video/ogg', 'video/mp4'])
+    expect(imageBaseName('Art/turntable.final.mp4')).toBe('turntable.final')
+    expect([...assetMap([{ path: 'Art/t.mp4', mtime: 1 }, { path: 'Art/x.mkv' }]).keys()]).toEqual(['Art/t.mp4'])
+  })
+
+  const files = {
+    'Projects/PORTALz.md': '---\ntype: project\n---\n# PORTALz\n\n![[turntable.mp4]] and ![[missing.webm]]\n',
+    'Projects/PORTALz/Art/Moodboard.md': '# Moodboard\n',
+  }
+  const folders = new Set(['Projects', 'Projects/PORTALz', 'Projects/PORTALz/Art'])
+  const assets = assetMap([
+    { path: 'Projects/PORTALz/Art/turntable.mp4', mtime: 9, size: 5_000_000 },
+    { path: 'Projects/PORTALz/Art/timelapse.webm', mtime: 8 },
+    { path: 'Projects/PORTALz/Art/gate.png', mtime: 7 },
+  ])
+
+  it('embed like pictures, orbit as moons and come into the gallery, flagged as videos', () => {
+    const g = buildGraph(notesOf(files), {
+      images: { all: assets, moons: true, gallery: 'Projects/PORTALz' },
+      folders: { all: folders, rootTitle: 'Vault', multiRoot: false, maxDepth: 3 },
+    })
+    const node = (p: string) => g.nodes[g.index.get(imageKey(p))!]!
+    expect(node('Projects/PORTALz/Art/turntable.mp4')).toMatchObject({ kind: 'image', title: 'turntable.mp4', inDegree: 1, image: { video: true, size: 5_000_000 } })
+    expect(node('Projects/PORTALz/Art/gate.png').image!.video).toBeUndefined()
+    expect(g.nodes.some((n) => n.kind === 'ghost')).toBe(false)
+    expect(g.gallery).toMatchObject({ cards: 3, videos: 2, total: 3 })
+    expect(notesOf(files).get('Projects/PORTALz')!.links.find((l) => l.raw === 'missing.webm')).toBeDefined()
+  })
+
+  it('come and go with the files', () => {
+    const search = new SearchIndex()
+    const next = applyChanges(notesOf(files), [{ kind: 'add', path: 'Projects/PORTALz/Art/new.mov', mtime: 10, size: 3 }], search, { assets })
+    expect(next.assets.get('Projects/PORTALz/Art/new.mov')).toEqual({ path: 'Projects/PORTALz/Art/new.mov', mtime: 10, size: 3 })
+    const gone = applyChanges(next.notes, [{ kind: 'unlink', path: 'Projects/PORTALz/Art/new.mov' }], search, { assets: next.assets })
+    expect(gone.assets.has('Projects/PORTALz/Art/new.mov')).toBe(false)
+  })
+})

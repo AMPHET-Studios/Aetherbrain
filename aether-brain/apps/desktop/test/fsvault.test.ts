@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { FsVault, HEAVY_DIRS, isImageName, isNoteName } from '../src/main/fsvault.js'
+import { FsVault, HEAVY_DIRS, isImageName, isMediaName, isNoteName, isVideoName } from '../src/main/fsvault.js'
 
 let tmp: string
 
@@ -640,6 +640,19 @@ describe('FsVault pictures', () => {
     for (const a of res.assets) expect(a.abs).toBe(v.abs(a.path))
     expect(res.assetsTruncated).toBe(false)
     expect(res.files.map((f) => f.path)).toEqual(['a.md'])
+  })
+
+  it('knows videos by name, with the same safety rules; writes stay pictures only', async () => {
+    for (const n of ['a.mp4', 'B.MOV', 'c.webm', 'd.m4v', 'e.ogv', 'Turntable final.Mp4']) expect([isVideoName(n), isMediaName(n), isImageName(n)], n).toEqual([true, true, false])
+    for (const n of ['a.mkv', 'a.avi', 'a.mp4x', '~$a.mp4', 'mp4']) expect(isMediaName(n), n).toBe(false)
+    for (const n of ['tool.exe:x.mp4', 'nul.webm']) expect(isMediaName(n, 'win32'), n).toBe(false)
+    expect(isMediaName('gate.png')).toBe(true)
+    await put('Art/turntable.mp4', 'x')
+    await put('Art/old.avi', 'x')
+    const v = new FsVault([tmp])
+    expect((await v.scan()).assets.map((a) => a.path)).toEqual(['Art/turntable.mp4'])
+    expect(await v.assetAbs('Art/turntable.mp4')).toBe(path.join(tmp, 'Art', 'turntable.mp4'))
+    await expect(v.createBinary('Art/new.mp4', new Uint8Array([1]))).rejects.toThrow(/Not a picture/)
   })
 
   it('stops listing pictures at maxAssets and says so, while notes and folders go on', async () => {

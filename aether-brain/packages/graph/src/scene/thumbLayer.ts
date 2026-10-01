@@ -44,6 +44,8 @@ export interface ThumbTargets {
   /** Picture key (`thumbKey`) and vault path per entry of `nodes`. */
   keys: string[]
   paths: string[]
+  /** 1 per entry of `nodes` that is a video (its card wears a play badge). */
+  video: Uint8Array
   /** Per graph node: 1 while its picture is drawn (the scene shrinks its core and drops its halo). */
   shown: Uint8Array
 }
@@ -52,13 +54,15 @@ export function thumbTargets(graph: GraphData): ThumbTargets {
   const idx: number[] = []
   const keys: string[] = []
   const paths: string[] = []
+  const video: number[] = []
   graph.nodes.forEach((n, i) => {
     if (n.kind !== 'image' || !n.image) return
     idx.push(i)
     keys.push(thumbKey(n.image))
     paths.push(n.image.path)
+    video.push(n.image.video ? 1 : 0)
   })
-  return { nodes: Int32Array.from(idx), keys, paths, shown: new Uint8Array(graph.nodes.length) }
+  return { nodes: Int32Array.from(idx), keys, paths, video: Uint8Array.from(video), shown: new Uint8Array(graph.nodes.length) }
 }
 
 /** What the layer reads from the scene's per-graph buffers each frame. */
@@ -94,6 +98,8 @@ export class ThumbLayer {
   private readonly alpha: InstancedBufferAttribute
   /** Opacity per instance: 1, or less for a gallery card the camera is passing. */
   private readonly fade: InstancedBufferAttribute
+  /** 1 per instance showing a video's still (a play badge). */
+  private readonly video: InstancedBufferAttribute
   private readonly scheduler: ThumbScheduler<Uint8ClampedArray>
   private texture: DataArrayTexture | null = null
   private ctx: Ctx2D | null = null
@@ -127,11 +133,13 @@ export class ThumbLayer {
     this.layer = attr(1, false)
     this.alpha = attr(1, true)
     this.fade = attr(1, true)
+    this.video = attr(1, false)
     this.geometry.setAttribute('iCenter', this.center)
     this.geometry.setAttribute('iSize', this.size)
     this.geometry.setAttribute('iLayer', this.layer)
     this.geometry.setAttribute('iAlpha', this.alpha)
     this.geometry.setAttribute('iFade', this.fade)
+    this.geometry.setAttribute('iVideo', this.video)
     this.geometry.instanceCount = 0
     this.material = createThumbMaterial()
     this.mesh = new Mesh(this.geometry, this.material)
@@ -262,6 +270,7 @@ export class ThumbLayer {
   /** Which nodes of the current graph show a picture, and in which layer. */
   private remap(t: ThumbTargets): void {
     const layers = this.layer.array as Float32Array
+    const video = this.video.array as Float32Array
     let n = 0
     for (let k = 0; k < t.nodes.length; k++) {
       const i = t.nodes[k]!
@@ -271,11 +280,15 @@ export class ThumbLayer {
       if (!show) continue
       this.instNode[n] = i
       layers[n] = l
+      video[n] = t.video[k] ?? 0
       n++
     }
     this.count = n
     this.geometry.instanceCount = n
-    if (n > 0) this.layer.needsUpdate = true
+    if (n > 0) {
+      this.layer.needsUpdate = true
+      this.video.needsUpdate = true
+    }
     this.mapped = this.scheduler.version
   }
 

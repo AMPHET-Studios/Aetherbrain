@@ -326,6 +326,20 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
+describe('thumbTargets', () => {
+  it('flags videos, whose cards wear a play badge', () => {
+    const notes = new Map<NoteId, ParsedNote>()
+    const n = parseNote({ path: 'Art/Board.md', content: '# Board\n\n![[a.png]] ![[turntable.mp4]]\n' })
+    notes.set(n.meta.id, n)
+    const g = buildGraph(notes, { images: { all: assetMap([{ path: 'Art/a.png', mtime: 1 }, { path: 'Art/turntable.mp4', mtime: 2 }]) } })
+    const t = thumbTargets(g)
+    expect(t.paths.map((p, k) => [p, t.video[k]])).toEqual([
+      ['Art/a.png', 0],
+      ['Art/turntable.mp4', 1],
+    ])
+  })
+})
+
 describe('ThumbLayer', () => {
   it('collects the image nodes of a graph by path', () => {
     const { targets, nodes } = graphWithImages()
@@ -394,6 +408,7 @@ describe('ThumbLayer', () => {
       nodes: Int32Array.from([1, 2]),
       keys: [targets.keys[1]!, targets.keys[0]!],
       paths: [targets.paths[1]!, targets.paths[0]!],
+      video: new Uint8Array(2),
       shown: new Uint8Array(nodes),
     }
     const movedScreen = screenOf([

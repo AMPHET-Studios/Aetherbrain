@@ -173,6 +173,8 @@ export interface ImageNodeInfo {
   size: number | null
   /** Notes that embed or link it. */
   embeddedBy: number
+  /** True for a video (`isVideoPath`): shown as one still frame, never played in the brain. */
+  video?: boolean
   /** Present while the picture is a card of the open star gallery. */
   gallery?: GalleryCardInfo
 }
@@ -197,8 +199,10 @@ export interface GalleryInfo {
   star: NoteId
   /** The star's folder (vault path). */
   path: string
-  /** Pictures drawn as cards. */
+  /** Pictures (videos included) drawn as cards. */
   cards: number
+  /** How many of the cards are videos. */
+  videos: number
   /** Pictures under the star's folder on disk (all of them, cards or not). */
   total: number
 }

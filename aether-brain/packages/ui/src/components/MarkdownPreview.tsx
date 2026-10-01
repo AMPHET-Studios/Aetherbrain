@@ -9,7 +9,8 @@ import {
   imageFileName,
   imageKey,
   imagePathOf,
-  isImagePath,
+  isMediaPath,
+  isVideoPath,
   remarkWikilink,
   splitFrontmatter,
   tameDelimiters,
@@ -57,7 +58,7 @@ export function MarkdownPreview({ source, selfId = null, depth = 0, className }:
   const plugins = useMemo(() => {
     const pictures = picturesOf(assets)
     const resolve = (t: string): string | null => {
-      if (!isImagePath(t)) return resolver.resolve(t)
+      if (!isMediaPath(t)) return resolver.resolve(t)
       const path = pictures.resolve(t, folder)
       return path === null ? null : imageKey(path)
     }
@@ -152,10 +153,10 @@ export function previewLink(props: ComponentProps<'a'> & ExtraProps, ctx: LinkCo
   }
   const id = data['data-id'] ?? null
   const embed = data['data-embed'] === 'true'
-  if (isImagePath(target)) {
+  if (isMediaPath(target)) {
     if (!id) {
       return (
-        <span className="picture-missing" title={`No picture “${target}” in the vault`}>
+        <span className="picture-missing" title={`No ${isVideoPath(target) ? 'video' : 'picture'} “${target}” in the vault`}>
           {embed ? target : children}
         </span>
       )
@@ -215,13 +216,22 @@ function PictureEmbed({ path, stamp, onOpen }: { path: string; stamp: string; on
   const [broken, setBroken] = useState<string | null>(null)
   const name = imageFileName(path)
   const url = preview.url !== broken ? preview.url : null
+  // A video shows one still frame with a play badge: it plays in the OS player (its inspector's Open), never here.
+  const video = isVideoPath(path)
   return (
-    <button type="button" className="embed-picture" onClick={onOpen} title={path}>
+    <button type="button" className="embed-picture" onClick={onOpen} title={video ? `${path} (video)` : path}>
       {url ? (
-        <img src={url} alt={name} draggable={false} onError={() => setBroken(url)} />
+        <span className="still">
+          <img src={url} alt={name} draggable={false} onError={() => setBroken(url)} />
+          {video && (
+            <span className="play-badge" aria-hidden>
+              ▶
+            </span>
+          )}
+        </span>
       ) : (
         <span className="embed-picture-wait">
-          🖼 {name}
+          {video ? '▶' : '🖼'} {name}
           {preview.state === 'loading' ? ' …' : ''}
         </span>
       )}

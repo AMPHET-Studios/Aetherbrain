@@ -9,6 +9,10 @@
  * The helper is locked down: sandboxed, context-isolated, an empty page, and
  * an in-memory session of its own that refuses every request (web, file,
  * anything) and every permission. The bytes come from main; it reads nothing.
+ * A video is too big to send whole: main hands the helper a one-job address
+ * (`aether-video://clip/<token>`) that its session serves from that one file,
+ * in the ranges the helper's media player asks for, and only while the job
+ * runs. The helper takes one still frame of it and never plays it.
  *
  * ThumbQueue is the bookkeeping, pure (tested with a fake helper): at most
  * two decodes at once, a timeout per decode (the picture gets no thumbnail,
@@ -18,8 +22,9 @@
  * a thumbnail. Thumbnailer is the Electron side: no electron import at
  * runtime (types only), main.ts hands in the modules.
  */
+import { randomUUID } from 'node:crypto'
 import type { BrowserWindow, BrowserWindowConstructorOptions, Session } from 'electron'
-import type { ThumbTarget } from './assets.js'
+import { serveVideo, type ThumbTarget } from './assets.js'
 
 /** IPC between main and the helper (thumb-preload.cts keeps a copy: a sandboxed preload cannot import this file). */
 export const THUMB_IPC = {
@@ -29,7 +34,17 @@ export const THUMB_IPC = {
   job: 'thumbs:job',
   /** helper → main: (id, PNG bytes or null). */
   done: 'thumbs:done',
+  /** main → helper: (id, video address, longest side): a still frame of a video, fitted to the size. */
+  video: 'thumbs:video',
 } as const
+
+/**
+ * The scheme the helper's session serves videos on (registered as privileged
+ * in main.ts before the app is ready: streamable, CORS-enabled).
+ */
+export const VIDEO_SCHEME = 'aether-video'
+/** Addresses of videos handed to the helper: `aether-video://clip/<token>`. */
+export const VIDEO_URL_PREFIX = `${VIDEO_SCHEME}://clip/`
 
 /** The helper's session: in memory only (no `persist:`), so nothing of it is written to disk. */
 export const THUMB_PARTITION = 'aether-thumbs'
@@ -45,9 +60,17 @@ export const MAX_THUMB_PNG = 16 * 1024 * 1024
 const PNG_SIG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]
 
 /** One picture to decode: its whole file and what to make of it. */
-export interface ThumbJob extends ThumbTarget {
+export interface PictureJob extends ThumbTarget {
   bytes: Uint8Array
 }
+
+/** One video to take a still frame of: where the helper's session serves it, and the longest side of the still. */
+export interface VideoJob {
+  url: string
+  px: number
+}
+
+export type ThumbJob = PictureJob | VideoJob
 
 /**
  * A job that got no answer through no fault of its picture (the helper could
@@ -300,6 +323,8 @@ interface Sender {
 export class Thumbnailer {
   private readonly queue: ThumbQueue
   private sessionReady = false
+  /** Videos handed to the helper for a job running now: token → the file and its media type. */
+  private readonly videos = new Map<string, { abs: string; mime: string }>()
 
   constructor(private opts: ThumbnailerOptions) {
     this.queue = new ThumbQueue(() => this.spawn(), opts.timeoutMs === undefined ? {} : { timeoutMs: opts.timeoutMs })
@@ -311,6 +336,28 @@ export class Thumbnailer {
    */
   render(job: ThumbJob): Promise<Uint8Array | null> {
     return this.queue.render(job)
+  }
+
+  /**
+   * PNG bytes of one still frame of the video at `abs` (served to the helper
+   * as `mime`), at most `px` on its longer side; the helper may read the file
+   * only until the job ends.
+   */
+  async renderVideo(abs: string, mime: string, px: number): Promise<Uint8Array | null> {
+    const token = randomUUID()
+    this.videos.set(token, { abs, mime })
+    try {
+      return await this.queue.render({ url: VIDEO_URL_PREFIX + token, px })
+    } finally {
+      this.videos.delete(token)
+    }
+  }
+
+  /** One request of the helper's session for a video address: the file of a job running now, else 404. */
+  serve(url: string, range: string | null): Promise<Response> {
+    const video = url.startsWith(VIDEO_URL_PREFIX) ? this.videos.get(url.slice(VIDEO_URL_PREFIX.length)) : undefined
+    if (!video) return Promise.resolve(new Response(null, { status: 404 }))
+    return serveVideo(video.abs, video.mime, range)
   }
 
   /** `thumbs:ready`: only the current helper counts. */
@@ -361,7 +408,8 @@ export class Thumbnailer {
     w.loadURL(THUMB_PAGE).catch(gone)
     return {
       id,
-      send: (jobId, job) => wc.send(THUMB_IPC.job, jobId, job.bytes, job.type, job.width, job.height),
+      send: (jobId, job) =>
+        'url' in job ? wc.send(THUMB_IPC.video, jobId, job.url, job.px) : wc.send(THUMB_IPC.job, jobId, job.bytes, job.type, job.width, job.height),
       destroy: (hung) => {
         if (w.isDestroyed()) return
         // A renderer stuck in a decode may never finish closing: end its process first.
@@ -371,12 +419,17 @@ export class Thumbnailer {
     }
   }
 
-  /** The helper's session, set up once: it loads its empty page and nothing else, and gets no permission. */
+  /**
+   * The helper's session, set up once: it loads its empty page and the videos
+   * of the jobs running now (served by `serve`), nothing else, and gets no
+   * permission.
+   */
   private prepareSession(): void {
     if (this.sessionReady) return
     this.sessionReady = true
     const ses = this.opts.electron.session.fromPartition(THUMB_PARTITION)
-    ses.webRequest.onBeforeRequest((details, cb) => cb({ cancel: details.url !== THUMB_PAGE }))
+    ses.webRequest.onBeforeRequest((details, cb) => cb({ cancel: details.url !== THUMB_PAGE && !details.url.startsWith(VIDEO_URL_PREFIX) }))
+    ses.protocol.handle(VIDEO_SCHEME, (req) => this.serve(req.url, req.headers.get('range')))
     ses.setPermissionRequestHandler((_wc, _permission, cb) => cb(false))
     ses.setPermissionCheckHandler(() => false)
   }

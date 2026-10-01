@@ -1,4 +1,4 @@
-import { isImagePath, type VaultAdapter, type VaultAsset, type VaultChange, type VaultFile, type VaultRootInfo } from '@aether/core'
+import { isMediaPath, type VaultAdapter, type VaultAsset, type VaultChange, type VaultFile, type VaultRootInfo } from '@aether/core'
 import type { AetherBridge, VaultChangeDto, VaultInfo } from '../../shared/ipc'
 
 /** A change as main reported it (a picture's comes without content, with its size). */
@@ -17,8 +17,8 @@ function toChange(c: VaultChangeDto): VaultChange {
  */
 export const MAX_HELD = 20_000
 
-/** A picture's add/change/unlink (folders are never pictures, whatever their name). */
-const isPictureChange = (c: VaultChangeDto): boolean => c.kind !== 'addDir' && c.kind !== 'unlinkDir' && isImagePath(c.path)
+/** A picture's or video's add/change/unlink (folders are never pictures, whatever their name). */
+const isPictureChange = (c: VaultChangeDto): boolean => c.kind !== 'addDir' && c.kind !== 'unlinkDir' && isMediaPath(c.path)
 
 /**
  * One or more folders on disk (a multi-root vault can be whole drives such

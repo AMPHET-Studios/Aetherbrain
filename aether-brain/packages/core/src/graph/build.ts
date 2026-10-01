@@ -3,7 +3,7 @@ import { LinkResolver } from './resolve'
 import { asString } from '../markdown/frontmatter'
 import type { DailyBrief } from '../markdown/brief'
 import { isProjectNote, projectFolderOf } from '../markdown/projects'
-import { AssetResolver, TODAY_ID, imageKey, imageTitle, isImagePath } from '../vault/assets'
+import { AssetResolver, TODAY_ID, imageKey, imageTitle, isMediaPath, isVideoPath } from '../vault/assets'
 import { folderUniverse, selectFolders, type FolderSelectOptions } from '../vault/folders'
 import { ancestorsOf, areaFromFolder, folderDepth, folderKey, folderOf, normalizeFolderPath } from '../vault/paths'
 
@@ -136,8 +136,8 @@ export function buildGraph(notes: Map<NoteId, ParsedNote>, opts: BuildGraphOptio
       // Always resolve from the raw text so rebuilding after a vault change
       // (a ghost becoming real, a rename) never needs a re-parse.
       const rawTarget = stripRaw(link.raw)
-      if (isImagePath(rawTarget)) {
-        // A picture: an image node when the file exists, else nothing (never a ghost).
+      if (isMediaPath(rawTarget)) {
+        // A picture or video: an image node when the file exists, else nothing (never a ghost).
         const img = pictures()?.resolve(rawTarget, n.meta.folder) ?? null
         link.resolved = img !== null
         link.to = img !== null ? imageKey(img) : rawTarget
@@ -275,7 +275,7 @@ function addImageNode(
     kind: 'image',
     ghost: false,
     parent: null,
-    image: { path, mtime, size: asset?.size ?? null, embeddedBy: 0 },
+    image: isVideoPath(path) ? { path, mtime, size: asset?.size ?? null, embeddedBy: 0, video: true } : { path, mtime, size: asset?.size ?? null, embeddedBy: 0 },
     inDegree: 0,
     outDegree: 0,
     degree: 0,
@@ -536,6 +536,7 @@ function addFolderSystem(
     const all = galleryImages(img.images, gPath)
     let cards = 0
     let added = 0
+    let videos = 0
     for (const path of all) {
       let node = nodes[index.get(imageKey(path)) ?? -1]
       let only = false
@@ -546,9 +547,11 @@ function addFolderSystem(
         only = true
         added++
       }
-      if (node.image) node.image.gallery = { star, rank: cards++, only }
+      if (!node.image) continue
+      node.image.gallery = { star, rank: cards++, only }
+      if (node.image.video) videos++
     }
-    if (cards > 0) gallery = { star, path: gPath, cards, total: all.length }
+    if (cards > 0) gallery = { star, path: gPath, cards, videos, total: all.length }
   }
 
   for (const path of visible) {

@@ -49,7 +49,7 @@ import {
   isIgnoredPath,
   chatUrlOf,
   isChatNote,
-  isImagePath,
+  isMediaPath,
   isProjectNote,
   joinFrontmatter,
   loadVault,
@@ -692,7 +692,7 @@ export class Brain {
   applyExternal(changes: VaultChangeDto[]): void {
     if (this.closed || !changes.length) return
     for (const c of changes) {
-      if (c.kind !== 'addDir' && c.kind !== 'unlinkDir' && isImagePath(c.path)) continue
+      if (c.kind !== 'addDir' && c.kind !== 'unlinkDir' && isMediaPath(c.path)) continue
       this.pending.push(c)
     }
     if (this.loaded && this.pending.length > MAX_PENDING) this.sync()

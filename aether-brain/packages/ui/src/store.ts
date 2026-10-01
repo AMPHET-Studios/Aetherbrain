@@ -38,6 +38,7 @@ import {
   isProjectNote,
   isTodayId,
   isVirtualId,
+  isVideoPath,
   loadVault,
   mountOf,
   neighborhood,
@@ -76,7 +77,7 @@ import {
 } from '@aether/core'
 import { BrainController, type ColorMode, type LayoutMode } from '@aether/graph'
 import { listProjects, moveTaskOnBoard } from './projects'
-import { plural, truncate } from './util'
+import { plural, stillOf, truncate } from './util'
 
 export type View = 'graph' | 'editor' | 'capture' | 'search' | 'review' | 'projects'
 
@@ -562,8 +563,8 @@ export interface AetherState {
   importTarget(folder?: string): string | null
   /**
    * A preview of a picture at most `size` px on its longer side, from the
-   * vault adapter; null when the adapter has none, it is empty or it fails.
-   * Never rejects.
+   * vault adapter (a video: one still frame of it); null when the adapter
+   * has none, it is empty or it fails. Never rejects.
    */
   preview(path: string, size: number): Promise<Blob | null>
   /** Projects a Concept Forge drawing can be saved to (active first). */
@@ -684,9 +685,13 @@ export interface CritiqueSaved {
 let toastSeq = 1
 let unwatch: (() => void) | null = null
 
-/** "12 pictures", or "480 of 900 pictures" when the gallery is capped. */
-function galleryCount(cards: number, total: number): string {
-  return cards < total ? `${cards.toLocaleString('en-US')} of ${total.toLocaleString('en-US')} pictures` : `${cards} picture${cards === 1 ? '' : 's'}`
+/** "12 pictures", "9 pictures and 3 videos", or "480 of 900 pictures" when the gallery is capped. */
+function galleryCount(cards: number, total: number, videos = 0): string {
+  if (cards < total) return `${cards.toLocaleString('en-US')} of ${total.toLocaleString('en-US')} pictures`
+  const pics = cards - videos
+  if (videos === 0) return `${cards} picture${cards === 1 ? '' : 's'}`
+  if (pics === 0) return `${videos} video${videos === 1 ? '' : 's'}`
+  return `${pics} picture${pics === 1 ? '' : 's'} and ${videos} video${videos === 1 ? '' : 's'}`
 }
 
 export const useAether = create<AetherState>()((set, get) => {
@@ -1698,7 +1703,8 @@ export const useAether = create<AetherState>()((set, get) => {
           graphOptions,
         )
         const thumbnail = adapter.thumbnail?.bind(adapter)
-        controller.thumbnails = thumbnail ? (path, size) => thumbnail(path, size) : null
+        // A video comes from the browser adapters as itself: the scene gets one still frame of it.
+        controller.thumbnails = thumbnail ? async (path, size) => stillOf(await thumbnail(path, size), size) : null
         set({ search, status: 'ready', loadProgress: null })
         setLoaded(loaded.notes, loaded.graph, loaded.folders, loaded.assets)
         unwatch = adapter.watch((changes) => get().applyExternal(changes))
@@ -2425,7 +2431,7 @@ export const useAether = create<AetherState>()((set, get) => {
       if (open && !galleryHinted) {
         galleryHinted = true
         const title = nodeOf(get().graph, open.star)?.title ?? open.path
-        get().toast(`★ ${title}: ${galleryCount(open.cards, open.total)} in 3D around the star · Shift+G folds them`)
+        get().toast(`★ ${title}: ${galleryCount(open.cards, open.total, open.videos)} in 3D around the star · Shift+G folds them`)
       }
     },
 
@@ -2460,8 +2466,8 @@ export const useAether = create<AetherState>()((set, get) => {
       get().select(star, { fly: true })
       // Once the cards have flown out, frame the whole gallery.
       flyWhenSettled(star)
-      const cards = get().graph?.gallery?.cards ?? total
-      get().toast(`★ ${title}: ${galleryCount(cards, total)} in 3D · Shift+G folds them`)
+      const shown = get().graph?.gallery
+      get().toast(`★ ${title}: ${galleryCount(shown?.cards ?? total, total, shown?.videos ?? 0)} in 3D · Shift+G folds them`)
     },
 
     refreshBrief() {
@@ -2484,7 +2490,7 @@ export const useAether = create<AetherState>()((set, get) => {
       const { adapter } = get()
       if (!adapter) return
       if (!adapter.openAsset) {
-        get().toast('Pictures open in your image app from the desktop app', 'info')
+        get().toast(isVideoPath(path) ? 'Videos play in your video player from the desktop app' : 'Pictures open in your image app from the desktop app', 'info')
         return
       }
       try {
@@ -2498,8 +2504,7 @@ export const useAether = create<AetherState>()((set, get) => {
       const thumbnail = get().adapter?.thumbnail
       if (!thumbnail) return null
       try {
-        const blob = await thumbnail.call(get().adapter, path, size)
-        return blob && blob.size > 0 ? blob : null
+        return await stillOf(await thumbnail.call(get().adapter, path, size), size)
       } catch {
         return null
       }

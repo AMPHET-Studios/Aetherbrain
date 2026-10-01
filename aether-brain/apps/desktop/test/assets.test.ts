@@ -12,9 +12,13 @@ import {
   imageKindOf,
   imageSize,
   readUpTo,
+  readHead,
   thumbPx,
   thumbTarget,
   turnsSideways,
+  byteRange,
+  serveVideo,
+  videoKindOf,
 } from '../src/main/assets.js'
 
 const bytes = (...parts: (number[] | string)[]) =>
@@ -351,5 +355,72 @@ describe('ThumbCache', () => {
     expect(c.bytes).toBe(7)
     c.clear()
     expect([c.size, c.bytes]).toEqual([0, 0])
+  })
+})
+
+describe('videos', () => {
+  it('know a video from its first bytes, and a picture in a video box is not one', () => {
+    expect(videoKindOf(bytes(be32(32), 'ftypisom', be32(512), 'isomiso2'))).toBe('mp4')
+    expect(videoKindOf(bytes(be32(32), 'ftypmp42'))).toBe('mp4')
+    expect(videoKindOf(bytes(be32(20), 'ftypqt  '))).toBe('quicktime')
+    expect(videoKindOf(bytes(be32(8), 'wide', be32(100), 'mdat'))).toBe('quicktime')
+    expect(videoKindOf(bytes(be32(100), 'moov'))).toBe('quicktime')
+    expect(videoKindOf(bytes([0x1a, 0x45, 0xdf, 0xa3, 0x9f]))).toBe('webm')
+    expect(videoKindOf(bytes('OggS', [0, 2]))).toBe('ogg')
+    expect(videoKindOf(bytes(be32(28), 'ftypavif'))).toBeNull()
+    expect(videoKindOf(bytes(be32(28), 'ftypheic'))).toBeNull()
+    expect(videoKindOf(png(4, 4))).toBeNull()
+    expect(videoKindOf(bytes('MZ', [0x90, 0, 3, 0, 0, 0]))).toBeNull()
+    expect(videoKindOf(new Uint8Array(0))).toBeNull()
+  })
+
+  it('read the byte ranges a media player asks for', () => {
+    expect(byteRange(null, 100)).toBeNull()
+    expect(byteRange('bytes=0-', 100)).toEqual({ start: 0, end: 99 })
+    expect(byteRange('bytes=10-19', 100)).toEqual({ start: 10, end: 19 })
+    expect(byteRange('bytes=90-500', 100)).toEqual({ start: 90, end: 99 })
+    expect(byteRange('bytes=-30', 100)).toEqual({ start: 70, end: 99 })
+    expect(byteRange('bytes=-300', 100)).toEqual({ start: 0, end: 99 })
+    expect(byteRange('bytes=100-', 100)).toBe('unsatisfiable')
+    expect(byteRange('bytes=20-10', 100)).toBe('unsatisfiable')
+    expect(byteRange('bytes=-0', 100)).toBe('unsatisfiable')
+    for (const junk of ['bytes=-', 'items=0-1', 'bytes=0-1,5-6', 'bytes=a-b']) expect(byteRange(junk, 100), junk).toBeNull()
+  })
+
+  describe('served from disk', () => {
+    let dir = ''
+    let file = ''
+    const data = Uint8Array.from({ length: 1000 }, (_, i) => i & 255)
+    beforeEach(async () => {
+      dir = await fs.mkdtemp(path.join(os.tmpdir(), 'aether-video-'))
+      file = path.join(dir, 'clip.webm')
+      await fs.writeFile(file, data)
+    })
+    afterEach(async () => {
+      await fs.rm(dir, { recursive: true, force: true })
+    })
+
+    it('whole or in ranges, as its media type, readable across origins; nothing for a missing file', async () => {
+      const all = await serveVideo(file, 'video/webm', null)
+      expect(all.status).toBe(200)
+      expect(Object.fromEntries(['content-type', 'content-length', 'accept-ranges', 'access-control-allow-origin'].map((h) => [h, all.headers.get(h)]))).toEqual({
+        'content-type': 'video/webm',
+        'content-length': '1000',
+        'accept-ranges': 'bytes',
+        'access-control-allow-origin': '*',
+      })
+      expect(new Uint8Array(await all.arrayBuffer())).toEqual(data)
+      const part = await serveVideo(file, 'video/webm', 'bytes=100-199')
+      expect([part.status, part.headers.get('content-range'), part.headers.get('content-length')]).toEqual([206, 'bytes 100-199/1000', '100'])
+      expect(new Uint8Array(await part.arrayBuffer())).toEqual(data.subarray(100, 200))
+      const tail = await serveVideo(file, 'video/webm', 'bytes=-10')
+      expect(new Uint8Array(await tail.arrayBuffer())).toEqual(data.subarray(990))
+      const past = await serveVideo(file, 'video/webm', 'bytes=5000-')
+      expect([past.status, past.headers.get('content-range')]).toEqual([416, 'bytes */1000'])
+      expect((await serveVideo(path.join(dir, 'gone.webm'), 'video/webm', null)).status).toBe(404)
+      expect((await serveVideo(dir, 'video/webm', null)).status).toBe(404)
+      expect(await readHead(file, 4)).toEqual(data.subarray(0, 4))
+      expect(await readHead(file, 5000)).toEqual(data)
+    })
   })
 })
