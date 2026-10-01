@@ -174,6 +174,14 @@ export function handleKey(e: KeyboardEvent): void {
         return
       }
       break
+    case 'H':
+    case 'h':
+      // Shift+H: leave the selected folder out of the brain (desktop). Shift decides, as for Shift+G.
+      if (e.shiftKey) {
+        if (s.selectedId && isFolderId(s.selectedId)) void s.hideFolder(folderPathOf(s.selectedId))
+        return
+      }
+      break
     case 'm':
       s.cycleColorMode()
       return

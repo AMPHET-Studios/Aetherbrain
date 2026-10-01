@@ -19,6 +19,7 @@ import {
   IPC,
   type AssetListDto,
   type FolderListDto,
+  type SkippedInstallDto,
   type VaultChangeDto,
   type VaultFileDto,
   type VaultInfo,
@@ -40,7 +41,7 @@ import {
   videoKindOf,
 } from './assets.js'
 import { THUMB_IPC, Thumbnailer, VIDEO_SCHEME } from './thumbnailer.js'
-import { AiLinkHost, aiSettings, cleanPatch, type AiLinkSettings } from './ai-link.js'
+import { AiLinkHost, aiSettings, cleanPatch, type AiLinkSettings, type LinkVault } from './ai-link.js'
 import { ForgeHost, forgeSettings, type ForgeSettings } from './forge.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -65,6 +66,10 @@ interface Settings {
   lastVault?: string
   /** Extra folder names skipped while scanning. */
   exclude?: string[]
+  /** Folders (absolute paths) left out of the brain (⇧H on a folder; the vault folders panel lets them back in). */
+  hidden?: string[]
+  /** Folders (absolute paths) shown although they look like an installed game or program. */
+  keep?: string[]
   ai?: Partial<AiLinkSettings>
   /** The Concept Forge link (the remembered concept-forge.html). */
   forge?: ForgeSettings
@@ -84,12 +89,14 @@ async function loadSettings(): Promise<{ settings: Settings; migrated: boolean }
   } catch {
     /* first run or unreadable: defaults */
   }
-  const { lastVault, roots, exclude, ...rest } = raw
+  const { lastVault, roots, exclude, hidden, keep, ...rest } = raw
   const out: Settings = { ...rest }
   const list = Array.isArray(roots) ? roots.filter(isString) : []
   if (!list.length && isString(lastVault)) list.push(lastVault)
   if (list.length) out.roots = list
   if (Array.isArray(exclude)) out.exclude = cleanNames(exclude)
+  if (Array.isArray(hidden)) out.hidden = cleanFolders(hidden)
+  if (Array.isArray(keep)) out.keep = cleanFolders(keep)
   return { settings: out, migrated: lastVault !== undefined }
 }
 
@@ -117,6 +124,20 @@ function cleanNames(names: unknown[]): string[] {
     if (!name || /[\\/]/.test(name) || seen.has(name.toLowerCase())) continue
     seen.add(name.toLowerCase())
     out.push(name)
+  }
+  return out
+}
+
+/** Absolute folder paths: no relative ones, no duplicates (rootKey). */
+function cleanFolders(paths: unknown[]): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const p of paths) {
+    if (!isString(p) || !path.isAbsolute(p)) continue
+    const abs = path.resolve(p)
+    if (seen.has(rootKey(abs))) continue
+    seen.add(rootKey(abs))
+    out.push(abs)
   }
   return out
 }
@@ -214,7 +235,14 @@ function vaultInfo(v: FsVault): VaultInfo {
     name: v.roots.map((r) => r.label).join(' + '),
     roots: v.roots.map((r) => ({ path: r.abs, mount: r.mount, label: r.label })),
     exclude: [...v.exclude],
+    hidden: [...v.hidden],
+    keep: [...v.keep],
   }
+}
+
+/** What the AI link serves: the vault's roots and its folder rules. */
+function linkVault(v: FsVault): LinkVault {
+  return { roots: v.roots.map((r) => r.abs), exclude: [...v.exclude], hidden: [...v.hidden], keep: [...v.keep] }
 }
 
 /** Roots the vault is made of, including remembered ones that are unreachable right now (an unplugged drive). */
@@ -239,7 +267,7 @@ async function openVault(input: string[]): Promise<VaultInfo> {
         : `None of these folders can be opened: ${wanted.join(', ')}`,
     )
   }
-  const next = new FsVault(ok, { exclude: settings.exclude ?? [] })
+  const next = new FsVault(ok, { exclude: settings.exclude ?? [], hidden: settings.hidden ?? [], keep: settings.keep ?? [] })
   generation++
   watcher?.stop()
   watcher = null
@@ -290,7 +318,7 @@ async function listFiles(): Promise<VaultFileDto[]> {
     const found = scan.files.length
     const files = await v.readAll(scan.files, (done) => progress({ phase: 'reading', files: done, found, dirs: scan.dirs, done: false }))
     progress({ phase: 'done', files: files.length, found, dirs: scan.dirs, done: true })
-    if (latest()) void ai?.setVault({ roots: v.roots.map((r) => r.abs), exclude: [...v.exclude] }, { files, folders: scan.folders })
+    if (latest()) void ai?.setVault(linkVault(v), { files, folders: scan.folders })
     return files
   } finally {
     // setVault above already set the link's target, so these land after the snapshot.
@@ -563,6 +591,78 @@ async function setExclude(names: unknown): Promise<VaultInfo> {
   return openVault(rememberedRoots())
 }
 
+/**
+ * Leave one folder (a vault path) out of the brain: remembered by its
+ * absolute path, applied at once without a rescan (the watcher unlinks what
+ * was known under it). Nothing on disk changes. A root is removed in the
+ * vault folders panel instead.
+ */
+async function hideFolder(p: unknown): Promise<VaultInfo> {
+  const v = requireVault()
+  const abs = v.abs(String(p))
+  if (v.roots.some((r) => rootKey(r.abs) === rootKey(abs))) {
+    throw new Error('That is a whole vault folder: remove it in the vault folders panel (v) instead')
+  }
+  return setFolderRules({ hidden: [...(settings.hidden ?? []), abs] })
+}
+
+/** Let a folder (a vault path) left out with hideFolder back in. */
+function unhideFolder(p: unknown): Promise<VaultInfo> {
+  const v = requireVault()
+  const key = rootKey(v.abs(String(p)))
+  return setFolderRules({ hidden: (settings.hidden ?? []).filter((h) => rootKey(h) !== key) })
+}
+
+/**
+ * New folder rules (absolute paths): folders left out, installs kept.
+ * Applied live: every folder whose rule changed is looked at again by the
+ * watcher (unlinked when now skipped, walked and reported when now shown).
+ */
+async function setFolderRules(rules: { hidden?: unknown; keep?: unknown }): Promise<VaultInfo> {
+  const v = requireVault()
+  const before = { hidden: settings.hidden ?? [], keep: settings.keep ?? [] }
+  if (rules.hidden !== undefined) settings.hidden = cleanFolders(Array.isArray(rules.hidden) ? rules.hidden : [])
+  if (rules.keep !== undefined) settings.keep = cleanFolders(Array.isArray(rules.keep) ? rules.keep : [])
+  await saveSettings()
+  v.hidden = settings.hidden ?? []
+  v.keep = settings.keep ?? []
+  const keys = (l: string[]) => new Set(l.map(rootKey))
+  const minus = (a: string[], b: string[]) => {
+    const kb = keys(b)
+    return a.filter((x) => !kb.has(rootKey(x)))
+  }
+  const hiddenNow = settings.hidden ?? []
+  const keepNow = settings.keep ?? []
+  // [folder, recheck]: a folder no longer kept is looked into again (is it still an install?).
+  const look: [string, boolean][] = [
+    ...minus(before.hidden, hiddenNow).map((x): [string, boolean] => [x, false]),
+    ...minus(hiddenNow, before.hidden).map((x): [string, boolean] => [x, false]),
+    ...minus(keepNow, before.keep).map((x): [string, boolean] => [x, false]),
+    ...minus(before.keep, keepNow).map((x): [string, boolean] => [x, true]),
+  ]
+  for (const [abs, recheck] of look) {
+    const vp = v.toVault(abs)
+    if (vp) watcher?.refresh(vp, { recheck })
+  }
+  ai?.setFolderRules(linkVault(v))
+  return vaultInfo(v)
+}
+
+/** Install folders the scans and the watcher left out so far, as absolute paths. */
+function skippedInstalls(): SkippedInstallDto[] {
+  const v = vault
+  if (!v) return []
+  const out: SkippedInstallDto[] = []
+  for (const i of v.installs()) {
+    try {
+      out.push({ path: v.abs(i.path), kind: i.kind })
+    } catch {
+      /* a root that is gone */
+    }
+  }
+  return out.sort((a, b) => a.path.localeCompare(b.path))
+}
+
 /** Drive roots on Windows (`C:\`, `D:\`, …) that answer within a moment; empty elsewhere. */
 async function listDrives(): Promise<string[]> {
   if (process.platform !== 'win32') return []
@@ -606,7 +706,7 @@ function createAiLink(): AiLinkHost {
       return saveSettings()
     },
     onActivity: (a) => toRenderer(IPC.aiActivity, a),
-    currentVault: () => (vault ? { roots: vault.roots.map((r) => r.abs), exclude: [...vault.exclude] } : null),
+    currentVault: () => (vault ? linkVault(vault) : null),
     // Packaged: import the real unpacked file, the one the client configs point at.
     bundlePath: app.isPackaged ? serverScript : devBundle,
     serverScript,
@@ -680,6 +780,12 @@ function registerIpc(): void {
   ipcMain.handle(IPC.addRootPath, (_e, p: unknown) => addRootPath(p))
   ipcMain.handle(IPC.removeRoot, (_e, p: unknown) => removeRoot(p))
   ipcMain.handle(IPC.setExclude, (_e, names: unknown) => setExclude(names))
+  ipcMain.handle(IPC.hideFolder, (_e, p: unknown) => hideFolder(p))
+  ipcMain.handle(IPC.unhideFolder, (_e, p: unknown) => unhideFolder(p))
+  ipcMain.handle(IPC.setFolderRules, (_e, rules: unknown) =>
+    setFolderRules(rules && typeof rules === 'object' ? (rules as { hidden?: unknown; keep?: unknown }) : {}),
+  )
+  ipcMain.handle(IPC.skippedInstalls, () => skippedInstalls())
   ipcMain.handle(IPC.drives, () => listDrives())
   ipcMain.handle(IPC.list, () => listFiles())
   ipcMain.handle(IPC.folders, (): FolderListDto => {

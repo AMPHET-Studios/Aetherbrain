@@ -47,6 +47,7 @@ const GROUPS: HelpGroup[] = [
       ['[ ]', 'Show fewer / more folder levels'],
       ['o', 'Orbits moving / paused'],
       ['⇧ G', "Star gallery: a star's pictures in 3D (also opens as you fly close)"],
+      ['⇧ H', 'Leave the selected folder out of the brain (desktop; Undo on the toast, or v)'],
     ],
   },
   {

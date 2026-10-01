@@ -92,6 +92,15 @@ describe('client setups', () => {
     ])
   })
 
+  it('passes folders left out as --hide and installs kept as --keep, one folder each', () => {
+    expect(serverArgs({ ...win, hidden: ['F:\\Weird stuff'], keep: ['F:\\Games\\My mod'] }).slice(5)).toEqual([
+      '--hide',
+      'F:\\Weird stuff',
+      '--keep',
+      'F:\\Games\\My mod',
+    ])
+  })
+
   it('writes a Claude Desktop mcpServers entry that runs this app as Node', () => {
     const cfg = JSON.parse(claudeDesktopConfig(win)) as {
       mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }>
@@ -239,7 +248,7 @@ describe('AiLinkHost', () => {
     expect(saved.at(-1)?.enabled).toBe(true)
     expect(st.running).toBe(true)
     // The preload was dropped while the link was off, so the brain scans for itself.
-    expect(server.log.opens[0]).toEqual({ roots: ['/v/notes'], exclude: [], watch: false })
+    expect(server.log.opens[0]).toEqual({ roots: ['/v/notes'], exclude: [], hidden: [], keep: [], watch: false })
     expect(server.log.links[0]).toMatchObject({ host: '127.0.0.1', port: AI_DEFAULT_PORT, token: st.token, readOnly: false })
     expect(st.url).toBe(`http://127.0.0.1:${AI_DEFAULT_PORT}/mcp/${st.token}`)
     expect(JSON.parse(st.claudeDesktopConfig).mcpServers['aether-brain'].args).toEqual([
@@ -254,7 +263,7 @@ describe('AiLinkHost', () => {
     const { host, server } = makeHost({ enabled: true })
     const st = await host.setVault(VAULT, PRELOAD)
     expect(st.running).toBe(true)
-    expect(server.log.opens[0]).toEqual({ roots: ['/v/notes'], exclude: [], watch: false, preload: PRELOAD })
+    expect(server.log.opens[0]).toEqual({ roots: ['/v/notes'], exclude: [], hidden: [], keep: [], watch: false, preload: PRELOAD })
   })
 
   it('replays watcher batches that arrive while the brain opens, then feeds it directly', async () => {
@@ -362,7 +371,7 @@ describe('preload', () => {
 /* Renderer: the Electron vault adapter and the panels' helpers       */
 /* ------------------------------------------------------------------ */
 
-const INFO: VaultInfo = { root: '/v/notes', name: 'notes', roots: [{ path: '/v/notes', mount: '', label: 'notes' }], exclude: [] }
+const INFO: VaultInfo = { root: '/v/notes', name: 'notes', roots: [{ path: '/v/notes', mount: '', label: 'notes' }], exclude: [], hidden: [], keep: [] }
 
 /** The bridge calls the adapter uses, with change events the test fires. */
 function fakeBridge(files: VaultFileDto[]) {
@@ -578,7 +587,7 @@ describe('ElectronVaultAdapter', () => {
         },
         onChanges: () => () => undefined,
       } as unknown as AetherBridge
-      const info: VaultInfo = { root: tmp, name: 'vault', roots: [{ path: tmp, mount: '', label: 'vault' }], exclude: [] }
+      const info: VaultInfo = { root: tmp, name: 'vault', roots: [{ path: tmp, mount: '', label: 'vault' }], exclude: [], hidden: [], keep: [] }
       const s = () => useAether.getState()
       await s().openVault(new ElectronVaultAdapter(bridge, info))
       // Written by another app after the load, not reported yet.

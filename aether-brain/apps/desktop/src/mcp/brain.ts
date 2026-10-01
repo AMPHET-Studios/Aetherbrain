@@ -107,6 +107,10 @@ export interface BrainOptions {
   roots: string[]
   /** Extra folder names to skip, on top of FsVault's built-in list. */
   exclude?: string[]
+  /** Folders (absolute paths) left out of the brain. */
+  hidden?: string[]
+  /** Folders (absolute paths) shown although they look like an installed game or program. */
+  keep?: string[]
   /** Refuse every write. */
   readOnly?: boolean
   /** Run its own recursive fs.watch (default true). The in-app link passes false and feeds changes itself. */
@@ -648,7 +652,7 @@ export class Brain {
 
   private constructor(private readonly opts: BrainOptions) {
     // No tool offers pictures: the scan need not list them (a whole drive can hold hundreds of thousands).
-    this.vault = new FsVault(opts.roots, { exclude: opts.exclude ?? [], maxAssets: 0 })
+    this.vault = new FsVault(opts.roots, { exclude: opts.exclude ?? [], hidden: opts.hidden ?? [], keep: opts.keep ?? [], maxAssets: 0 })
     this.readOnly = opts.readOnly === true
     this.roots = this.vault.roots.map((r) => ({ path: r.abs, mount: r.mount, label: r.label }))
     this.home = homePrefix(this.roots)
@@ -682,6 +686,16 @@ export class Brain {
   /** Note and folder counts (0 until loaded). */
   stats(): { notes: number; folders: number } {
     return { notes: this.notes.size, folders: this.folders.size }
+  }
+
+  /**
+   * New folder rules (absolute paths) from the host. What they leave out
+   * arrives as unlinks from the host's watcher; this only makes reads and
+   * writes refuse those folders at once.
+   */
+  setFolderRules(rules: { hidden: string[]; keep: string[] }): void {
+    this.vault.hidden = rules.hidden
+    this.vault.keep = rules.keep
   }
 
   /**

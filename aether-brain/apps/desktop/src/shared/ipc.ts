@@ -120,6 +120,18 @@ export interface VaultInfo {
   roots: VaultRootDto[]
   /** Extra folder names skipped while scanning (on top of the built-in list). */
   exclude: string[]
+  /** Folders (absolute paths) left out of the brain. */
+  hidden: string[]
+  /** Folders (absolute paths) shown although they look like an installed game or program. */
+  keep: string[]
+}
+
+/** A folder left out because it holds an installed game or program. */
+export interface SkippedInstallDto {
+  /** Absolute path. */
+  path: string
+  /** What it looks like: `Steam game`, `installed program`, `game library` … */
+  kind: string
 }
 
 export interface FolderListDto {
@@ -191,6 +203,14 @@ export interface AetherBridge {
   removeRoot(path: string): Promise<VaultInfo>
   /** Set extra folder names to skip while scanning (reopens the vault). */
   setExclude(names: string[]): Promise<VaultInfo>
+  /** Leave one folder (vault path) out of the brain, at once (no rescan); nothing on disk changes. */
+  hideFolder(path: string): Promise<VaultInfo>
+  /** Let a folder left out with hideFolder (vault path) back in. */
+  unhideFolder(path: string): Promise<VaultInfo>
+  /** Replace the folders left out and/or the installs kept (absolute paths), applied at once. */
+  setFolderRules(rules: { hidden?: string[]; keep?: string[] }): Promise<VaultInfo>
+  /** Installed games and programs left out so far. */
+  skippedInstalls(): Promise<SkippedInstallDto[]>
   /** Drive roots on Windows (`C:\`, `D:\`, …); empty elsewhere. */
   listDrives(): Promise<string[]>
   listFiles(): Promise<VaultFileDto[]>
@@ -247,6 +267,10 @@ export const IPC = {
   addRootPath: 'vault:addRootPath',
   removeRoot: 'vault:removeRoot',
   setExclude: 'vault:setExclude',
+  hideFolder: 'vault:hideFolder',
+  unhideFolder: 'vault:unhideFolder',
+  setFolderRules: 'vault:setFolderRules',
+  skippedInstalls: 'vault:skippedInstalls',
   drives: 'vault:drives',
   list: 'vault:list',
   folders: 'vault:folders',

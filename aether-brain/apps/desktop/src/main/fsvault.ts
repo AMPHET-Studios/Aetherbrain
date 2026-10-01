@@ -7,12 +7,14 @@
  * Several roots: the first segment is the root's mount (`D/Projects/x.md`).
  *
  * Every operation is path-jailed to its root and refuses paths that the scan
- * would skip (hidden, system and heavy folders, user excludes), both by name
- * and as resolved on disk (symlinks, junctions, 8.3 short names), so nothing
- * outside the visible vault can be read or written through this class.
+ * would skip (hidden, system and heavy folders, user excludes, folders the
+ * user left out, installed games and programs), both by name and as resolved
+ * on disk (symlinks, junctions, 8.3 short names), so nothing outside the
+ * visible vault can be read or written through this class.
  */
 import { promises as fs, type Dirent } from 'node:fs'
 import path from 'node:path'
+import { installKind, isGameDirName } from './installs.js'
 
 /**
  * Lowercased folder names never scanned, watched or written into: build
@@ -100,6 +102,16 @@ export interface ScanResult {
   assets: { path: string; abs: string }[]
   /** True when more pictures were found than `maxAssets` (the list is partial). */
   assetsTruncated: boolean
+  /** Folders this scan left out because they hold an installed game or program (see SkippedInstall). */
+  installs: SkippedInstall[]
+}
+
+/** A folder left out because it holds an installed game or program (installs.ts). */
+export interface SkippedInstall {
+  /** Vault path. */
+  path: string
+  /** What it looks like: `Steam game`, `installed program`, `game library` … */
+  kind: string
 }
 
 /** A picture with what a stat said about it (both unknown when it was not looked at). */
@@ -136,6 +148,11 @@ function segmentsOf(vaultPath: string): string[] {
     .replace(/\\/g, '/')
     .split('/')
     .filter((s) => s && s !== '.')
+}
+
+/** Comparable form of a vault path (folder names compare case-insensitively, like exclude names). */
+function keyOf(vaultPath: string): string {
+  return segmentsOf(vaultPath).join('/').toLowerCase()
 }
 
 /** True when `path.relative(root, x)` points outside the root. */
@@ -257,8 +274,19 @@ export class FsVault {
   private readonly maxAssets: number
   private excludeNames: string[] = []
   private excludeSet = new Set<string>()
+  private hiddenAbs: string[] = []
+  /** Folders the user left out (vault path keys, see keyOf). */
+  private hiddenKeys = new Set<string>()
+  private keepAbs: string[] = []
+  /** Install folders the user wants to see anyway. */
+  private keepKeys = new Set<string>()
+  /** Install folders found so far (scans and the watcher), by key. */
+  private installKeys = new Map<string, SkippedInstall>()
 
-  constructor(roots: string[], opts: { exclude?: string[]; maxDirs?: number; maxAssets?: number } = {}) {
+  constructor(
+    roots: string[],
+    opts: { exclude?: string[]; hidden?: string[]; keep?: string[]; maxDirs?: number; maxAssets?: number } = {},
+  ) {
     const unique = new Map<string, string>()
     for (const r of roots.map((x) => path.resolve(x))) if (!unique.has(pathKey(r))) unique.set(pathKey(r), r)
     if (!unique.size) throw new Error('A vault needs at least one root folder')
@@ -267,6 +295,60 @@ export class FsVault {
     this.maxDirs = opts.maxDirs ?? 250_000
     this.maxAssets = opts.maxAssets ?? 200_000
     this.exclude = opts.exclude ?? []
+    this.hidden = opts.hidden ?? []
+    this.keep = opts.keep ?? []
+  }
+
+  /**
+   * Folders (absolute paths) the user left out of the brain: never scanned,
+   * watched, read or written, like an excluded name but for one folder. A
+   * path outside every root, or a root itself, changes nothing.
+   */
+  get hidden(): string[] {
+    return this.hiddenAbs
+  }
+  set hidden(paths: string[]) {
+    this.hiddenAbs = [...paths]
+    this.hiddenKeys = this.folderKeys(paths)
+  }
+
+  /** Folders (absolute paths) shown even though they look like a game library or an installed program. */
+  get keep(): string[] {
+    return this.keepAbs
+  }
+  set keep(paths: string[]) {
+    this.keepAbs = [...paths]
+    this.keepKeys = this.folderKeys(paths)
+    for (const k of this.keepKeys) this.installKeys.delete(k)
+  }
+
+  /** Install folders found by the scans and the watcher so far, kept ones not included. */
+  installs(): SkippedInstall[] {
+    return [...this.installKeys.values()]
+  }
+
+  /** Record `vaultPath` as an install folder (the scan or the watcher saw it); false when the user keeps it. */
+  markInstall(vaultPath: string, kind: string): boolean {
+    const key = keyOf(vaultPath)
+    if (this.keepKeys.has(key)) return false
+    this.installKeys.set(key, { path: segmentsOf(vaultPath).join('/'), kind })
+    return true
+  }
+
+  /** True when the user keeps `vaultPath` although it looks like an install. */
+  keeps(vaultPath: string): boolean {
+    return this.keepKeys.has(keyOf(vaultPath))
+  }
+
+  /** Keys of the folders among `paths` inside a root (not a root itself). */
+  private folderKeys(paths: string[]): Set<string> {
+    const out = new Set<string>()
+    for (const p of paths) {
+      const v = typeof p === 'string' && p ? this.toVault(p) : null
+      if (v === null || segmentsOf(v).length <= (this.multi ? 1 : 0)) continue
+      out.add(keyOf(v))
+    }
+    return out
   }
 
   /** Extra folder names skipped everywhere (case-insensitive). Assign a new array to change it. */
@@ -342,10 +424,31 @@ export class FsVault {
     return HEAVY_DIRS.has(lower) || this.excludeSet.has(lower)
   }
 
-  /** Hidden (dot/$ prefixed), HEAVY_DIRS, OS system folders, user excludes — any segment of the path inside its root. */
+  /**
+   * Hidden (dot/$ prefixed), HEAVY_DIRS, OS system folders, user excludes —
+   * any segment of the path inside its root — or inside a folder left out
+   * (skippedTree).
+   */
   isIgnored(vaultPath: string): boolean {
     const segs = segmentsOf(vaultPath)
-    return (this.multi ? segs.slice(1) : segs).some((s) => this.ignoredName(s))
+    return (this.multi ? segs.slice(1) : segs).some((s) => this.ignoredName(s)) || this.skippedTree(segs)
+  }
+
+  /**
+   * True when a folder on the path (inside its root) is one the user left
+   * out, an install folder found so far, or named like a game library and
+   * not kept. Lexical: no fs call.
+   */
+  private skippedTree(segs: string[]): boolean {
+    const start = this.multi ? 1 : 0
+    let key = this.multi ? (segs[0] ?? '').toLowerCase() : ''
+    for (let i = start; i < segs.length; i++) {
+      const seg = segs[i]!
+      key = key ? `${key}/${seg.toLowerCase()}` : seg.toLowerCase()
+      if (this.hiddenKeys.has(key) || this.installKeys.has(key)) return true
+      if (isGameDirName(seg) && !this.keepKeys.has(key)) return true
+    }
+    return false
   }
 
   /**
@@ -366,7 +469,8 @@ export class FsVault {
     const [realRoot, real] = await Promise.all([realish(root.abs), realish(full)])
     const rel = path.relative(realRoot, real)
     if (outside(rel)) throw new Error(`Path escapes vault: ${vaultPath}`)
-    if (rel.split(path.sep).some((s) => s && this.ignoredName(s))) {
+    const relSegs = rel.split(path.sep).filter(Boolean)
+    if (relSegs.some((s) => this.ignoredName(s)) || this.skippedTree(this.multi ? [root.mount, ...relSegs] : relSegs)) {
       throw new Error(`Path is excluded from the vault: ${vaultPath}`)
     }
     return { full, real }
@@ -410,6 +514,10 @@ export class FsVault {
     const assets: ScanResult['assets'] = []
     let assetsTruncated = false
     const folders: string[] = this.multi ? roots.map((r) => r.mount) : []
+    const installs: SkippedInstall[] = []
+    const install = (vault: string, kind: string): void => {
+      if (this.markInstall(vault, kind)) installs.push({ path: vault, kind })
+    }
     // Every root, not only the walked ones: a root nested inside another is never walked as part of it.
     const rootDirs = new Set(this.roots.map((r) => pathKey(r.abs)))
     const queue = roots.map((r) => ({ abs: r.abs, vault: r.mount, root: true }))
@@ -429,12 +537,26 @@ export class FsVault {
         continue
       }
       dirs++
-      if (!dir.root) folders.push(dir.vault)
+      if (!dir.root) {
+        // An installed game or program: left out with everything in it (unless the user keeps it).
+        const kind = this.keeps(dir.vault) ? null : installKind(entries.map((e) => e.name))
+        if (kind) {
+          install(dir.vault, kind)
+          continue
+        }
+        folders.push(dir.vault)
+      }
       for (const e of entries) {
         if (this.ignoredName(e.name)) continue
         const abs = path.join(dir.abs, e.name)
         const vault = dir.vault ? `${dir.vault}/${e.name}` : e.name
         if (e.isDirectory()) {
+          const key = keyOf(vault)
+          if (this.hiddenKeys.has(key) || this.installKeys.has(key)) continue
+          if (isGameDirName(e.name) && !this.keepKeys.has(key)) {
+            install(vault, 'game library')
+            continue
+          }
           // A root nested inside another root is walked once, as itself.
           if (!rootDirs.has(pathKey(abs))) queue.push({ abs, vault, root: false })
         } else if (e.isFile()) {
@@ -451,7 +573,7 @@ export class FsVault {
       }
     }
     onProgress?.({ dirs, found: files.length })
-    return { files, folders, truncated, dirs, assets, assetsTruncated }
+    return { files, folders, truncated, dirs, assets, assetsTruncated, installs }
   }
 
   /** Read scanned files with bounded concurrency (32); unreadable files are skipped. Keeps input order. */

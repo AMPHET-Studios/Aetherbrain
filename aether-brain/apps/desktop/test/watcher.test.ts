@@ -782,3 +782,90 @@ describe('VaultWatcher pictures', () => {
     await waitChange('addDir', 'Renders')
   })
 })
+
+describe('VaultWatcher and folders left out', () => {
+  let fake: ReturnType<typeof fakeWatch>
+
+  beforeEach(async () => {
+    await put('vault/Art/a.md', 'a')
+    await put('vault/Art/gate.png', 'png')
+    await put('vault/Art/Old/b.md', 'b')
+    await put('vault/Tools/notes.md', 'n')
+    fake = fakeWatch()
+  })
+
+  /** A watcher on `vault` seeded from its scan (pictures included), fed by the fake fs.watch. */
+  async function watched(vault = new FsVault([root])): Promise<FsVault> {
+    const scan = await vault.scan()
+    watcher = new VaultWatcher(
+      vault,
+      { files: scan.files.map((f) => f.path), folders: scan.folders, images: scan.assets.map((a) => a.path) },
+      (batch) => changes.push(...batch),
+      { debounceMs: 20, resyncMs: 20, watch: fake.fn },
+    )
+    await watcher.start()
+    return vault
+  }
+
+  const fire = (rel: string) => fake.of(root).listener('rename', rel.split('/').join(path.sep))
+
+  /** Wait until a flush that also reported `sentinel` is done. */
+  async function settle(sentinel: string): Promise<void> {
+    await put(`vault/${sentinel}`, 's')
+    fire(sentinel)
+    await waitChange('add', sentinel)
+  }
+
+  it('unlinks everything in a folder left out, ignores it from then on, and walks it again when let back in', async () => {
+    const v = await watched()
+    v.hidden = [path.join(root, 'Art')]
+    watcher!.refresh('Art')
+    await waitChange('unlinkDir', 'Art')
+    for (const p of ['Art/a.md', 'Art/gate.png', 'Art/Old/b.md']) expect(find('unlink', p), p).toBeTruthy()
+    expect(find('unlinkDir', 'Art/Old')).toBeTruthy()
+    await put('vault/Art/c.md', 'c')
+    fire('Art/c.md')
+    await settle('sentinel-1.md')
+    expect(find('add', 'Art/c.md')).toBeUndefined()
+    changes = []
+    v.hidden = []
+    watcher!.refresh('Art')
+    await waitChange('add', 'Art/Old/b.md')
+    for (const p of ['Art/a.md', 'Art/c.md']) expect(find('add', p), p).toBeTruthy()
+    expect(find('add', 'Art/gate.png')).toBeTruthy()
+    expect([find('addDir', 'Art'), find('addDir', 'Art/Old')].every(Boolean)).toBe(true)
+  })
+
+  it('leaves a folder out once a game or program is installed into it, and never reports one moved in whole', async () => {
+    const v = await watched()
+    await put('vault/Tools/Krita/brush.png', 'x')
+    fire('Tools/Krita')
+    await waitChange('add', 'Tools/Krita/brush.png')
+    await put('vault/Tools/Krita/unins000.exe', 'x')
+    fire('Tools/Krita/unins000.exe')
+    await waitChange('unlinkDir', 'Tools/Krita')
+    expect(find('unlink', 'Tools/Krita/brush.png')).toBeTruthy()
+    expect(v.installs()).toEqual([{ path: 'Tools/Krita', kind: 'installed program' }])
+    // Events inside it are ignored from then on.
+    await put('vault/Tools/Krita/more.png', 'x')
+    fire('Tools/Krita/more.png')
+    await put('vault/Games/Doom/steam_api64.dll', 'x')
+    await put('vault/Games/Doom/tex.png', 'x')
+    await put('vault/Games/My notes.md', 'mine')
+    fire('Games')
+    await settle('sentinel-2.md')
+    expect(find('add', 'Games/My notes.md')).toBeTruthy()
+    expect(changes.filter((c) => c.path.startsWith('Games/Doom') || c.path === 'Tools/Krita/more.png')).toEqual([])
+  })
+
+  it('looks into a folder again when the user stops keeping it', async () => {
+    await put('vault/Games/Hollow/UnityPlayer.dll', 'x')
+    await put('vault/Games/Hollow/README.md', 'r')
+    const v = await watched(new FsVault([root], { keep: [path.join(root, 'Games', 'Hollow')] }))
+    v.keep = []
+    watcher!.refresh('Games/Hollow', { recheck: true })
+    await waitChange('unlinkDir', 'Games/Hollow')
+    expect(find('unlink', 'Games/Hollow/README.md')).toBeTruthy()
+    expect(find('unlinkDir', 'Games')).toBeUndefined()
+  })
+})

@@ -31,11 +31,17 @@ interface BrainOptions {
   /** Run its own recursive fs.watch (default true). The in-app link passes false and feeds changes itself. */
   watch?: boolean
   preload?: BrainPreload
+  /** Folders (absolute paths) left out of the brain. */
+  hidden?: string[]
+  /** Folders (absolute paths) shown although they look like installs. */
+  keep?: string[]
 }
 
 interface Brain {
   /** Apply file/folder changes observed elsewhere (the host's watcher). Idempotent. */
   applyExternal(changes: VaultChangeDto[]): void
+  /** New folder rules for the same vault (see LinkVault). */
+  setFolderRules?(rules: { hidden: string[]; keep: string[] }): void
   close(): void | Promise<void>
 }
 
@@ -135,15 +141,21 @@ export interface ServerLaunch {
   roots: string[]
   /** Extra folder names skipped while scanning. */
   exclude?: string[]
+  /** Folders (absolute paths) left out of the brain. */
+  hidden?: string[]
+  /** Folders (absolute paths) shown although they look like installs. */
+  keep?: string[]
   readOnly: boolean
 }
 
-/** Server arguments: the script, `--vault` per root, `--exclude` per name, `--read-only`. */
+/** Server arguments: the script, `--vault` per root, `--exclude` per name, `--hide` / `--keep` per folder, `--read-only`. */
 export function serverArgs(l: ServerLaunch): string[] {
   return [
     l.serverScript,
     ...l.roots.flatMap((r) => ['--vault', r]),
     ...(l.exclude ?? []).flatMap((n) => ['--exclude', n]),
+    ...(l.hidden ?? []).flatMap((f) => ['--hide', f]),
+    ...(l.keep ?? []).flatMap((f) => ['--keep', f]),
     ...(l.readOnly ? ['--read-only'] : []),
   ]
 }
@@ -186,7 +198,7 @@ export function claudeCodeCommand(l: ServerLaunch, platform: string = process.pl
 }
 
 /** Flags serverArgs() emits; everything else in the command line is a quoted value. */
-const SERVER_FLAGS = new Set(['--vault', '--exclude', '--read-only'])
+const SERVER_FLAGS = new Set(['--vault', '--exclude', '--hide', '--keep', '--read-only'])
 
 /** Error from a missing bundle file (so the status can say what to do). */
 class MissingBundle extends Error {}
@@ -205,10 +217,12 @@ export function describeStartError(err: unknown, port: number): string {
 /* Host                                                               */
 /* ------------------------------------------------------------------ */
 
-/** The vault the link serves: roots in order + user excludes. */
+/** The vault the link serves: roots in order + user excludes, and the folder rules (applied live, see setFolderRules). */
 export interface LinkVault {
   roots: string[]
   exclude: string[]
+  hidden?: string[]
+  keep?: string[]
 }
 
 export interface AiLinkHostOptions {
@@ -277,6 +291,8 @@ export class AiLinkHost {
       serverScript: this.opts.serverScript,
       roots: v?.roots ?? [],
       exclude: v?.exclude ?? [],
+      hidden: v?.hidden ?? [],
+      keep: v?.keep ?? [],
       readOnly: s.readOnly,
     }
     return {
@@ -301,9 +317,24 @@ export class AiLinkHost {
    * reflects it.
    */
   setVault(vault: LinkVault | null, preload?: BrainPreload | null): Promise<AiLinkStatus> {
-    this.target = vault ? { roots: [...vault.roots], exclude: [...vault.exclude] } : null
+    this.target = vault ? { roots: [...vault.roots], exclude: [...vault.exclude], hidden: [...(vault.hidden ?? [])], keep: [...(vault.keep ?? [])] } : null
     this.prepare(preload ?? null)
     return this.enqueue(() => this.sync())
+  }
+
+  /**
+   * New folder rules for the same vault: the open brain takes them at once
+   * (no reopen; what they leave out comes as unlinks from main's watcher).
+   * Other roots or excludes are a new vault: setVault.
+   */
+  setFolderRules(vault: LinkVault): void {
+    if (!this.target || vaultKey(this.target) !== vaultKey(vault)) return
+    this.target = { ...this.target, hidden: [...(vault.hidden ?? [])], keep: [...(vault.keep ?? [])] }
+    try {
+      this.brain?.setFolderRules?.({ hidden: this.target.hidden ?? [], keep: this.target.keep ?? [] })
+    } catch (err) {
+      console.warn('[aether] AI link could not apply folder rules', err)
+    }
   }
 
   /** Changes seen by main's watcher or made by the app itself. Never throws. */
@@ -403,6 +434,8 @@ export class AiLinkHost {
           brain = await mod.Brain.open({
             roots: target.roots,
             exclude: target.exclude,
+            hidden: target.hidden ?? [],
+            keep: target.keep ?? [],
             watch: false,
             ...(preload ? { preload } : {}),
           })
