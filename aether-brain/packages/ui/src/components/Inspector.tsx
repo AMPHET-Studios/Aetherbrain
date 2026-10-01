@@ -273,7 +273,8 @@ function FolderInspector({ node }: { node: GraphNode }) {
     const moons: GraphNode[] = []
     const pictures: GraphNode[] = []
     for (const n of graph?.nodes ?? []) {
-      if (n.parent !== node.id) continue
+      // Cards of an open star gallery belong to the gallery, not to the folder's own moons.
+      if (n.parent !== node.id || n.image?.gallery?.only) continue
       if (n.kind === 'folder') planets.push(n)
       else if (n.kind === 'note') moons.push(n)
       else if (n.kind === 'image') pictures.push(n)

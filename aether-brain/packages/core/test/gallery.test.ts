@@ -102,6 +102,15 @@ describe('star gallery', () => {
     expect(empty.gallery).toBeNull()
   })
 
+  it('copes with a folder of 130,000 pictures', () => {
+    const many = assetMap(Array.from({ length: 130_000 }, (_, i) => ({ path: `Projects/PORTALz/dataset/frame ${i}.png`, mtime: i })))
+    const g = buildGraph(notesOf(files), {
+      images: { all: many, moons: false, gallery: 'Projects/PORTALz' },
+      folders: { all: new Set([...folders, 'Projects/PORTALz/dataset']), rootTitle: 'Vault', multiRoot: false, maxDepth: 3 },
+    })
+    expect(g.gallery).toMatchObject({ cards: GALLERY_MAX, total: 130_000 })
+  })
+
   it('sees a new picture once the asset map changes', () => {
     const more = new Map(assets)
     more.set('Projects/PORTALz/new.png', { path: 'Projects/PORTALz/new.png', mtime: 99 })

@@ -12,8 +12,8 @@ export const GALLERY_OPEN = 2.6
 export const GALLERY_CLOSE = 3.4
 /** System radius a small star counts with: one with a single planet still opens from a fair distance. */
 export const GALLERY_MIN_EXTENT = 30
-/** Another star takes over an open gallery only when the camera is this much closer to it (relative). */
-export const GALLERY_SWITCH = 0.6
+/** Another star takes over only when the camera looks at it this much more closely (relative): no flapping between neighbours. */
+export const GALLERY_SWITCH = 0.85
 /** How often the scene measures the camera against the stars (ms). */
 export const GALLERY_CHECK_MS = 150
 /** Cards grow out of the star over this long (ms) … */
@@ -22,17 +22,27 @@ export const GALLERY_GROW_MS = 900
 export const GALLERY_SHRINK_MS = 380
 /** The graph lets the cards go this long after the fold starts (ms): once they have shrunk. */
 export const GALLERY_FOLD_MS = 420
+/**
+ * A gallery opens by itself only once the camera has stayed close to its star
+ * this long (ms): flying past a star on the way somewhere else opens nothing.
+ */
+export const GALLERY_DWELL_MS = 300
+/** Nor while the camera makes its first framing flight over a new vault or layout (at most this long, ms). */
+export const GALLERY_FRAMING_MS = 5000
 /** A gallery opened with Shift+G waits this long (ms) for the camera to reach its star. */
 export const GALLERY_REACH_MS = 8000
 
 /**
- * The project star the camera at (cx, cy, cz) is close to: the one with the
- * smallest distance over system radius (`extent`, at least
- * GALLERY_MIN_EXTENT), when that is below GALLERY_OPEN. `current` (a node
- * index, −1 for none) stays the answer while the camera is within
- * GALLERY_CLOSE of it, unless another star is within GALLERY_OPEN and
- * GALLERY_SWITCH times closer. `stars` holds node indices, `pos` xyz per node.
- * Returns a node index, or −1.
+ * The project star the camera is close to: the camera at (cx, cy, cz)
+ * looking at (tx, ty, tz). A star counts when both the camera and the point it
+ * looks at are within GALLERY_OPEN system radii of it (`extent`, at least
+ * GALLERY_MIN_EXTENT); of those, the one looked at most closely wins (the
+ * camera's own distance breaks ties), so orbiting a star never hands its
+ * gallery to a small neighbour the camera swings past. `current` (a node
+ * index, −1 for none) stays the answer while both stay within GALLERY_CLOSE,
+ * unless another star counts and is looked at GALLERY_SWITCH times as
+ * closely. `stars` holds node indices, `pos` xyz per node. Returns a node
+ * index, or −1.
  */
 export function nearestStar(
   stars: ArrayLike<number>,
@@ -41,12 +51,15 @@ export function nearestStar(
   cx: number,
   cy: number,
   cz: number,
+  tx: number,
+  ty: number,
+  tz: number,
   current = -1,
   open = GALLERY_OPEN,
 ): number {
   let best = -1
-  let bestRatio = Infinity
-  let currentRatio = Infinity
+  let bestScore = Infinity
+  let currentScore = Infinity
   for (let k = 0; k < stars.length; k++) {
     const i = stars[k]!
     const x = pos[i * 3]
@@ -54,16 +67,19 @@ export function nearestStar(
     const z = pos[i * 3 + 2]
     const e = extent[i]
     if (x === undefined || y === undefined || z === undefined || e === undefined) continue
-    const ratio = Math.hypot(x - cx, y - cy, z - cz) / Math.max(GALLERY_MIN_EXTENT, Number.isFinite(e) ? e : 0)
-    if (!Number.isFinite(ratio)) continue
-    if (i === current) currentRatio = ratio
-    if (ratio < bestRatio) {
-      bestRatio = ratio
+    const size = Math.max(GALLERY_MIN_EXTENT, Number.isFinite(e) ? e : 0)
+    const cam = Math.hypot(x - cx, y - cy, z - cz) / size
+    const look = Math.hypot(x - tx, y - ty, z - tz) / size
+    if (!Number.isFinite(cam) || !Number.isFinite(look)) continue
+    const score = look + cam * 0.01
+    if (i === current && cam < GALLERY_CLOSE && look < GALLERY_CLOSE) currentScore = score
+    if (cam < open && look < open && score < bestScore) {
+      bestScore = score
       best = i
     }
   }
-  if (currentRatio < GALLERY_CLOSE && !(best !== current && bestRatio < open && bestRatio < currentRatio * GALLERY_SWITCH)) return current
-  return bestRatio < open ? best : -1
+  if (currentScore < Infinity && !(best !== current && bestScore < currentScore * GALLERY_SWITCH)) return current
+  return best
 }
 
 /** Ease a 0..1 growth value (smoothstep): cards start and settle gently. */

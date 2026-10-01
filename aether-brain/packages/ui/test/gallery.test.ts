@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { MemoryVaultAdapter, folderKey, imageKey, type VaultFile } from '@aether/core'
-import { GALLERY_FOLD_MS } from '@aether/graph'
+import { GALLERY_DWELL_MS, GALLERY_FOLD_MS } from '@aether/graph'
 
 /** localStorage for the node test environment. */
 class MemoryStorage {
@@ -80,6 +80,8 @@ describe('star galleries in the app', () => {
     expect(s().graph!.gallery).toBeNull()
 
     s().controller.nearStar(STAR)
+
+    vi.advanceTimersByTime(GALLERY_DWELL_MS)
     expect(s().gallery).toBe('Projects/Gate')
     const g = s().graph!
     expect(g.gallery).toEqual({ star: STAR, path: 'Projects/Gate', cards: 32, total: 32 })
@@ -102,6 +104,7 @@ describe('star galleries in the app', () => {
     expect(s().graph!.nodes.length).toBe(before + 1)
     const toasts = s().toasts.length
     s().controller.nearStar(STAR)
+    vi.advanceTimersByTime(GALLERY_DWELL_MS)
     expect(s().graph!.gallery).not.toBeNull()
     expect(s().toasts.length).toBe(toasts)
   })
@@ -123,6 +126,38 @@ describe('star galleries in the app', () => {
     expect(s().selectedId).toBeNull()
   })
 
+  it('Shift decides with Caps Lock on; Tab from a star reaches its planets before the gallery cards', async () => {
+    const { s, store } = await freshStore()
+    await openVault(s)
+    const { handleKey } = await import('../src/hooks/useKeyboard')
+    const key = (k: string, shiftKey: boolean) =>
+      handleKey({
+        key: k,
+        metaKey: false,
+        ctrlKey: false,
+        altKey: false,
+        shiftKey,
+        target: { tagName: 'BODY', isContentEditable: false, getAttribute: () => null, hasAttribute: () => false },
+        preventDefault() {},
+        stopPropagation() {},
+      } as unknown as KeyboardEvent)
+    s().select(STAR)
+    key('G', false) // Caps Lock, plain g: not the gallery
+    expect(s().gallery).toBeNull()
+    key('g', true) // Caps Lock, Shift+G
+    expect(s().gallery).toBe('Projects/Gate')
+    s().select(STAR)
+    s().cycleNeighbor(1)
+    s().cycleNeighbor(1)
+    const g = s().graph!
+    expect(g.nodes[g.index.get(s().hoveredId!)!]!.image?.gallery?.only).not.toBe(true)
+    s().cycleNeighbor(-1)
+    s().cycleNeighbor(-1)
+    s().cycleNeighbor(-1)
+    expect(g.nodes[g.index.get(s().hoveredId!)!]!.image?.gallery?.only).toBe(true)
+    expect(store.starOf(g, s().hoveredId)).toBe(STAR)
+  })
+
   it('explains what Shift+G needs instead of doing nothing', async () => {
     const { s, press } = await freshStore()
     await openVault(s)
@@ -135,6 +170,7 @@ describe('star galleries in the app', () => {
     // Close to a star without pictures: nothing to show, nothing rebuilt.
     const graph = s().graph
     s().controller.nearStar(folderKey('Projects/Quiet'))
+    vi.advanceTimersByTime(GALLERY_DWELL_MS)
     expect(s().graph).toBe(graph)
     s().setSettings({ layoutMode: 'constellation' })
     press('G')
@@ -148,10 +184,12 @@ describe('star galleries in the app', () => {
     expect(s().settings.starGalleries).toBe(false)
     expect(JSON.parse(localStorage.getItem('aether:settings')!).starGalleries).toBe(false)
     s().controller.nearStar(STAR)
+    vi.advanceTimersByTime(GALLERY_DWELL_MS)
     expect(s().gallery).toBeNull()
     commands.find((c) => c.id === 'star-galleries')!.run(s())
     s().controller.nearStar(null)
     s().controller.nearStar(STAR)
+    vi.advanceTimersByTime(GALLERY_DWELL_MS)
     expect(s().gallery).toBe('Projects/Gate')
 
     s().setSettings({ layoutMode: 'orbit' })
@@ -163,12 +201,14 @@ describe('star galleries in the app', () => {
 
     s().controller.nearStar(null)
     s().controller.nearStar(STAR)
+    vi.advanceTimersByTime(GALLERY_DWELL_MS)
     expect(s().gallery).toBe('Projects/Gate')
     await openVault(s)
     expect(s().gallery).toBeNull()
     expect(s().graph!.gallery).toBeNull()
     // The new vault's controller state starts clean: coming close opens again.
     s().controller.nearStar(STAR)
+    vi.advanceTimersByTime(GALLERY_DWELL_MS)
     expect(s().gallery).toBe('Projects/Gate')
   })
 

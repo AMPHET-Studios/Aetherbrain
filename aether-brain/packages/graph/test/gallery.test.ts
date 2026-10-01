@@ -3,7 +3,9 @@ import { assetMap, buildGraph, parseNote, type GraphData, type NoteId, type Pars
 import { BrainController } from '../src/BrainController'
 import {
   GALLERY_CLOSE,
+  GALLERY_DWELL_MS,
   GALLERY_FOLD_MS,
+  GALLERY_FRAMING_MS,
   GALLERY_GROW_MS,
   GALLERY_MIN_EXTENT,
   GALLERY_OPEN,
@@ -179,32 +181,39 @@ describe('nearestStar', () => {
   const pos = new Float32Array([0, 0, 0, 300, 0, 0, 500, 0, 0])
   const extent = new Float32Array([100, 50, 5])
   const stars = [0, 1]
+  /** The camera at (x, y, z) looking at (tx, ty, tz). */
+  const near = (x: number, y: number, z: number, tx: number, ty: number, tz: number, current = -1, open?: number) =>
+    nearestStar(stars, pos, extent, x, y, z, tx, ty, tz, current, open)
 
-  it('opens within GALLERY_OPEN system radii and holds until GALLERY_CLOSE', () => {
-    expect(nearestStar(stars, pos, extent, 0, 0, 200)).toBe(0)
+  it('opens when the camera and what it looks at are within GALLERY_OPEN system radii, holds until GALLERY_CLOSE', () => {
+    expect(near(0, 0, 200, 0, 0, 0)).toBe(0)
     const between = ((GALLERY_OPEN + GALLERY_CLOSE) / 2) * 100
-    expect(nearestStar(stars, pos, extent, 0, 0, between)).toBe(-1)
-    expect(nearestStar(stars, pos, extent, 0, 0, between, 0)).toBe(0)
-    expect(nearestStar(stars, pos, extent, 0, 0, GALLERY_CLOSE * 100 + 1, 0)).toBe(-1)
+    expect(near(0, 0, between, 0, 0, 0)).toBe(-1)
+    expect(near(0, 0, between, 0, 0, 0, 0)).toBe(0)
+    expect(near(0, 0, GALLERY_CLOSE * 100 + 1, 0, 0, 0, 0)).toBe(-1)
+    // Close, but looking far away from it: not this star.
+    expect(near(0, 0, 200, 0, 0, -400)).toBe(-1)
   })
 
-  it('hands over to another star only when the camera is clearly closer to it', () => {
-    // x = 250: 2.5 radii from A, 1 from B (under 0.6 × 2.5): B takes over.
-    expect(nearestStar(stars, pos, extent, 250, 0, 0, 0)).toBe(1)
-    // x = 200: 2 radii from each: A stays (and wins the tie without one open).
-    expect(nearestStar(stars, pos, extent, 200, 0, 0, 0)).toBe(0)
-    expect(nearestStar(stars, pos, extent, 200, 0, 0, -1)).toBe(0)
-    expect(nearestStar(stars, pos, extent, 200, 0, 0, 1)).toBe(1)
+  it('the star looked at wins: orbiting one never hands its gallery to a neighbour swung past', () => {
+    // 2.5 radii from A, 0.4 from B, looking at A.
+    expect(near(250, 0, 0, 0, 0, 0, 0)).toBe(0)
+    expect(near(250, 0, 0, 0, 0, 0, -1)).toBe(0)
+    // Looking at B now (the camera flew there): B takes over.
+    expect(near(250, 0, 0, 300, 0, 0, 0)).toBe(1)
+    // Looking at a point two system radii from each: the one held stays.
+    expect(near(200, 0, 30, 200, 0, 0, 0)).toBe(0)
+    expect(near(200, 0, 30, 200, 0, 0, 1)).toBe(1)
   })
 
   it('counts a small system as GALLERY_MIN_EXTENT and skips what it cannot measure', () => {
-    expect(nearestStar([2], pos, extent, 500, GALLERY_MIN_EXTENT * 2, 0)).toBe(2)
-    expect(nearestStar([0, 7], pos, extent, 0, 0, 100)).toBe(0)
-    expect(nearestStar([], pos, extent, 0, 0, 0)).toBe(-1)
-    expect(nearestStar([0], pos, new Float32Array([Number.NaN]), 0, 0, 10)).toBe(0)
-    // Without a threshold (Shift+G with nothing selected): the closest, however far.
-    expect(nearestStar(stars, pos, extent, 0, 0, 5000)).toBe(-1)
-    expect(nearestStar(stars, pos, extent, 0, 0, 5000, -1, Infinity)).toBe(0)
+    expect(nearestStar([2], pos, extent, 500, GALLERY_MIN_EXTENT * 2, 0, 500, 0, 0)).toBe(2)
+    expect(nearestStar([0, 7], pos, extent, 0, 0, 100, 0, 0, 0)).toBe(0)
+    expect(nearestStar([], pos, extent, 0, 0, 0, 0, 0, 0)).toBe(-1)
+    expect(nearestStar([0], pos, new Float32Array([Number.NaN]), 0, 0, 10, 0, 0, 0)).toBe(0)
+    // Without a threshold (Shift+G with nothing selected): the star looked at, however far.
+    expect(near(0, 0, 5000, 300, 0, 0)).toBe(-1)
+    expect(near(0, 0, 5000, 300, 0, 0, -1, Infinity)).toBe(1)
   })
 })
 
@@ -253,6 +262,12 @@ describe('BrainController star galleries', () => {
     vi.useRealTimers()
   })
 
+  /** The camera comes close to a star and stays there. */
+  const near = (c: BrainController, id: NoteId) => {
+    c.nearStar(id)
+    vi.advanceTimersByTime(GALLERY_DWELL_MS)
+  }
+
   function controller() {
     const c = new BrainController()
     c.layoutMode = 'system'
@@ -263,7 +278,7 @@ describe('BrainController star galleries', () => {
 
   it('opens near a star, folds away from it, and opens again when the camera comes back mid-fold', () => {
     const { c, asked } = controller()
-    c.nearStar('folder:A')
+    near(c, 'folder:A')
     expect(asked).toEqual(['folder:A'])
     c.nearStar(null)
     expect(c.galleryFold).toBeGreaterThanOrEqual(0)
@@ -271,38 +286,38 @@ describe('BrainController star galleries', () => {
     vi.advanceTimersByTime(GALLERY_FOLD_MS)
     expect(asked).toEqual(['folder:A', null])
     expect(c.galleryFold).toBe(-1)
-    c.nearStar('folder:A')
+    near(c, 'folder:A')
     c.nearStar(null)
     vi.advanceTimersByTime(GALLERY_FOLD_MS / 2)
-    c.nearStar('folder:A')
+    near(c, 'folder:A')
     expect(c.galleryFold).toBe(-1)
     vi.advanceTimersByTime(GALLERY_FOLD_MS * 3)
     expect(asked).toEqual(['folder:A', null, 'folder:A'])
-    c.nearStar('folder:B')
+    near(c, 'folder:B')
     expect(asked.at(-1)).toBe('folder:B')
     c.dispose()
   })
 
   it('Shift+G closes it until the camera leaves the star; opening holds while the camera flies there', () => {
     const { c, asked } = controller()
-    c.nearStar('folder:A')
+    near(c, 'folder:A')
     c.closeGallery()
     vi.advanceTimersByTime(GALLERY_FOLD_MS)
     expect(asked).toEqual(['folder:A', null])
-    c.nearStar('folder:A')
+    near(c, 'folder:A')
     expect(asked).toHaveLength(2)
     c.nearStar(null)
-    c.nearStar('folder:A')
+    near(c, 'folder:A')
     expect(asked).toEqual(['folder:A', null, 'folder:A'])
 
     // Opened from afar: the fly passes no star (or another one) without closing it…
     c.openGallery('folder:C')
     expect(asked.at(-1)).toBe('folder:C')
     c.nearStar(null)
-    c.nearStar('folder:D')
+    near(c, 'folder:D')
     expect(c.galleryFold).toBe(-1)
     // …reaching it, then leaving it, folds it.
-    c.nearStar('folder:C')
+    near(c, 'folder:C')
     c.nearStar(null)
     vi.advanceTimersByTime(GALLERY_FOLD_MS)
     expect(asked.at(-1)).toBeNull()
@@ -319,20 +334,52 @@ describe('BrainController star galleries', () => {
   it('auto-open off: only Shift+G opens; leaving the system layout lets go at once', () => {
     const { c, asked } = controller()
     c.galleries = false
-    c.nearStar('folder:A')
+    near(c, 'folder:A')
     expect(asked).toEqual([])
     c.openGallery('folder:A')
     expect(asked).toEqual(['folder:A'])
     c.setLayoutMode('constellation')
     expect(asked).toEqual(['folder:A', null])
     c.galleries = true
-    c.nearStar('folder:B')
+    near(c, 'folder:B')
     expect(asked).toHaveLength(2)
     c.resetGallery()
     c.setLayoutMode('system')
-    c.nearStar('folder:B')
+    near(c, 'folder:B')
     expect(asked.at(-1)).toBe('folder:B')
     c.dispose()
+  })
+
+  it('opens by itself only once the camera stays close, and not during the first framing flight', () => {
+    const { c, asked } = controller()
+    c.nearStar('folder:A')
+    vi.advanceTimersByTime(GALLERY_DWELL_MS - 1)
+    expect(asked).toEqual([])
+    // Flying past A to B: A never opens.
+    c.nearStar('folder:B')
+    vi.advanceTimersByTime(GALLERY_DWELL_MS - 1)
+    expect(asked).toEqual([])
+    vi.advanceTimersByTime(1)
+    expect(asked).toEqual(['folder:B'])
+    c.dispose()
+
+    // A new vault: the camera frames it first (it may start close to a star).
+    const fresh = controller()
+    fresh.c.camera = { setRange() {}, flyTo() {}, reset() {}, orbit() {}, dolly() {}, truck() {}, setEnabled() {}, setShift() {} }
+    fresh.c.setGraph(starGraph())
+    fresh.c.nearStar('folder:A')
+    vi.advanceTimersByTime(GALLERY_DWELL_MS)
+    expect(fresh.asked).toEqual([])
+    // Shift+G does not wait.
+    fresh.c.openGallery('folder:B')
+    expect(fresh.asked).toEqual(['folder:B'])
+    fresh.c.closeGallery()
+    vi.advanceTimersByTime(GALLERY_FOLD_MS)
+    expect(fresh.asked).toEqual(['folder:B', null])
+    // The framing never settles here (no worker): A opens once GALLERY_FRAMING_MS have passed.
+    vi.advanceTimersByTime(GALLERY_FRAMING_MS)
+    expect(fresh.asked).toEqual(['folder:B', null, 'folder:A'])
+    fresh.c.dispose()
   })
 
   it('finds the star the camera is closest to for Shift+G', () => {
@@ -340,7 +387,7 @@ describe('BrainController star galleries', () => {
     c.layoutMode = 'system'
     expect(c.nearestStar()).toBeNull()
     c.graph = starGraph()
-    c.camera = { setRange() {}, flyTo() {}, reset() {}, orbit() {}, dolly() {}, truck() {}, setEnabled() {}, setShift() {}, getPosition: (out) => ((out[0] = 9), (out[1] = 0), (out[2] = 0), out) }
+    c.camera = { setRange() {}, flyTo() {}, reset() {}, orbit() {}, dolly() {}, truck() {}, setEnabled() {}, setShift() {}, getPosition: (out) => ((out[0] = 9), (out[1] = 0), (out[2] = 0), out), getTarget: (out) => ((out[0] = 10), (out[1] = 0), (out[2] = 0), out) }
     const n = c.graph.nodes.length
     c.engine.positions = new Float32Array(n * 3)
     c.engine.extents = new Float32Array(n).fill(10)

@@ -274,6 +274,16 @@ export function createThumbMaterial(): ShaderMaterial {
       varying float vLayer;
       varying float vAlpha;
       varying float vFade;
+      // 4×4 ordered dither threshold in (0, 1) for this pixel.
+      float bayer4(vec2 p) {
+        vec2 q = mod(floor(p), 4.0);
+        // The 2×2 Bayer matrix [0 2; 3 1] at the fine and the coarse level.
+        vec2 f = mod(q, 2.0);
+        vec2 c = floor(q / 2.0);
+        float fine = 2.0 * f.x + 3.0 * f.y - 4.0 * f.x * f.y;
+        float coarse = 2.0 * c.x + 3.0 * c.y - 4.0 * c.x * c.y;
+        return (fine * 4.0 + coarse + 0.5) / 16.0;
+      }
       // Signed distance to a rounded square of half-size b, corner radius r (negative inside).
       float roundedBox(vec2 p, float b, float r) {
         vec2 q = abs(p) - vec2(b - r);
@@ -282,8 +292,10 @@ export function createThumbMaterial(): ShaderMaterial {
       void main() {
         float d = roundedBox(vUv - 0.5, 0.5, 0.12);
         float aa = max(fwidth(d), 1e-4);
-        float mask = (1.0 - smoothstep(-aa, 0.0, d)) * vFade;
-        if (mask < 0.01) discard;
+        float mask = 1.0 - smoothstep(-aa, 0.0, d);
+        // A card the camera is passing fades by dropping pixels, not by blending: the pixels kept
+        // write depth as solid ones, so nothing behind a nearly gone card is cut out.
+        if (mask < 0.01 || vFade < bayer4(gl_FragCoord.xy)) discard;
         vec3 pic = texture(uMap, vec3(vUv.x, 1.0 - vUv.y, vLayer)).rgb;
         float rim = 1.0 - smoothstep(0.02, 0.02 + aa * 1.5, -d);
         vec3 col = mix(pic * 0.94, vec3(0.78, 0.8, 0.9), rim) * mix(0.12, 1.0, vAlpha);

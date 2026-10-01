@@ -184,6 +184,13 @@ function CameraRig({ controller }: { controller: BrainController }) {
         out[2] = here.z
         return out
       },
+      getTarget(out) {
+        c.getTarget(here, true)
+        out[0] = here.x
+        out[1] = here.y
+        out[2] = here.z
+        return out
+      },
       setShift(fraction) {
         // camera-controls' focal offset is in view space and in world units,
         // so scale by the visible half-width at the current distance and keep
@@ -608,8 +615,7 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
     grow: 0,
     cardBuffers: null as Buffers | null,
     cardRings: -1,
-    /** The project star the camera was last found close to, and when that was last measured. */
-    nearId: null as NoteId | null,
+    /** When the camera was last measured against the stars. */
     lastNearCheck: -Infinity,
   })
 
@@ -760,6 +766,8 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
   const m4 = useMemo(() => new Matrix4(), [])
   const v3 = useMemo(() => new Vector3(), [])
   const camPos = useMemo(() => new Vector3(), [])
+  const camEnd = useMemo(() => new Vector3(), [])
+  const lookEnd = useMemo(() => new Vector3(), [])
 
   useFrame((_, dt) => {
     if (!buffers) return
@@ -886,18 +894,25 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
 
     drawLabels(overlayRef.current, buffers, controller, st.labelSet, hovI, selI, size.width, size.height)
 
-    // Star galleries: which project star is the camera close to? Last in the frame: the answer can
-    // rebuild the graph (a gallery opening), and this frame's buffers are done with by now.
-    if (controller.layoutMode !== 'system') st.nearId = null
-    else if (now - st.lastNearCheck >= GALLERY_CHECK_MS && eng.extents.length === n && controller.graph === g) {
+    // Star galleries: which project star is the camera close to? Measured where the camera is going
+    // (the end of a flight), so flying past a star counts for nothing. Last in the frame: the answer
+    // can rebuild the graph (a gallery opening), and this frame's buffers are done with by now.
+    // The star the controller holds (opened with Shift+G, open, else last found) keeps its place until
+    // the camera is clearly closer to another one; the answer goes in whenever the controller's differs.
+    if (controller.layoutMode === 'system' && now - st.lastNearCheck >= GALLERY_CHECK_MS && eng.extents.length === n && controller.graph === g) {
       st.lastNearCheck = now
-      const current = st.nearId === null ? -1 : (g.index.get(st.nearId) ?? -1)
-      const k = nearestStar(buffers.stars, pos, eng.extents, camPos.x, camPos.y, camPos.z, current)
-      const id = k >= 0 ? (g.nodes[k]?.id ?? null) : null
-      if (id !== st.nearId) {
-        st.nearId = id
-        controller.nearStar(id)
+      if (controls) {
+        controls.getPosition(camEnd, true)
+        controls.getTarget(lookEnd, true)
+      } else {
+        camEnd.copy(camPos)
+        lookEnd.copy(camPos)
       }
+      const held = controller.galleryHeld
+      const current = held === null ? -1 : (g.index.get(held) ?? -1)
+      const k = nearestStar(buffers.stars, pos, eng.extents, camEnd.x, camEnd.y, camEnd.z, lookEnd.x, lookEnd.y, lookEnd.z, current)
+      const id = k >= 0 ? (g.nodes[k]?.id ?? null) : null
+      if (id !== controller.nearId) controller.nearStar(id)
     }
   })
 
@@ -934,8 +949,20 @@ function hits(b: Buffers, i: number, dx: number, dy: number, selI: number, hovI:
     if (!((b.radii[i] ?? 0) > 0.25)) return false
     if (picture && i !== selI && cardFade((b.screen[i * 4 + 3] ?? 0) * THUMB_SCALE, viewHeight) < 0.5) return false
   }
-  const px = b.screen[i * 4 + 3] ?? 0
+  const px = bodyPx(b, i)
   return thumbPickHit(dx, dy, px, picture, picture ? thumbDrawnHalf(thumbHalf(i, selI, hovI), px, viewHeight, TAN_HALF_FOV) : 1)
+}
+
+/**
+ * Projected radius (px) node `i` is picked and labelled with: a gallery card
+ * still waiting for its picture is drawn as a picture moon's body, not at its
+ * card size.
+ */
+function bodyPx(b: Buffers, i: number): number {
+  const px = b.screen[i * 4 + 3] ?? 0
+  if (b.isCard[i] !== 1 || b.thumbs.shown[i] === 1) return px
+  const r = b.radii[i] ?? 0
+  return r > 0 ? px * Math.min(1, (b.baseRadii[i] ?? r) / r) : px
 }
 
 /* ------------------------------------------------------------------ */
@@ -1265,7 +1292,7 @@ function drawLabels(
     const x = s[i * 4] ?? 0
     const y = s[i * 4 + 1] ?? 0
     // Below the picture when the node shows one (it is wider than the core, and grows when hovered or selected).
-    const px = s[i * 4 + 3] ?? 0
+    const px = bodyPx(b, i)
     const r = shown[i] === 1 ? px * (thumbDrawnHalf(thumbHalf(i, selI, hovI), px, height, TAN_HALF_FOV) + 0.1) : px
     if (x < -40 || x > width + 40 || y < -20 || y > height + 20) return
     const node = g.nodes[i]!

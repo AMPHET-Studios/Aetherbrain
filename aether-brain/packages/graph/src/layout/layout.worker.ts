@@ -11,7 +11,9 @@
  *
  * System mode — no physics: the folder tree is laid out analytically as
  * nested solar systems (see system.ts). Positions ease in from the previous
- * layout over 1.2 s, then planets and moons orbit while motion is on.
+ * layout over 1.2 s (a fading offset on top of the live orbits, so a body
+ * whose orbit did not change never lags), then planets and moons orbit while
+ * motion is on.
  */
 import {
   forceCenter,
@@ -78,7 +80,11 @@ let layout: SystemLayout | null = null
 let sysIds: string[] = []
 /** Last computed positions (what the main thread shows). */
 let sysPos = new Float32Array(0)
-/** Transition start positions. */
+/**
+ * Transition: where each body started minus where its orbit had it then. The
+ * shown position is the live orbit plus this offset, fading out: zero for a
+ * body whose orbit did not change, so a rebuild never makes the others lag.
+ */
 let sysFrom: Float32Array = new Float32Array(0)
 /** Scratch: analytic positions at the current orbit time. */
 let sysTarget = new Float32Array(0)
@@ -342,6 +348,7 @@ function enterSystem(from: Float32Array, known: Uint8Array | null, keepOffsets: 
     }
   }
   sysPos = new Float32Array(sysFrom)
+  for (let i = 0; i < sysFrom.length; i++) sysFrom[i] = sysFrom[i]! - sysTarget[i]!
   postRings(next)
   transitionStart = performance.now()
   startSystemLoop()
@@ -359,28 +366,6 @@ function postSystem(settled: boolean, alpha: number): void {
   const out = new Float32Array(sysPos)
   const msg: WorkerToMain = { type: 'positions', positions: out, alpha, settled, generation }
   ctx.postMessage(msg, [out.buffer])
-}
-
-/** Scratch for shiftSubtree: 1 for nodes inside the subtree. */
-let subtreeMark = new Uint8Array(0)
-
-/** Add (dx, dy, dz) to `buf` (xyz per node) for `root` and everything orbiting it. */
-function shiftSubtree(buf: Float32Array, root: number, dx: number, dy: number, dz: number): void {
-  if (!layout) return
-  const { order, parent } = layout
-  const n = order.length
-  if (subtreeMark.length < n) subtreeMark = new Uint8Array(n)
-  const mark = subtreeMark
-  // Parents come first in `order`, so a node's mark is known before its children's.
-  for (let o = 0; o < n; o++) {
-    const i = order[o]!
-    const p = parent[i]!
-    mark[i] = i === root || (p >= 0 && mark[p] === 1) ? 1 : 0
-    if (mark[i] === 0 || i * 3 + 2 >= buf.length) continue
-    buf[i * 3] = buf[i * 3]! + dx
-    buf[i * 3 + 1] = buf[i * 3 + 1]! + dy
-    buf[i * 3 + 2] = buf[i * 3 + 2]! + dz
-  }
 }
 
 /**
@@ -401,10 +386,7 @@ function systemLoop(): void {
   if (transitionStart >= 0) {
     const k = Math.min(1, (now - transitionStart) / TRANSITION_MS)
     const e = k < 0.5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2
-    for (let i = 0; i < sysPos.length; i++) {
-      const a = sysFrom[i]!
-      sysPos[i] = a + (sysTarget[i]! - a) * e
-    }
+    for (let i = 0; i < sysPos.length; i++) sysPos[i] = sysTarget[i]! + sysFrom[i]! * (1 - e)
     alpha = 1 - k
     settled = k >= 1
     if (settled) transitionStart = -1
@@ -487,10 +469,8 @@ ctx.onmessage = (ev: MessageEvent<MainToWorker>) => {
         offsets[i * 3] = offsets[i * 3]! + dx
         offsets[i * 3 + 1] = offsets[i * 3 + 1]! + dy
         offsets[i * 3 + 2] = offsets[i * 3 + 2]! + dz
-        // Mid-transition the shown position is eased from `sysFrom`: move the
-        // subtree's start by the same delta, or the drag would only count by
-        // the ease factor and pile up in the offset.
-        if (transitionStart >= 0) shiftSubtree(sysFrom, i, dx, dy, dz)
+        // Mid-transition the shown position is the orbit (which carries the offset) plus a fading
+        // start offset, so the drag counts in full right away.
         if (!running) {
           systemPositions(layout, sysTime, sysPos, offsets)
           postSystem(false, 0)
@@ -528,7 +508,9 @@ ctx.onmessage = (ev: MessageEvent<MainToWorker>) => {
       if (layout) {
         // Re-run the system layout: forget drags and ease back into place.
         offsets.fill(0)
-        sysFrom = new Float32Array(sysPos)
+        systemPositions(layout, sysTime, sysTarget, offsets)
+        sysFrom = new Float32Array(sysPos.length)
+        for (let i = 0; i < sysFrom.length; i++) sysFrom[i] = sysPos[i]! - sysTarget[i]!
         transitionStart = performance.now()
         startSystemLoop()
         break

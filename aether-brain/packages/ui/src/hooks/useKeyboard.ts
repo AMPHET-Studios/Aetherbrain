@@ -166,9 +166,14 @@ export function handleKey(e: KeyboardEvent): void {
       if (s.selectedId && isFolderId(s.selectedId)) s.toggleFolder(folderPathOf(s.selectedId))
       return
     case 'G':
-      // Shift+G: the star gallery (the selected star's pictures in 3D), or fold the open one.
-      s.toggleGallery()
-      return
+    case 'g':
+      // Shift+G: the star gallery (the selected star's pictures in 3D), or fold the open one. With
+      // Caps Lock on, Shift+G arrives as 'g' and a plain g as 'G': Shift decides.
+      if (e.shiftKey) {
+        s.toggleGallery()
+        return
+      }
+      break
     case 'm':
       s.cycleColorMode()
       return
@@ -206,7 +211,8 @@ export function handleKey(e: KeyboardEvent): void {
       cam?.dolly(-18)
       return
   }
-  const extra = extraKeys.get(e.key)
+  // A host key works with Caps Lock on too (a plain g arrives as 'G').
+  const extra = extraKeys.get(e.key) ?? (e.shiftKey ? undefined : extraKeys.get(e.key.toLowerCase()))
   if (extra) {
     e.preventDefault()
     extra()

@@ -684,9 +684,9 @@ export interface CritiqueSaved {
 let toastSeq = 1
 let unwatch: (() => void) | null = null
 
-/** "12 pictures", or "the newest 480 of 900 pictures" when the gallery is capped. */
+/** "12 pictures", or "480 of 900 pictures" when the gallery is capped. */
 function galleryCount(cards: number, total: number): string {
-  return cards < total ? `the newest ${cards.toLocaleString('en-US')} of ${total.toLocaleString('en-US')} pictures` : `${cards} picture${cards === 1 ? '' : 's'}`
+  return cards < total ? `${cards.toLocaleString('en-US')} of ${total.toLocaleString('en-US')} pictures` : `${cards} picture${cards === 1 ? '' : 's'}`
 }
 
 export const useAether = create<AetherState>()((set, get) => {
@@ -708,6 +708,8 @@ export const useAether = create<AetherState>()((set, get) => {
   }
   /** The first gallery of a session says how it works (later ones open quietly). */
   let galleryHinted = false
+  /** A rebuild for a gallery alone keeps today's brief (no note changed): set around that rebuild. */
+  let keepBrief = false
 
   /** The brief the latest graph-options call computed: the store takes it together with the graph built from it. */
   let builtBrief: DailyBrief | null = null
@@ -721,7 +723,8 @@ export const useAether = create<AetherState>()((set, get) => {
    */
   const graphOptions: GraphOptionsFn = (folders, notes, assets) => {
     const { settings, adapter, roots, expandedFolders, brief: shown } = get()
-    const fresh = dailyBrief(notes.values(), { date: todayIso(), folders })
+    const date = todayIso()
+    const fresh = keepBrief && shown?.date === date ? shown : dailyBrief(notes.values(), { date, folders })
     // Nothing on it changed: keep the object, so the Inspector and the top bar don't redraw.
     const brief = shown && sameBrief(shown, fresh) ? shown : fresh
     builtBrief = brief
@@ -1818,9 +1821,12 @@ export const useAether = create<AetherState>()((set, get) => {
       }
       let ring: NoteId[]
       if (isFolderId(selectedId)) {
-        // A folder's neighbors are structural: its parent, then its planets and moons.
+        // A folder's neighbors are structural: its parent, then its planets and moons, then the cards
+        // of its open gallery (Shift+Tab reaches them first).
         const parent = nodeOf(graph, selectedId)?.parent ?? null
-        ring = [...(parent !== null ? [parent] : []), ...graph.nodes.filter((n) => n.parent === selectedId).map((n) => n.id)]
+        const kids = graph.nodes.filter((n) => n.parent === selectedId)
+        const cards = kids.filter((n) => n.image?.gallery?.only)
+        ring = [...(parent !== null ? [parent] : []), ...kids.filter((n) => !n.image?.gallery?.only).map((n) => n.id), ...cards.map((n) => n.id)]
       } else {
         // The Today hub's neighbors are the notes of its beams; a picture's, the notes embedding it.
         ring = [...neighborhood(graph, selectedId, 1)].filter((id) => id !== selectedId).sort()
@@ -2404,7 +2410,17 @@ export const useAether = create<AetherState>()((set, get) => {
       // A star without pictures has no cards: nothing to rebuild for (unless a gallery is drawn now).
       const cards = path !== null && picturesUnder(get().assets, path) > 0
       if (!cards && !shown) return
-      rebuildGraph()
+      keepBrief = true
+      try {
+        rebuildGraph()
+      } catch (err) {
+        // The graph stays as it was; so does the gallery the store builds it with.
+        set({ gallery: shown?.path ?? null })
+        get().toast(`Could not show the gallery: ${errText(err)}`, 'error')
+        return
+      } finally {
+        keepBrief = false
+      }
       const open = get().graph?.gallery
       if (open && !galleryHinted) {
         galleryHinted = true

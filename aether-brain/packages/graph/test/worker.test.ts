@@ -238,6 +238,27 @@ describe('layout worker, system mode', () => {
     expect(w.positions().at(-1)!.generation).toBe(2)
   })
 
+  it('a rebuild never makes the bodies whose orbit did not change lag behind it', async () => {
+    const w = await startWorker()
+    w.send({ type: 'graph', nodes: system(), edges: [], mode: 'system' })
+    vi.advanceTimersByTime(1500)
+    const before = w.positions().at(-1)!.positions
+    // B's gallery opens: one gallery-only card comes in; nothing else changes its orbit.
+    const open = system()
+    open[2] = { ...open[2]!, role: 2 }
+    open.push({ ...node('image:B/new.png', 2), kind: 4, gallery: { anchor: 2, rank: 0, only: true } })
+    w.send({ type: 'graph', nodes: open, edges: [], mode: 'system', prev: { ids: system().map((d) => d.id), positions: before } })
+    vi.advanceTimersByTime(1300)
+    const frames = w.positions().filter((m) => m.generation === 2)
+    expect(frames.length).toBeGreaterThan(20)
+    const d = (p: Float32Array, a: number, b: number) => Math.hypot(p[a * 3]! - p[b * 3]!, p[a * 3 + 1]! - p[b * 3 + 1]!, p[a * 3 + 2]! - p[b * 3 + 2]!)
+    // A/one rides its orbit around A, and A its orbit around the sun, in every frame of the ease.
+    for (const f of frames) {
+      expect(d(f.positions, 3, 1)).toBeCloseTo(d(before, 3, 1), 3)
+      expect(d(f.positions, 1, 0)).toBeCloseTo(d(before, 1, 0), 3)
+    }
+  })
+
   it('sends card sizes and system radii; gallery cards grow out of their star', async () => {
     const w = await startWorker()
     w.send({ type: 'graph', nodes: system(), edges: [], mode: 'system' })

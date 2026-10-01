@@ -401,7 +401,8 @@ function galleryImages(assets: Map<string, VaultAsset>, folder: string): string[
   if (out) return out
   out = []
   const inside = `${folder}/`
-  for (const [f, list] of imagesByFolder(assets)) if (f === folder || f.startsWith(inside)) out.push(...list)
+  // One by one: a spread of a folder's list would overflow the stack past ~125k pictures.
+  for (const [f, list] of imagesByFolder(assets)) if (f === folder || f.startsWith(inside)) for (const path of list) out.push(path)
   out.sort((a, b) => (assets.get(b)?.mtime ?? 0) - (assets.get(a)?.mtime ?? 0) || (a < b ? -1 : a > b ? 1 : 0))
   perFolder.set(folder, out)
   return out
