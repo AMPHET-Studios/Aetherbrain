@@ -9,11 +9,16 @@
  * and angles within a ring are allocated by extent. Orbit planes and start
  * phases come from hashes of the node ids, so the same vault always lays out
  * the same way. The Today hub (kind 3) is the exception: it hangs still,
- * straight above the root sun, outside every ring.
+ * straight above the root sun, outside every ring. So are the cards of an
+ * open star gallery: they float on a slowly turning sphere around their star,
+ * just outside its system, newest picture at the top, and take no room in
+ * any system (a card that is also a moon keeps its empty slot), so opening a
+ * gallery moves nothing else.
  *
  * Pure (no three.js) so it runs in the layout worker and in unit tests;
  * `systemPositions` allocates nothing and is called every motion frame.
  */
+import { THUMB_SCALE } from '../scene/thumbs'
 
 export interface SystemInput {
   /** Structural parent index per node, -1 for a root. */
@@ -26,6 +31,12 @@ export interface SystemInput {
   radius: Float32Array
   /** Node ids: seed the stable orbit planes and phases. */
   ids: string[]
+  /** Star gallery: the star each card floats around (an ancestor of the card), -1 for other nodes. */
+  gallery?: Int32Array
+  /** Place of each card in its gallery, newest first. */
+  galleryRank?: Int32Array
+  /** 1 for a card in the graph for the gallery only: it takes no place in its parent's system. */
+  galleryOnly?: Uint8Array
 }
 
 export interface SystemLayout {
@@ -47,8 +58,12 @@ export interface SystemLayout {
   shellDir: Float32Array
   /** 6 floats per ring: parentIndex, radius, qx, qy, qz, qw (see protocol). */
   rings: Float32Array
-  /** Subtree radius: the node's own body plus everything orbiting it. */
+  /** Subtree radius: the node's own body plus everything orbiting it (gallery-only cards left out). */
   extent: Float32Array
+  /** Star gallery: the star a card is placed around (a strict ancestor), -1 for other nodes. */
+  anchor: Int32Array
+  /** Radius a gallery card is drawn with (its billboard is `THUMB_SCALE` times as wide), 0 for other nodes. */
+  card: Float32Array
 }
 
 /** Clearance between neighbouring bodies and between rings. */
@@ -72,6 +87,17 @@ const KIND_TODAY = 3
 const HUB_LIFT = 30
 /** Quaternion component of −90° about X: turns the XZ ring into the vertical plane. */
 const HALF_SQRT2 = Math.SQRT1_2
+/**
+ * Star gallery cards: width over the sphere radius, at most this, and never
+ * more than this share of the distance between neighbouring cards (so they
+ * never touch). The sphere clears the star's system by GAP at the cards' inner
+ * edge, and is never smaller than GALLERY_MIN_RADIUS.
+ */
+const GALLERY_MAX_CARD = 0.16
+const GALLERY_FILL = 0.72
+const GALLERY_MIN_RADIUS = 16
+/** The gallery turns at this share of an orbit of its radius. */
+const GALLERY_SPIN = 0.5
 
 /** Angular speed of an orbit of radius r: inner orbits run faster. */
 export function orbitSpeed(r: number): number {
@@ -145,6 +171,8 @@ function sanitizeParents(input: Int32Array): Int32Array {
 export function computeSystemLayout(input: SystemInput): SystemLayout {
   const n = input.parent.length
   const parent = sanitizeParents(input.parent)
+  const anchor = galleryAnchors(input, parent)
+  const only = (i: number): boolean => anchor[i]! >= 0 && input.galleryOnly?.[i] === 1
 
   // The Today hub belongs to the root sun: a hub without a parent joins the
   // first root instead of becoming a second one.
@@ -228,6 +256,8 @@ export function computeSystemLayout(input: SystemInput): SystemLayout {
     let hub = -1
     for (let k = 0; k < kids.length; k++) {
       const c = kids[k]!
+      // A gallery-only card floats around its star (placed below), outside every system.
+      if (only(c)) continue
       if (p >= 0 && input.kind[c] === KIND_TODAY) {
         hangAbove(c, p)
         hub = c
@@ -344,6 +374,9 @@ export function computeSystemLayout(input: SystemInput): SystemLayout {
     extent[p] = Math.max(own, outer)
   }
 
+  const card = new Float32Array(n)
+  placeGalleries(input, anchor, extent, { orbitRadius, phase, speed, plane, shell, shellDir }, card)
+
   // Several roots (should not happen): static rings around the origin.
   if (rootCount > 1) {
     q[0] = 0
@@ -353,17 +386,93 @@ export function computeSystemLayout(input: SystemInput): SystemLayout {
     place(-1, order.subarray(0, rootCount), GAP, 0, 0.125)
   }
 
-  return { parent, order, orbitRadius, phase, speed, plane, shell, shellDir, rings: new Float32Array(rings), extent }
+  return { parent, order, orbitRadius, phase, speed, plane, shell, shellDir, rings: new Float32Array(rings), extent, anchor, card }
+}
+
+/**
+ * The star each gallery card floats around: the card's `gallery` entry when it
+ * names a strict ancestor of the card (after parent cycles are broken), else
+ * -1 (the card lays out like any node).
+ */
+function galleryAnchors(input: SystemInput, parent: Int32Array): Int32Array {
+  const n = parent.length
+  const anchor = new Int32Array(n).fill(-1)
+  const g = input.gallery
+  if (!g) return anchor
+  for (let i = 0; i < n; i++) {
+    const a = g[i]
+    if (a === undefined || a < 0 || a >= n || a === i) continue
+    for (let p = parent[i]!, steps = 0; p >= 0 && steps < n; p = parent[p]!, steps++) {
+      if (p !== a) continue
+      anchor[i] = a
+      break
+    }
+  }
+  return anchor
+}
+
+/**
+ * Put the cards of every gallery on a Fibonacci sphere around their star,
+ * newest (lowest rank) at the top. The sphere clears the star's system:
+ * radius R with R − w/2 ≥ extent + GAP for cards of width w = k·R, k the
+ * card share for m cards (FIB_SPACING/√m · GALLERY_FILL, at most
+ * GALLERY_MAX_CARD). It stands upright and turns slowly about the vertical.
+ */
+function placeGalleries(
+  input: SystemInput,
+  anchor: Int32Array,
+  extent: Float32Array,
+  out: Pick<SystemLayout, 'orbitRadius' | 'phase' | 'speed' | 'plane' | 'shell' | 'shellDir'>,
+  card: Float32Array,
+): void {
+  const n = anchor.length
+  const members = new Map<number, number[]>()
+  for (let i = 0; i < n; i++) {
+    const a = anchor[i]!
+    if (a < 0) continue
+    const list = members.get(a)
+    if (list) list.push(i)
+    else members.set(a, [i])
+  }
+  const rank = input.galleryRank
+  for (const [a, list] of members) {
+    list.sort((x, y) => (rank?.[x] ?? x) - (rank?.[y] ?? y) || x - y)
+    const m = list.length
+    const k = Math.min(GALLERY_MAX_CARD, (FIB_SPACING / Math.sqrt(m)) * GALLERY_FILL)
+    const R = Math.max(GALLERY_MIN_RADIUS, (extent[a]! + GAP) / (1 - k / 2))
+    const w = orbitSpeed(R) * GALLERY_SPIN
+    const a0 = hash01(input.ids[a] ?? String(a), 4) * TAU
+    const r = (k * R) / THUMB_SCALE
+    for (let j = 0; j < m; j++) {
+      const c = list[j]!
+      const y = m === 1 ? 1 : 1 - (2 * (j + 0.5)) / m
+      const rr = Math.sqrt(Math.max(0, 1 - y * y))
+      const th = GOLDEN_ANGLE * j
+      out.shell[c] = 1
+      out.shellDir[c * 3] = Math.cos(th) * rr
+      out.shellDir[c * 3 + 1] = y
+      out.shellDir[c * 3 + 2] = Math.sin(th) * rr
+      out.orbitRadius[c] = R
+      out.phase[c] = a0
+      out.speed[c] = w
+      out.plane[c * 4] = 0
+      out.plane[c * 4 + 1] = 0
+      out.plane[c * 4 + 2] = 0
+      out.plane[c * 4 + 3] = 1
+      card[c] = r
+    }
+  }
 }
 
 /**
  * Positions at time `t` (seconds) into `out` (xyz triples, length ≥ 3n):
- * pos[i] = pos[parent] + rot(plane[i]) · ring/shell offset(t) + offsets[i].
+ * pos[i] = pos[parent] + rot(plane[i]) · ring/shell offset(t) + offsets[i]
+ * (a gallery card: pos[star] instead of pos[parent]).
  * `offsets` (user drags, xyz triples) move whole subtrees because children are
  * placed relative to their parent. Allocates nothing.
  */
 export function systemPositions(layout: SystemLayout, t: number, out: Float32Array, offsets?: Float32Array): void {
-  const { order, parent, orbitRadius, phase, speed, plane, shell, shellDir } = layout
+  const { order, parent, orbitRadius, phase, speed, plane, shell, shellDir, anchor } = layout
   const n = order.length
   if (out.length < n * 3) return
   const off = offsets && offsets.length >= n * 3 ? offsets : null
@@ -398,7 +507,9 @@ export function systemPositions(layout: SystemLayout, t: number, out: Float32Arr
     let x = lx + qw * tx + (qy * tz - qz * ty)
     let y = ly + qw * ty + (qz * tx - qx * tz)
     let z = lz + qw * tz + (qx * ty - qy * tx)
-    const p = parent[i]!
+    // A gallery card floats around its star, not its parent (an ancestor: placed already).
+    const star = anchor[i]!
+    const p = star >= 0 ? star : parent[i]!
     if (p >= 0) {
       x += out[p * 3]!
       y += out[p * 3 + 1]!

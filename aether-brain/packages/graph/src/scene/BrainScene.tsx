@@ -28,6 +28,8 @@ import {
 import type { CameraControlsImpl } from '@react-three/drei'
 import type { GraphData, GraphNode, NoteId } from '@aether/core'
 import { BrainController, DEFAULT_FAR, DEFAULT_MAX_DISTANCE, cameraRange } from '../BrainController'
+import { GALLERY_CHECK_MS, easeGrow, nearestStar, stepGrow } from '../gallery'
+import type { LayoutEngine } from '../layout/LayoutEngine'
 import {
   AREA_COLORS,
   GHOST_COLOR,
@@ -53,9 +55,12 @@ import {
 import { shiftTarget } from './follow'
 import { todayLabel } from './labels'
 import { ThumbLayer, thumbTargets, type ThumbTargets } from './thumbLayer'
-import { thumbHalf, thumbPickHit } from './thumbs'
+import { cardFade, thumbDrawnHalf, thumbHalf, thumbPickHit, THUMB_SCALE } from './thumbs'
 
 const HOME_POS: [number, number, number] = [0, 150, 460]
+/** Vertical field of view (degrees), and the tangent of half of it. */
+const FOV = 55
+const TAN_HALF_FOV = Math.tan((FOV * Math.PI) / 360)
 const BG = '#04050d'
 
 export interface BrainSceneProps {
@@ -68,9 +73,10 @@ export interface BrainSceneProps {
 /**
  * The thought-space. One InstancedMesh for neuron cores, one for halos, one
  * LineSegments for every synapse, one instanced LineSegments for every orbit
- * ring (system layout), one instanced billboard mesh for picture thumbnails,
- * a starfield, selective bloom, a 2D label overlay and screen-space picking.
- * Nothing here allocates per frame.
+ * ring (system layout), one instanced billboard mesh for picture thumbnails
+ * (image moons and the cards of a star gallery), a starfield, selective
+ * bloom, a 2D label overlay and screen-space picking. Nothing here allocates
+ * per frame.
  */
 export function BrainScene({ controller, maxDpr = 1.5, className }: BrainSceneProps) {
   const overlayRef = useRef<HTMLCanvasElement | null>(null)
@@ -83,7 +89,7 @@ export function BrainScene({ controller, maxDpr = 1.5, className }: BrainScenePr
       <Canvas
         dpr={[1, maxDpr]}
         gl={{ antialias: false, powerPreference: 'high-performance', alpha: false, stencil: false }}
-        camera={{ fov: 55, near: 1, far: DEFAULT_FAR, position: HOME_POS }}
+        camera={{ fov: FOV, near: 1, far: DEFAULT_FAR, position: HOME_POS }}
         onCreated={({ gl }) => {
           gl.toneMapping = NoToneMapping
           gl.setClearColor(BG)
@@ -122,6 +128,7 @@ function CameraRig({ controller }: { controller: BrainController }) {
     if (!c) return
     const pos = new Vector3()
     const tgt = new Vector3()
+    const here = new Vector3()
     const shift = { value: 0 }
     const cam = camera as PerspectiveCamera
     // Set here, not as a prop: `setRange` raises it for big scenes and a
@@ -169,6 +176,20 @@ function CameraRig({ controller }: { controller: BrainController }) {
       },
       setEnabled(v) {
         c.enabled = v
+      },
+      getPosition(out) {
+        c.getPosition(here, true)
+        out[0] = here.x
+        out[1] = here.y
+        out[2] = here.z
+        return out
+      },
+      getTarget(out) {
+        c.getTarget(here, true)
+        out[0] = here.x
+        out[1] = here.y
+        out[2] = here.z
+        return out
       },
       setShift(fraction) {
         // camera-controls' focal offset is in view space and in world units,
@@ -320,6 +341,15 @@ interface Buffers {
   edgeBeam: Uint8Array
   /** Image nodes and which of them show their picture (see ThumbLayer). */
   thumbs: ThumbTargets
+  /** Project stars: the camera is measured against them (star galleries). */
+  stars: Int32Array
+  /** Cards of the open star gallery (node indices), and per card 1 when it is in the graph for the gallery only. */
+  cards: Int32Array
+  cardOnly: Uint8Array
+  /** 1 per node that is a gallery card. */
+  isCard: Uint8Array
+  /** Radius per node as the theme gives it (`radii` holds the drawn one: gallery cards grow from it). */
+  baseRadii: Float32Array
   /** Orbit rings: one instanced LineSegments. */
   rings: LineSegments
   ringGeo: InstancedBufferGeometry
@@ -387,6 +417,18 @@ function buildBuffers(graph: GraphData): Buffers {
 
   const radii = new Float32Array(count)
   graph.nodes.forEach((n, i) => (radii[i] = nodeRadius(n)))
+  const stars: number[] = []
+  const cards: number[] = []
+  const cardOnly: number[] = []
+  const isCard = new Uint8Array(count)
+  graph.nodes.forEach((n, i) => {
+    if (n.folder?.role === 'project') stars.push(i)
+    const card = n.image?.gallery
+    if (!card) return
+    cards.push(i)
+    cardOnly.push(card.only ? 1 : 0)
+    isCard[i] = 1
+  })
 
   const times = graph.nodes.map((n) => n.created).filter((t): t is number => t !== null)
   const minT = times.length ? Math.min(...times) : 0
@@ -501,6 +543,11 @@ function buildBuffers(graph: GraphData): Buffers {
     landmark,
     edgeBeam,
     thumbs: thumbTargets(graph),
+    stars: Int32Array.from(stars),
+    cards: Int32Array.from(cards),
+    cardOnly: Uint8Array.from(cardOnly),
+    isCard,
+    baseRadii: new Float32Array(radii),
     rings,
     ringGeo,
     ringCenter,
@@ -563,6 +610,13 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
     /** Layout frame and buffers the follow step last ran for. */
     followFrame: -1,
     followBuffers: null as Buffers | null,
+    /** Star gallery: the star whose cards are drawn, their growth (linear 0..1), what their sizes were last set from. */
+    galleryStar: null as NoteId | null,
+    grow: 0,
+    cardBuffers: null as Buffers | null,
+    cardRings: -1,
+    /** When the camera was last measured against the stars. */
+    lastNearCheck: -Infinity,
   })
 
   /* ---- pointer events (capture phase so node-drag can pre-empt orbit) ---- */
@@ -629,7 +683,7 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
         const sy = s[i * 4 + 1] ?? 0
         const depth = s[i * 4 + 2] ?? 2
         if (depth > 1 || depth < -1) continue
-        if (hits(buffers, i, sx - x, sy - y, selI, st.hovered) && depth < bestD) {
+        if (hits(buffers, i, sx - x, sy - y, selI, st.hovered, size.height) && depth < bestD) {
           bestD = depth
           best = i
         }
@@ -712,6 +766,8 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
   const m4 = useMemo(() => new Matrix4(), [])
   const v3 = useMemo(() => new Vector3(), [])
   const camPos = useMemo(() => new Vector3(), [])
+  const camEnd = useMemo(() => new Vector3(), [])
+  const lookEnd = useMemo(() => new Vector3(), [])
 
   useFrame((_, dt) => {
     if (!buffers) return
@@ -739,7 +795,7 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
       for (let i = 0; i < n; i++) {
         const depth = s[i * 4 + 2] ?? 2
         if (depth > 1 || depth < -1) continue
-        if (hits(buffers, i, (s[i * 4] ?? 0) - px, (s[i * 4 + 1] ?? 0) - py, sel, st.hovered) && depth < bestD) {
+        if (hits(buffers, i, (s[i * 4] ?? 0) - px, (s[i * 4 + 1] ?? 0) - py, sel, st.hovered, size.height) && depth < bestD) {
           bestD = depth
           hoveredIndex = i
         }
@@ -772,22 +828,29 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
     const selI = controller.selected ? (g.index.get(controller.selected) ?? -1) : -1
     const hovI = st.hovered
 
-    // Pictures: pick, load and place them; a change in who shows one reshapes the cores below.
-    const thumbsChanged = thumbs.update(buffers, controller, pos, selI, hovI, size.width, size.height, performance.now())
+    // Star gallery cards grow out of their star, and shrink when it folds.
+    const cardsChanged = sizeCards(buffers, controller, eng, st, dt)
 
-    if (positionsChanged || versionChanged || thumbsChanged) {
+    // Pictures: pick, load and place them; a change in who shows one reshapes the cores below.
+    const now = performance.now()
+    const thumbsChanged = thumbs.update(buffers, controller, pos, selI, hovI, size.width, size.height, now)
+
+    if (positionsChanged || versionChanged || thumbsChanged || cardsChanged) {
       // Instance matrices for cores + halos. A node showing its picture keeps
-      // a small core behind it and no halo: the picture is the body.
+      // a small core behind it and no halo: the picture is the body. A gallery
+      // card still waiting for its picture is a picture moon's pale body.
       const shown = buffers.thumbs.shown
       for (let i = 0; i < n; i++) {
         const x = pos[i * 3] ?? 0
         const y = pos[i * 3 + 1] ?? 0
         const z = pos[i * 3 + 2] ?? 0
         let r = buffers.radii[i] ?? 1
+        if (buffers.isCard[i] === 1 && shown[i] !== 1) r = Math.min(r, buffers.baseRadii[i] ?? 1)
         if (i === selI) r *= 1.35
         else if (i === hovI) r *= 1.2
         const pictured = shown[i] === 1
-        const core = pictured ? r * THUMB_CORE : r
+        // A gallery card is all picture: no core to show when it fades as the camera passes.
+        const core = pictured ? (buffers.isCard[i] === 1 ? 0 : r * THUMB_CORE) : r
         m4.makeScale(core, core, core)
         m4.setPosition(x, y, z)
         buffers.nodes.setMatrixAt(i, m4)
@@ -830,6 +893,27 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
     }
 
     drawLabels(overlayRef.current, buffers, controller, st.labelSet, hovI, selI, size.width, size.height)
+
+    // Star galleries: which project star is the camera close to? Measured where the camera is going
+    // (the end of a flight), so flying past a star counts for nothing. Last in the frame: the answer
+    // can rebuild the graph (a gallery opening), and this frame's buffers are done with by now.
+    // The star the controller holds (opened with Shift+G, open, else last found) keeps its place until
+    // the camera is clearly closer to another one; the answer goes in whenever the controller's differs.
+    if (controller.layoutMode === 'system' && now - st.lastNearCheck >= GALLERY_CHECK_MS && eng.extents.length === n && controller.graph === g) {
+      st.lastNearCheck = now
+      if (controls) {
+        controls.getPosition(camEnd, true)
+        controls.getTarget(lookEnd, true)
+      } else {
+        camEnd.copy(camPos)
+        lookEnd.copy(camPos)
+      }
+      const held = controller.galleryHeld
+      const current = held === null ? -1 : (g.index.get(held) ?? -1)
+      const k = nearestStar(buffers.stars, pos, eng.extents, camEnd.x, camEnd.y, camEnd.z, lookEnd.x, lookEnd.y, lookEnd.z, current)
+      const id = k >= 0 ? (g.nodes[k]?.id ?? null) : null
+      if (id !== controller.nearId) controller.nearStar(id)
+    }
   })
 
   useEffect(() => {
@@ -857,9 +941,28 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
  * it: its body, or while it shows one, its picture as drawn (grown when
  * hovered or selected).
  */
-function hits(b: Buffers, i: number, dx: number, dy: number, selI: number, hovI: number): boolean {
+function hits(b: Buffers, i: number, dx: number, dy: number, selI: number, hovI: number, viewHeight: number): boolean {
   const picture = b.thumbs.shown[i] === 1
-  return thumbPickHit(dx, dy, b.screen[i * 4 + 3] ?? 0, picture, picture ? thumbHalf(i, selI, hovI) : 1)
+  if (b.isCard[i] === 1) {
+    // A gallery card still growing out of its star (or folding into it) is not there yet,
+    // nor is one the camera is passing (faded out).
+    if (!((b.radii[i] ?? 0) > 0.25)) return false
+    if (picture && i !== selI && cardFade((b.screen[i * 4 + 3] ?? 0) * THUMB_SCALE, viewHeight) < 0.5) return false
+  }
+  const px = bodyPx(b, i)
+  return thumbPickHit(dx, dy, px, picture, picture ? thumbDrawnHalf(thumbHalf(i, selI, hovI), px, viewHeight, TAN_HALF_FOV) : 1)
+}
+
+/**
+ * Projected radius (px) node `i` is picked and labelled with: a gallery card
+ * still waiting for its picture is drawn as a picture moon's body, not at its
+ * card size.
+ */
+function bodyPx(b: Buffers, i: number): number {
+  const px = b.screen[i * 4 + 3] ?? 0
+  if (b.isCard[i] !== 1 || b.thumbs.shown[i] === 1) return px
+  const r = b.radii[i] ?? 0
+  return r > 0 ? px * Math.min(1, (b.baseRadii[i] ?? r) / r) : px
 }
 
 /* ------------------------------------------------------------------ */
@@ -921,6 +1024,8 @@ function recolor(b: Buffers, c: BrainController, neighbors: Set<number>, labelSe
       const p = b.parentIdx[focusI]!
       if (p >= 0) neighbors.add(p)
       for (let k = b.childStart[focusI]!; k < b.childStart[focusI + 1]!; k++) neighbors.add(b.childList[k]!)
+      // A star with its gallery open: every card is its own (moons among them orbit its planets).
+      if (g.gallery && g.nodes[focusI]!.id === g.gallery.star) for (const k of b.cards) neighbors.add(k)
     }
   }
 
@@ -994,7 +1099,7 @@ function recolor(b: Buffers, c: BrainController, neighbors: Set<number>, labelSe
   // Label candidates: focus + neighbors, hubs, small highlight sets.
   labelSet.clear()
   if (focusI >= 0) labelSet.add(focusI)
-  for (const i of neighbors) if (labelSet.size < 70) labelSet.add(i)
+  for (const i of neighbors) if (labelSet.size < 70 && b.isCard[i] !== 1) labelSet.add(i)
   if (hasHighlight && highlight.size <= 80) {
     for (const id of highlight) {
       const i = g.index.get(id)
@@ -1003,6 +1108,41 @@ function recolor(b: Buffers, c: BrainController, neighbors: Set<number>, labelSe
   } else if (c.hubLabels) {
     for (const i of b.hubs) labelSet.add(i)
   }
+}
+
+/**
+ * Size the gallery cards: from their body (a moon's radius, or nothing for a
+ * card that is only in the gallery) up to the size the layout gives them,
+ * as the gallery grows open or folds. Returns true when any radius changed.
+ */
+function sizeCards(
+  b: Buffers,
+  c: BrainController,
+  eng: LayoutEngine,
+  st: { galleryStar: NoteId | null; grow: number; cardBuffers: Buffers | null; cardRings: number },
+  dt: number,
+): boolean {
+  const star = b.cards.length > 0 ? (b.graph.gallery?.star ?? null) : null
+  // A new gallery grows from nothing; a rebuild of the same one keeps its size.
+  if (star !== st.galleryStar) {
+    st.galleryStar = star
+    st.grow = 0
+  }
+  if (star === null) return false
+  const before = st.grow
+  st.grow = stepGrow(st.grow, c.galleryFold >= 0, dt * 1000)
+  if (st.grow === before && st.cardBuffers === b && st.cardRings === eng.ringsVersion) return false
+  st.cardBuffers = b
+  st.cardRings = eng.ringsVersion
+  const e = easeGrow(st.grow)
+  const sizes = eng.cards.length === b.count ? eng.cards : null
+  for (let k = 0; k < b.cards.length; k++) {
+    const i = b.cards[k]!
+    const body = b.cardOnly[k] === 1 ? 0 : b.baseRadii[i]!
+    const full = sizes && sizes[i]! > 0 ? sizes[i]! : b.baseRadii[i]!
+    b.radii[i] = body + (full - body) * e
+  }
+  return true
 }
 
 /** Copy the worker's ring buffer (6 floats per ring) into the instance attributes. */
@@ -1152,7 +1292,8 @@ function drawLabels(
     const x = s[i * 4] ?? 0
     const y = s[i * 4 + 1] ?? 0
     // Below the picture when the node shows one (it is wider than the core, and grows when hovered or selected).
-    const r = (s[i * 4 + 3] ?? 0) * (shown[i] === 1 ? thumbHalf(i, selI, hovI) + 0.1 : 1)
+    const px = bodyPx(b, i)
+    const r = shown[i] === 1 ? px * (thumbDrawnHalf(thumbHalf(i, selI, hovI), px, height, TAN_HALF_FOV) + 0.1) : px
     if (x < -40 || x > width + 40 || y < -20 || y > height + 20) return
     const node = g.nodes[i]!
     const filtered = highlight !== null && !highlight.has(node.id) && emphasis < 2
@@ -1177,6 +1318,7 @@ function drawLabels(
   for (let i = 0; i < b.count; i++) {
     if (labelSet.has(i) || i === selI || i === hovI) continue
     if (b.landmark[i] === 1) continue // landmarks are drawn below
+    if (b.isCard[i] === 1) continue // a gallery is pictures: their names show on hover
     const role = b.role[i]!
     const px = s[i * 4 + 3] ?? 0
     if (role === ROLE_FOLDER) {
@@ -1190,7 +1332,7 @@ function drawLabels(
     }
   }
   for (const i of b.landmarks) if (!labelSet.has(i) && i !== selI && i !== hovI) draw(i, 1, true)
-  for (const i of labelSet) if (i !== selI && i !== hovI) draw(i, 1, b.landmark[i] === 1)
+  for (const i of labelSet) if (i !== selI && i !== hovI && b.isCard[i] !== 1) draw(i, 1, b.landmark[i] === 1)
   if (hovI >= 0 && hovI !== selI) draw(hovI, 2)
   if (selI >= 0) draw(selI, 2)
   ctx.globalAlpha = 1

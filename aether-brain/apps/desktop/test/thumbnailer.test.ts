@@ -14,6 +14,8 @@ import {
   ThumbQueue,
   ThumbUnavailable,
   Thumbnailer,
+  VIDEO_SCHEME,
+  VIDEO_URL_PREFIX,
   type ThumbElectron,
   type ThumbHelper,
   type ThumbJob,
@@ -326,6 +328,7 @@ function fakeElectron() {
     beforeRequest: null as null | ((d: { url: string }, cb: (r: { cancel: boolean }) => void) => void),
     permission: null as null | ((wc: unknown, p: string, cb: (ok: boolean) => void) => void),
     check: null as null | ((wc: unknown, p: string) => boolean),
+    protocols: {} as Record<string, (req: Request) => Promise<Response>>,
   }
   const session = {
     fromPartition(partition: string) {
@@ -334,6 +337,7 @@ function fakeElectron() {
         webRequest: { onBeforeRequest: (fn: typeof ses.beforeRequest) => (ses.beforeRequest = fn) },
         setPermissionRequestHandler: (fn: typeof ses.permission) => (ses.permission = fn),
         setPermissionCheckHandler: (fn: typeof ses.check) => (ses.check = fn),
+        protocol: { handle: (scheme: string, fn: (req: Request) => Promise<Response>) => (ses.protocols[scheme] = fn) },
       }
     },
   }
@@ -367,9 +371,12 @@ describe('Thumbnailer (the helper window)', () => {
     }
     expect(e.ses.partitions).toEqual([THUMB_PARTITION])
     expect(cancel(THUMB_PAGE)).toBe(false)
-    for (const url of ['https://example.com/', 'http://127.0.0.1:7457/', 'file:///etc/passwd', 'ws://127.0.0.1/', 'data:text/html,<p>other</p>']) {
+    for (const url of ['https://example.com/', 'http://127.0.0.1:7457/', 'file:///etc/passwd', 'ws://127.0.0.1/', 'data:text/html,<p>other</p>', `${VIDEO_SCHEME}://other/x`]) {
       expect(cancel(url), url).toBe(true)
     }
+    // Video addresses pass the filter; the session's own handler serves only the jobs running now.
+    expect(cancel(`${VIDEO_URL_PREFIX}anything`)).toBe(false)
+    expect(Object.keys(e.ses.protocols)).toEqual([VIDEO_SCHEME])
     let granted: boolean | undefined
     e.ses.permission!(null, 'media', (ok) => (granted = ok))
     expect(granted).toBe(false)
@@ -389,6 +396,43 @@ describe('Thumbnailer (the helper window)', () => {
     t.done({ id: w.webContents.id + 50 }, id, pngBytes(1))
     t.done(w.webContents, id, pngBytes(7))
     expect(await out).toEqual(pngBytes(7))
+  })
+
+  it('streams a video to the helper only while its job runs, and sends the job on its own channel', async () => {
+    const e = fakeElectron()
+    const t = new Thumbnailer({ electron: e.electron, preload: '/app/dist/preload/thumb-preload.cjs' })
+    const clip = path.join(here, 'fixtures', 'clip.webm')
+    const data = new Uint8Array(await fs.readFile(clip))
+    const out = t.renderVideo(clip, 'video/webm', 128)
+    const w = e.windows[0]!
+    t.ready(w.webContents)
+    const [channel, id, url, px] = w.webContents.sent[0]! as [string, number, string, number]
+    expect([channel, px]).toEqual([THUMB_IPC.video, 128])
+    expect(url.startsWith(VIDEO_URL_PREFIX)).toBe(true)
+    const serve = e.ses.protocols[VIDEO_SCHEME]!
+    const part = await serve(new Request(url, { headers: { range: 'bytes=0-15' } }))
+    expect([part.status, part.headers.get('content-type'), part.headers.get('content-range')]).toEqual([206, 'video/webm', `bytes 0-15/${data.length}`])
+    expect(new Uint8Array(await part.arrayBuffer())).toEqual(data.subarray(0, 16))
+    expect((await serve(new Request(`${VIDEO_URL_PREFIX}not-a-job`))).status).toBe(404)
+    // A stream the helper opened and left unread (a share that stopped answering)…
+    const open = (await serve(new Request(url))).body!.getReader()
+    t.done(w.webContents, id, pngBytes(9))
+    expect(await out).toEqual(pngBytes(9))
+    // …ends with the job, and the file is no longer served.
+    const drained = await (async () => {
+      let n = 0
+      try {
+        for (;;) {
+          const r = await open.read()
+          if (r.done) return n
+          n += r.value.length
+        }
+      } catch {
+        return n
+      }
+    })()
+    expect(drained).toBeLessThan(data.length)
+    expect((await serve(new Request(url))).status).toBe(404)
   })
 
   it('ends a hung helper process on a timeout and opens a new one for the next job', async () => {
@@ -482,18 +526,21 @@ describe('thumb-preload', () => {
         if (blob.size === 1) throw new DOMException('The source image could not be decoded.', 'InvalidStateError')
         return { width: options.resizeWidth, height: options.resizeHeight, close: vi.fn() }
       },
-      OffscreenCanvas: class {
-        constructor(
-          readonly width: number,
-          readonly height: number,
-        ) {}
-        getContext() {
-          return { drawImage: vi.fn() }
-        }
-        convertToBlob(opts: { type: string }) {
-          return Promise.resolve(new Blob([new Uint8Array([...PNG_SIG, this.width, this.height])], { type: opts.type }))
-        }
+      // The page's canvas, encoded at once (toDataURL), as the helper does it.
+      document: {
+        createElement: (tag: string) => {
+          expect(tag).toBe('canvas')
+          return {
+            width: 0,
+            height: 0,
+            getContext: () => ({ drawImage: vi.fn() }),
+            toDataURL(type: string) {
+              return `data:${type};base64,${Buffer.from([...PNG_SIG, this.width, this.height]).toString('base64')}`
+            },
+          }
+        },
       },
+      atob,
     }
     const require = (id: string): unknown => {
       if (id === 'electron') return electron
@@ -513,6 +560,16 @@ describe('thumb-preload', () => {
     expect(decoded[0]).toEqual({ type: 'image/jpeg', size: 3, options: { resizeWidth: 96, resizeHeight: 128, resizeQuality: 'high' } })
     // Bytes the decoder refuses: null, and the helper carries on.
     expect(await run(2, new Uint8Array([0]), 'image/png', 10, 10)).toEqual([THUMB_IPC.done, 2, null])
+    // A video job for anything but an address of the helper's session, or a size out of range: null, nothing loaded.
+    const runVideo = async (...args: unknown[]) => {
+      const before = sent.length
+      listeners.get(THUMB_IPC.video)!({}, ...args)
+      await vi.waitFor(() => expect(sent.length).toBe(before + 1))
+      return sent.at(-1)!
+    }
+    expect(await runVideo(5, 'https://example.com/a.mp4', 128)).toEqual([THUMB_IPC.done, 5, null])
+    expect(await runVideo(6, 'file:///etc/passwd', 128)).toEqual([THUMB_IPC.done, 6, null])
+    expect(await runVideo(7, 'aether-video://clip/x', 5000)).toEqual([THUMB_IPC.done, 7, null])
     // Arguments that are not a job are never decoded.
     const count = decoded.length
     for (const bad of [
@@ -745,5 +802,82 @@ describe('thumb-preload decoding in Chromium', () => {
     expect(out['turned']).toEqual({ png: '137,80,78,71', width: 64, height: 128, topLeft: 'red', topRight: 'red', bottomLeft: 'blue' })
     expect(out['garbage']).toBeNull()
     expect(out['truncated']).toBeNull()
+  }, 60_000)
+
+  it('takes one still of a video, sought past its first frame and fitted to the size, never played; nothing from garbage', async (ctx) => {
+    if (!browser) return ctx.skip()
+    const clip = Array.from(new Uint8Array(await fs.readFile(path.join(here, 'fixtures', 'clip.webm'))))
+    const page = await browser.newPage()
+    try {
+      await page.setContent('<!doctype html><title>helper</title>')
+      const out = await page.evaluate(
+        async ({ js, clip, channels, prefix }) => {
+          // The helper's session serves `aether-video://clip/…`; here the page plays that part with blobs.
+          const blobs: Record<string, string> = {
+            [`${prefix}clip`]: URL.createObjectURL(new Blob([new Uint8Array(clip)], { type: 'video/webm' })),
+            [`${prefix}garbage`]: URL.createObjectURL(new Blob([new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8])], { type: 'video/webm' })),
+          }
+          const src = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'src')!
+          Object.defineProperty(HTMLMediaElement.prototype, 'src', {
+            configurable: true,
+            get() {
+              return src.get!.call(this)
+            },
+            set(v: string) {
+              src.set!.call(this, blobs[v] ?? v)
+            },
+          })
+          let played = 0
+          HTMLMediaElement.prototype.play = function () {
+            played++
+            return Promise.resolve()
+          }
+          const sent: unknown[][] = []
+          const listeners: Record<string, (e: unknown, ...args: unknown[]) => void> = {}
+          const electron = {
+            ipcRenderer: {
+              send: (...args: unknown[]) => void sent.push(args),
+              on: (channel: string, fn: (e: unknown, ...args: unknown[]) => void) => void (listeners[channel] = fn),
+            },
+          }
+          const module = { exports: {} }
+          new Function('require', 'module', 'exports', js)(() => electron, module, module.exports)
+          const ask = async (id: number, url: string, px: number) => {
+            listeners[channels.video]!({}, id, url, px)
+            const deadline = Date.now() + 15_000
+            while (!sent.some((s) => s[0] === channels.done && s[1] === id) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 10))
+            const answer = sent.find((s) => s[0] === channels.done && s[1] === id)
+            if (!answer) return 'no answer'
+            const png = answer[2] as Uint8Array | null
+            if (!png) return null
+            const bmp = await createImageBitmap(new Blob([png as Uint8Array<ArrayBuffer>], { type: 'image/png' }))
+            const c = new OffscreenCanvas(bmp.width, bmp.height)
+            const g = c.getContext('2d')!
+            g.drawImage(bmp, 0, 0)
+            const at = (x: number, y: number) => {
+              const [r, gg, b] = g.getImageData(x, y, 1, 1).data
+              if ((r ?? 0) < 40 && (gg ?? 0) < 40 && (b ?? 0) < 40) return 'black'
+              return (r ?? 0) > 128 && (b ?? 0) < 128 ? 'red' : (b ?? 0) > 128 && (r ?? 0) < 128 ? 'blue' : 'other'
+            }
+            return { png: Array.from(png.slice(0, 4)).join(), width: bmp.width, height: bmp.height, left: at(5, 5), right: at(bmp.width - 6, 5) }
+          }
+          return {
+            small: await ask(1, `${prefix}clip`, 64),
+            big: await ask(2, `${prefix}clip`, 512),
+            garbage: await ask(3, `${prefix}garbage`, 64),
+            played,
+          }
+        },
+        { js, clip, channels: THUMB_IPC, prefix: VIDEO_URL_PREFIX },
+      )
+      // Frame 0 is black: a still with red and blue halves was sought to.
+      expect(out.small).toEqual({ png: '137,80,78,71', width: 64, height: 36, left: 'red', right: 'blue' })
+      // Never enlarged.
+      expect(out.big).toEqual({ png: '137,80,78,71', width: 160, height: 90, left: 'red', right: 'blue' })
+      expect(out.garbage).toBeNull()
+      expect(out.played).toBe(0)
+    } finally {
+      await page.close()
+    }
   }, 60_000)
 })

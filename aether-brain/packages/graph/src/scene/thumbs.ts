@@ -34,15 +34,45 @@ export const THUMB_SCALE = 2.4
 export const THUMB_HOVER_SCALE = 1.15
 export const THUMB_SELECTED_SCALE = 1.3
 
+/**
+ * A star gallery card drawn wider than this share of the view height starts
+ * to fade (the camera is about to pass it), and is gone, letting clicks
+ * through, at CARD_FADE_TO. The selected card never fades.
+ */
+export const CARD_FADE_FROM = 0.4
+export const CARD_FADE_TO = 0.65
+
+/** Opacity of a gallery card `widthPx` wide in a view `viewHeight` px high (1: solid, 0: gone). */
+export function cardFade(widthPx: number, viewHeight: number): number {
+  if (!(viewHeight > 0) || !(widthPx > 0)) return 1
+  const f = widthPx / viewHeight
+  if (f <= CARD_FADE_FROM) return 1
+  if (f >= CARD_FADE_TO) return 0
+  const t = (f - CARD_FADE_FROM) / (CARD_FADE_TO - CARD_FADE_FROM)
+  return 1 - t * t * (3 - 2 * t)
+}
+
 /** Half the drawn width of node `i`'s picture over its projected radius (hover and selection grow it). */
 export function thumbHalf(i: number, selI: number, hovI: number): number {
   return (THUMB_SCALE / 2) * (i === selI ? THUMB_SELECTED_SCALE : i === hovI ? THUMB_HOVER_SCALE : 1)
 }
 
 /**
+ * Half the width a picture is drawn with over its projected radius, `half`
+ * (`thumbHalf`) grown by the billboard's shift toward the camera (0.2 of its
+ * width, see the thumbnail material): negligible far away, about a tenth
+ * when a picture fills half the view. `tanHalfFov`: tangent of half the
+ * vertical field of view.
+ */
+export function thumbDrawnHalf(half: number, radiusPx: number, viewHeight: number, tanHalfFov: number): number {
+  const toward = (0.4 * half * Math.max(0, radiusPx) * tanHalfFov) / Math.max(1, viewHeight / 2)
+  return half / Math.max(0.2, 1 - toward)
+}
+
+/**
  * True when the pointer, (dx, dy) px from a node's projected centre, hits it:
- * a picture is hit anywhere on its square as drawn (plus a 5 px margin, which
- * also covers the billboard's small shift toward the camera); a body within
+ * a picture is hit anywhere on its square as drawn (`half`: see
+ * `thumbDrawnHalf`; plus a 5 px margin); a body within
  * its projected radius plus 5 px, never less than 9 px.
  */
 export function thumbPickHit(dx: number, dy: number, radiusPx: number, picture: boolean, half: number): boolean {

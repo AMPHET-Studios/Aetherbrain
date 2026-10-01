@@ -252,13 +252,19 @@ export function createThumbMaterial(): ShaderMaterial {
       attribute float iSize;
       attribute float iLayer;
       attribute float iAlpha;
+      attribute float iFade;
+      attribute float iVideo;
       varying vec2 vUv;
       varying float vLayer;
       varying float vAlpha;
+      varying float vFade;
+      varying float vVideo;
       void main() {
         vUv = uv;
         vLayer = iLayer;
         vAlpha = iAlpha;
+        vFade = iFade;
+        vVideo = iVideo;
         vec4 viewCenter = viewMatrix * modelMatrix * vec4(iCenter, 1.0);
         viewCenter.xy += position.xy * iSize;
         viewCenter.z += iSize * 0.2;
@@ -270,6 +276,18 @@ export function createThumbMaterial(): ShaderMaterial {
       varying vec2 vUv;
       varying float vLayer;
       varying float vAlpha;
+      varying float vFade;
+      varying float vVideo;
+      // 4×4 ordered dither threshold in (0, 1) for this pixel.
+      float bayer4(vec2 p) {
+        vec2 q = mod(floor(p), 4.0);
+        // The 2×2 Bayer matrix [0 2; 3 1] at the fine and the coarse level.
+        vec2 f = mod(q, 2.0);
+        vec2 c = floor(q / 2.0);
+        float fine = 2.0 * f.x + 3.0 * f.y - 4.0 * f.x * f.y;
+        float coarse = 2.0 * c.x + 3.0 * c.y - 4.0 * c.x * c.y;
+        return (fine * 4.0 + coarse + 0.5) / 16.0;
+      }
       // Signed distance to a rounded square of half-size b, corner radius r (negative inside).
       float roundedBox(vec2 p, float b, float r) {
         vec2 q = abs(p) - vec2(b - r);
@@ -279,10 +297,25 @@ export function createThumbMaterial(): ShaderMaterial {
         float d = roundedBox(vUv - 0.5, 0.5, 0.12);
         float aa = max(fwidth(d), 1e-4);
         float mask = 1.0 - smoothstep(-aa, 0.0, d);
-        if (mask < 0.01) discard;
+        // A card the camera is passing fades by dropping pixels, not by blending: the pixels kept
+        // write depth as solid ones, so nothing behind a nearly gone card is cut out.
+        if (mask < 0.01 || vFade < bayer4(gl_FragCoord.xy)) discard;
         vec3 pic = texture(uMap, vec3(vUv.x, 1.0 - vUv.y, vLayer)).rgb;
+        vec3 col = pic * 0.94;
+        // A video's still: a play badge in the middle (a dark disc, a white triangle). It never plays here.
+        if (vVideo > 0.5) {
+          vec2 p = vUv - 0.5;
+          float r = length(p);
+          float raa = max(fwidth(r), 1e-4);
+          float disc = 1.0 - smoothstep(0.15 - raa, 0.15, r);
+          col = mix(col, vec3(0.03, 0.04, 0.08), disc * 0.6);
+          vec2 q = p - vec2(0.01, 0.0);
+          float tri = max(-q.x - 0.05, abs(q.y) * 1.923 + q.x - 0.075);
+          float taa = max(fwidth(tri), 1e-4);
+          col = mix(col, vec3(0.96), 1.0 - smoothstep(-taa, 0.0, tri));
+        }
         float rim = 1.0 - smoothstep(0.02, 0.02 + aa * 1.5, -d);
-        vec3 col = mix(pic * 0.94, vec3(0.78, 0.8, 0.9), rim) * mix(0.12, 1.0, vAlpha);
+        col = mix(col, vec3(0.78, 0.8, 0.9), rim) * mix(0.12, 1.0, vAlpha);
         gl_FragColor = vec4(col, mask);
         #include <colorspace_fragment>
       }

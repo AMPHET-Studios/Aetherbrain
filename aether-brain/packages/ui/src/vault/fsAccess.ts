@@ -4,6 +4,9 @@ import {
   isIgnoredPath,
   isImagePath,
   isMarkdownPath,
+  isMediaPath,
+  isVideoPath,
+  mimeOf,
   normalizeFolderPath,
   normalizePath,
   type VaultAdapter,
@@ -107,7 +110,7 @@ export class FsAccessVaultAdapter implements VaultAdapter {
         folders.add(path)
         await this.walk(entry, path, out, folders, images)
       } else if (isMarkdownPath(path)) out.push({ path, handle: entry })
-      else if (isImagePath(path)) images.add(path)
+      else if (isMediaPath(path)) images.add(path)
     }
   }
 
@@ -149,13 +152,19 @@ export class FsAccessVaultAdapter implements VaultAdapter {
     return [...this.images].map((path) => ({ path }))
   }
 
-  /** A preview of a picture, at most `size` px on its longer side (see `resizeImage`), or null. */
+  /**
+   * A preview of a picture, at most `size` px on its longer side (see
+   * `resizeImage`), or null. A video comes as itself (read lazily from disk):
+   * the store takes one still frame of it (`stillOf`).
+   */
   async thumbnail(path: string, size: number): Promise<Blob | null> {
     const p = normalizePath(path)
-    if (!isImagePath(p)) return null
+    if (!isMediaPath(p)) return null
     try {
       const { dir, name } = await this.resolve(p)
-      return await resizeImage(await (await dir.getFileHandle(name)).getFile(), size)
+      const file = await (await dir.getFileHandle(name)).getFile()
+      if (isVideoPath(p)) return file.size > 0 ? new Blob([file], { type: mimeOf(p) }) : null
+      return await resizeImage(file, size)
     } catch {
       return null
     }

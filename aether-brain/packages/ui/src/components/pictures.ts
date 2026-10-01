@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { IMAGE_EXTENSIONS, imageFileName, isImagePath, type VaultAsset } from '@aether/core'
+import { IMAGE_EXTENSIONS, imageFileName, isImagePath, isVideoPath, type VaultAsset } from '@aether/core'
 import { MAX_IMAGE_BYTES, useAether } from '../store'
 import { plural, truncate } from '../util'
 
@@ -30,8 +30,15 @@ export async function importPictureFiles(files: readonly File[], folder?: string
     else pictures.push(f)
   }
   if (refused.length) {
-    const what = refused.length === 1 ? `${truncate(refused[0] ?? '', 48)} is not a picture` : `${refused.length} files are not pictures`
-    s.toast(`${what} (${IMAGE_EXTENSIONS.join(', ')})`, 'error')
+    const videos = refused.filter((n) => isVideoPath(n))
+    if (videos.length === refused.length) {
+      // Videos are shown, not imported: copied into a vault folder, they appear there by themselves.
+      const what = videos.length === 1 ? truncate(videos[0] ?? '', 48) : plural(videos.length, 'video')
+      s.toast(`${what}: videos are not imported here; copy them into a folder of the vault and they show up as stills`, 'error')
+    } else {
+      const what = refused.length === 1 ? `${truncate(refused[0] ?? '', 48)} is not a picture` : `${refused.length} files are not pictures`
+      s.toast(`${what} (${IMAGE_EXTENSIONS.join(', ')})`, 'error')
+    }
   }
   if (tooBig.length) s.toast(`${tooBig.length === 1 ? truncate(tooBig[0] ?? '', 48) : plural(tooBig.length, 'picture')} over 40 MB, not added`, 'error')
   if (!pictures.length) return []

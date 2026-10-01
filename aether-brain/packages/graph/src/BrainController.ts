@@ -1,4 +1,5 @@
 import type { GraphData, GraphNode, NoteId } from '@aether/core'
+import { GALLERY_DWELL_MS, GALLERY_FOLD_MS, GALLERY_FRAMING_MS, GALLERY_REACH_MS, nearestStar as starNearCamera } from './gallery'
 import { LayoutEngine } from './layout/LayoutEngine'
 import type { LayoutMode } from './layout/protocol'
 import { nodeRadius, type ColorMode } from './theme'
@@ -13,6 +14,12 @@ export interface BrainEvents {
   onSelect?: (id: NoteId | null) => void
   onOpen?: (id: NoteId) => void
   onHover?: (id: NoteId | null) => void
+  /**
+   * Show the gallery of this project star (its folder id), or none. The
+   * owner rebuilds the graph with that gallery (`images.gallery`) and hands
+   * it back through `setGraph` / `setLayoutMode`.
+   */
+  onGallery?: (star: NoteId | null) => void
 }
 
 /** Default depth of the view: the camera's far plane and how far the user can dolly out. */
@@ -51,6 +58,10 @@ export interface CameraLike {
   setEnabled(v: boolean): void
   /** Shift the focal point sideways by a fraction of the viewport width (−1..1). */
   setShift(fraction: number): void
+  /** Where the camera is now, or where its flight ends (world space). */
+  getPosition?(out: [number, number, number]): [number, number, number]
+  /** The point the camera looks at (or will, once its flight ends). */
+  getTarget?(out: [number, number, number]): [number, number, number]
 }
 
 /**
@@ -98,6 +109,50 @@ export class BrainController {
     this.thumbsOn = on
     this.touch()
   }
+  /**
+   * Star galleries open by themselves when the camera comes close to a
+   * project star (system layout). Off: only Shift+G (`openGallery`) opens one.
+   */
+  get galleries(): boolean {
+    return this.galleryAuto
+  }
+  set galleries(on: boolean) {
+    if (this.galleryAuto === on) return
+    this.galleryAuto = on
+    this.applyGallery()
+  }
+  /** The star whose gallery the graph shows (its folder id), or null. */
+  get gallery(): NoteId | null {
+    return this.graph?.gallery?.star ?? null
+  }
+  /** When the open gallery started folding (performance.now() ms), −1 while it isn't: the scene shrinks its cards. */
+  galleryFold = -1
+  /** The project star the camera was last found close to (`nearStar`). */
+  get nearId(): NoteId | null {
+    return this.galleryNear
+  }
+  /**
+   * The star the camera is measured against first (hysteresis): the one opened
+   * with Shift+G, else the gallery asked for, else the last star found close.
+   */
+  get galleryHeld(): NoteId | null {
+    return this.galleryManual ?? this.galleryWanted ?? this.galleryNear
+  }
+  private galleryAuto = true
+  /** The project star the camera is close to (the scene reports it), and since when (performance.now() ms). */
+  private galleryNear: NoteId | null = null
+  private nearSince = 0
+  /** Opened with Shift+G: held open until the camera has reached the star and left it again. */
+  private galleryManual: NoteId | null = null
+  private galleryReached = false
+  /** Closed with Shift+G while close to it: stays shut until the camera leaves that star. */
+  private galleryDismissed: NoteId | null = null
+  /** What the owner was last asked to show (`onGallery`). */
+  private galleryWanted: NoteId | null = null
+  private foldTimer: ReturnType<typeof setTimeout> | null = null
+  private reachTimer: ReturnType<typeof setTimeout> | null = null
+  /** Asks again once the camera has dwelt near a star (or the first framing is over). */
+  private dwellTimer: ReturnType<typeof setTimeout> | null = null
   /** Bumped whenever a visual property changes; the scene diffs against it. */
   version = 0
   events: BrainEvents = {}
@@ -106,6 +161,8 @@ export class BrainController {
 
   private fitPending = false
   private fitRefit = false
+  /** When the last framing flight was armed (performance.now() ms). */
+  private refitArmedAt = 0
   private unTick: (() => void) | null = null
 
   setGraph(graph: GraphData): void {
@@ -128,6 +185,7 @@ export class BrainController {
   /** Refit the camera to the whole graph on the next settled layout frame (once). */
   private armRefit(): void {
     this.fitRefit = true
+    this.refitArmedAt = performance.now()
     this.unTick ??= this.engine.onTick((eng) => {
       if (this.fitPending && eng.frame > 1) {
         this.fitPending = false
@@ -136,6 +194,10 @@ export class BrainController {
       if (this.fitRefit && eng.settled) {
         this.fitRefit = false
         this.fitToGraph(true)
+        // Galleries held back during the framing may open now, once the camera has stayed near a star
+        // where this flight takes it (the scene measures the new destination within the dwell).
+        this.nearSince = performance.now()
+        this.applyGallery()
       }
     })
   }
@@ -220,6 +282,157 @@ export class BrainController {
     if (graph) this.setGraph(graph)
     else this.engine.setMode(mode)
     if (changed) this.armRefit()
+    // Stars exist only in the system layout: leaving it lets the gallery go.
+    if (changed && mode !== 'system') {
+      this.galleryNear = null
+      this.galleryManual = null
+      this.galleryDismissed = null
+      this.applyGallery()
+    }
+    this.touch()
+  }
+
+  /* ---- star galleries ---- */
+
+  /** The scene: the project star the camera is close to now (null: none). Opens or folds galleries. */
+  nearStar(id: NoteId | null): void {
+    if (id === this.galleryNear) return
+    this.galleryNear = id
+    this.nearSince = performance.now()
+    if (id !== this.galleryDismissed) this.galleryDismissed = null
+    if (this.galleryManual !== null) {
+      if (id === this.galleryManual) this.galleryReached = true
+      else if (this.galleryReached) this.galleryManual = null
+    }
+    this.applyGallery()
+  }
+
+  /**
+   * Open a star's gallery now (Shift+G), wherever the camera is. It stays
+   * open while the camera flies there, until the camera has reached the star
+   * and left it again (or GALLERY_REACH_MS passed without reaching it).
+   */
+  openGallery(star: NoteId): void {
+    this.galleryManual = star
+    this.galleryReached = this.galleryNear === star
+    this.galleryDismissed = null
+    if (this.reachTimer) clearTimeout(this.reachTimer)
+    this.reachTimer = setTimeout(() => {
+      this.reachTimer = null
+      if (this.galleryManual !== star || this.galleryReached) return
+      this.galleryReached = true
+      if (this.galleryNear !== star) this.galleryManual = null
+      this.applyGallery()
+    }, GALLERY_REACH_MS)
+    this.applyGallery()
+  }
+
+  /** Fold the open gallery (Shift+G). Close to its star, it stays shut until the camera leaves the star. */
+  closeGallery(): void {
+    const open = this.galleryWanted
+    this.galleryManual = null
+    if (open !== null && open === this.galleryNear) this.galleryDismissed = open
+    this.applyGallery()
+  }
+
+  /** Forget every gallery state (another vault); nothing is folded or asked for. */
+  resetGallery(): void {
+    this.cancelFold()
+    this.cancelDwell()
+    if (this.reachTimer) clearTimeout(this.reachTimer)
+    this.reachTimer = null
+    this.galleryNear = null
+    this.galleryManual = null
+    this.galleryReached = false
+    this.galleryDismissed = null
+    this.galleryWanted = null
+  }
+
+  /**
+   * The project star the camera looks at most closely, relative to the size
+   * of its system, however far (null: no stars, no camera or no system layout
+   * yet).
+   */
+  nearestStar(): NoteId | null {
+    const g = this.graph
+    const cam = this.camera?.getPosition?.([0, 0, 0])
+    const look = this.camera?.getTarget?.([0, 0, 0]) ?? cam
+    const pos = this.engine.positions
+    const extents = this.engine.extents
+    if (!g || !cam || !look || this.layoutMode !== 'system' || extents.length !== g.nodes.length || pos.length < g.nodes.length * 3) return null
+    const stars: number[] = []
+    g.nodes.forEach((n, i) => n.folder?.role === 'project' && stars.push(i))
+    const i = starNearCamera(stars, pos, extents, cam[0], cam[1], cam[2], look[0], look[1], look[2], -1, Infinity)
+    return i >= 0 ? (g.nodes[i]?.id ?? null) : null
+  }
+
+  /** Ask the owner for the gallery the camera and Shift+G call for; a gallery going away folds first. */
+  private applyGallery(): void {
+    const system = this.layoutMode === 'system'
+    const manual = system && this.galleryManual !== null
+    let want: NoteId | null = null
+    if (manual) want = this.galleryManual
+    else if (system && this.galleryAuto && this.galleryNear !== this.galleryDismissed) want = this.galleryNear
+    if (want !== null && want === this.galleryWanted) {
+      this.cancelFold()
+      this.cancelDwell()
+      return
+    }
+    if (want !== null) {
+      // Opening by itself waits until the camera has stayed near the star, outside the first framing
+      // flight; the gallery open meanwhile (another star's) folds.
+      const wait = manual ? 0 : this.galleryReadyAt() - performance.now()
+      if (wait <= 0) {
+        this.cancelFold()
+        this.cancelDwell()
+        this.galleryWanted = want
+        this.events.onGallery?.(want)
+        return
+      }
+      this.cancelDwell()
+      this.dwellTimer = setTimeout(() => {
+        this.dwellTimer = null
+        this.applyGallery()
+      }, wait)
+    } else {
+      this.cancelDwell()
+    }
+    if (this.galleryWanted === null || this.foldTimer) return
+    if (!system) {
+      // Nothing is drawn to fold.
+      this.galleryWanted = null
+      this.events.onGallery?.(null)
+      return
+    }
+    // Fold: the scene shrinks the cards, then the owner lets them go.
+    this.galleryFold = performance.now()
+    this.foldTimer = setTimeout(() => {
+      this.foldTimer = null
+      this.galleryFold = -1
+      this.galleryWanted = null
+      this.events.onGallery?.(null)
+      this.touch()
+    }, GALLERY_FOLD_MS)
+    this.touch()
+  }
+
+  /** When a gallery may open by itself (performance.now() ms). */
+  private galleryReadyAt(): number {
+    let at = this.nearSince + GALLERY_DWELL_MS
+    if (this.camera && (this.fitPending || this.fitRefit)) at = Math.max(at, this.refitArmedAt + GALLERY_FRAMING_MS)
+    return at
+  }
+
+  private cancelDwell(): void {
+    if (this.dwellTimer) clearTimeout(this.dwellTimer)
+    this.dwellTimer = null
+  }
+
+  private cancelFold(): void {
+    if (!this.foldTimer) return
+    clearTimeout(this.foldTimer)
+    this.foldTimer = null
+    this.galleryFold = -1
     this.touch()
   }
 
@@ -261,7 +474,11 @@ export class BrainController {
     if (!node) return 44
     if (node.kind === 'folder') return this.systemDistance(id, p, node)
     if (node.kind === 'today') return 90
-    if (node.kind === 'image') return 26
+    if (node.kind === 'image') {
+      // A gallery card is bigger than a moon: come close enough for it to fill a third of the view.
+      const card = this.engine.cards[this.engine.index.get(id) ?? -1] ?? 0
+      return Math.max(26, card * 7)
+    }
     return 34 + nodeRadius(node) * 10
   }
 
@@ -320,6 +537,7 @@ export class BrainController {
   private subs = new Set<() => void>()
 
   dispose(): void {
+    this.resetGallery()
     this.unTick?.()
     this.unTick = null
     this.engine.dispose()

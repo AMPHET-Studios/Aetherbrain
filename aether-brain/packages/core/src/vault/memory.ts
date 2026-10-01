@@ -1,5 +1,5 @@
 import type { VaultAdapter, VaultAsset, VaultChange, VaultFile } from '../types'
-import { isImagePath } from './assets'
+import { isImagePath, isMediaPath } from './assets'
 import { folderOf, isIgnoredPath, isMarkdownPath, normalizeFolderPath, normalizePath } from './paths'
 
 /** An image held by a MemoryVaultAdapter: its bytes (possibly empty in tests) and when it was written. */
@@ -73,7 +73,7 @@ export class MemoryVaultAdapter implements VaultAdapter {
     }
     for (const a of opts.assets ?? []) {
       const path = normalizePath(a.path)
-      if (!isImagePath(path) || isIgnoredPath(path)) continue
+      if (!isMediaPath(path) || isIgnoredPath(path)) continue
       this.assets.set(path, { path, data: a.data, mtime: a.mtime ?? Date.now() })
     }
   }
@@ -83,7 +83,11 @@ export class MemoryVaultAdapter implements VaultAdapter {
     return [...this.assets.values()].map((a) => ({ path: a.path, mtime: a.mtime, size: a.data.byteLength }))
   }
 
-  /** The image's own bytes as a Blob (no resizing here), or null when there is no such image. */
+  /**
+   * The image's own bytes as a Blob (no resizing here), or null when there is
+   * no such image. A video comes as itself (a `video/…` Blob): the renderer
+   * takes one still frame of it.
+   */
   async thumbnail(path: string, _size: number): Promise<Blob | null> {
     const a = this.assets.get(normalizePath(path))
     if (!a || typeof Blob === 'undefined') return null
@@ -221,7 +225,7 @@ export class MemoryVaultAdapter implements VaultAdapter {
   external(changes: VaultChange[]): void {
     for (const c of changes) {
       const p = normalizePath(c.path)
-      if (isImagePath(p) && (c.kind === 'add' || c.kind === 'change' || c.kind === 'unlink')) {
+      if (isMediaPath(p) && (c.kind === 'add' || c.kind === 'change' || c.kind === 'unlink')) {
         if (c.kind === 'unlink') {
           if (this.assets.delete(p)) this.keepFolderOf(p)
         } else {
@@ -266,10 +270,13 @@ export class MemoryVaultAdapter implements VaultAdapter {
   }
 }
 
-/** MIME type of an image path (by extension). */
+/** MIME type of a picture or video path (by extension). */
 export function mimeOf(path: string): string {
   const ext = path.slice(path.lastIndexOf('.') + 1).toLowerCase()
   if (ext === 'jpg' || ext === 'jpeg') return 'image/jpeg'
   if (ext === 'png' || ext === 'webp' || ext === 'gif' || ext === 'bmp' || ext === 'avif') return `image/${ext}`
+  if (ext === 'mp4' || ext === 'm4v') return 'video/mp4'
+  if (ext === 'mov') return 'video/quicktime'
+  if (ext === 'webm') return 'video/webm'
   return 'application/octet-stream'
 }

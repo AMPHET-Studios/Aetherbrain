@@ -231,6 +231,24 @@ export const COMMANDS: Command[] = [
       if (path !== undefined) void s.reveal(path)
     },
   },
+  {
+    id: 'gallery',
+    title: "Star gallery: the selected star's pictures in 3D (again: fold them)",
+    keys: 'Shift+G',
+    group: 'view',
+    when: (s) => s.settings.layoutMode === 'system',
+    run: (s) => s.toggleGallery(),
+  },
+  {
+    id: 'star-galleries',
+    title: 'Toggle star galleries (open as you fly close to a star)',
+    group: 'view',
+    run: (s) => {
+      const on = !s.settings.starGalleries
+      s.setSettings({ starGalleries: on })
+      s.toast(on ? 'Star galleries on: fly close to a ★ star to see its pictures in 3D' : 'Star galleries off: Shift+G still opens one')
+    },
+  },
   { id: 'color', title: 'Cycle color mode: area → type → tag → age', keys: 'm', group: 'view', run: (s) => s.cycleColorMode() },
   { id: 'bloom', title: 'Toggle bloom', keys: 'b', group: 'view', run: (s) => s.setSettings({ bloom: !s.settings.bloom }) },
   { id: 'labels', title: 'Toggle hub labels', keys: 'l', group: 'view', run: (s) => s.setSettings({ hubLabels: !s.settings.hubLabels }) },

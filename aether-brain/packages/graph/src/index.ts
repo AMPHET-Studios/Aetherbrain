@@ -1,4 +1,5 @@
 export * from './theme'
+export * from './gallery'
 export * from './layout/protocol'
 export { LayoutEngine } from './layout/LayoutEngine'
 export { computeSystemLayout, systemPositions, orbitSpeed } from './layout/system'

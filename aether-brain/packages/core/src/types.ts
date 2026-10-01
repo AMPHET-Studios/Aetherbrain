@@ -173,6 +173,38 @@ export interface ImageNodeInfo {
   size: number | null
   /** Notes that embed or link it. */
   embeddedBy: number
+  /** True for a video (`isVideoPath`): shown as one still frame, never played in the brain. */
+  video?: boolean
+  /** Present while the picture is a card of the open star gallery. */
+  gallery?: GalleryCardInfo
+}
+
+/** A picture's place in the open star gallery (see `ImageGraphOptions.gallery`). */
+export interface GalleryCardInfo {
+  /** The project star the card floats around (`folder:<path>`). */
+  star: NoteId
+  /** Place in the gallery, newest picture first (0, 1, …). */
+  rank: number
+  /**
+   * True when the picture is in the graph for the gallery only (not a moon or
+   * a linked picture): it holds no orbit of its own, so opening the gallery
+   * moves nothing else.
+   */
+  only: boolean
+}
+
+/** The open star gallery of a system graph: every picture under a project star, as cards around it. */
+export interface GalleryInfo {
+  /** The project star (`folder:<path>`). */
+  star: NoteId
+  /** The star's folder (vault path). */
+  path: string
+  /** Pictures (videos included) drawn as cards. */
+  cards: number
+  /** How many of the cards are videos. */
+  videos: number
+  /** Pictures under the star's folder on disk (all of them, cards or not). */
+  total: number
 }
 
 /** Present on the Today hub: the counts of the daily brief it stands for. */
@@ -240,6 +272,8 @@ export interface GraphData {
   areaCounts: Map<Area, number>
   /** Which folders the graph shows as nodes; null when built without folders. */
   folderSelection: FolderSelection | null
+  /** The open star gallery (system graphs only); absent or null when none is open. */
+  gallery?: GalleryInfo | null
 }
 
 /** Result of `selectFolders`: the folder nodes a system graph shows. */
@@ -266,9 +300,9 @@ export interface SearchHit {
 
 /**
  * File changes, plus folder creation/removal ('addDir' / 'unlinkDir', path =
- * the folder). Image files (`isImagePath`) come as add / change / unlink
- * without `content` (mtime and size when known); everything that is not a
- * note or an image is never reported.
+ * the folder). Picture and video files (`isMediaPath`) come as add / change /
+ * unlink without `content` (mtime and size when known); everything that is
+ * not a note, a picture or a video is never reported.
  */
 export type VaultChangeKind = 'add' | 'change' | 'unlink' | 'addDir' | 'unlinkDir'
 

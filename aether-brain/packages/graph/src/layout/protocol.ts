@@ -32,6 +32,12 @@ export interface LayoutNodeInput {
   parent: number
   kind: LayoutKind
   role: LayoutRole
+  /**
+   * System layout: a card of the open star gallery. `anchor`: index of the
+   * star it floats around; `rank`: its place, newest first; `only`: in the
+   * graph for the gallery only (it takes no place in its parent's system).
+   */
+  gallery?: { anchor: number; rank: number; only: boolean }
 }
 
 export interface LayoutEdgeInput {
@@ -73,12 +79,16 @@ export type WorkerToMain =
   | { type: 'ready'; generation: number }
   | {
       /**
-       * Orbit rings for the system layout, sent once per layout generation
-       * (an empty array in other modes). 6 floats per ring:
-       * parentIndex, radius, qx, qy, qz, qw — a circle of `radius` in the XZ
-       * plane, rotated by quaternion q, centred on the parent's live position.
+       * What the system layout knows once per layout generation (empty arrays
+       * in other modes). `rings`: 6 floats per orbit ring: parentIndex,
+       * radius, qx, qy, qz, qw — a circle of `radius` in the XZ plane, rotated
+       * by quaternion q, centred on the parent's live position.
        */
       type: 'rings'
       rings: Float32Array
+      /** Per node: the radius a star gallery card is drawn with, 0 for other nodes. */
+      cards: Float32Array
+      /** Per node: the radius of its system (its body and everything orbiting it). */
+      extent: Float32Array
       generation: number
     }

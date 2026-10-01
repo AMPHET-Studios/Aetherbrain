@@ -1,8 +1,11 @@
 /**
- * Picture files in the vault: concept art, references, Concept Forge
- * critiques. They are not notes (nothing parses them), but they are part of
- * the brain: embedded ones (`![[gate.png]]`) link from their notes, and in
- * the system layout each folder shows its newest pictures as thumbnail moons.
+ * Picture and video files in the vault: concept art, references, Concept
+ * Forge critiques, timelapses and turntables. They are not notes (nothing
+ * parses them), but they are part of the brain: embedded ones
+ * (`![[gate.png]]`, `![[turntable.mp4]]`) link from their notes, and in the
+ * system layout each folder shows its newest ones as thumbnail moons. A video
+ * shows one still frame, never plays in the brain (it opens in the OS player).
+ * Writes (imports, the Concept Forge) are pictures only: `isImagePath`.
  */
 import type { NoteId, VaultAsset } from '../types'
 import { folderOf, isIgnoredPath, normalizePath } from './paths'
@@ -15,6 +18,25 @@ const IMAGE_RE = /\.(png|jpe?g|webp|gif|bmp|avif)$/i
 /** True for a path (or file name) with a picture extension, any letter case. */
 export function isImagePath(p: string): boolean {
   return IMAGE_RE.test(p)
+}
+
+/** Video extensions the brain shows as a still frame (lowercase, no dot): what Chromium decodes (no Ogg Theora). */
+export const VIDEO_EXTENSIONS: readonly string[] = ['mp4', 'm4v', 'mov', 'webm']
+
+const VIDEO_RE = /\.(mp4|m4v|mov|webm)$/i
+const MEDIA_RE = /\.(png|jpe?g|webp|gif|bmp|avif|mp4|m4v|mov|webm)$/i
+
+/** True for a path (or file name) with a video extension, any letter case. */
+export function isVideoPath(p: string): boolean {
+  return VIDEO_RE.test(p)
+}
+
+/**
+ * True for a picture or a video: what the brain shows as a thumbnail (moons,
+ * gallery cards, embeds). Image nodes (`image:<path>`) are made for both.
+ */
+export function isMediaPath(p: string): boolean {
+  return MEDIA_RE.test(p)
 }
 
 /** Graph node id of an image: `image:<vault path>`. */
@@ -52,12 +74,12 @@ export function imageFileName(path: string): string {
   return p.slice(p.lastIndexOf('/') + 1)
 }
 
-/** Assets of a list, keyed by normalized path: images only, ignored folders skipped, the last entry per path wins. */
+/** Assets of a list, keyed by normalized path: pictures and videos only, ignored folders skipped, the last entry per path wins. */
 export function assetMap(list: Iterable<VaultAsset>): Map<string, VaultAsset> {
   const out = new Map<string, VaultAsset>()
   for (const a of list) {
     const path = normalizePath(a.path)
-    if (!isImagePath(path) || isIgnoredPath(path)) continue
+    if (!isMediaPath(path) || isIgnoredPath(path)) continue
     const asset: VaultAsset = { path }
     if (a.mtime !== undefined && Number.isFinite(a.mtime)) asset.mtime = a.mtime
     if (a.size !== undefined && Number.isFinite(a.size)) asset.size = a.size
@@ -96,7 +118,7 @@ export class AssetResolver {
   /** Vault path of the image `target` names from a note in `fromFolder`, or null. */
   resolve(target: string, fromFolder = ''): string | null {
     const raw = normalizePath(target.trim()).replace(/^(\.\/)+/, '')
-    if (!raw || !isImagePath(raw)) return null
+    if (!raw || !isMediaPath(raw)) return null
     const exact = this.byPath.get(raw.toLowerCase())
     if (exact) return exact
     if (fromFolder) {
@@ -148,5 +170,5 @@ export function imageTitle(path: string): string {
 
 /** File name without its extension (`gate.png` → `gate`). */
 export function imageBaseName(path: string): string {
-  return imageFileName(path).replace(IMAGE_RE, '')
+  return imageFileName(path).replace(MEDIA_RE, '')
 }

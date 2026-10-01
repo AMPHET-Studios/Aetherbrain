@@ -51,7 +51,7 @@ describe('LayoutEngine', () => {
 
     // The worker's replies for the first graph arrive only now.
     worker.reply({ type: 'ready', generation: 1 })
-    worker.reply({ type: 'rings', rings: new Float32Array([0, 10, 0, 0, 0, 1]), generation: 1 })
+    worker.reply({ type: 'rings', rings: new Float32Array([0, 10, 0, 0, 0, 1]), cards: new Float32Array(3), extent: new Float32Array(3), generation: 1 })
     worker.reply({ type: 'positions', positions: new Float32Array(9).fill(5), alpha: 0, settled: true, generation: 1 })
     expect(engine.positions).toBe(seeded)
     expect(engine.rings).toBe(rings)
@@ -60,7 +60,7 @@ describe('LayoutEngine', () => {
     // The second graph's replies are taken.
     worker.reply({ type: 'ready', generation: 2 })
     const r2 = new Float32Array([1, 12, 0, 0, 0, 1])
-    worker.reply({ type: 'rings', rings: r2, generation: 2 })
+    worker.reply({ type: 'rings', rings: r2, cards: new Float32Array(3), extent: new Float32Array(3), generation: 2 })
     const p2 = new Float32Array(9).fill(7)
     worker.reply({ type: 'positions', positions: p2, alpha: 0, settled: true, generation: 2 })
     expect(engine.rings).toBe(r2)

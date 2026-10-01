@@ -232,8 +232,56 @@ describe('layout worker, system mode', () => {
       [1, 0],
       [2, 0],
     ])
+    expect(r.every((m) => m.cards.length === 0 && m.extent.length === 0)).toBe(true)
     vi.advanceTimersByTime(30_000)
     expect(w.positions().at(-1)!.settled).toBe(true)
     expect(w.positions().at(-1)!.generation).toBe(2)
+  })
+
+  it('a rebuild never makes the bodies whose orbit did not change lag behind it', async () => {
+    const w = await startWorker()
+    w.send({ type: 'graph', nodes: system(), edges: [], mode: 'system' })
+    vi.advanceTimersByTime(1500)
+    const before = w.positions().at(-1)!.positions
+    // B's gallery opens: one gallery-only card comes in; nothing else changes its orbit.
+    const open = system()
+    open[2] = { ...open[2]!, role: 2 }
+    open.push({ ...node('image:B/new.png', 2), kind: 4, gallery: { anchor: 2, rank: 0, only: true } })
+    w.send({ type: 'graph', nodes: open, edges: [], mode: 'system', prev: { ids: system().map((d) => d.id), positions: before } })
+    vi.advanceTimersByTime(1300)
+    const frames = w.positions().filter((m) => m.generation === 2)
+    expect(frames.length).toBeGreaterThan(20)
+    const d = (p: Float32Array, a: number, b: number) => Math.hypot(p[a * 3]! - p[b * 3]!, p[a * 3 + 1]! - p[b * 3 + 1]!, p[a * 3 + 2]! - p[b * 3 + 2]!)
+    // A/one rides its orbit around A, and A its orbit around the sun, in every frame of the ease.
+    for (const f of frames) {
+      expect(d(f.positions, 3, 1)).toBeCloseTo(d(before, 3, 1), 3)
+      expect(d(f.positions, 1, 0)).toBeCloseTo(d(before, 1, 0), 3)
+    }
+  })
+
+  it('sends card sizes and system radii; gallery cards grow out of their star', async () => {
+    const w = await startWorker()
+    w.send({ type: 'graph', nodes: system(), edges: [], mode: 'system' })
+    vi.advanceTimersByTime(1500)
+    const before = w.positions().at(-1)!.positions
+    // Folder A becomes a project star with its gallery open: its moon A/one is a card, and a new picture comes in.
+    const open = system()
+    open[1] = { ...open[1]!, role: 2 }
+    open[3] = { ...open[3]!, kind: 4, gallery: { anchor: 1, rank: 1, only: false } }
+    open.push({ ...node('image:A/new.png', 1), kind: 4, gallery: { anchor: 1, rank: 0, only: true } })
+    w.send({ type: 'graph', nodes: open, edges: [], mode: 'system', prev: { ids: system().map((d) => d.id), positions: before } })
+    const msg = w.rings().at(-1)!
+    expect(msg.generation).toBe(2)
+    expect(msg.cards.length).toBe(open.length)
+    expect(msg.extent.length).toBe(open.length)
+    expect(Array.from(msg.cards).map((r) => r > 0)).toEqual([false, false, false, true, false, false, false, true])
+    expect(msg.extent[1]).toBeGreaterThan(0)
+    // The new card is born at its star.
+    vi.advanceTimersByTime(16)
+    const first = w.positions().find((m) => m.generation === 2)!.positions
+    const at = (p: Float32Array, i: number) => [p[i * 3]!, p[i * 3 + 1]!, p[i * 3 + 2]!]
+    const star = at(first, 1)
+    const born = at(first, 7)
+    expect(Math.hypot(born[0]! - star[0]!, born[1]! - star[1]!, born[2]! - star[2]!)).toBeLessThan(1)
   })
 })

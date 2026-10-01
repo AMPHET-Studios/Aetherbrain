@@ -11,7 +11,7 @@
  *
  * No telemetry. The renderer is sandboxed with context isolation and makes no network requests.
  */
-import { app, BrowserWindow, clipboard, dialog, ipcMain, shell, nativeTheme, screen, session } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, protocol, shell, nativeTheme, screen, session } from 'electron'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -24,14 +24,33 @@ import {
   type VaultInfo,
   type VaultProgressDto,
 } from '../shared/ipc.js'
-import { FsVault, within } from './fsvault.js'
+import { FsVault, isVideoName, within } from './fsvault.js'
 import { VaultWatcher } from './watcher.js'
-import { MAX_THUMB_FILE_BYTES, ThumbCache, assetBytes, assetPath, readUpTo, thumbPx, thumbTarget } from './assets.js'
-import { THUMB_IPC, Thumbnailer } from './thumbnailer.js'
+import {
+  MAX_THUMB_FILE_BYTES,
+  ThumbCache,
+  VIDEO_HEAD_BYTES,
+  VIDEO_MIME,
+  assetBytes,
+  assetPath,
+  readHead,
+  readUpTo,
+  thumbPx,
+  thumbTarget,
+  videoKindOf,
+} from './assets.js'
+import { THUMB_IPC, Thumbnailer, VIDEO_SCHEME } from './thumbnailer.js'
 import { AiLinkHost, aiSettings, cleanPatch, type AiLinkSettings } from './ai-link.js'
 import { ForgeHost, forgeSettings, type ForgeSettings } from './forge.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
+
+// The thumbnail helper's session serves videos on this scheme (see thumbnailer.ts): its media
+// player streams them in ranges and draws a frame of them, so the scheme must be streamable and
+// CORS-enabled. Schemes can only be registered before the app is ready.
+protocol.registerSchemesAsPrivileged([
+  { scheme: VIDEO_SCHEME, privileges: { standard: true, secure: true, stream: true, supportFetchAPI: true, corsEnabled: true } },
+])
 const isDev = !!process.env['VITE_DEV_SERVER_URL']
 const settingsFile = () => path.join(app.getPath('userData'), 'settings.json')
 
@@ -394,6 +413,8 @@ const thumbnailer = new Thumbnailer({
  * the renderer's few requests in flight forever (it gets null, a plain moon).
  */
 const THUMB_TIMEOUT = 20_000
+/** A video's still that came back empty after this long timed out in the helper (it waits 15 s). */
+const VIDEO_GAVE_UP_MS = 14_000
 
 /** Every picture the last scan found, with mtime and size where a stat got to them in time. */
 async function listAssets(): Promise<AssetListDto> {
@@ -405,7 +426,9 @@ async function listAssets(): Promise<AssetListDto> {
 
 /**
  * PNG bytes of a picture at most `size` px on its longer side, or null when
- * it is not a picture of the vault, too big, or cannot be decoded.
+ * it is not a picture of the vault, too big, or cannot be decoded. A video's
+ * thumbnail is one still frame of it (any size of file: it is streamed to
+ * the helper, never read whole).
  */
 async function thumbnail(p: unknown, size: unknown): Promise<Uint8Array | null> {
   const v = requireVault()
@@ -413,13 +436,14 @@ async function thumbnail(p: unknown, size: unknown): Promise<Uint8Array | null> 
   const abs = await v.assetAbs(String(p))
   if (!abs) return null
   const st = await fs.stat(abs).catch(() => null)
-  if (!st?.isFile() || st.size === 0 || st.size > MAX_THUMB_FILE_BYTES) return null
+  const video = isVideoName(path.basename(abs))
+  if (!st?.isFile() || st.size === 0 || (!video && st.size > MAX_THUMB_FILE_BYTES)) return null
   const key = ThumbCache.key(abs, st.mtimeMs, st.size, px)
   const hit = thumbs.get(key)
   if (hit !== undefined) return hit
   let job = thumbsInFlight.get(key)
   if (!job) {
-    job = renderThumb(abs, px)
+    job = (video ? renderVideoThumb(abs, px) : renderThumb(abs, px))
       .then(
         (png) => {
           // A picture that cannot be decoded is an answer too (null, cached for this version of the
@@ -450,6 +474,21 @@ async function renderThumb(abs: string, px: number): Promise<Uint8Array | null> 
 }
 
 /**
+ * A still frame of a video, made by the thumbnail helper from the file served
+ * to it (main reads nothing but its first bytes, to check it is a video).
+ */
+async function renderVideoThumb(abs: string, px: number): Promise<Uint8Array | null> {
+  const kind = videoKindOf(await readHead(abs, VIDEO_HEAD_BYTES))
+  // Chromium has no MPEG-TS decoder: no still (the OS player still plays it).
+  if (!kind || kind === 'mpegts') return null
+  const started = Date.now()
+  const png = await thumbnailer.renderVideo(abs, VIDEO_MIME[kind], px)
+  // No still because the helper gave up waiting (a share that stopped answering): asked again later, not remembered.
+  if (!png && Date.now() - started >= VIDEO_GAVE_UP_MS) throw new Error('The video did not answer in time')
+  return png
+}
+
+/**
  * A new picture (a dropped file, a Concept Forge drawing): a picture path,
  * bytes that really are a picture, at most 40 MB, created without ever
  * replacing anything (EEXIST, like notes). The watcher reports it to the
@@ -469,12 +508,17 @@ async function createAsset(p: unknown, data: unknown): Promise<void> {
   toAi(changes)
 }
 
-/** Open a picture of the vault in the OS default app. Pictures only: shell.openPath would run a program just the same. */
+/**
+ * Open a picture or video of the vault in the OS default app (a video plays
+ * there, never in the brain). Pictures and videos only: shell.openPath would
+ * run a program just the same. A video must also start like one.
+ */
 async function openAsset(p: unknown): Promise<void> {
   const v = requireVault()
   const rel = String(p)
   const abs = await v.assetAbs(rel)
   if (!abs) throw new Error(`Not a picture in the vault: ${rel}`)
+  if (isVideoName(path.basename(abs)) && !videoKindOf(await readHead(abs, VIDEO_HEAD_BYTES))) throw new Error(`Not a video: ${rel}`)
   const err = await shell.openPath(abs)
   if (err) throw new Error(`Could not open ${rel}: ${err}`)
 }

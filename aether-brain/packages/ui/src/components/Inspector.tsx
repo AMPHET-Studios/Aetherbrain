@@ -11,13 +11,14 @@ import {
   isGhostId,
   isImageId,
   isTodayId,
+  isVideoPath,
   type BriefTask,
   type DailyBrief,
   type GraphNode,
   type NoteId,
 } from '@aether/core'
 import { AREA_LABELS, IMAGE_COLOR, STAR_COLOR, SUN_COLOR, TODAY_COLOR, planetColor } from '@aether/graph'
-import { useAether } from '../store'
+import { picturesUnder, useAether } from '../store'
 import { cx, plural, relativeTime, truncate, MOD } from '../util'
 import { copyEmbed, formatBytes, importPicturesFromDialog, usePreview } from './pictures'
 
@@ -224,7 +225,10 @@ export function linkRow(
 ): { kind: 'note' | 'ghost' | 'image' | 'today' | 'folder'; label: string; hint: string; dot?: string; dotClass?: string } {
   if (isGhostId(id)) return { kind: 'ghost', label: `+ ${ghostTitle(id)}`, hint: 'Missing note — select to create', dotClass: 'bg-danger' }
   if (isImageId(id)) {
-    return { kind: 'image', label: `🖼 ${imageFileName(imagePathOf(id))}`, hint: 'Click: select · double-click: open in your image app', dot: IMAGE_COLOR }
+    const path = imagePathOf(id)
+    return isVideoPath(path)
+      ? { kind: 'image', label: `▶ ${imageFileName(path)}`, hint: 'Click: select · double-click: play in your video player', dot: IMAGE_COLOR }
+      : { kind: 'image', label: `🖼 ${imageFileName(path)}`, hint: 'Click: select · double-click: open in your image app', dot: IMAGE_COLOR }
   }
   if (isTodayId(id)) return { kind: 'today', label: '☀ Today', hint: "Click: select the daily brief", dot: TODAY_COLOR }
   if (isFolderId(id)) {
@@ -258,6 +262,11 @@ function FolderInspector({ node }: { node: GraphNode }) {
   const setView = useAether((s) => s.setView)
   const reveal = useAether((s) => s.reveal)
   const controller = useAether((s) => s.controller)
+  const toggleGallery = useAether((s) => s.toggleGallery)
+  /** A star: its pictures (subfolders included) and whether its gallery is open. */
+  const assets = useAether((s) => s.assets)
+  const starPictures = useMemo(() => (info.role === 'project' ? picturesUnder(assets, info.path) : 0), [assets, info.role, info.path])
+  const galleryOpen = graph?.gallery?.star === node.id
   const [adding, setAdding] = useState<'note' | 'folder' | null>(null)
   const [name, setName] = useState('')
   /** Bumped per palette request so the field mounts again and takes the focus. */
@@ -268,7 +277,8 @@ function FolderInspector({ node }: { node: GraphNode }) {
     const moons: GraphNode[] = []
     const pictures: GraphNode[] = []
     for (const n of graph?.nodes ?? []) {
-      if (n.parent !== node.id) continue
+      // Cards of an open star gallery belong to the gallery, not to the folder's own moons.
+      if (n.parent !== node.id || n.image?.gallery?.only) continue
       if (n.kind === 'folder') planets.push(n)
       else if (n.kind === 'note') moons.push(n)
       else if (n.kind === 'image') pictures.push(n)
@@ -348,6 +358,16 @@ function FolderInspector({ node }: { node: GraphNode }) {
           {(info.hiddenFolders > 0 || expanded) && (
             <button type="button" className="hud-btn primary" onClick={() => toggleFolder(info.path)} title="Expand / collapse (x)">
               {expanded ? 'Collapse' : `Expand +${info.hiddenFolders}`} <kbd className="!text-white/80">x</kbd>
+            </button>
+          )}
+          {starPictures > 0 && (
+            <button
+              type="button"
+              className="hud-btn"
+              onClick={toggleGallery}
+              title={galleryOpen ? 'Fold the pictures back into the star (Shift+G)' : `Every picture of ${node.title} in 3D around the star (Shift+G); flying close opens it too`}
+            >
+              🖼 {galleryOpen ? 'Fold gallery' : `Gallery · ${starPictures}`} <kbd>⇧G</kbd>
             </button>
           )}
           {info.projectId ? (
@@ -753,9 +773,10 @@ function TodayInspector() {
 }
 
 /**
- * Inspector for a picture: a preview, where it lives, its size and date, the
- * notes that embed it, and Open (the OS image app, `e`), Reveal and Copy
- * embed (`![[name.png]]`, to paste into a note).
+ * Inspector for a picture or a video: a preview (a video's still, with a
+ * play badge), where it lives, its size and date, the notes that embed it,
+ * and Open (the OS image app or video player, `e`), Reveal and Copy embed
+ * (`![[name.png]]`, to paste into a note).
  */
 function ImageInspector({ id }: { id: NoteId }) {
   const path = imagePathOf(id)
@@ -780,13 +801,14 @@ function ImageInspector({ id }: { id: NoteId }) {
   const name = imageFileName(path)
   const folder = folderOf(path)
   const refs = [...(embeddedIn ?? [])].sort()
+  const video = info?.video === true || isVideoPath(path)
 
   return (
     <aside className="panel rise flex max-h-full w-80 flex-col overflow-hidden" aria-label="Picture inspector">
       <div className="p-4 pb-3">
         <div className="section-title flex items-center gap-1.5">
           <span className="inline-block h-2 w-2 rounded-full" style={{ background: IMAGE_COLOR, boxShadow: `0 0 8px ${IMAGE_COLOR}` }} />
-          Picture
+          {video ? 'Video' : 'Picture'}
         </div>
         <button
           type="button"
@@ -811,16 +833,23 @@ function ImageInspector({ id }: { id: NoteId }) {
         </div>
       </div>
 
-      <div className="mx-4 mb-3 grid h-44 place-items-center overflow-hidden rounded-lg border border-[var(--line)] bg-black/40">
+      <div className="mx-4 mb-3 grid h-44 grid-cols-[minmax(0,1fr)] grid-rows-[minmax(0,1fr)] place-items-center overflow-hidden rounded-lg border border-[var(--line)] bg-black/40">
         {preview.url && !broken ? (
-          <img src={preview.url} alt={name} className="max-h-full max-w-full object-contain" draggable={false} onError={() => setBroken(true)} />
+          <span className="still grid h-full w-full grid-cols-[minmax(0,1fr)] grid-rows-[minmax(0,1fr)] place-items-center">
+            <img src={preview.url} alt={name} className="max-h-full max-w-full object-contain" draggable={false} onError={() => setBroken(true)} />
+            {video && (
+              <span className="play-badge" aria-hidden title="A still: it plays in your video player (e)">
+                ▶
+              </span>
+            )}
+          </span>
         ) : (
           <span className="text-[11.5px] text-faint">{preview.state === 'loading' ? 'Loading preview…' : 'No preview'}</span>
         )}
       </div>
 
       <div className="flex flex-wrap gap-1.5 px-4 pb-3">
-        <button type="button" className="hud-btn primary" onClick={() => void openImage(path)} title="Open in your image app (e · Enter)">
+        <button type="button" className="hud-btn primary" onClick={() => void openImage(path)} title={video ? 'Play it in your video player (e · Enter)' : 'Open in your image app (e · Enter)'}>
           Open <kbd className="!text-white/80">e</kbd>
         </button>
         {canReveal && (
