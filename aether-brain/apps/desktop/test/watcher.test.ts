@@ -591,14 +591,20 @@ describe('VaultWatcher pictures', () => {
   })
 
   /** A watcher on `root` seeded from a scan (pictures included), fed by the fake fs.watch. */
-  async function watched(opts: { images?: boolean; maxAssets?: number; known?: string[] } = {}) {
+  async function watched(opts: { images?: boolean; maxAssets?: number; known?: string[]; videoSettleMs?: number } = {}) {
     const vault = new FsVault([root], opts.maxAssets ? { maxAssets: opts.maxAssets } : {})
     const scan = await vault.scan()
     watcher = new VaultWatcher(
       vault,
       { files: scan.files.map((f) => f.path), folders: scan.folders, images: opts.known ?? scan.assets.map((a) => a.path) },
       (batch) => changes.push(...batch),
-      { debounceMs: 20, resyncMs: 20, watch: fake.fn, ...(opts.images === false ? { images: false } : {}) },
+      {
+        debounceMs: 20,
+        resyncMs: 20,
+        watch: fake.fn,
+        ...(opts.images === false ? { images: false } : {}),
+        ...(opts.videoSettleMs === undefined ? {} : { videoSettleMs: opts.videoSettleMs }),
+      },
     )
     await watcher.start()
     return vault
@@ -635,6 +641,28 @@ describe('VaultWatcher pictures', () => {
     await fs.rm(path.join(root, 'Art', 'gate.png'))
     fire('Art/gate.png')
     await waitChange('unlink', 'Art/gate.png')
+  })
+
+  it('reports a video being written once it is left alone, not on every write', async () => {
+    await watched({ videoSettleMs: 300 })
+    await put('vault/Clips/take.mp4', 'a')
+    fire('Clips/take.mp4')
+    // New: there at once (its moon shows; its still comes with the change).
+    expect((await waitChange('add', 'Clips/take.mp4')).size).toBe(1)
+    for (const more of ['ab', 'abc', 'abcd']) {
+      await sleep(60)
+      await put('vault/Clips/take.mp4', more)
+      fire('Clips/take.mp4')
+    }
+    await settle('sentinel-v.md')
+    expect(count('change', 'Clips/take.mp4')).toBe(0)
+    expect((await waitChange('change', 'Clips/take.mp4')).size).toBe(4)
+    await sleep(500)
+    expect(count('change', 'Clips/take.mp4')).toBe(1)
+    // A picture rewritten is reported at once, as before.
+    await put('vault/keep.png', 'repainted')
+    fire('keep.png')
+    await waitChange('change', 'keep.png')
   })
 
   it('reports a change, not an add, for a picture the scan saw', async () => {

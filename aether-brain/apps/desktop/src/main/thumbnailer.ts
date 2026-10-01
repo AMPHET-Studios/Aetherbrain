@@ -323,8 +323,8 @@ interface Sender {
 export class Thumbnailer {
   private readonly queue: ThumbQueue
   private sessionReady = false
-  /** Videos handed to the helper for a job running now: token → the file and its media type. */
-  private readonly videos = new Map<string, { abs: string; mime: string }>()
+  /** Videos handed to the helper for a job running now: token → the file, its media type, and what ends its streams. */
+  private readonly videos = new Map<string, { abs: string; mime: string; end: AbortController }>()
 
   constructor(private opts: ThumbnailerOptions) {
     this.queue = new ThumbQueue(() => this.spawn(), opts.timeoutMs === undefined ? {} : { timeoutMs: opts.timeoutMs })
@@ -345,11 +345,14 @@ export class Thumbnailer {
    */
   async renderVideo(abs: string, mime: string, px: number): Promise<Uint8Array | null> {
     const token = randomUUID()
-    this.videos.set(token, { abs, mime })
+    const end = new AbortController()
+    this.videos.set(token, { abs, mime, end })
     try {
       return await this.queue.render({ url: VIDEO_URL_PREFIX + token, px })
     } finally {
       this.videos.delete(token)
+      // Streams still open (a helper that gave up on a share that stopped answering) end with the job.
+      end.abort()
     }
   }
 
@@ -357,7 +360,7 @@ export class Thumbnailer {
   serve(url: string, range: string | null): Promise<Response> {
     const video = url.startsWith(VIDEO_URL_PREFIX) ? this.videos.get(url.slice(VIDEO_URL_PREFIX.length)) : undefined
     if (!video) return Promise.resolve(new Response(null, { status: 404 }))
-    return serveVideo(video.abs, video.mime, range)
+    return serveVideo(video.abs, video.mime, range, video.end.signal)
   }
 
   /** `thumbs:ready`: only the current helper counts. */

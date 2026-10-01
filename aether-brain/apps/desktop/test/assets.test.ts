@@ -18,6 +18,8 @@ import {
   turnsSideways,
   byteRange,
   serveVideo,
+  VIDEO_HEAD_BYTES,
+  VIDEO_MIME,
   videoKindOf,
 } from '../src/main/assets.js'
 
@@ -374,6 +376,30 @@ describe('videos', () => {
     expect(videoKindOf(new Uint8Array(0))).toBeNull()
   })
 
+  it('want a real box after a filler box, a box size that can be one, and three packets of a transport stream', () => {
+    // Fragmented MP4 and 64-bit box sizes.
+    expect(videoKindOf(bytes(be32(24), 'stypmsdh'))).toBe('quicktime')
+    expect(videoKindOf(bytes(be32(16), 'moof'))).toBe('quicktime')
+    expect(videoKindOf(bytes(be32(1), 'mdat', be32(0), be32(4096)))).toBe('quicktime')
+    expect(videoKindOf(bytes(be32(8), 'free', be32(16), 'moov'))).toBe('quicktime')
+    expect(videoKindOf(bytes(be32(12), 'skip', [0, 0, 0, 0], be32(40), 'ftypisom'))).toBe('quicktime')
+    // Text that spells a box type where one would be is not a video.
+    expect(videoKindOf(bytes('Get free stuff at the market'))).toBeNull()
+    expect(videoKindOf(bytes('#!/bskip --all'))).toBeNull()
+    expect(videoKindOf(bytes(be32(8), 'wide', be32(100), 'note'))).toBeNull()
+    expect(videoKindOf(bytes(be32(8), 'wide'))).toBeNull()
+    expect(videoKindOf(bytes(be32(4), 'moov'))).toBeNull()
+    expect(videoKindOf(bytes(be32(4), 'ftypisom'))).toBeNull()
+    // MPEG-TS: a sync byte every 188 bytes.
+    const ts = new Uint8Array(VIDEO_HEAD_BYTES)
+    for (let at = 0; at < ts.length; at += 188) ts[at] = 0x47
+    expect(videoKindOf(ts)).toBe('mpegts')
+    expect(VIDEO_MIME.mpegts).toBe('video/mp2t')
+    expect(videoKindOf(ts.subarray(0, 300))).toBeNull()
+    ts[188] = 0
+    expect(videoKindOf(ts)).toBeNull()
+  })
+
   it('read the byte ranges a media player asks for', () => {
     expect(byteRange(null, 100)).toBeNull()
     expect(byteRange('bytes=0-', 100)).toEqual({ start: 0, end: 99 })
@@ -421,6 +447,34 @@ describe('videos', () => {
       expect((await serveVideo(dir, 'video/webm', null)).status).toBe(404)
       expect(await readHead(file, 4)).toEqual(data.subarray(0, 4))
       expect(await readHead(file, 5000)).toEqual(data)
+    })
+
+    it('ends a stream when its job ends, read to the end or not', async () => {
+      const big = path.join(dir, 'big.webm')
+      await fs.writeFile(big, new Uint8Array(4 << 20))
+      const job = new AbortController()
+      const res = await serveVideo(big, 'video/webm', null, job.signal)
+      const reader = res.body!.getReader()
+      const first = await reader.read()
+      expect(first.done).toBe(false)
+      job.abort()
+      let got = first.value!.length
+      const end = await (async () => {
+        try {
+          for (;;) {
+            const r = await reader.read()
+            if (r.done) return 'done'
+            got += r.value.length
+          }
+        } catch {
+          return 'ended'
+        }
+      })()
+      expect(end).toMatch(/done|ended/)
+      expect(got).toBeLessThan(4 << 20)
+      // A job already over gets nothing.
+      const late = await serveVideo(big, 'video/webm', null, job.signal)
+      expect([late.status, (await late.arrayBuffer()).byteLength]).toEqual([410, 0])
     })
   })
 })

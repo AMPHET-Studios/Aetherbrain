@@ -348,36 +348,50 @@ export async function readUpTo(abs: string, max: number): Promise<Uint8Array | n
 
 /* ---- videos ---- */
 
-export type VideoKind = 'mp4' | 'quicktime' | 'webm'
+export type VideoKind = 'mp4' | 'quicktime' | 'webm' | 'mpegts'
 
 /** The media type a video is served to the thumbnail helper as. */
 export const VIDEO_MIME: Record<VideoKind, string> = {
   mp4: 'video/mp4',
   quicktime: 'video/quicktime',
   webm: 'video/webm',
+  mpegts: 'video/mp2t',
 }
 
-/** Bytes read from the start of a video to tell its kind. */
-export const VIDEO_HEAD_BYTES = 64
-/** Boxes an old QuickTime movie may start with instead of `ftyp`. */
-const QT_BOXES = ['moov', 'mdat', 'wide', 'free', 'skip', 'pnot'].map(ascii)
+/** Bytes read from the start of a video to tell its kind (an MPEG-TS needs three 188-byte packets). */
+export const VIDEO_HEAD_BYTES = 512
+/** Boxes an ISO BMFF file may start with instead of `ftyp`: an old QuickTime movie, a fragmented MP4. */
+const FIRST_BOXES = ['moov', 'mdat', 'styp', 'sidx', 'moof', 'uuid'].map(ascii)
+/** Filler boxes: anything may follow their type, so the box after them must be a known one too. */
+const FILLER_BOXES = ['wide', 'free', 'skip', 'pnot'].map(ascii)
+/** Box types a filler box may be followed by. */
+const NEXT_BOXES = ['ftyp', 'moov', 'mdat', 'wide', 'free', 'skip', 'pnot', 'uuid', 'moof', 'sidx', 'styp'].map(ascii)
+const be32 = (b: Uint8Array, at: number): number => (((b[at] ?? 0) << 24) | ((b[at + 1] ?? 0) << 16) | ((b[at + 2] ?? 0) << 8) | (b[at + 3] ?? 0)) >>> 0
 /** `ftyp` brands of pictures (AVIF, HEIF), not videos. */
 const STILL_BRANDS = ['avif', 'avis', 'mif1', 'msf1', 'heic', 'heix'].map(ascii)
 const EBML = [0x1a, 0x45, 0xdf, 0xa3]
 
 /**
- * What kind of video the first bytes start with (ISO BMFF: mp4, m4v, mov;
- * Matroska / WebM), or null for anything else, a picture in an
- * ISO BMFF box (AVIF, HEIF) included. A video is opened with the OS player:
- * a file named `.mp4` that is not one is never handed over.
+ * What kind of video the first bytes start with (ISO BMFF: mp4, m4v, mov,
+ * fragmented MP4; Matroska / WebM; an MPEG transport stream, which Chromium
+ * does not decode but the OS player plays), or null for anything else, a
+ * picture in an ISO BMFF box (AVIF, HEIF) included. A video is opened with
+ * the OS player: a file named `.mp4` that is not one is never handed over.
+ * `b`: the first VIDEO_HEAD_BYTES of the file (or all of it).
  */
 export function videoKindOf(b: Uint8Array): VideoKind | null {
   if (has(b, 4, FTYP)) {
-    if (STILL_BRANDS.some((brand) => has(b, 8, brand))) return null
+    if (be32(b, 0) < 8 || STILL_BRANDS.some((brand) => has(b, 8, brand))) return null
     return has(b, 8, ascii('qt  ')) ? 'quicktime' : 'mp4'
   }
-  if (QT_BOXES.some((box) => has(b, 4, box))) return 'quicktime'
+  if (FIRST_BOXES.some((box) => has(b, 4, box))) return be32(b, 0) === 1 || be32(b, 0) >= 8 ? 'quicktime' : null
+  if (FILLER_BOXES.some((box) => has(b, 4, box))) {
+    // `free`, `skip`… say nothing by themselves (text can spell them): the next box must be a real one.
+    const size = be32(b, 0)
+    return size >= 8 && size + 8 <= b.length && NEXT_BOXES.some((box) => has(b, size + 4, box)) ? 'quicktime' : null
+  }
   if (has(b, 0, EBML)) return 'webm'
+  if (b.length >= 377 && b[0] === 0x47 && b[188] === 0x47 && b[376] === 0x47) return 'mpegts'
   return null
 }
 
@@ -420,15 +434,27 @@ export function byteRange(header: string | null, size: number): { start: number;
  * held whole), as `mime`, readable by the helper's page (CORS) so a frame of
  * it can be drawn and saved.
  */
-export async function serveVideo(abs: string, mime: string, rangeHeader: string | null): Promise<Response> {
+export async function serveVideo(abs: string, mime: string, rangeHeader: string | null, signal?: AbortSignal): Promise<Response> {
   const cors = { 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-store' }
+  // A job already over opens nothing.
+  if (signal?.aborted) return new Response(null, { status: 410, headers: cors })
   const st = await fs.stat(abs).catch(() => null)
   if (!st?.isFile()) return new Response(null, { status: 404, headers: cors })
   const range = byteRange(rangeHeader, st.size)
   if (range === 'unsatisfiable') return new Response(null, { status: 416, headers: { ...cors, 'Content-Range': `bytes */${st.size}` } })
   const { start, end } = range ?? { start: 0, end: st.size - 1 }
   const length = Math.max(0, end - start + 1)
-  const body = length > 0 ? (Readable.toWeb(createReadStream(abs, { start, end })) as ReadableStream<Uint8Array>) : null
+  let body: ReadableStream<Uint8Array> | null = null
+  if (length > 0) {
+    const stream = createReadStream(abs, { start, end })
+    // The job is over (or timed out): its streams end, and their files close, even if no one reads on.
+    if (signal) {
+      const stop = () => stream.destroy()
+      signal.addEventListener('abort', stop, { once: true })
+      stream.once('close', () => signal.removeEventListener('abort', stop))
+    }
+    body = Readable.toWeb(stream) as ReadableStream<Uint8Array>
+  }
   const headers: Record<string, string> = { ...cors, 'Content-Type': mime, 'Content-Length': String(length), 'Accept-Ranges': 'bytes' }
   if (range) headers['Content-Range'] = `bytes ${start}-${end}/${st.size}`
   return new Response(body, { status: range ? 206 : 200, headers })

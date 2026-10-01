@@ -19,7 +19,7 @@
 import { promises as fs, watch as nodeWatch, type Dirent, type FSWatcher, type Stats } from 'node:fs'
 import path from 'node:path'
 import type { VaultChangeDto } from '../shared/ipc.js'
-import { isMediaName, isNoteName, within, type FsVault, type MountedRoot } from './fsvault.js'
+import { isMediaName, isNoteName, isVideoName, within, type FsVault, type MountedRoot } from './fsvault.js'
 
 /** A write we made ourselves; its watcher echo is swallowed for SELF_WINDOW ms. */
 interface SelfWrite {
@@ -81,6 +81,12 @@ export interface VaultWatcherOptions {
   watch?: WatchFn
   /** Report picture files too (default true). The AI link's brain has no use for them. */
   images?: boolean
+  /**
+   * A video changed this recently (being recorded or copied in) is reported
+   * once it has been left alone this long (default 4000 ms): every change
+   * rebuilds the brain and asks for a still of a half-written file.
+   */
+  videoSettleMs?: number
 }
 
 /** Per-flush state: paths already reported, parent listings for exact-name checks. */
@@ -109,6 +115,9 @@ export class VaultWatcher {
   private readonly rearmMs: number
   private readonly probeMs: number
   private readonly watchFn: WatchFn
+  private readonly videoSettleMs: number
+  /** Videos still being written: looked at again once they have been left alone (see videoSettleMs). */
+  private settling = new Map<string, NodeJS.Timeout>()
   private watchers: FSWatcher[] = []
   private pending = new Set<string>()
   private firstPending = 0
@@ -153,6 +162,7 @@ export class VaultWatcher {
     this.resyncMs = opts.resyncMs ?? 2000
     this.rearmMs = opts.rearmMs ?? 1000
     this.probeMs = opts.probeMs ?? 5000
+    this.videoSettleMs = opts.videoSettleMs ?? 4000
     this.watchFn = opts.watch ?? nodeWatch
   }
 
@@ -218,6 +228,8 @@ export class VaultWatcher {
     this.retries.clear()
     for (const t of this.resyncTimers.values()) clearTimeout(t)
     this.resyncTimers.clear()
+    for (const t of this.settling.values()) clearTimeout(t)
+    this.settling.clear()
     this.resyncing.clear()
     this.lostSince.clear()
     this.armed.clear()
@@ -654,9 +666,28 @@ export class VaultWatcher {
       ctx.handled.add(p)
       return
     }
+    // A known video still being written (recorded, copied in): one change once it is left alone, not one per flush.
+    if (before !== undefined && isVideoName(path.basename(p)) && Date.now() - st.mtimeMs < this.videoSettleMs) {
+      ctx.handled.add(p)
+      this.settleLater(p, this.videoSettleMs - (Date.now() - st.mtimeMs))
+      return
+    }
     this.addAncestors(p, ctx)
     this.images.set(p, sig)
     this.emit(ctx, { kind: before === undefined ? 'add' : 'change', path: p, mtime: st.mtimeMs, size: st.size })
+  }
+
+  /** Look at a video again once it has been left alone for a while. */
+  private settleLater(p: string, ms: number): void {
+    const old = this.settling.get(p)
+    if (old) clearTimeout(old)
+    this.settling.set(
+      p,
+      setTimeout(() => {
+        this.settling.delete(p)
+        this.enqueue(p)
+      }, Math.max(50, ms + 50)),
+    )
   }
 
   /** addDir for parent folders we never heard about (events can be coalesced or missed). */

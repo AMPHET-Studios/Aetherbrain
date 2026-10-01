@@ -413,6 +413,8 @@ const thumbnailer = new Thumbnailer({
  * the renderer's few requests in flight forever (it gets null, a plain moon).
  */
 const THUMB_TIMEOUT = 20_000
+/** A video's still that came back empty after this long timed out in the helper (it waits 15 s). */
+const VIDEO_GAVE_UP_MS = 14_000
 
 /** Every picture the last scan found, with mtime and size where a stat got to them in time. */
 async function listAssets(): Promise<AssetListDto> {
@@ -477,7 +479,13 @@ async function renderThumb(abs: string, px: number): Promise<Uint8Array | null> 
  */
 async function renderVideoThumb(abs: string, px: number): Promise<Uint8Array | null> {
   const kind = videoKindOf(await readHead(abs, VIDEO_HEAD_BYTES))
-  return kind ? thumbnailer.renderVideo(abs, VIDEO_MIME[kind], px) : null
+  // Chromium has no MPEG-TS decoder: no still (the OS player still plays it).
+  if (!kind || kind === 'mpegts') return null
+  const started = Date.now()
+  const png = await thumbnailer.renderVideo(abs, VIDEO_MIME[kind], px)
+  // No still because the helper gave up waiting (a share that stopped answering): asked again later, not remembered.
+  if (!png && Date.now() - started >= VIDEO_GAVE_UP_MS) throw new Error('The video did not answer in time')
+  return png
 }
 
 /**

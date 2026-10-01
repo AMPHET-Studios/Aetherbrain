@@ -414,9 +414,24 @@ describe('Thumbnailer (the helper window)', () => {
     expect([part.status, part.headers.get('content-type'), part.headers.get('content-range')]).toEqual([206, 'video/webm', `bytes 0-15/${data.length}`])
     expect(new Uint8Array(await part.arrayBuffer())).toEqual(data.subarray(0, 16))
     expect((await serve(new Request(`${VIDEO_URL_PREFIX}not-a-job`))).status).toBe(404)
+    // A stream the helper opened and left unread (a share that stopped answering)…
+    const open = (await serve(new Request(url))).body!.getReader()
     t.done(w.webContents, id, pngBytes(9))
     expect(await out).toEqual(pngBytes(9))
-    // The job is over: the file is no longer served.
+    // …ends with the job, and the file is no longer served.
+    const drained = await (async () => {
+      let n = 0
+      try {
+        for (;;) {
+          const r = await open.read()
+          if (r.done) return n
+          n += r.value.length
+        }
+      } catch {
+        return n
+      }
+    })()
+    expect(drained).toBeLessThan(data.length)
     expect((await serve(new Request(url))).status).toBe(404)
   })
 
@@ -511,18 +526,21 @@ describe('thumb-preload', () => {
         if (blob.size === 1) throw new DOMException('The source image could not be decoded.', 'InvalidStateError')
         return { width: options.resizeWidth, height: options.resizeHeight, close: vi.fn() }
       },
-      OffscreenCanvas: class {
-        constructor(
-          readonly width: number,
-          readonly height: number,
-        ) {}
-        getContext() {
-          return { drawImage: vi.fn() }
-        }
-        convertToBlob(opts: { type: string }) {
-          return Promise.resolve(new Blob([new Uint8Array([...PNG_SIG, this.width, this.height])], { type: opts.type }))
-        }
+      // The page's canvas, encoded at once (toDataURL), as the helper does it.
+      document: {
+        createElement: (tag: string) => {
+          expect(tag).toBe('canvas')
+          return {
+            width: 0,
+            height: 0,
+            getContext: () => ({ drawImage: vi.fn() }),
+            toDataURL(type: string) {
+              return `data:${type};base64,${Buffer.from([...PNG_SIG, this.width, this.height]).toString('base64')}`
+            },
+          }
+        },
       },
+      atob,
     }
     const require = (id: string): unknown => {
       if (id === 'electron') return electron
