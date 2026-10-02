@@ -14,17 +14,18 @@
  * in the ranges the helper's media player asks for, and only while the job
  * runs. The helper takes one still frame of it and never plays it.
  *
- * ThumbQueue is the bookkeeping, pure (tested with a fake helper): at most
- * two decodes at once, a timeout per decode (the picture gets no thumbnail,
- * the helper is destroyed, the next job starts a new one), answers taken only
- * from the helper itself, and after a crash the jobs that were in flight run
- * again one at a time, so the picture that crashes it is the only one without
- * a thumbnail. Thumbnailer is the Electron side: no electron import at
+ * ThumbQueue is the bookkeeping (a HelperQueue, see helper-queue.ts, tested
+ * with a fake helper): at most two decodes at once, a timeout per decode (the
+ * picture gets no thumbnail, the helper is destroyed, the next job starts a
+ * new one), answers taken only from the helper itself, and after a crash the
+ * jobs that were in flight run again one at a time, so the picture that
+ * crashes it is the only one without a thumbnail. Thumbnailer is the Electron side: no electron import at
  * runtime (types only), main.ts hands in the modules.
  */
 import { randomUUID } from 'node:crypto'
 import type { BrowserWindow, BrowserWindowConstructorOptions, Session } from 'electron'
 import { serveVideo, type ThumbTarget } from './assets.js'
+import { HelperQueue, type QueueHelper } from './helper-queue.js'
 
 /** IPC between main and the helper (thumb-preload.cts keeps a copy: a sandboxed preload cannot import this file). */
 export const THUMB_IPC = {
@@ -81,30 +82,11 @@ export class ThumbUnavailable extends Error {
 }
 
 /** One helper as the queue sees it (the hidden window in the app, a fake in tests). */
-export interface ThumbHelper {
-  /** Its webContents id: an answer from anyone else is ignored. */
-  readonly id: number
-  send(id: number, job: ThumbJob): void
-  /** Close it for good; `hung`: it stopped answering, end its process instead of asking it to close. */
-  destroy(hung: boolean): void
-}
+export type ThumbHelper = QueueHelper<ThumbJob>
 
 export interface ThumbQueueOptions {
   timeoutMs?: number
   concurrency?: number
-}
-
-interface Waiting {
-  job: ThumbJob
-  resolve(png: Uint8Array | null): void
-  reject(err: Error): void
-  /** In flight when a helper crashed: from then on it runs alone, and gets no thumbnail if a helper crashes again. */
-  suspect: boolean
-}
-
-interface Running {
-  w: Waiting
-  timer: ReturnType<typeof setTimeout>
 }
 
 /** The helper's answer when it is PNG bytes of a sane size; anything else is no thumbnail. */
@@ -114,187 +96,19 @@ function pngOf(v: unknown): Uint8Array | null {
 }
 
 /**
- * Jobs for the helper: started lazily, `concurrency` in flight, the rest
- * waiting in order. Every job gets exactly one outcome: PNG bytes, null (the
- * picture cannot be decoded, took too long, or crashed the helper twice), or
- * a ThumbUnavailable rejection (no helper could answer).
+ * Jobs for the helper (see helper-queue.ts): PNG bytes, null (the picture
+ * cannot be decoded, took too long, or crashed the helper twice), or a
+ * ThumbUnavailable rejection (no helper could answer).
  */
-export class ThumbQueue {
-  readonly timeoutMs: number
-  readonly concurrency: number
-  private helper: ThumbHelper | null = null
-  /** The current helper said it is ready. */
-  private listening = false
-  private startTimer: ReturnType<typeof setTimeout> | null = null
-  private waiting: Waiting[] = []
-  private running = new Map<number, Running>()
-  private seq = 0
-
-  /** `spawn` starts a helper; the app then calls ready() once it listens and gone() when it crashes or is destroyed. */
-  constructor(
-    private spawn: () => ThumbHelper,
-    opts: ThumbQueueOptions = {},
-  ) {
-    this.timeoutMs = opts.timeoutMs ?? THUMB_JOB_TIMEOUT
-    this.concurrency = opts.concurrency ?? THUMB_CONCURRENCY
-  }
-
-  /** Jobs waiting for a slot. */
-  get queued(): number {
-    return this.waiting.length
-  }
-
-  /** Jobs being decoded. */
-  get inFlight(): number {
-    return this.running.size
-  }
-
-  /** The current helper's id, or null when there is none. */
-  get helperId(): number | null {
-    return this.helper?.id ?? null
-  }
-
-  render(job: ThumbJob): Promise<Uint8Array | null> {
-    return new Promise<Uint8Array | null>((resolve, reject) => {
-      this.waiting.push({ job, resolve, reject, suspect: false })
-      this.pump()
+export class ThumbQueue extends HelperQueue<ThumbJob, Uint8Array> {
+  constructor(spawn: () => ThumbHelper, opts: ThumbQueueOptions = {}) {
+    super(spawn, pngOf, {
+      name: 'thumbnail helper',
+      unavailable: (message) => new ThumbUnavailable(message),
+      stopped: 'Thumbnails stopped',
+      timeoutMs: opts.timeoutMs ?? THUMB_JOB_TIMEOUT,
+      concurrency: opts.concurrency ?? THUMB_CONCURRENCY,
     })
-  }
-
-  /** `thumbs:ready` from `sender`: the current helper listens now. */
-  ready(sender: number): void {
-    if (!this.helper || sender !== this.helper.id || this.listening) return
-    this.listening = true
-    this.clearStart()
-    this.pump()
-  }
-
-  /** `thumbs:done` from `sender`. False when it is not the current helper answering a job it has. */
-  done(sender: number, id: unknown, png: unknown): boolean {
-    if (!this.helper || sender !== this.helper.id || typeof id !== 'number') return false
-    const r = this.running.get(id)
-    if (!r) return false
-    this.running.delete(id)
-    clearTimeout(r.timer)
-    r.w.resolve(pngOf(png))
-    this.pump()
-    return true
-  }
-
-  /** The helper with this id crashed or was destroyed (from outside: the queue ignores its own destroys). */
-  gone(helperId: number): void {
-    if (!this.helper || this.helper.id !== helperId) return
-    const started = this.listening
-    this.drop(false)
-    if (!started) {
-      // It died before it could take a job: nothing ran, so nothing is to blame.
-      this.failWaiting('The thumbnail helper stopped while starting')
-      return
-    }
-    const again: Waiting[] = []
-    for (const r of this.takeRunning()) {
-      // It ran alone and a helper crashed again: this picture is the cause.
-      if (r.w.suspect) r.w.resolve(null)
-      else again.push({ ...r.w, suspect: true })
-    }
-    this.waiting.unshift(...again)
-    this.pump()
-  }
-
-  /** Destroy the helper and fail every job (the brain window closed, the app quits). The next job starts a new helper. */
-  stop(): void {
-    for (const r of this.takeRunning()) r.w.reject(new ThumbUnavailable('Thumbnails stopped'))
-    this.drop(false)
-    this.failWaiting('Thumbnails stopped')
-  }
-
-  private pump(): void {
-    if (!this.waiting.length) return
-    if (!this.helper) {
-      this.start()
-      return
-    }
-    while (this.helper && this.listening && this.waiting.length && this.running.size < this.concurrency) {
-      const next = this.waiting[0]!
-      // A suspect runs alone, so that a crash names its picture.
-      if (this.running.size && (next.suspect || [...this.running.values()].some((r) => r.w.suspect))) return
-      this.waiting.shift()
-      this.dispatch(this.helper, next)
-    }
-  }
-
-  private start(): void {
-    let h: ThumbHelper
-    try {
-      h = this.spawn()
-    } catch {
-      this.failWaiting('Could not start the thumbnail helper')
-      return
-    }
-    this.helper = h
-    this.listening = false
-    this.startTimer = setTimeout(() => {
-      this.startTimer = null
-      if (this.helper !== h || this.listening) return
-      this.drop(true)
-      this.failWaiting('The thumbnail helper did not start')
-    }, this.timeoutMs)
-  }
-
-  private dispatch(helper: ThumbHelper, w: Waiting): void {
-    const id = ++this.seq
-    const timer = setTimeout(() => this.timeout(id), this.timeoutMs)
-    this.running.set(id, { w, timer })
-    try {
-      helper.send(id, w.job)
-    } catch {
-      // Its window went away under us: as good as a crash.
-      this.gone(helper.id)
-    }
-  }
-
-  /** A decode took too long: no thumbnail for that picture, and a new helper for the others. */
-  private timeout(id: number): void {
-    const r = this.running.get(id)
-    if (!r) return
-    this.running.delete(id)
-    r.w.resolve(null)
-    // The others in flight were not late (yet): they start over on the next helper.
-    this.waiting.unshift(...this.takeRunning().map((x) => x.w))
-    this.drop(true)
-    this.pump()
-  }
-
-  /** Every running job, their timers cleared, in the order they were sent. */
-  private takeRunning(): Running[] {
-    const out = [...this.running.values()]
-    for (const r of out) clearTimeout(r.timer)
-    this.running.clear()
-    return out
-  }
-
-  /** Forget the current helper and destroy it; its own gone() then no longer matches and is ignored. */
-  private drop(hung: boolean): void {
-    const h = this.helper
-    this.helper = null
-    this.listening = false
-    this.clearStart()
-    try {
-      h?.destroy(hung)
-    } catch {
-      /* already gone */
-    }
-  }
-
-  private clearStart(): void {
-    if (this.startTimer) clearTimeout(this.startTimer)
-    this.startTimer = null
-  }
-
-  private failWaiting(message: string): void {
-    const all = this.waiting
-    this.waiting = []
-    for (const w of all) w.reject(new ThumbUnavailable(message))
   }
 }
 

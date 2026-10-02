@@ -1245,6 +1245,11 @@ describe('CLI arguments', () => {
     expect(parseArgs(['--read-only=', '/a'], {}).readOnly).toBe(false)
   })
 
+  it('takes --hide and --keep, one folder each', () => {
+    const cli = parseArgs(['--vault', '/a', '--hide', '/a/Weird, stuff', '--keep=/a/Games/Mod', '--hide', ''], {})
+    expect([cli.hidden, cli.keep]).toEqual([['/a/Weird, stuff'], ['/a/Games/Mod']])
+  })
+
   it('skips empty values and unexpanded placeholders, falls back to AETHER_VAULT', () => {
     expect(parseArgs(['--read-only=${user_config.read_only}', '${user_config.vaults}', ''], {}).roots).toEqual([])
     expect(parseArgs([], { AETHER_VAULT: ['/x', '/y'].join(path.delimiter) }).roots).toEqual([path.resolve('/x'), path.resolve('/y')])

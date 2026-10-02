@@ -261,6 +261,7 @@ function FolderInspector({ node }: { node: GraphNode }) {
   const selectProject = useAether((s) => s.selectProject)
   const setView = useAether((s) => s.setView)
   const reveal = useAether((s) => s.reveal)
+  const hideFolder = useAether((s) => s.hideFolder)
   const controller = useAether((s) => s.controller)
   const toggleGallery = useAether((s) => s.toggleGallery)
   /** A star: its pictures (subfolders included) and whether its gallery is open. */
@@ -392,6 +393,16 @@ function FolderInspector({ node }: { node: GraphNode }) {
           {adapter?.reveal && onDisk && (
             <button type="button" className="hud-btn" onClick={() => void reveal(info.path)} title="Show in the file manager">
               Reveal
+            </button>
+          )}
+          {adapter?.hideFolder && onDisk && info.path && !(roots.length > 1 && !info.path.includes('/')) && (
+            <button
+              type="button"
+              className="hud-btn"
+              onClick={() => void hideFolder(info.path)}
+              title="Leave this folder out of the brain: nothing on disk changes; Undo on the toast, or bring it back in Vault folders (v)"
+            >
+              Leave out <kbd>⇧H</kbd>
             </button>
           )}
           <button type="button" className="hud-btn" onClick={() => select(null)} title="Deselect (Esc)">

@@ -15,6 +15,7 @@
     "packages/ui/src",
     "apps/web/src",
     "apps/desktop/src/renderer",
+    "apps/desktop/src/vision",
     "apps/desktop/src/shared"
   ]
 }

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useAether } from '@aether/ui'
-import type { VaultInfo } from '../../shared/ipc'
+import type { SkippedInstallDto, VaultInfo } from '../../shared/ipc'
 import { ElectronVaultAdapter } from '../vault/electron'
 import { UNSAVED_NOTE, errorText, openPanel, samePath, saveOpenNote } from '../panels'
 import { ErrorLine, Overlay, Section } from './Overlay'
@@ -8,6 +8,11 @@ import { ErrorLine, Overlay, Section } from './Overlay'
 /** What the scanner always leaves out, in words (see HEAVY_DIRS in main/fsvault.ts). */
 const ALWAYS_SKIPPED =
   'hidden folders, Windows, Program Files, ProgramData, AppData, $Recycle.Bin, node_modules, build, dist, cache, temp, and game-engine caches (Saved, Intermediate, DerivedDataCache)'
+
+/** The last folder name of an absolute path (`F:\\Games\\Doom` → `Doom`, a drive → itself). */
+function folderName(abs: string): string {
+  return abs.split(/[\\/]+/).filter(Boolean).pop() ?? abs
+}
 
 const MIRROR_NOTE =
   'Mirroring a drive scans every folder on it except system, build and cache folders, so its real folder tree becomes planets and moons. Big drives take a while the first time.'
@@ -73,8 +78,41 @@ function Roots() {
   const locked = busy || loading || !bridge
 
   const [missing, setMissing] = useState<string[]>([])
+  /** Folders left out (⇧H) and installs shown anyway, as main last reported them. */
+  const [rules, setRules] = useState<{ hidden: string[]; keep: string[] }>({ hidden: info?.hidden ?? [], keep: info?.keep ?? [] })
+  const [installs, setInstalls] = useState<SkippedInstallDto[] | null>(null)
 
   useEffect(() => setExclude(info?.exclude.join(', ') ?? ''), [info])
+  useEffect(() => setRules({ hidden: info?.hidden ?? [], keep: info?.keep ?? [] }), [info])
+
+  // Installed games and programs the scan left out (known once the vault is read).
+  useEffect(() => {
+    if (!bridge || !info || loading) return
+    let alive = true
+    bridge.skippedInstalls().then(
+      (list) => alive && setInstalls(list),
+      () => alive && setInstalls([]),
+    )
+    return () => {
+      alive = false
+    }
+  }, [bridge, info, loading, rules])
+
+  /** Change the folder rules; applied live by main (no rescan), the brain updates through its change feed. */
+  const changeRules = async (next: { hidden?: string[]; keep?: string[] }) => {
+    if (!electron || busy) return
+    setBusy(true)
+    setError(null)
+    try {
+      const out = await electron.setFolderRules(next)
+      setRules({ hidden: out.hidden, keep: out.keep })
+    } catch (err) {
+      setError(errorText(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+  const without = (list: string[], p: string) => list.filter((x) => !samePath(x, p, platform))
 
   // Remembered roots that could not be opened (an unplugged drive): listed so they can be forgotten.
   useEffect(() => {
@@ -259,6 +297,75 @@ function Roots() {
         </form>
         <p className="text-[11.5px] leading-relaxed text-faint">Always skipped: {ALWAYS_SKIPPED}.</p>
       </Section>
+
+      {info && (
+        <Section title="Left out of the brain" aside={rules.hidden.length ? undefined : 'select a folder and press ⇧H'}>
+          {rules.hidden.length === 0 ? (
+            <p className="mb-1 text-[12px] text-faint">
+              Nothing yet. Select a planet you don&apos;t want (a weird folder) and press <kbd>⇧H</kbd>, or use Leave out in its inspector. Nothing on disk changes.
+            </p>
+          ) : (
+            <ul className="mb-1 flex flex-col gap-1.5">
+              {rules.hidden.map((p) => (
+                <li key={p} className="flex items-center gap-3 rounded-lg border border-[var(--line)] bg-black/20 px-3 py-1.5">
+                  <span className="min-w-0 flex-1">
+                    <span className="block text-[13px] font-semibold text-white">{folderName(p)}</span>
+                    <span className="block truncate font-mono text-[11px] text-dim" title={p}>
+                      {p}
+                    </span>
+                  </span>
+                  <button type="button" className="hud-btn" disabled={locked} onClick={() => void changeRules({ hidden: without(rules.hidden, p) })} aria-label={`Bring ${p} back into the brain`}>
+                    Bring back
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </Section>
+      )}
+
+      {info && (
+        <Section title="Games and programs skipped" aside={installs?.length ? `${installs.length} found` : undefined}>
+          {installs === null ? (
+            <p className="mb-1 text-[12px] text-faint">Looking…</p>
+          ) : installs.length === 0 && rules.keep.length === 0 ? (
+            <p className="mb-1 text-[12px] text-faint">None found. Game libraries (Steam, Epic, Xbox, GOG…) and folders that hold an installed game or program are left out automatically.</p>
+          ) : (
+            <ul className="mb-1 flex max-h-56 flex-col gap-1.5 overflow-y-auto">
+              {installs.map((i) => (
+                <li key={i.path} className="flex items-center gap-3 rounded-lg border border-[var(--line)] bg-black/20 px-3 py-1.5">
+                  <span className="min-w-0 flex-1">
+                    <span className="block text-[13px] font-semibold text-white">
+                      {folderName(i.path)} <span className="text-[11px] font-normal text-faint">· {i.kind}</span>
+                    </span>
+                    <span className="block truncate font-mono text-[11px] text-dim" title={i.path}>
+                      {i.path}
+                    </span>
+                  </span>
+                  <button type="button" className="hud-btn" disabled={locked} onClick={() => void changeRules({ keep: [...rules.keep, i.path] })} title="It is not a game or program: show it in the brain" aria-label={`Show ${i.path} anyway`}>
+                    Show anyway
+                  </button>
+                </li>
+              ))}
+              {rules.keep.map((p) => (
+                <li key={p} className="flex items-center gap-3 rounded-lg border border-dashed border-[var(--line)] px-3 py-1.5">
+                  <span className="min-w-0 flex-1">
+                    <span className="block text-[13px] font-semibold text-white">
+                      {folderName(p)} <span className="text-[11px] font-normal text-faint">· shown anyway</span>
+                    </span>
+                    <span className="block truncate font-mono text-[11px] text-dim" title={p}>
+                      {p}
+                    </span>
+                  </span>
+                  <button type="button" className="hud-btn" disabled={locked} onClick={() => void changeRules({ keep: without(rules.keep, p) })} aria-label={`Skip ${p} again`}>
+                    Skip again
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </Section>
+      )}
 
       <div className="flex items-center gap-2 border-t border-[var(--line)] pt-3 text-[12px] text-dim" aria-live="polite">
         {loading ? (

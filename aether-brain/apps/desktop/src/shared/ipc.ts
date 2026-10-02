@@ -103,6 +103,11 @@ export interface VaultProgressDto {
   done: boolean
 }
 
+import type { ChatEventDto, ChatPatch, ChatReplyDto, ChatStatusDto } from './chat.js'
+export type { ChatEventDto, ChatPatch, ChatReplyDto, ChatStatusDto } from './chat.js'
+import type { LibraryEventDto, LibraryModelAction, LibraryPatch, LibraryStatusDto } from './library.js'
+export type * from './library.js'
+
 export interface VaultRootDto {
   /** Absolute path on disk. */
   path: string
@@ -120,6 +125,18 @@ export interface VaultInfo {
   roots: VaultRootDto[]
   /** Extra folder names skipped while scanning (on top of the built-in list). */
   exclude: string[]
+  /** Folders (absolute paths) left out of the brain. */
+  hidden: string[]
+  /** Folders (absolute paths) shown although they look like an installed game or program. */
+  keep: string[]
+}
+
+/** A folder left out because it holds an installed game or program. */
+export interface SkippedInstallDto {
+  /** Absolute path. */
+  path: string
+  /** What it looks like: `Steam game`, `installed program`, `game library` … */
+  kind: string
 }
 
 export interface FolderListDto {
@@ -191,6 +208,42 @@ export interface AetherBridge {
   removeRoot(path: string): Promise<VaultInfo>
   /** Set extra folder names to skip while scanning (reopens the vault). */
   setExclude(names: string[]): Promise<VaultInfo>
+  /** Leave one folder (vault path) out of the brain, at once (no rescan); nothing on disk changes. */
+  hideFolder(path: string): Promise<VaultInfo>
+  /** Let a folder left out with hideFolder (vault path) back in. */
+  unhideFolder(path: string): Promise<VaultInfo>
+  /** Replace the folders left out and/or the installs kept (absolute paths), applied at once. */
+  setFolderRules(rules: { hidden?: string[]; keep?: string[] }): Promise<VaultInfo>
+  /** Installed games and programs left out so far. */
+  skippedInstalls(): Promise<SkippedInstallDto[]>
+
+  /** The brain's chat: its settings and whether it can chat now. */
+  chatStatus(): Promise<ChatStatusDto>
+  chatConfigure(patch: ChatPatch): Promise<ChatStatusDto>
+  /** Send a message in conversation `conv` (an id the renderer makes); events stream through onChatEvent. */
+  chatSend(conv: string, text: string): Promise<ChatReplyDto>
+  /** Stop the answer being written. */
+  chatStop(conv: string): Promise<void>
+  /** Let go of a conversation (its note stays). */
+  chatForget(conv: string): Promise<void>
+  onChatEvent(cb: (e: ChatEventDto) => void): () => void
+
+  /** The librarian: where from and to, the vision model, the job running, the plan, the last result. */
+  libraryStatus(): Promise<LibraryStatusDto>
+  libraryConfigure(patch: LibraryPatch): Promise<LibraryStatusDto>
+  /** Choose the folder to sort (`source`) or the library folder (`dest`) with the OS picker. */
+  libraryPick(which: 'source' | 'dest'): Promise<LibraryStatusDto>
+  /** Look through the pictures and plan the library (progress and the plan arrive through onLibraryEvent). */
+  libraryAnalyze(): Promise<LibraryStatusDto>
+  /** Copy the plan's new pictures into the library and write its notes. */
+  libraryCopy(): Promise<LibraryStatusDto>
+  /** Stop looking or copying (what is copied stays). */
+  libraryStop(): Promise<void>
+  /** Download the vision model (about 150 MB, once), stop the download, or delete the model. */
+  libraryModel(action: LibraryModelAction): Promise<LibraryStatusDto>
+  /** A small picture (data URL) of one picture of the plan, or null. */
+  libraryThumb(id: number): Promise<string | null>
+  onLibraryEvent(cb: (e: LibraryEventDto) => void): () => void
   /** Drive roots on Windows (`C:\`, `D:\`, …); empty elsewhere. */
   listDrives(): Promise<string[]>
   listFiles(): Promise<VaultFileDto[]>
@@ -247,6 +300,25 @@ export const IPC = {
   addRootPath: 'vault:addRootPath',
   removeRoot: 'vault:removeRoot',
   setExclude: 'vault:setExclude',
+  hideFolder: 'vault:hideFolder',
+  unhideFolder: 'vault:unhideFolder',
+  setFolderRules: 'vault:setFolderRules',
+  skippedInstalls: 'vault:skippedInstalls',
+  chatStatus: 'chat:status',
+  chatConfigure: 'chat:configure',
+  chatSend: 'chat:send',
+  chatStop: 'chat:stop',
+  chatForget: 'chat:forget',
+  chatEvent: 'chat:event',
+  libraryStatus: 'library:status',
+  libraryConfigure: 'library:configure',
+  libraryPick: 'library:pick',
+  libraryAnalyze: 'library:analyze',
+  libraryCopy: 'library:copy',
+  libraryStop: 'library:stop',
+  libraryModel: 'library:model',
+  libraryThumb: 'library:thumb',
+  libraryEvent: 'library:event',
   drives: 'vault:drives',
   list: 'vault:list',
   folders: 'vault:folders',

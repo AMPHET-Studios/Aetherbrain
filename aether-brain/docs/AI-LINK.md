@@ -235,6 +235,9 @@ Read tools (always available):
 | `related_notes` | Notes a note links to, notes linking to it, and similar notes |
 | `recent_notes` | Recently changed notes, optionally within some days or a folder |
 | `search` / `fetch` | The same search and read in the shape ChatGPT's connectors expect |
+| `about_me` | What you asked your brain to remember about you (`Me/About me`), which parts are still empty, and your last two weeks of check-ins |
+| `my_trends` | Your check-ins over 7–90 days: the last week against the weeks before (mood, sleep, energy, stress, medication), with plain-fact notices |
+| `wellbeing_playbook` | Your Wellbeing playbook (or one section of it): the evidence behind wellbeing advice, your early warning signs plan, crisis lines |
 
 Write tools (hidden when the link is read-only):
 
@@ -253,6 +256,8 @@ Write tools (hidden when the link is read-only):
 | `update_project` | Rename (the old name stays as an alias, so links keep working), status, summary, tags, folder |
 | `create_folder` | A new folder, such as a planet inside a project's folder |
 | `link_notes` | Add `- Related: [[other note]]` to a note |
+| `remember_about_me` | Add one fact you agreed to share, dated, to its section of `Me/About me` |
+| `check_in` | Record a check-in (mood 1–10, sleep, energy, stress, medication, family, a win, a worry) in this month's `Me/Check-ins` note |
 | `save_chat` | Save the conversation as a chat note: a summary on top (its links and `- [ ]` tasks count), then the transcript, under `AI Chats` or a project's `AI Chats` planet. Given the chat's web address, saving again updates that chat note: a new summary, and a new transcript only when there are more messages ([AI-CHATS.md](AI-CHATS.md)) |
 
 The task tools name a task by its line number or its text. If the note changed

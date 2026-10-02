@@ -12,6 +12,7 @@ import type { CallToolResult, ToolAnnotations } from '@modelcontextprotocol/sdk/
 import { z } from 'zod'
 import { MAX_MESSAGE_CHARS, NOTE_TYPES } from '@aether/core'
 import type { Brain } from './brain.js'
+import { ABOUT_ME_AREAS, ABOUT_ME_SECTIONS, type AboutMeArea, type CheckIn } from './me.js'
 
 /** One tool call, for the host's activity feed. */
 export interface ActivityEvent {
@@ -48,7 +49,8 @@ How to work with it:
 - New notes go to the Inbox unless you give a folder. A new note never overwrites anything (a taken name gets " 2"), only .md notes and folders are created, and no tool deletes a note.
 - A planet is a folder inside a project's home folder: create_folder with project and path.
 - Prefer small edits (edit_note, append_to_note, add_task) over rewriting whole notes, and keep the user's own words.
-- When the user asks to save or remember this conversation, call save_chat: a title, a short summary (next steps as tasks) and the messages as faithfully as you can. With the chat's url it refreshes that chat note instead of making a new one.`
+- When the user asks to save or remember this conversation, call save_chat: a title, a short summary (next steps as tasks) and the messages as faithfully as you can. With the chat's url it refreshes that chat note instead of making a new one.
+- The brain also knows its user: when the conversation is personal (how they are, their family, health, goals, how they like to work), call about_me first. Ask before remembering anything personal, save it with remember_about_me (one fact, their words) and say what you saved. check_in records a short check-in; my_trends compares the last week with the weeks before; wellbeing_playbook holds the evidence and their early warning signs plan. You are a supportive companion, not a clinician: never diagnose or advise medication changes; their care team leads.`
 
 /** Every tool: title, description (also used for the Claude Desktop extension manifest) and whether it writes. */
 export const TOOLS = {
@@ -143,6 +145,36 @@ export const TOOLS = {
     write: true,
     description:
       "Use this when the user asks to save, keep or remember this conversation in their brain: writes it as a chat note, a short summary on top (live markdown: [[links]] and \"- [ ] next step\" tasks count) and then the transcript, under AI Chats (or a project's AI Chats planet). Pass the messages as faithfully as you can. With the chat's web address as url, saving again updates that chat note: its summary is replaced by the new one, and its transcript only when you pass more messages than it holds; nothing else in the vault changes.",
+  },
+  about_me: {
+    title: 'About me',
+    write: false,
+    description:
+      'Use this when the conversation is personal, or before advice that depends on who the user is: what they asked their brain to remember (Me/About me: who they are, how they like to be talked to, what matters, family, health and routine, work, goals, what helps, early warning signs, care team), which sections are still empty, and the trends of their last two weeks of check-ins.',
+  },
+  remember_about_me: {
+    title: 'Remember about me',
+    write: true,
+    description:
+      'Use this when the user agreed you should remember something about them (always ask first): adds one fact, in their words, as a dated line in its section of Me/About me (made when missing). Then tell them exactly what you saved. They can change or delete it in the note any time.',
+  },
+  check_in: {
+    title: 'Check in',
+    write: true,
+    description:
+      "Use this when the user answers a check-in: mood 1–10 (required), and as they give them hours of sleep, energy and stress 1–10, whether they took their medication (only if they track it), connection with family, one win, one worry. Adds a row to this month's Me/Check-ins note and returns the trends.",
+  },
+  my_trends: {
+    title: 'My trends',
+    write: false,
+    description:
+      'Use this when the user asks how they have been doing, or before a check-in conversation: their check-ins over the last days (7–90, default 14), the last week against the weeks before (mood, sleep, energy, stress), medication taken or missed, and plain-fact notices when something shifted. Name a shift neutrally and ask; never conclude.',
+  },
+  wellbeing_playbook: {
+    title: 'Wellbeing playbook',
+    write: false,
+    description:
+      "Use this when you need the evidence behind wellbeing advice, or the user's own plan: their copy of the Wellbeing playbook (sleep, movement, stress, early warning signs plan, recovery, work and creativity, family, crisis lines), or one section of it with topic.",
   },
   capture: {
     title: 'Quick capture',
@@ -493,6 +525,81 @@ export function createMcpServer(brain: Brain, opts: McpServerOptions): McpServer
     async ({ title, folder, content, tags, type }) => {
       const n = await brain.createNote({ title, ...(folder ? { folder } : {}), ...(content ? { content } : {}), ...(tags ? { tags } : {}), ...(type ? { type } : {}) })
       return { text: reply(`Created ${n.path}.`, n), summary: `created ${quote(n.title)}`, path: n.path }
+    },
+  )
+
+  /* ------------------------------ Me ------------------------------ */
+
+  tool('about_me', {}, READ, async () => {
+    const me = await brain.aboutMe()
+    const line = me.exists
+      ? `About me at ${me.path}${me.empty.length ? `; not filled in yet: ${me.empty.join(', ')}` : ''}. ${plural(me.checkIns.count, 'check-in')} in the last two weeks.`
+      : `There is no About me yet (${me.path}): nothing remembered so far. Offer to get to know them, one question at a time, and remember what they agree to.`
+    return { text: reply(line, me), summary: 'read About me', path: me.exists ? me.path : null }
+  })
+
+  tool(
+    'remember_about_me',
+    {
+      area: z
+        .enum(ABOUT_ME_AREAS as [AboutMeArea, ...AboutMeArea[]])
+        .describe(`Where it belongs: ${Object.entries(ABOUT_ME_SECTIONS).map(([k, v]) => `${k} (${v})`).join(', ')}.`),
+      fact: mdText().min(1).max(500).describe('One fact, in their words, e.g. "Sketches best in the morning with music on".'),
+    },
+    ADDS,
+    async ({ area, fact }) => {
+      const r = await brain.rememberAboutMe(area, fact)
+      return { text: reply(`Remembered under "${r.section}" in ${r.path}.`, r), summary: `remembered: ${quote(fact, 60)}`, path: r.path }
+    },
+  )
+
+  tool(
+    'check_in',
+    {
+      mood: z.number().min(1).max(10).describe('Mood today, 1 (very low) to 10 (great).'),
+      sleep: z.number().min(0).max(24).optional().describe('Hours slept last night.'),
+      energy: z.number().min(1).max(10).optional().describe('Energy, 1–10.'),
+      stress: z.number().min(1).max(10).optional().describe('Stress, 1–10.'),
+      meds: z.boolean().optional().describe('Took their medication as planned today (only if they track it).'),
+      family: oneLine().max(300).optional().describe('Connection with family today, in their words.'),
+      win: oneLine().max(300).optional().describe('One win today.'),
+      worry: oneLine().max(300).optional().describe('One worry today.'),
+      note: oneLine().max(300).optional().describe('Anything else they want noted.'),
+    },
+    ADDS,
+    async (args) => {
+      const entry: CheckIn = { mood: args.mood }
+      if (args.sleep !== undefined) entry.sleep = args.sleep
+      if (args.energy !== undefined) entry.energy = args.energy
+      if (args.stress !== undefined) entry.stress = args.stress
+      if (args.meds !== undefined) entry.meds = args.meds
+      if (args.family) entry.family = args.family
+      if (args.win) entry.win = args.win
+      if (args.worry) entry.worry = args.worry
+      if (args.note) entry.note = args.note
+      const r = await brain.checkIn(entry)
+      return { text: reply(`Check-in saved in ${r.path}.`, r), summary: 'saved a check-in', path: r.path }
+    },
+  )
+
+  tool(
+    'my_trends',
+    { days: z.number().int().min(7).max(90).optional().describe('How many days back (7–90, default 14).') },
+    READ,
+    async ({ days }) => {
+      const t = await brain.trends(days ?? 14)
+      const line = t.count ? `${plural(t.count, 'check-in')} in the last ${t.days} days.${t.notices.length ? ` Notices: ${t.notices.join(' ')}` : ''}` : `No check-ins in the last ${t.days} days.`
+      return { text: reply(line, t), summary: 'looked at the check-in trends' }
+    },
+  )
+
+  tool(
+    'wellbeing_playbook',
+    { topic: oneLine().optional().describe('Only the section whose heading contains this, e.g. "sleep", "early warning", "family", "crisis".') },
+    READ,
+    async ({ topic }) => {
+      const r = await brain.playbook(topic)
+      return { text: r.text, summary: topic ? `read the playbook on ${quote(topic)}` : 'read the playbook', path: r.path }
     },
   )
 

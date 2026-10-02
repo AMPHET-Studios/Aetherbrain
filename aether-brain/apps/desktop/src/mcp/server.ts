@@ -26,11 +26,15 @@ export type { BrainOptions, BrainPreload, FolderNode, NoteRef, ProjectBrief, Tas
 export { INSTRUCTIONS, SERVER_VERSION, TOOLS, createMcpServer } from './tools.js'
 export type { ActivityEvent, McpServerOptions, ToolName } from './tools.js'
 export { MAX_BODY_BYTES, clientFromUserAgent, startHttpLink } from './http.js'
+export { BrainTools, ChatThread, isLoopbackUrl, sessionBlock, timeLine } from './chat.js'
+export type { ChatContext, ChatSettings, TurnOptions, TurnResult } from './chat.js'
 export type { HttpLink, HttpLinkOptions } from './http.js'
 
 export interface CliOptions {
   roots: string[]
   exclude: string[]
+  hidden: string[]
+  keep: string[]
   readOnly: boolean
   http: boolean
   port: number
@@ -52,6 +56,8 @@ Options:
   --read-only[=true|false]  Offer read tools only
   --exclude <name>       Also skip folders with this name (repeatable; one exact name each)
   --exclude-list <names> Also skip these folder names, separated by commas
+  --hide <folder>        Leave this one folder (an absolute path) out (repeatable)
+  --keep <folder>        Show this folder although it looks like an installed game or program (repeatable)
                          (the extension's "Skip these folders")
   --http                 Serve the HTTP link instead of stdio (for tunnels: ChatGPT, claude.ai)
   --port <n>             HTTP port (default ${DEFAULT_PORT}; 0 = any free port)
@@ -80,7 +86,7 @@ function rootPath(arg: string): string {
  * chosen folder); empty values and unexpanded `${…}` placeholders are skipped.
  */
 export function parseArgs(argv: string[], env: NodeJS.ProcessEnv = process.env): CliOptions {
-  const out: CliOptions = { roots: [], exclude: [], readOnly: false, http: false, port: DEFAULT_PORT, host: '127.0.0.1', token: null, help: false }
+  const out: CliOptions = { roots: [], exclude: [], hidden: [], keep: [], readOnly: false, http: false, port: DEFAULT_PORT, host: '127.0.0.1', token: null, help: false }
   const usable = (v: string | undefined): v is string => v !== undefined && v.trim() !== '' && !v.includes('${')
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i] ?? ''
@@ -109,6 +115,18 @@ export function parseArgs(argv: string[], env: NodeJS.ProcessEnv = process.env):
         // Several names in one value, comma-separated: the .mcpb's "Skip these folders" text field.
         const v = value()
         if (usable(v)) out.exclude.push(...v.split(',').map((s) => s.trim()).filter(Boolean))
+        break
+      }
+      case '--hide': {
+        // One folder left out of the brain (an absolute path), as the app's copied configs pass them.
+        const v = value()
+        if (usable(v)) out.hidden.push(v.trim())
+        break
+      }
+      case '--keep': {
+        // One folder shown although it looks like an installed game or program.
+        const v = value()
+        if (usable(v)) out.keep.push(v.trim())
         break
       }
       case '--read-only':
@@ -213,7 +231,7 @@ export async function runStdio(argv: string[]): Promise<void> {
   if (!cli.http) quietStdout()
   const found = await usableRoots(cli.roots)
   // Load in the background: the MCP handshake must not wait for a whole drive to be scanned.
-  const brain = Brain.start({ roots: found, exclude: cli.exclude, readOnly: cli.readOnly, watch: true })
+  const brain = Brain.start({ roots: found, exclude: cli.exclude, hidden: cli.hidden, keep: cli.keep, readOnly: cli.readOnly, watch: true })
   const roots = brain.roots.map((r) => r.label).join(' + ')
   brain.ready().then(
     () => {

@@ -20,6 +20,7 @@ import { promises as fs, watch as nodeWatch, type Dirent, type FSWatcher, type S
 import path from 'node:path'
 import type { VaultChangeDto } from '../shared/ipc.js'
 import { isMediaName, isNoteName, isVideoName, within, type FsVault, type MountedRoot } from './fsvault.js'
+import { installKind, isInstallMarker } from './installs.js'
 
 /** A write we made ourselves; its watcher echo is swallowed for SELF_WINDOW ms. */
 interface SelfWrite {
@@ -89,6 +90,9 @@ export interface VaultWatcherOptions {
   videoSettleMs?: number
 }
 
+/** The folder a vault path is in ('' at the top). */
+const parentOf = (p: string): string => p.slice(0, Math.max(0, p.lastIndexOf('/')))
+
 /** Per-flush state: paths already reported, parent listings for exact-name checks. */
 interface FlushCtx {
   out: VaultChangeDto[]
@@ -116,6 +120,8 @@ export class VaultWatcher {
   private readonly probeMs: number
   private readonly watchFn: WatchFn
   private readonly videoSettleMs: number
+  /** Known folders to look into again for an install (see refresh). */
+  private recheck = new Set<string>()
   /** Videos still being written: looked at again once they have been left alone (see videoSettleMs). */
   private settling = new Map<string, NodeJS.Timeout>()
   private watchers: FSWatcher[] = []
@@ -230,10 +236,29 @@ export class VaultWatcher {
     this.resyncTimers.clear()
     for (const t of this.settling.values()) clearTimeout(t)
     this.settling.clear()
+    this.recheck.clear()
     this.resyncing.clear()
     this.lostSince.clear()
     this.armed.clear()
     this.syncedAt.clear()
+  }
+
+  /**
+   * Look at `vaultPath` again (a folder just left out of the brain or let
+   * back in, an install the user keeps): what is known under a folder now
+   * skipped is unlinked, a folder now shown is walked and reported.
+   */
+  refresh(vaultPath: string, opts: { recheck?: boolean } = {}): void {
+    let key: string | null
+    try {
+      key = this.vault.toVault(this.vault.abs(vaultPath))
+    } catch {
+      return
+    }
+    if (!key) return
+    // A known folder the user no longer keeps: is it (still) an install?
+    if (opts.recheck) this.recheck.add(key)
+    this.enqueue(key)
   }
 
   /** Remember content we wrote so the echo is swallowed (3 s window). */
@@ -440,7 +465,6 @@ export class VaultWatcher {
     if (!scan.dirs) return false
     const prefix = `${root.mount}/`
     const inRoot = (p: string): boolean => !root.mount || p.startsWith(prefix)
-    const parentOf = (p: string): string => p.slice(0, Math.max(0, p.lastIndexOf('/')))
     const onDisk = new Set(scan.files.map((f) => f.path))
     const dirs = new Set(scan.folders)
     // Folders whose listing the rescan read (the root included): only their known children can be gone.
@@ -525,6 +549,11 @@ export class VaultWatcher {
 
   /** Decide what happened at `p` from what is on disk now versus what we knew. */
   private async classify(p: string, ctx: FlushCtx): Promise<void> {
+    if (this.vault.isIgnored(p)) {
+      // Left out since it was known (the user hid it, it turned out to be an install): it goes.
+      this.forget(p, ctx)
+      return
+    }
     const abs = this.vault.abs(p)
     const st = await this.present(abs, ctx)
     const isDir = st?.isDirectory() ?? false
@@ -532,6 +561,12 @@ export class VaultWatcher {
     const name = path.basename(abs)
     const isNote = isFile && isNoteName(name)
     const isImage = isFile && this.trackImages && isMediaName(name)
+    // A game or program being installed into a folder the brain shows: once its folder looks like one, it goes.
+    if (isFile && !isNote && !isImage && isInstallMarker(name) && (await this.becameInstall(parentOf(p), path.dirname(abs), ctx))) {
+      ctx.handled.add(p)
+      return
+    }
+    if (isDir && this.recheck.delete(p) && (await this.becameInstall(p, abs, ctx))) return
     if (!isDir && this.folders.has(p)) this.dropFolder(p, ctx)
     if (!isNote && this.files.has(p)) this.dropFile(p, ctx)
     if (!isImage && this.images.has(p)) this.dropImage(p, ctx)
@@ -623,6 +658,34 @@ export class VaultWatcher {
     }
   }
 
+  /** Unlink whatever is known at or under `p`. */
+  private forget(p: string, ctx: FlushCtx): void {
+    if (this.folders.has(p)) this.dropFolder(p, ctx)
+    if (this.files.has(p)) this.dropFile(p, ctx)
+    if (this.images.has(p)) this.dropImage(p, ctx)
+    ctx.handled.add(p)
+  }
+
+  /**
+   * True when `folder` (vault path; `dir` on disk), a known folder inside a
+   * root, now looks like an installed game or program (a marker file such as
+   * `steam_api64.dll` or an `.exe` just showed up in it, or the user stopped
+   * keeping it). The folder is then left out and its known notes, pictures
+   * and folders unlinked.
+   */
+  private async becameInstall(folder: string, dir: string, ctx: FlushCtx): Promise<boolean> {
+    if (!folder || !this.folders.has(folder) || this.vault.roots.some((r) => r.mount === folder) || this.vault.keeps(folder)) return false
+    let names = ctx.listings.get(dir)
+    if (names === undefined) {
+      names = await fs.readdir(dir).then((n) => new Set(n), () => null)
+      ctx.listings.set(dir, names)
+    }
+    const kind = names ? installKind(names) : null
+    if (!kind || !this.vault.markInstall(folder, kind)) return false
+    this.dropFolder(folder, ctx)
+    return true
+  }
+
   /** Report a note (add when unknown, change when known) unless it is the echo of our own write. */
   private async addFile(p: string, abs: string, ctx: FlushCtx): Promise<void> {
     let read: [string, number]
@@ -704,30 +767,33 @@ export class VaultWatcher {
   /**
    * A new folder: addDir for it, then walk its subtree (created or moved in
    * before we could watch it) reporting every folder, note and picture inside.
+   * A folder that holds an installed game or program is left out with
+   * everything in it, as the scan does.
    */
   private async addTree(p: string, abs: string, ctx: FlushCtx): Promise<void> {
-    this.addAncestors(p, ctx)
-    this.folders.add(p)
-    this.emit(ctx, { kind: 'addDir', path: p })
     const queue = [{ abs, vault: p }]
     for (let head = 0; head < queue.length; head++) {
       const dir = queue[head]!
-      let entries: Dirent[]
+      let entries: Dirent[] | null
       try {
         entries = await fs.readdir(dir.abs, { withFileTypes: true })
       } catch {
-        continue
+        entries = null
       }
+      const kind = entries && !this.vault.keeps(dir.vault) ? installKind(entries.map((e) => e.name)) : null
+      if (kind && this.vault.markInstall(dir.vault, kind)) continue
+      if (head === 0) this.addAncestors(p, ctx)
+      if (!this.folders.has(dir.vault)) {
+        this.folders.add(dir.vault)
+        this.emit(ctx, { kind: 'addDir', path: dir.vault })
+      }
+      if (!entries) continue
       const pictures: { abs: string; vault: string }[] = []
       for (const e of entries) {
         const vault = `${dir.vault}/${e.name}`
         if (this.vault.isIgnored(vault)) continue
         const child = path.join(dir.abs, e.name)
         if (e.isDirectory()) {
-          if (!this.folders.has(vault)) {
-            this.folders.add(vault)
-            this.emit(ctx, { kind: 'addDir', path: vault })
-          }
           queue.push({ abs: child, vault })
         } else if (!e.isFile()) {
           continue

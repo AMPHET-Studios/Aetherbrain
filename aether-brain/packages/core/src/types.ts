@@ -392,6 +392,13 @@ export interface VaultAdapter {
   /** Open an image in the OS default app (desktop only). */
   openAsset?(path: string): Promise<void>
   /**
+   * Leave a folder out of the brain (desktop only). Nothing on disk changes;
+   * what was shown under it goes away through the change feed.
+   */
+  hideFolder?(path: string): Promise<void>
+  /** Let a folder left out with hideFolder back in; what is in it arrives through the change feed. */
+  unhideFolder?(path: string): Promise<void>
+  /**
    * True when changes that arrived while the vault loaded could not all be
    * kept (a huge burst on a whole drive): the app offers a rescan.
    */

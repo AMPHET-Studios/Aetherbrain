@@ -28,7 +28,7 @@ export const THUMB_MAX = 1024
 export type ImageKind = 'png' | 'jpeg' | 'gif' | 'webp' | 'bmp' | 'avif'
 
 /** The media type the thumbnail helper decodes each kind as. */
-const MIME: Record<ImageKind, string> = {
+export const IMAGE_MIME: Record<ImageKind, string> = {
   png: 'image/png',
   jpeg: 'image/jpeg',
   gif: 'image/gif',
@@ -38,7 +38,7 @@ const MIME: Record<ImageKind, string> = {
 }
 
 /** True when `b` holds `bytes` at offset `at`. */
-function has(b: Uint8Array, at: number, bytes: readonly number[]): boolean {
+export function has(b: Uint8Array, at: number, bytes: readonly number[]): boolean {
   if (at + bytes.length > b.length) return false
   for (let i = 0; i < bytes.length; i++) if (b[at + i] !== bytes[i]) return false
   return true
@@ -75,13 +75,13 @@ export function imageKindOf(b: Uint8Array): ImageKind | null {
   return null
 }
 
-const u16be = (b: Uint8Array, i: number): number => ((b[i] ?? 0) << 8) | (b[i + 1] ?? 0)
-const u16le = (b: Uint8Array, i: number): number => (b[i] ?? 0) | ((b[i + 1] ?? 0) << 8)
+export const u16be = (b: Uint8Array, i: number): number => ((b[i] ?? 0) << 8) | (b[i + 1] ?? 0)
+export const u16le = (b: Uint8Array, i: number): number => (b[i] ?? 0) | ((b[i + 1] ?? 0) << 8)
 const u24le = (b: Uint8Array, i: number): number => u16le(b, i) + (b[i + 2] ?? 0) * 0x10000
-const u32be = (b: Uint8Array, i: number): number => u16be(b, i) * 0x10000 + u16be(b, i + 2)
-const u32le = (b: Uint8Array, i: number): number => u16le(b, i) + u16le(b, i + 2) * 0x10000
+export const u32be = (b: Uint8Array, i: number): number => u16be(b, i) * 0x10000 + u16be(b, i + 2)
+export const u32le = (b: Uint8Array, i: number): number => u16le(b, i) + u16le(b, i + 2) * 0x10000
 const i32le = (b: Uint8Array, i: number): number => u16le(b, i) | (u16le(b, i + 2) << 16)
-const fourcc = (b: Uint8Array, i: number): string => String.fromCharCode(b[i] ?? 0, b[i + 1] ?? 0, b[i + 2] ?? 0, b[i + 3] ?? 0)
+export const fourcc = (b: Uint8Array, i: number): string => String.fromCharCode(b[i] ?? 0, b[i + 1] ?? 0, b[i + 2] ?? 0, b[i + 3] ?? 0)
 
 /**
  * Pixel size a picture's header claims (PNG, JPEG, GIF, WebP, BMP, AVIF), as
@@ -138,7 +138,7 @@ function webpSize(b: Uint8Array): { width: number; height: number } | null {
  * its 0xFF, `len`: its length field) up to the start of scan, until `visit`
  * returns true. Stops at anything that is not a marker.
  */
-function jpegSegments(b: Uint8Array, visit: (marker: number, at: number, len: number) => boolean): void {
+export function jpegSegments(b: Uint8Array, visit: (marker: number, at: number, len: number) => boolean): void {
   let i = 2
   while (i + 8 < b.length) {
     if (b[i] !== 0xff) return
@@ -315,7 +315,7 @@ export function thumbTarget(b: Uint8Array, px: number): ThumbTarget | null {
   const size = kind ? imageSize(b) : null
   if (!kind || !size || size.width * size.height > MAX_DECODE_PIXELS) return null
   const shown = turnsSideways(b) ? { width: size.height, height: size.width } : size
-  return { type: MIME[kind], ...(fitWithin(shown.width, shown.height, px) ?? shown) }
+  return { type: IMAGE_MIME[kind], ...(fitWithin(shown.width, shown.height, px) ?? shown) }
 }
 
 /**

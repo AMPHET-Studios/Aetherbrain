@@ -30,8 +30,11 @@ export class ElectronVaultAdapter implements VaultAdapter {
   readonly location: string
   readonly readOnly = false
   readonly roots: VaultRootInfo[]
-  /** What main reported when it opened the vault (roots, exclusions). */
-  readonly info: VaultInfo
+  /** What main reported about the vault (roots, exclusions, folder rules), updated as the folder rules change. */
+  get info(): VaultInfo {
+    return this.current
+  }
+  private current: VaultInfo
   /** True when the last folder listing stopped at the folder cap (the tree is partial). */
   truncated = false
   /** True when the last picture listing stopped at the picture cap (some pictures are missing). */
@@ -53,7 +56,7 @@ export class ElectronVaultAdapter implements VaultAdapter {
     private bridge: AetherBridge,
     info: VaultInfo,
   ) {
-    this.info = info
+    this.current = info
     this.name = info.name
     this.location = info.roots.length > 1 ? info.roots.map((r) => r.path).join(' + ') : info.root
     this.roots = info.roots.map((r) => ({ path: r.path, mount: r.mount, label: r.label }))
@@ -212,5 +215,21 @@ export class ElectronVaultAdapter implements VaultAdapter {
   /** Open a picture in the OS default app. */
   openAsset(path: string): Promise<void> {
     return this.bridge.openAsset(path)
+  }
+
+  /** Leave a folder out of the brain: main applies it at once and its watcher unlinks what was shown. */
+  async hideFolder(path: string): Promise<void> {
+    this.current = await this.bridge.hideFolder(path)
+  }
+
+  /** Let a folder left out back in: main's watcher walks it and reports what is in it. */
+  async unhideFolder(path: string): Promise<void> {
+    this.current = await this.bridge.unhideFolder(path)
+  }
+
+  /** Replace the folders left out and/or the installs kept (absolute paths), applied at once. */
+  async setFolderRules(rules: { hidden?: string[]; keep?: string[] }): Promise<VaultInfo> {
+    this.current = await this.bridge.setFolderRules(rules)
+    return this.current
   }
 }

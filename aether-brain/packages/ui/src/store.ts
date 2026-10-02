@@ -602,6 +602,10 @@ export interface AetherState {
    * is closest to) and fly there.
    */
   toggleGallery(): void
+  /** Shift+H: leave a folder out of the brain (nothing on disk changes); the toast offers Undo. */
+  hideFolder(path: string): Promise<void>
+  /** Let a folder left out with hideFolder back in. */
+  unhideFolder(path: string): Promise<void>
 }
 
 /** Pictures under a folder, subfolders included. */
@@ -2264,6 +2268,41 @@ export const useAether = create<AetherState>()((set, get) => {
       set({ projectId: id })
       get().toast(`★ ${p.title} is a project now${numberedAs(p.path, id)}`, 'success')
       return id
+    },
+
+    async hideFolder(path) {
+      const { adapter } = get()
+      if (!adapter?.hideFolder) {
+        get().toast('Leaving folders out works in the desktop app', 'info')
+        return
+      }
+      const name = path.split('/').pop() || path
+      if (!path || (get().roots.length > 1 && !path.includes('/'))) {
+        get().toast(path ? `${name} is a whole folder of this vault: remove it in Vault folders (v) instead` : 'The top folder of the vault cannot be left out', 'error')
+        return
+      }
+      try {
+        await adapter.hideFolder(path)
+        // The folder goes through the change feed; nothing under it stays selected.
+        const sel = get().selectedId
+        const selPath = sel && isFolderId(sel) ? folderPathOf(sel) : sel && isImageId(sel) ? imagePathOf(sel) : sel ? get().notes.get(sel)?.meta.path : undefined
+        if (selPath !== undefined && (selPath === path || selPath.startsWith(`${path}/`))) get().select(null)
+        get().toast(`Left ${name} out of the brain (nothing on disk changed)`, 'success', { label: 'Undo', run: () => void get().unhideFolder(path) })
+      } catch (err) {
+        get().toast(`Could not leave ${name} out: ${errText(err)}`, 'error')
+      }
+    },
+
+    async unhideFolder(path) {
+      const { adapter } = get()
+      if (!adapter?.unhideFolder) return
+      const name = path.split('/').pop() || path
+      try {
+        await adapter.unhideFolder(path)
+        get().toast(`${name} is back in the brain`, 'success')
+      } catch (err) {
+        get().toast(`Could not bring ${name} back: ${errText(err)}`, 'error')
+      }
     },
 
     async reveal(path) {

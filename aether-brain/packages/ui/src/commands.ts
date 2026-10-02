@@ -232,6 +232,21 @@ export const COMMANDS: Command[] = [
     },
   },
   {
+    id: 'hide-folder',
+    title: 'Leave the selected folder out of the brain (nothing on disk changes)',
+    keys: 'Shift+H',
+    group: 'vault',
+    when: (s) => {
+      const f = diskFolder(s)
+      // Not the vault's top folder, nor a whole root of a multi-root vault (those are removed in Vault folders).
+      return !!s.adapter?.hideFolder && !!f && !(s.roots.length > 1 && !f.includes('/'))
+    },
+    run: (s) => {
+      const f = diskFolder(s)
+      if (f) void s.hideFolder(f)
+    },
+  },
+  {
     id: 'gallery',
     title: "Star gallery: the selected star's pictures in 3D (again: fold them)",
     keys: 'Shift+G',

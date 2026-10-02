@@ -11,19 +11,22 @@
  *
  * No telemetry. The renderer is sandboxed with context isolation and makes no network requests.
  */
-import { app, BrowserWindow, clipboard, dialog, ipcMain, protocol, shell, nativeTheme, screen, session } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, protocol, safeStorage, shell, nativeTheme, screen, session } from 'electron'
 import { promises as fs } from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   IPC,
   type AssetListDto,
   type FolderListDto,
+  type SkippedInstallDto,
   type VaultChangeDto,
   type VaultFileDto,
   type VaultInfo,
   type VaultProgressDto,
 } from '../shared/ipc.js'
+import type { ChatPatch } from '../shared/chat.js'
 import { FsVault, isVideoName, within } from './fsvault.js'
 import { VaultWatcher } from './watcher.js'
 import {
@@ -40,16 +43,25 @@ import {
   videoKindOf,
 } from './assets.js'
 import { THUMB_IPC, Thumbnailer, VIDEO_SCHEME } from './thumbnailer.js'
-import { AiLinkHost, aiSettings, cleanPatch, type AiLinkSettings } from './ai-link.js'
+import { AiLinkHost, aiSettings, cleanPatch, type AiLinkSettings, type LinkVault } from './ai-link.js'
 import { ForgeHost, forgeSettings, type ForgeSettings } from './forge.js'
+import { ChatHost, chatSettings, type ChatSettingsStored } from './chat-host.js'
+import { LibraryHost, librarySettings, type LibrarySettings } from './library-host.js'
+import { VISION_IPC, VISION_SCHEME, VisionHelper } from './library/vision.js'
+import { VisionModel } from './library/vision-model.js'
+import type { LibraryModelAction, LibraryPatch } from '../shared/library.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
 // The thumbnail helper's session serves videos on this scheme (see thumbnailer.ts): its media
 // player streams them in ranges and draws a frame of them, so the scheme must be streamable and
 // CORS-enabled. Schemes can only be registered before the app is ready.
+// The librarian's vision helper loads its page, the ONNX runtime and the model files on its own
+// scheme (see library/vision.ts): standard and secure, so it is an origin that can be cross-origin
+// isolated (threads) and fetch from itself.
 protocol.registerSchemesAsPrivileged([
   { scheme: VIDEO_SCHEME, privileges: { standard: true, secure: true, stream: true, supportFetchAPI: true, corsEnabled: true } },
+  { scheme: VISION_SCHEME, privileges: { standard: true, secure: true, stream: true, supportFetchAPI: true, corsEnabled: true } },
 ])
 const isDev = !!process.env['VITE_DEV_SERVER_URL']
 const settingsFile = () => path.join(app.getPath('userData'), 'settings.json')
@@ -65,9 +77,17 @@ interface Settings {
   lastVault?: string
   /** Extra folder names skipped while scanning. */
   exclude?: string[]
+  /** Folders (absolute paths) left out of the brain (⇧H on a folder; the vault folders panel lets them back in). */
+  hidden?: string[]
+  /** Folders (absolute paths) shown although they look like an installed game or program. */
+  keep?: string[]
   ai?: Partial<AiLinkSettings>
   /** The Concept Forge link (the remembered concept-forge.html). */
   forge?: ForgeSettings
+  /** The brain's chat (provider, models, the encrypted API key). */
+  chat?: ChatSettingsStored
+  /** The librarian: where pictures are sorted from and to. */
+  library?: LibrarySettings
 }
 
 let settings: Settings = {}
@@ -84,12 +104,14 @@ async function loadSettings(): Promise<{ settings: Settings; migrated: boolean }
   } catch {
     /* first run or unreadable: defaults */
   }
-  const { lastVault, roots, exclude, ...rest } = raw
+  const { lastVault, roots, exclude, hidden, keep, ...rest } = raw
   const out: Settings = { ...rest }
   const list = Array.isArray(roots) ? roots.filter(isString) : []
   if (!list.length && isString(lastVault)) list.push(lastVault)
   if (list.length) out.roots = list
   if (Array.isArray(exclude)) out.exclude = cleanNames(exclude)
+  if (Array.isArray(hidden)) out.hidden = cleanFolders(hidden)
+  if (Array.isArray(keep)) out.keep = cleanFolders(keep)
   return { settings: out, migrated: lastVault !== undefined }
 }
 
@@ -117,6 +139,20 @@ function cleanNames(names: unknown[]): string[] {
     if (!name || /[\\/]/.test(name) || seen.has(name.toLowerCase())) continue
     seen.add(name.toLowerCase())
     out.push(name)
+  }
+  return out
+}
+
+/** Absolute folder paths: no relative ones, no duplicates (rootKey). */
+function cleanFolders(paths: unknown[]): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const p of paths) {
+    if (!isString(p) || !path.isAbsolute(p)) continue
+    const abs = path.resolve(p)
+    if (seen.has(rootKey(abs))) continue
+    seen.add(rootKey(abs))
+    out.push(abs)
   }
   return out
 }
@@ -169,6 +205,9 @@ let opened = false
 let aiHeld: VaultChangeDto[][] | null = null
 let win: BrowserWindow | null = null
 let ai: AiLinkHost | null = null
+let chat: ChatHost | null = null
+let library: LibraryHost | null = null
+let vision: VisionHelper | null = null
 
 /** Changes for the AI link's brain: held during a read, else applied now. */
 function toAi(changes: VaultChangeDto[]): void {
@@ -214,7 +253,14 @@ function vaultInfo(v: FsVault): VaultInfo {
     name: v.roots.map((r) => r.label).join(' + '),
     roots: v.roots.map((r) => ({ path: r.abs, mount: r.mount, label: r.label })),
     exclude: [...v.exclude],
+    hidden: [...v.hidden],
+    keep: [...v.keep],
   }
+}
+
+/** What the AI link serves: the vault's roots and its folder rules. */
+function linkVault(v: FsVault): LinkVault {
+  return { roots: v.roots.map((r) => r.abs), exclude: [...v.exclude], hidden: [...v.hidden], keep: [...v.keep] }
 }
 
 /** Roots the vault is made of, including remembered ones that are unreachable right now (an unplugged drive). */
@@ -239,7 +285,7 @@ async function openVault(input: string[]): Promise<VaultInfo> {
         : `None of these folders can be opened: ${wanted.join(', ')}`,
     )
   }
-  const next = new FsVault(ok, { exclude: settings.exclude ?? [] })
+  const next = new FsVault(ok, { exclude: settings.exclude ?? [], hidden: settings.hidden ?? [], keep: settings.keep ?? [] })
   generation++
   watcher?.stop()
   watcher = null
@@ -290,7 +336,7 @@ async function listFiles(): Promise<VaultFileDto[]> {
     const found = scan.files.length
     const files = await v.readAll(scan.files, (done) => progress({ phase: 'reading', files: done, found, dirs: scan.dirs, done: false }))
     progress({ phase: 'done', files: files.length, found, dirs: scan.dirs, done: true })
-    if (latest()) void ai?.setVault({ roots: v.roots.map((r) => r.abs), exclude: [...v.exclude] }, { files, folders: scan.folders })
+    if (latest()) void ai?.setVault(linkVault(v), { files, folders: scan.folders })
     return files
   } finally {
     // setVault above already set the link's target, so these land after the snapshot.
@@ -563,6 +609,78 @@ async function setExclude(names: unknown): Promise<VaultInfo> {
   return openVault(rememberedRoots())
 }
 
+/**
+ * Leave one folder (a vault path) out of the brain: remembered by its
+ * absolute path, applied at once without a rescan (the watcher unlinks what
+ * was known under it). Nothing on disk changes. A root is removed in the
+ * vault folders panel instead.
+ */
+async function hideFolder(p: unknown): Promise<VaultInfo> {
+  const v = requireVault()
+  const abs = v.abs(String(p))
+  if (v.roots.some((r) => rootKey(r.abs) === rootKey(abs))) {
+    throw new Error('That is a whole vault folder: remove it in the vault folders panel (v) instead')
+  }
+  return setFolderRules({ hidden: [...(settings.hidden ?? []), abs] })
+}
+
+/** Let a folder (a vault path) left out with hideFolder back in. */
+function unhideFolder(p: unknown): Promise<VaultInfo> {
+  const v = requireVault()
+  const key = rootKey(v.abs(String(p)))
+  return setFolderRules({ hidden: (settings.hidden ?? []).filter((h) => rootKey(h) !== key) })
+}
+
+/**
+ * New folder rules (absolute paths): folders left out, installs kept.
+ * Applied live: every folder whose rule changed is looked at again by the
+ * watcher (unlinked when now skipped, walked and reported when now shown).
+ */
+async function setFolderRules(rules: { hidden?: unknown; keep?: unknown }): Promise<VaultInfo> {
+  const v = requireVault()
+  const before = { hidden: settings.hidden ?? [], keep: settings.keep ?? [] }
+  if (rules.hidden !== undefined) settings.hidden = cleanFolders(Array.isArray(rules.hidden) ? rules.hidden : [])
+  if (rules.keep !== undefined) settings.keep = cleanFolders(Array.isArray(rules.keep) ? rules.keep : [])
+  await saveSettings()
+  v.hidden = settings.hidden ?? []
+  v.keep = settings.keep ?? []
+  const keys = (l: string[]) => new Set(l.map(rootKey))
+  const minus = (a: string[], b: string[]) => {
+    const kb = keys(b)
+    return a.filter((x) => !kb.has(rootKey(x)))
+  }
+  const hiddenNow = settings.hidden ?? []
+  const keepNow = settings.keep ?? []
+  // [folder, recheck]: a folder no longer kept is looked into again (is it still an install?).
+  const look: [string, boolean][] = [
+    ...minus(before.hidden, hiddenNow).map((x): [string, boolean] => [x, false]),
+    ...minus(hiddenNow, before.hidden).map((x): [string, boolean] => [x, false]),
+    ...minus(keepNow, before.keep).map((x): [string, boolean] => [x, false]),
+    ...minus(before.keep, keepNow).map((x): [string, boolean] => [x, true]),
+  ]
+  for (const [abs, recheck] of look) {
+    const vp = v.toVault(abs)
+    if (vp) watcher?.refresh(vp, { recheck })
+  }
+  ai?.setFolderRules(linkVault(v))
+  return vaultInfo(v)
+}
+
+/** Install folders the scans and the watcher left out so far, as absolute paths. */
+function skippedInstalls(): SkippedInstallDto[] {
+  const v = vault
+  if (!v) return []
+  const out: SkippedInstallDto[] = []
+  for (const i of v.installs()) {
+    try {
+      out.push({ path: v.abs(i.path), kind: i.kind })
+    } catch {
+      /* a root that is gone */
+    }
+  }
+  return out.sort((a, b) => a.path.localeCompare(b.path))
+}
+
 /** Drive roots on Windows (`C:\`, `D:\`, …) that answer within a moment; empty elsewhere. */
 async function listDrives(): Promise<string[]> {
   if (process.platform !== 'win32') return []
@@ -606,13 +724,98 @@ function createAiLink(): AiLinkHost {
       return saveSettings()
     },
     onActivity: (a) => toRenderer(IPC.aiActivity, a),
-    currentVault: () => (vault ? { roots: vault.roots.map((r) => r.abs), exclude: [...vault.exclude] } : null),
+    currentVault: () => (vault ? linkVault(vault) : null),
     // Packaged: import the real unpacked file, the one the client configs point at.
     bundlePath: app.isPackaged ? serverScript : devBundle,
     serverScript,
     execPath: process.execPath,
     portable: !!process.env['PORTABLE_EXECUTABLE_DIR'],
   })
+}
+
+/* ------------------------------------------------------------------ */
+/* The brain's chat                                                   */
+/* ------------------------------------------------------------------ */
+
+function createChat(): ChatHost {
+  const initial = chatSettings(settings.chat)
+  return new ChatHost({
+    settings: initial,
+    save: (s) => {
+      settings.chat = s
+      return saveSettings()
+    },
+    brain: () => requireAi().useBrain(),
+    vaultOpen: () => vault !== null,
+    wantBrain: (on) => void ai?.wantBrain(on),
+    emit: (e) => toRenderer(IPC.chatEvent, e),
+    keychain: {
+      available: () => safeStorage.isEncryptionAvailable(),
+      encrypt: (text) => safeStorage.encryptString(text).toString('base64'),
+      decrypt: (b64) => safeStorage.decryptString(Buffer.from(b64, 'base64')),
+    },
+  })
+}
+
+function requireChat(): ChatHost {
+  if (!chat) throw new Error('The chat is not ready yet')
+  return chat
+}
+
+/* ------------------------------------------------------------------ */
+/* The librarian                                                      */
+/* ------------------------------------------------------------------ */
+
+/** The model is downloaded through a session of its own (in memory): the app's own session refuses the web. */
+const VISION_DOWNLOAD_PARTITION = 'aether-vision-download'
+
+/** Where pictures are sorted from and to until the user picks: `D:\` → `F:\MASTERIMAGES` on Windows. */
+function libraryDefaults(): { source: string; dest: string } {
+  if (process.platform === 'win32') return { source: 'D:\\', dest: 'F:\\MASTERIMAGES' }
+  return { source: path.join(os.homedir(), 'Pictures'), dest: path.join(os.homedir(), 'MASTERIMAGES') }
+}
+
+/** The vault path of an absolute path the brain shows (inside a root, not in a skipped folder), else null. */
+function shownVaultPath(abs: string): string | null {
+  if (!vault) return null
+  const vp = vault.toVault(abs)
+  return vp !== null && !vault.isIgnored(vp) ? vp : null
+}
+
+function createLibrary(): LibraryHost {
+  const userData = app.getPath('userData')
+  const model = new VisionModel(
+    path.join(userData, 'vision-models'),
+    (url, init) => session.fromPartition(VISION_DOWNLOAD_PARTITION).fetch(url, init),
+    process.env['AETHER_VISION_MODEL_URL'] || undefined,
+  )
+  const helper = new VisionHelper({
+    electron: { BrowserWindow, session },
+    preload: path.join(__dirname, '..', 'preload', 'vision-preload.cjs'),
+    appDir: path.join(__dirname, '..', 'vision'),
+    model,
+  })
+  vision = helper
+  return new LibraryHost({
+    initial: librarySettings(settings.library),
+    defaults: libraryDefaults(),
+    save: (s) => {
+      settings.library = s
+      void saveSettings()
+    },
+    emit: (e) => toRenderer(IPC.libraryEvent, e),
+    eyes: () => helper,
+    restEyes: () => helper.stop(),
+    model,
+    cacheFile: path.join(userData, 'library-looks.json'),
+    toVault: shownVaultPath,
+    thumb: (abs, px) => renderThumb(abs, px),
+  })
+}
+
+function requireLibrary(): LibraryHost {
+  if (!library) throw new Error('The librarian is not ready yet')
+  return library
 }
 
 function requireAi(): AiLinkHost {
@@ -680,6 +883,12 @@ function registerIpc(): void {
   ipcMain.handle(IPC.addRootPath, (_e, p: unknown) => addRootPath(p))
   ipcMain.handle(IPC.removeRoot, (_e, p: unknown) => removeRoot(p))
   ipcMain.handle(IPC.setExclude, (_e, names: unknown) => setExclude(names))
+  ipcMain.handle(IPC.hideFolder, (_e, p: unknown) => hideFolder(p))
+  ipcMain.handle(IPC.unhideFolder, (_e, p: unknown) => unhideFolder(p))
+  ipcMain.handle(IPC.setFolderRules, (_e, rules: unknown) =>
+    setFolderRules(rules && typeof rules === 'object' ? (rules as { hidden?: unknown; keep?: unknown }) : {}),
+  )
+  ipcMain.handle(IPC.skippedInstalls, () => skippedInstalls())
   ipcMain.handle(IPC.drives, () => listDrives())
   ipcMain.handle(IPC.list, () => listFiles())
   ipcMain.handle(IPC.folders, (): FolderListDto => {
@@ -700,6 +909,32 @@ function registerIpc(): void {
   ipcMain.on(THUMB_IPC.done, (e, id: unknown, png: unknown) => thumbnailer.done(e.sender, id, png))
   ipcMain.handle(IPC.createAsset, (_e, p: unknown, data: unknown) => createAsset(p, data))
   ipcMain.handle(IPC.openAsset, (_e, p: unknown) => openAsset(p))
+  ipcMain.handle(IPC.chatStatus, () => requireChat().status())
+  ipcMain.handle(IPC.chatConfigure, (_e, patch: unknown) => requireChat().configure(patch && typeof patch === 'object' ? (patch as ChatPatch) : {}))
+  ipcMain.handle(IPC.chatSend, (_e, conv: unknown, text: unknown) => requireChat().send(conv, text))
+  ipcMain.handle(IPC.chatStop, (_e, conv: unknown) => requireChat().stop(conv))
+  ipcMain.handle(IPC.chatForget, (_e, conv: unknown) => requireChat().forget(conv))
+  ipcMain.handle(IPC.libraryStatus, () => requireLibrary().status())
+  ipcMain.handle(IPC.libraryConfigure, (_e, patch: unknown) => requireLibrary().configure(patch && typeof patch === 'object' ? (patch as LibraryPatch) : {}))
+  ipcMain.handle(IPC.libraryPick, async (_e, which: unknown) => {
+    const lib = requireLibrary()
+    const dest = which === 'dest'
+    const dir = await chooseFolder(
+      dest ? 'Where should the library go?' : 'Which folder or drive should the librarian sort?',
+      dest ? 'Pictures are copied into this folder, sorted by type, genre and year.' : 'Every picture in it is copied (never moved or changed).',
+    )
+    return dir ? lib.configure(dest ? { dest: dir } : { source: dir }) : lib.status()
+  })
+  ipcMain.handle(IPC.libraryAnalyze, () => requireLibrary().analyze())
+  ipcMain.handle(IPC.libraryCopy, () => requireLibrary().copy())
+  ipcMain.handle(IPC.libraryStop, () => requireLibrary().stop())
+  ipcMain.handle(IPC.libraryModel, (_e, action: unknown) =>
+    requireLibrary().model(action === 'cancel' || action === 'remove' ? (action as LibraryModelAction) : 'download'),
+  )
+  ipcMain.handle(IPC.libraryThumb, (_e, id: unknown) => within(requireLibrary().thumb(id), THUMB_TIMEOUT, null))
+  // From the vision helper only: the helper ignores every other sender.
+  ipcMain.on(VISION_IPC.ready, (e) => vision?.ready(e.sender))
+  ipcMain.on(VISION_IPC.done, (e, id: unknown, answer: unknown) => vision?.done(e.sender, id, answer))
   ipcMain.handle(IPC.aiStatus, () => requireAi().status())
   ipcMain.handle(IPC.aiConfigure, (_e, patch: unknown) => requireAi().configure(cleanPatch(patch)))
   ipcMain.handle(IPC.copy, (_e, text: unknown) => clipboard.writeText(String(text)))
@@ -754,6 +989,8 @@ function createWindow(): void {
     // Nothing asks for thumbnails without the brain window, and a hidden helper left open
     // would keep 'window-all-closed' from ever firing (the app would not quit).
     thumbnailer.stop()
+    library?.close()
+    vision?.stop()
   })
 }
 
@@ -769,6 +1006,9 @@ app.on('before-quit', () => {
   watcher?.stop()
   watcher = null
   thumbnailer.stop()
+  library?.close()
+  vision?.stop()
+  void chat?.close()
   void ai?.stop()
 })
 
@@ -782,6 +1022,8 @@ void app.whenReady().then(async () => {
   settings = loaded.settings
   if (loaded.migrated) void saveSettings()
   ai = createAiLink()
+  chat = createChat()
+  library = createLibrary()
   registerIpc()
   createWindow()
   registerForgeIpc(createForge())

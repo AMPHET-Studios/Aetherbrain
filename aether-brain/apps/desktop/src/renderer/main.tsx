@@ -6,6 +6,8 @@ import type { AiActivityDto } from '../shared/ipc'
 import { ElectronVaultAdapter } from './vault/electron'
 import { RootsPanel } from './components/RootsPanel'
 import { AiLinkPanel } from './components/AiLinkPanel'
+import { ChatPanel, registerChat } from './components/ChatPanel'
+import { LibraryPanel, registerLibrary } from './components/LibraryPanel'
 import { activityFailed, clientLabel, errorText, flyToPath, openPanel, pushActivity, samePath, togglePanel, usePanel } from './panels'
 import './forge'
 
@@ -92,6 +94,8 @@ function Desktop() {
       <AetherApp sources={sources} onPickVault={onPickVault} />
       {(panel === 'roots' || panel === 'drives') && <RootsPanel mode={panel} />}
       {panel === 'ai' && <AiLinkPanel />}
+      {panel === 'library' && <LibraryPanel />}
+      <ChatPanel />
     </>
   )
 }
@@ -108,6 +112,8 @@ async function boot() {
   })
   bridge?.onAiActivity(onAiActivity)
   registerDesktopKeys()
+  registerChat()
+  registerLibrary()
   const root = createRoot(document.getElementById('root')!)
   root.render(
     <StrictMode>
