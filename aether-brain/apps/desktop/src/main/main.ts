@@ -45,6 +45,7 @@ import {
 import { THUMB_IPC, Thumbnailer, VIDEO_SCHEME } from './thumbnailer.js'
 import { AiLinkHost, aiSettings, cleanPatch, type AiLinkSettings, type LinkVault } from './ai-link.js'
 import { ForgeHost, forgeSettings, type ForgeSettings } from './forge.js'
+import { CompanionHost, companionSettings, type CompanionSettings } from './companion.js'
 import { ChatHost, chatSettings, type ChatSettingsStored } from './chat-host.js'
 import { LibraryHost, librarySettings, type LibrarySettings } from './library-host.js'
 import { VISION_IPC, VISION_SCHEME, VisionHelper } from './library/vision.js'
@@ -88,6 +89,8 @@ interface Settings {
   chat?: ChatSettingsStored
   /** The librarian: where pictures are sorted from and to. */
   library?: LibrarySettings
+  /** The companion link (the Unreal viewer). */
+  companion?: Partial<CompanionSettings>
 }
 
 let settings: Settings = {}
@@ -841,13 +844,50 @@ function createForge(): ForgeHost {
   })
 }
 
-/** The brain window opens the Forge window; the Forge window's requests go through the host to the brain window's store. */
+/**
+ * The brain window opens the Forge window; the Forge window's requests go through the host to the brain window's
+ * store; the brain window's Concept Forge star gets frames of the page while its screen is in view.
+ */
 function registerForgeIpc(forge: ForgeHost): void {
   ipcMain.handle(IPC.forgeOpen, (_e, opts: unknown) => forge.open(opts))
   ipcMain.handle(IPC.forgeStatus, () => forge.status())
   ipcMain.handle(IPC.forgeProjects, (e) => forge.projects(e.sender))
   ipcMain.handle(IPC.forgeSave, (e, dto: unknown) => forge.save(e.sender, dto))
   ipcMain.handle(IPC.forgeReply, (e, id: unknown, ok: unknown, value: unknown) => forge.reply(e.sender, id, ok, value))
+  ipcMain.handle(IPC.forgeScreen, (e, on: unknown) => forge.screen(e.sender, on))
+}
+
+/* ------------------------------------------------------------------ */
+/* Companion link (the Unreal viewer)                                 */
+/* ------------------------------------------------------------------ */
+
+let companion: CompanionHost | null = null
+
+function createCompanion(): CompanionHost {
+  const initial = companionSettings(settings.companion)
+  if (JSON.stringify(initial) !== JSON.stringify(settings.companion)) {
+    // First run (or a damaged entry): keep the generated token, so a viewer set up by hand keeps working.
+    settings.companion = initial
+    void saveSettings()
+  }
+  return new CompanionHost({
+    settings: initial,
+    save: (s) => {
+      settings.companion = s
+      return saveSettings()
+    },
+    brain: () => (win && !win.isDestroyed() ? win.webContents : null),
+    connectionFile: path.join(app.getPath('userData'), 'companion.json'),
+    version: app.getVersion(),
+  })
+}
+
+/** The brain window publishes the scene; viewers read it over HTTP; the panel switches it. */
+function registerCompanionIpc(host: CompanionHost): void {
+  ipcMain.handle(IPC.companionStatus, () => host.status())
+  ipcMain.handle(IPC.companionConfigure, (_e, patch: unknown) => host.configure(patch))
+  ipcMain.on(IPC.companionGraph, (e, graph: unknown) => void host.publishGraph(e.sender.id, graph))
+  ipcMain.on(IPC.companionPositions, (e, version: unknown, positions: unknown, rings: unknown) => void host.publishPositions(e.sender.id, version, positions, rings))
 }
 
 /* ------------------------------------------------------------------ */
@@ -1010,6 +1050,7 @@ app.on('before-quit', () => {
   vision?.stop()
   void chat?.close()
   void ai?.stop()
+  companion?.quit()
 })
 
 void app.whenReady().then(async () => {
@@ -1027,5 +1068,8 @@ void app.whenReady().then(async () => {
   registerIpc()
   createWindow()
   registerForgeIpc(createForge())
+  companion = createCompanion()
+  registerCompanionIpc(companion)
+  void companion.start()
   started = true
 })

@@ -47,6 +47,75 @@ export interface ForgeStatus {
   open: boolean
 }
 
+/**
+ * One frame of the Concept Forge page for its ★ star's screen in the brain:
+ * the page as it looks right now, at most 1024 px wide, as raw pixels.
+ */
+export interface ForgeFrameDto {
+  /** width × height × 4 bytes, rows top to bottom. */
+  data: Uint8Array
+  width: number
+  height: number
+  /** Byte order of each pixel: B, G, R, A (Chromium's own) when true, else R, G, B, A. */
+  bgra: boolean
+}
+
+/* ---- the companion link (the Unreal viewer) ---- */
+
+/** What a node is, for a viewer drawing it. */
+export type CompanionKind = 'sun' | 'star' | 'planet' | 'moon' | 'ghost' | 'picture' | 'today'
+
+/** A node of the brain as the brain window draws it. */
+export interface CompanionNodeDto {
+  id: string
+  title: string
+  kind: CompanionKind
+  /** `#rrggbb`, the colour the brain draws it in. */
+  color: string
+  /** Radius in the brain's world units. */
+  radius: number
+  /** Index of its structural parent in `nodes` (the system layout's star, planet …), -1 for none. */
+  parent: number
+}
+
+/**
+ * The scene the brain window shows, for the companion link: published by the
+ * brain window while a viewer reads it, served as JSON on /v1/graph.
+ * Positions come separately (they change every frame): /v1/positions.
+ */
+export interface CompanionGraphDto {
+  /** Bumped by the brain window with every new graph; positions carry it too. */
+  version: number
+  /** The vault's display name. */
+  vault: string
+  layout: 'constellation' | 'orbit' | 'system'
+  nodes: CompanionNodeDto[]
+  /** Links as pairs of node indices: [from0, to0, from1, to1, …]. */
+  edges: number[]
+  /** Index of the selected node, -1 for none. */
+  selected: number
+}
+
+export interface CompanionStatus {
+  /** The user switched the link on. */
+  enabled: boolean
+  /** It is listening. */
+  running: boolean
+  port: number
+  /** A viewer read the scene in the last few seconds. */
+  connected: boolean
+  /** Why it is not running (the port is taken …), or null. */
+  error: string | null
+  /** Where the viewer finds the address and token (written while running). */
+  file: string
+}
+
+export interface CompanionPatch {
+  enabled?: boolean
+  port?: number
+  regenerateToken?: boolean
+}
+
 /** A project a graded drawing can be saved to (for the Forge window's picker). */
 export interface ForgeProjectDto {
   id: string
@@ -279,6 +348,26 @@ export interface AetherBridge {
    * A rejected promise reaches the Forge window as an error message.
    */
   onForgeRequest(handler: (req: ForgeRequest) => Promise<unknown>): () => void
+  /**
+   * The Concept Forge star's screen came into view (true) or folded away
+   * (false). While it is in view main sends frames of the page (onForgeFrame):
+   * of the Forge window when it is open, else of a hidden, muted copy of the
+   * page that takes no input.
+   */
+  forgeScreen(on: boolean): Promise<void>
+  onForgeFrame(cb: (frame: ForgeFrameDto) => void): () => void
+
+  /** The companion link (the Unreal viewer): status and switches. */
+  companionStatus(): Promise<CompanionStatus>
+  companionConfigure(patch: CompanionPatch): Promise<CompanionStatus>
+  /** Publish the scene (while a viewer reads it, see onCompanionWant). */
+  companionGraph(graph: CompanionGraphDto): void
+  /** Publish where everything is now: xyz per node, and the orbit rings (6 floats each), for graph `version`. */
+  companionPositions(version: number, positions: Float32Array, rings: Float32Array): void
+  /** A viewer started (true) or stopped (false) reading the scene. */
+  onCompanionWant(cb: (on: boolean) => void): () => void
+  /** A viewer asked to select (and fly to) a node, or to open it. */
+  onCompanionSelect(cb: (req: { id: string; open: boolean }) => void): () => void
 
   aiStatus(): Promise<AiLinkStatus>
   aiConfigure(patch: AiLinkPatch): Promise<AiLinkStatus>
@@ -344,6 +433,19 @@ export const IPC = {
   /** Forge window → main (its preload): the project list / a save. */
   forgeProjects: 'forge:win:projects',
   forgeSave: 'forge:win:save',
+  /** brain window → main: the star screen is in view (true) or not (false). */
+  forgeScreen: 'forge:screen',
+  /** main → brain window: a ForgeFrameDto for the star screen. */
+  forgeFrame: 'forge:frame',
+  companionStatus: 'companion:status',
+  companionConfigure: 'companion:configure',
+  /** brain window → main (send): the scene / the positions. */
+  companionGraph: 'companion:graph',
+  companionPositions: 'companion:positions',
+  /** main → brain window: a viewer is reading (true) or went quiet (false). */
+  companionWant: 'companion:want',
+  /** main → brain window: { id, open } from a viewer. */
+  companionSelect: 'companion:select',
   aiStatus: 'ai:status',
   aiConfigure: 'ai:configure',
   aiActivity: 'ai:activity',

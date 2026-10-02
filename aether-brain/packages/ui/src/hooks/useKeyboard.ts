@@ -113,6 +113,12 @@ export function handleKey(e: KeyboardEvent): void {
     case 'Enter':
       // Enter on a focused button or link is that control's own (Expand, ✕, a toast's Undo …).
       if (e.key === 'Enter' && isControl(e.target)) return
+      // Enter while a star's live screen is open (Concept Forge) opens its app, unless something else is selected.
+      if (e.key === 'Enter' && s.controller.screenOpen && (!s.selectedId || s.selectedId === s.controller.screen?.star)) {
+        e.preventDefault()
+        s.controller.activateScreen()
+        return
+      }
       if (!s.selectedId) return
       // A picture opens in the OS image app; the Today hub opens its brief (focus on the first task).
       if (isImageId(s.selectedId)) void s.openImage(imagePathOf(s.selectedId))

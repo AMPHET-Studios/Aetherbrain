@@ -3,6 +3,7 @@ import { useAether } from '@aether/ui'
 import type { AiLinkPatch, AiLinkStatus } from '../../shared/ipc'
 import { ElectronVaultAdapter } from '../vault/electron'
 import { activityFailed, clientLabel, errorText, flyToPath, openPanel, useActivity, type FeedItem } from '../panels'
+import { CompanionSection } from './CompanionSection'
 import { ErrorLine, Overlay, Section } from './Overlay'
 
 const RELEASES = 'https://github.com/YEASTINFECTIONCHEESE/desktop-tutorial/releases'
@@ -309,6 +310,8 @@ export function AiLinkPanel() {
               <li>In claude.ai: Settings → Connectors → Add custom connector, and paste the same https://&lt;your-tunnel&gt;/mcp/… URL.</li>
             </Client>
           </Section>
+
+          <CompanionSection bridge={bridge} />
 
           <Section title="Activity" aside="calls through the link; Claude Desktop's own server shows up as edits">
             <Activity items={activity} />

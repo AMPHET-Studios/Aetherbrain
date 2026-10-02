@@ -22,6 +22,35 @@ export interface BrainEvents {
   onGallery?: (star: NoteId | null) => void
 }
 
+/**
+ * Who serves a star screen (see `StarScreen`): the desktop app streams the
+ * Concept Forge window's frames into it.
+ */
+export interface ScreenHost {
+  /** The screen came into view (frames are wanted from now on) or folded away (none are). */
+  want(on: boolean): void
+  /** The user clicked the screen, or pressed Enter while it was open: open the app itself. */
+  activate(): void
+}
+
+/** A live screen floating above one project star (system layout), shown while the camera is close to it. */
+export interface StarScreen {
+  /** The star (its folder id). */
+  star: NoteId
+  host: ScreenHost
+  /** Shown on the screen until its first frame arrives (one or two short lines). */
+  placeholder?: string
+}
+
+/** One picture of the screen: 4 bytes per pixel, rows from the top. */
+export interface ScreenFrame {
+  data: Uint8Array
+  width: number
+  height: number
+  /** True for BGRA (what Electron's frames are), false for RGBA. */
+  bgra: boolean
+}
+
 /** Default depth of the view: the camera's far plane and how far the user can dolly out. */
 export const DEFAULT_FAR = 12000
 export const DEFAULT_MAX_DISTANCE = 5000
@@ -155,6 +184,61 @@ export class BrainController {
   private dwellTimer: ReturnType<typeof setTimeout> | null = null
   /** Bumped whenever a visual property changes; the scene diffs against it. */
   version = 0
+
+  /** The live screen above a star (desktop: Concept Forge), or null. */
+  screen: StarScreen | null = null
+  /** Its latest picture, and a counter the scene diffs against (frames arrive without a re-render). */
+  screenFrame: ScreenFrame | null = null
+  screenFrameVersion = 0
+  private screenIsOpen = false
+
+  /** True while the screen is on view (the camera is close to its star). */
+  get screenOpen(): boolean {
+    return this.screenIsOpen
+  }
+
+  /** Show a live screen above a star, or none. The same star and host keep the screen (and its frames) as they are. */
+  setScreen(screen: StarScreen | null): void {
+    const old = this.screen
+    if (old?.star === screen?.star && old?.host === screen?.host) {
+      if (old && screen && old.placeholder !== screen.placeholder) {
+        this.screen = screen
+        this.touch()
+      }
+      return
+    }
+    if (old && this.screenIsOpen) old.host.want(false)
+    this.screenIsOpen = false
+    this.screen = screen
+    this.screenFrame = null
+    this.screenFrameVersion++
+    this.touch()
+  }
+
+  /** A new picture for the screen (drawn on the next frame; no re-render). */
+  pushScreenFrame(frame: ScreenFrame): void {
+    if (!this.screen) return
+    this.screenFrame = frame
+    this.screenFrameVersion++
+  }
+
+  /** The scene: the screen came into view or folded away. Its host is told (frames wanted or not). */
+  screenShown(open: boolean): void {
+    if (open === this.screenIsOpen) return
+    this.screenIsOpen = open
+    this.screen?.host.want(open)
+    this.touch()
+  }
+
+  /** Open the screen's app (a click on it, Enter while it is open). */
+  activateScreen(): void {
+    this.screen?.host.activate()
+  }
+
+  /** How long (ms, at `now`) the camera has been close to the star it is close to (`nearId`); 0 when none. */
+  nearFor(now: number): number {
+    return this.galleryNear === null ? 0 : Math.max(0, now - this.nearSince)
+  }
   events: BrainEvents = {}
   camera: CameraLike | null = null
   private cameraListeners = new Set<() => void>()
@@ -537,6 +621,7 @@ export class BrainController {
   private subs = new Set<() => void>()
 
   dispose(): void {
+    this.setScreen(null)
     this.resetGallery()
     this.unTick?.()
     this.unTick = null
