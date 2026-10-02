@@ -1,0 +1,364 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { promises as fs, existsSync } from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { MemoryVaultAdapter, buildGraph, parseNote, type VaultFile } from '@aether/core'
+import { IPC, type CompanionGraphDto } from '../src/shared/ipc.js'
+import {
+  CLIENT_IDLE_MS,
+  COMPANION_DEFAULT_PORT,
+  CompanionHost,
+  POSITIONS_HEADER,
+  POSITIONS_MAGIC,
+  REPUBLISH_MS,
+  cleanCompanionPatch,
+  cleanGraph,
+  companionSettings,
+  positionsBody,
+  type CompanionSettings,
+} from '../src/main/companion.js'
+import { companionKind, companionScene } from '../src/renderer/companion-scene.js'
+
+const TOKEN = 'tok_0123456789abcdefghijKLMN'
+
+const graph = (over: Partial<CompanionGraphDto> = {}): CompanionGraphDto => ({
+  version: 1,
+  vault: 'Vault',
+  layout: 'system',
+  nodes: [
+    { id: 'folder:', title: 'Vault', kind: 'sun', color: '#fff1d6', radius: 8, parent: -1 },
+    { id: 'folder:Projects/Forge', title: 'Forge', kind: 'star', color: '#ffcf6b', radius: 5.5, parent: 0 },
+    { id: 'Projects/Forge/Plan', title: 'Plan', kind: 'moon', color: '#ff5cc8', radius: 1.2, parent: 1 },
+  ],
+  edges: [2, 1],
+  selected: -1,
+  ...over,
+})
+
+describe('companion checks', () => {
+  it('fills settings in and keeps a good token', () => {
+    const s = companionSettings({})
+    expect(s).toMatchObject({ enabled: false, port: COMPANION_DEFAULT_PORT })
+    expect(s.token).toMatch(/^[A-Za-z0-9_-]{32}$/)
+    expect(companionSettings({ enabled: true, port: 9000, token: TOKEN })).toEqual({ enabled: true, port: 9000, token: TOKEN })
+    expect(companionSettings({ port: 80, token: 'short' }).port).toBe(COMPANION_DEFAULT_PORT)
+    expect(cleanCompanionPatch({ enabled: true, port: '9001', regenerateToken: true, evil: 1 })).toEqual({ enabled: true, port: 9001, regenerateToken: true })
+  })
+
+  it('takes a well-formed graph and refuses anything else', () => {
+    expect(cleanGraph(graph()).nodes).toHaveLength(3)
+    // Upper-case colours are normalised; long titles cut; unknown fields dropped.
+    const g = cleanGraph({ ...graph(), extra: 1, nodes: [{ id: 'a', title: 'x'.repeat(900), kind: 'moon', color: '#ABCDEF', radius: 1, parent: -1, more: 2 }], edges: [] })
+    expect(g.nodes[0]).toEqual({ id: 'a', title: 'x'.repeat(500), kind: 'moon', color: '#abcdef', radius: 1, parent: -1 })
+    for (const bad of [
+      null,
+      { ...graph(), layout: 'flat' },
+      { ...graph(), version: -1 },
+      { ...graph(), nodes: [{ ...graph().nodes[0], kind: 'comet' }] },
+      { ...graph(), nodes: [{ ...graph().nodes[0], color: 'red' }] },
+      { ...graph(), nodes: [{ ...graph().nodes[0], radius: Infinity }] },
+      { ...graph(), nodes: [{ ...graph().nodes[0], parent: 3 }] },
+      { ...graph(), edges: [0] },
+      { ...graph(), edges: [0, 3] },
+      { ...graph(), selected: 7 },
+    ]) {
+      expect(() => cleanGraph(bad)).toThrow()
+    }
+  })
+
+  it('packs positions and rings behind a header, and refuses counts that do not fit', () => {
+    const body = positionsBody(7, 2, new Float32Array([1, 2, 3, 4, 5, 6]), new Float32Array([0, 30, 0, 0, 0, 1]))!
+    expect(body.length).toBe(POSITIONS_HEADER + 12 * 4)
+    expect(body.readUInt32LE(0)).toBe(POSITIONS_MAGIC)
+    expect(body.toString('latin1', 0, 4)).toBe('AEP1')
+    expect([body.readUInt32LE(4), body.readUInt32LE(8), body.readUInt32LE(12)]).toEqual([7, 2, 1])
+    expect(body.readFloatLE(POSITIONS_HEADER + 5 * 4)).toBe(6)
+    expect(body.readFloatLE(POSITIONS_HEADER + 7 * 4)).toBe(30)
+    expect(positionsBody(7, 3, new Float32Array(6), null)).toBeNull()
+    expect(positionsBody(7, 2, new Float32Array(6), new Float32Array(5))).toBeNull()
+    expect(positionsBody(7, 1, new Float32Array([NaN, Infinity, 1]), null)?.readFloatLE(POSITIONS_HEADER)).toBe(0)
+  })
+})
+
+describe('the scene the brain window publishes', () => {
+  it('gives each node its kind, colour, radius and parent, and the links as index pairs', async () => {
+    const files: VaultFile[] = [
+      { path: 'Projects/Forge.md', content: '---\nstatus: active\n---\n# Forge\n\n[[Plan]]\n', mtime: 1 },
+      { path: 'Projects/Forge/Plan.md', content: '# Plan\n', mtime: 2 },
+      { path: 'Inbox/Idea.md', content: '# Idea\n\n[[Nowhere]]\n', mtime: 3 },
+    ]
+    const notes = new Map(files.map((f) => [f.path.replace(/\.md$/, ''), parseNote(f)]))
+    const g = buildGraph(notes, { folders: { all: ['Projects', 'Projects/Forge', 'Inbox'], multiRoot: false, rootTitle: 'Vault' } })
+    const dto = companionScene(g, { version: 3, vault: 'Vault', layout: 'system', colorMode: 'area', activeTag: null, selectedId: 'Projects/Forge/Plan' })
+    expect(dto.version).toBe(3)
+    expect(dto.nodes).toHaveLength(g.nodes.length)
+    const at = (id: string) => dto.nodes.findIndex((n) => n.id === id)
+    const star = dto.nodes[at('folder:Projects/Forge')]
+    expect(star).toMatchObject({ kind: 'star', color: '#ffcf6b', radius: 5.5 })
+    expect(dto.nodes[at('folder:')]?.kind).toBe('sun')
+    expect(dto.nodes[at('ghost:nowhere')]?.kind ?? dto.nodes.find((n) => n.kind === 'ghost')?.kind).toBe('ghost')
+    expect(dto.nodes[at('Projects/Forge/Plan')]?.parent).toBe(at('folder:Projects/Forge'))
+    expect(dto.selected).toBe(at('Projects/Forge/Plan'))
+    expect(dto.edges.length % 2).toBe(0)
+    expect(dto.edges.length / 2).toBe(g.edges.length)
+    for (const n of dto.nodes) expect(n.color).toMatch(/^#[0-9a-f]{6}$/)
+    // What it sends passes main's checks as is.
+    expect(() => cleanGraph(dto)).not.toThrow()
+    expect(companionKind({ kind: 'today' } as never)).toBe('today')
+    expect(companionKind({ kind: 'image' } as never)).toBe('picture')
+  })
+})
+
+describe('the companion link server', () => {
+  let dir: string
+  let file: string
+  let saved: CompanionSettings[]
+  let brain: { id: number; sent: unknown[][]; destroyed: boolean; send(c: string, ...a: unknown[]): void; isDestroyed(): boolean }
+  let clock: number
+  let hosts: CompanionHost[]
+
+  beforeEach(async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'aether-companion-'))
+    file = path.join(dir, 'companion.json')
+    saved = []
+    clock = 1_000_000
+    hosts = []
+    brain = {
+      id: 42,
+      sent: [],
+      destroyed: false,
+      send(c, ...a) {
+        this.sent.push([c, ...a])
+      },
+      isDestroyed() {
+        return this.destroyed
+      },
+    }
+  })
+
+  afterEach(async () => {
+    for (const h of hosts) await h.stop()
+    await fs.rm(dir, { recursive: true, force: true })
+  })
+
+  const host = (over: Partial<CompanionSettings> = {}) => {
+    const h = new CompanionHost({
+      settings: { enabled: true, port: 0, token: TOKEN, ...over } as CompanionSettings,
+      save: async (s) => void saved.push(s),
+      brain: () => brain,
+      connectionFile: file,
+      version: '0.8.0',
+      now: () => clock,
+    })
+    hosts.push(h)
+    return h
+  }
+  /** port 0 is refused by settings: start on a free port through configure. */
+  const started = async () => {
+    const h = host({ enabled: false })
+    const st = await h.configure({ enabled: true, port: 0 }).catch(() => null)
+    if (st) return h
+    // Pick a free port the way the OS does.
+    const net = await import('node:net')
+    const port = await new Promise<number>((resolve) => {
+      const s = net.createServer().listen(0, '127.0.0.1', () => {
+        const p = (s.address() as { port: number }).port
+        s.close(() => resolve(p))
+      })
+    })
+    await h.configure({ enabled: true, port })
+    return h
+  }
+  const url = (h: CompanionHost, p: string) => `http://127.0.0.1:${h.status().port}${p}`
+  const auth = { Authorization: `Bearer ${TOKEN}` }
+  const wants = () => brain.sent.filter((m) => m[0] === IPC.companionWant).map((m) => m[1])
+
+  it('starts when switched on, writes companion.json, and takes it away when it stops', async () => {
+    const h = await started()
+    const st = h.status()
+    expect(st).toMatchObject({ enabled: true, running: true, connected: false, error: null, file })
+    const info = JSON.parse(await fs.readFile(file, 'utf8')) as Record<string, unknown>
+    expect(info).toEqual({ app: 'Aether Brain', url: `http://127.0.0.1:${st.port}`, token: TOKEN, version: '0.8.0' })
+    if (process.platform !== 'win32') expect((await fs.stat(file)).mode & 0o077).toBe(0)
+    expect(saved.at(-1)).toMatchObject({ enabled: true })
+    await h.configure({ enabled: false })
+    expect(h.status().running).toBe(false)
+    expect(existsSync(file)).toBe(false)
+  })
+
+  it('answers only with the token, on 127.0.0.1, with no CORS', async () => {
+    const h = await started()
+    expect((await fetch(url(h, '/v1/hello'))).status).toBe(401)
+    expect((await fetch(url(h, '/v1/hello'), { headers: { Authorization: 'Bearer nope' } })).status).toBe(401)
+    expect((await fetch(url(h, '/v1/hello'), { headers: { Authorization: `Bearer ${TOKEN}x` } })).status).toBe(401)
+    const ok = await fetch(url(h, '/v1/hello'), { headers: auth })
+    expect(ok.status).toBe(200)
+    expect(ok.headers.get('access-control-allow-origin')).toBeNull()
+    expect(await ok.json()).toEqual({ app: 'Aether Brain', version: '0.8.0', vault: null, graph: null })
+    expect((await fetch(url(h, '/v1/nothing'), { headers: auth })).status).toBe(404)
+    expect((await fetch(url(h, '/v1/graph'), { method: 'POST', headers: auth })).status).toBe(405)
+  })
+
+  it('asks the brain window to publish while a viewer reads, and stops when it goes quiet', async () => {
+    const h = await started()
+    expect(wants()).toEqual([])
+    expect((await fetch(url(h, '/v1/graph'), { headers: auth })).status).toBe(503)
+    expect(wants()).toEqual([true])
+    expect(h.status().connected).toBe(true)
+    // Published: served with an ETag, 304 when unchanged.
+    expect(h.publishGraph(42, graph())).toBe(true)
+    const r = await fetch(url(h, '/v1/graph'), { headers: auth })
+    expect(r.status).toBe(200)
+    const tag = r.headers.get('etag')!
+    expect(((await r.json()) as CompanionGraphDto).nodes[1]?.title).toBe('Forge')
+    expect((await fetch(url(h, '/v1/graph'), { headers: { ...auth, 'If-None-Match': tag } })).status).toBe(304)
+    // A reload of the brain window (nothing published for a while): asked again.
+    clock += REPUBLISH_MS + 1
+    await fetch(url(h, '/v1/hello'), { headers: auth })
+    expect(wants()).toEqual([true, true])
+    // Quiet: told to stop, and what it had is dropped.
+    clock += CLIENT_IDLE_MS + 1
+    ;(h as unknown as { checkIdle(): void }).checkIdle()
+    expect(wants()).toEqual([true, true, false])
+    expect(h.status().connected).toBe(false)
+    expect((await fetch(url(h, '/v1/graph'), { headers: auth })).status).toBe(503)
+    expect(wants()).toEqual([true, true, false, true])
+  })
+
+  it('serves positions of the current graph only, as binary with a header', async () => {
+    const h = await started()
+    await fetch(url(h, '/v1/hello'), { headers: auth })
+    expect(h.publishPositions(42, 1, new Float32Array(9), null)).toBe(false) // no graph yet
+    h.publishGraph(42, graph())
+    expect(h.publishPositions(42, 2, new Float32Array(9), null)).toBe(false) // another graph's
+    expect(h.publishPositions(42, 1, new Float32Array(6), null)).toBe(false) // wrong count
+    expect(h.publishPositions(7, 1, new Float32Array(9), null)).toBe(false) // not the brain window
+    expect(h.publishGraph(7, graph({ version: 9 }))).toBe(false)
+    expect(h.publishPositions(42, 1, new Float32Array([1, 2, 3, 4, 5, 6, 7, 8, 9]), new Float32Array([1, 40, 0, 0, 0, 1]))).toBe(true)
+    const r = await fetch(url(h, '/v1/positions'), { headers: auth })
+    expect(r.status).toBe(200)
+    expect(r.headers.get('content-type')).toBe('application/octet-stream')
+    const b = Buffer.from(await r.arrayBuffer())
+    expect([b.readUInt32LE(0), b.readUInt32LE(4), b.readUInt32LE(8), b.readUInt32LE(12)]).toEqual([POSITIONS_MAGIC, 1, 3, 1])
+    expect(b.readFloatLE(POSITIONS_HEADER + 8 * 4)).toBe(9)
+    const tag = r.headers.get('etag')!
+    expect((await fetch(url(h, '/v1/positions'), { headers: { ...auth, 'If-None-Match': tag } })).status).toBe(304)
+    h.publishPositions(42, 1, new Float32Array(9), null)
+    expect((await fetch(url(h, '/v1/positions'), { headers: { ...auth, 'If-None-Match': tag } })).status).toBe(200)
+    // A new graph drops positions of the old one.
+    h.publishGraph(42, graph({ version: 2 }))
+    expect((await fetch(url(h, '/v1/positions'), { headers: auth })).status).toBe(503)
+  })
+
+  it('relays a select or an open of a node in the scene to the brain window', async () => {
+    const h = await started()
+    await fetch(url(h, '/v1/hello'), { headers: auth })
+    h.publishGraph(42, graph())
+    const post = (body: string) => fetch(url(h, '/v1/select'), { method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' }, body })
+    expect((await post(JSON.stringify({ id: 'folder:Projects/Forge' }))).status).toBe(204)
+    expect((await post(JSON.stringify({ id: 'Projects/Forge/Plan', open: true }))).status).toBe(204)
+    const selects = brain.sent.filter((m) => m[0] === IPC.companionSelect).map((m) => m[1])
+    expect(selects).toEqual([
+      { id: 'folder:Projects/Forge', open: false },
+      { id: 'Projects/Forge/Plan', open: true },
+    ])
+    expect((await post(JSON.stringify({ id: 'Not/In/The/Scene' }))).status).toBe(404)
+    expect((await post('{nope')).status).toBe(400)
+    expect((await post(JSON.stringify({ id: 'x'.repeat(10_000) }))).status).toBe(413)
+    brain.destroyed = true
+    expect((await post(JSON.stringify({ id: 'folder:Projects/Forge' }))).status).toBe(409)
+  })
+
+  it('says when the port is taken, and restarts on a new token', async () => {
+    const a = await started()
+    const port = a.status().port
+    const b = host({ enabled: false })
+    const st = await b.configure({ enabled: true, port })
+    expect(st.running).toBe(false)
+    expect(st.error).toMatch(/taken/)
+    await a.configure({ regenerateToken: true })
+    const info = JSON.parse(await fs.readFile(file, 'utf8')) as { token: string }
+    expect(info.token).not.toBe(TOKEN)
+    expect((await fetch(url(a, '/v1/hello'), { headers: auth })).status).toBe(401)
+    expect((await fetch(url(a, '/v1/hello'), { headers: { Authorization: `Bearer ${info.token}` } })).status).toBe(200)
+    await expect(a.configure({ port: 80 })).rejects.toThrow(/1024/)
+  })
+
+  it('quits at once, companion.json and all', async () => {
+    const h = await started()
+    expect(existsSync(file)).toBe(true)
+    h.quit()
+    expect(existsSync(file)).toBe(false)
+    expect(h.status().running).toBe(false)
+  })
+})
+
+describe('the brain window side', () => {
+  afterEach(() => void vi.unstubAllGlobals())
+
+  it('publishes only while a viewer reads, and a viewer can open notes but never write one', async () => {
+    const stored = new Map<string, string>()
+    vi.stubGlobal('localStorage', {
+      getItem: (k: string) => stored.get(k) ?? null,
+      setItem: (k: string, v: string) => void stored.set(k, String(v)),
+      removeItem: (k: string) => void stored.delete(k),
+      clear: () => stored.clear(),
+    })
+    const { useAether } = await import('@aether/ui')
+    let wantTo: ((on: boolean) => void) | null = null
+    let selectTo: ((r: { id: string; open: boolean }) => void) | null = null
+    const graphs: CompanionGraphDto[] = []
+    const aether = {
+      onCompanionWant: (fn: typeof wantTo) => {
+        wantTo = fn
+        return () => undefined
+      },
+      onCompanionSelect: (fn: typeof selectTo) => {
+        selectTo = fn
+        return () => undefined
+      },
+      companionGraph: (g: CompanionGraphDto) => void graphs.push(g),
+      companionPositions: vi.fn(),
+      companionStatus: vi.fn(),
+      companionConfigure: vi.fn(),
+      onForgeRequest: () => () => undefined,
+      platform: 'linux',
+    }
+    vi.stubGlobal('window', { addEventListener: vi.fn(), aether })
+    await import('../src/renderer/companion.js')
+    const vault = new MemoryVaultAdapter([
+      { path: 'Projects/Forge.md', content: '---\nstatus: active\n---\n# Forge\n\n[[Not Written Yet]]\n', mtime: 1 },
+      { path: 'Projects/Forge/Plan.md', content: '# Plan\n', mtime: 2 },
+    ])
+    await useAether.getState().openVault(vault)
+    // Nobody reads: nothing is published.
+    await new Promise((r) => setTimeout(r, 150))
+    expect(graphs).toHaveLength(0)
+    wantTo!(true)
+    expect(graphs.length).toBeGreaterThan(0)
+    const g = graphs.at(-1)!
+    expect(g.nodes.some((n) => n.id === 'Projects/Forge/Plan')).toBe(true)
+    const ghost = g.nodes.find((n) => n.kind === 'ghost')!
+    expect(ghost).toBeTruthy()
+    // Opening a ghost would create its note: the viewer only selects it.
+    const before = (await vault.list()).length
+    selectTo!({ id: ghost.id, open: true })
+    await new Promise((r) => setTimeout(r, 50))
+    expect((await vault.list()).length).toBe(before)
+    expect(useAether.getState().selectedId).toBe(ghost.id)
+    // A real note opens in the editor; an unknown id does nothing.
+    selectTo!({ id: 'Projects/Forge/Plan', open: true })
+    expect(useAether.getState().editorId).toBe('Projects/Forge/Plan')
+    selectTo!({ id: 'Nope', open: false })
+    expect(useAether.getState().selectedId).toBe('Projects/Forge/Plan')
+    // The selection goes out with the next scene.
+    await new Promise((r) => setTimeout(r, 250))
+    const last = graphs.at(-1)!
+    expect(last.nodes[last.selected]?.id).toBe('Projects/Forge/Plan')
+    wantTo!(false)
+    const n = graphs.length
+    useAether.getState().select(null)
+    await new Promise((r) => setTimeout(r, 250))
+    expect(graphs.length).toBe(n)
+  })
+})

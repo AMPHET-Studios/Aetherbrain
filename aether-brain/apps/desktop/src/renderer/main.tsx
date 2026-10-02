@@ -10,6 +10,7 @@ import { ChatPanel, registerChat } from './components/ChatPanel'
 import { LibraryPanel, registerLibrary } from './components/LibraryPanel'
 import { activityFailed, clientLabel, errorText, flyToPath, openPanel, pushActivity, samePath, togglePanel, usePanel } from './panels'
 import { useForgeScreen } from './forge'
+import './companion'
 
 const bridge = ElectronVaultAdapter.bridge()
 const isWindows = bridge?.platform === 'win32'
