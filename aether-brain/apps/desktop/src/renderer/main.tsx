@@ -9,7 +9,7 @@ import { AiLinkPanel } from './components/AiLinkPanel'
 import { ChatPanel, registerChat } from './components/ChatPanel'
 import { LibraryPanel, registerLibrary } from './components/LibraryPanel'
 import { activityFailed, clientLabel, errorText, flyToPath, openPanel, pushActivity, samePath, togglePanel, usePanel } from './panels'
-import './forge'
+import { useForgeScreen } from './forge'
 
 const bridge = ElectronVaultAdapter.bridge()
 const isWindows = bridge?.platform === 'win32'
@@ -84,6 +84,17 @@ function onAiActivity(a: AiActivityDto): void {
   }
 }
 
+/** Above the toasts while the Concept Forge star's live screen is in view (the screen fills the top): how to draw on it. */
+function ForgeScreenHint() {
+  const shown = useForgeScreen()
+  if (!shown) return null
+  return (
+    <div className="panel rise pointer-events-none fixed bottom-[64px] left-1/2 z-[30] -translate-x-1/2 px-3 py-1.5 text-[12px] text-dim" role="status">
+      <span className="text-ink">★ Concept Forge · live</span> — <kbd>Enter</kbd> or click the screen to draw
+    </div>
+  )
+}
+
 /** The vault name in the top bar opens the vault folders panel (the welcome screen outside Electron). */
 const onPickVault = bridge ? () => openPanel('roots') : () => useAether.setState({ status: 'idle' })
 
@@ -96,6 +107,7 @@ function Desktop() {
       {panel === 'ai' && <AiLinkPanel />}
       {panel === 'library' && <LibraryPanel />}
       <ChatPanel />
+      <ForgeScreenHint />
     </>
   )
 }

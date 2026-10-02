@@ -841,13 +841,17 @@ function createForge(): ForgeHost {
   })
 }
 
-/** The brain window opens the Forge window; the Forge window's requests go through the host to the brain window's store. */
+/**
+ * The brain window opens the Forge window; the Forge window's requests go through the host to the brain window's
+ * store; the brain window's Concept Forge star gets frames of the page while its screen is in view.
+ */
 function registerForgeIpc(forge: ForgeHost): void {
   ipcMain.handle(IPC.forgeOpen, (_e, opts: unknown) => forge.open(opts))
   ipcMain.handle(IPC.forgeStatus, () => forge.status())
   ipcMain.handle(IPC.forgeProjects, (e) => forge.projects(e.sender))
   ipcMain.handle(IPC.forgeSave, (e, dto: unknown) => forge.save(e.sender, dto))
   ipcMain.handle(IPC.forgeReply, (e, id: unknown, ok: unknown, value: unknown) => forge.reply(e.sender, id, ok, value))
+  ipcMain.handle(IPC.forgeScreen, (e, on: unknown) => forge.screen(e.sender, on))
 }
 
 /* ------------------------------------------------------------------ */

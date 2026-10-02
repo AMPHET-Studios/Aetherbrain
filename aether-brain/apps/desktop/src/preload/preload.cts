@@ -57,6 +57,8 @@ const IPC = {
   forgeReply: 'forge:reply',
   forgeProjects: 'forge:win:projects',
   forgeSave: 'forge:win:save',
+  forgeScreen: 'forge:screen',
+  forgeFrame: 'forge:frame',
   aiStatus: 'ai:status',
   aiConfigure: 'ai:configure',
   aiActivity: 'ai:activity',
@@ -160,6 +162,8 @@ const bridge: AetherBridge = {
       if (forgeHandler === handler) forgeHandler = null
     }
   },
+  forgeScreen: (on) => ipcRenderer.invoke(IPC.forgeScreen, on),
+  onForgeFrame: (cb) => on(IPC.forgeFrame, cb),
   aiStatus: () => ipcRenderer.invoke(IPC.aiStatus),
   aiConfigure: (patch) => ipcRenderer.invoke(IPC.aiConfigure, patch),
   onAiActivity: (cb) => on(IPC.aiActivity, cb),

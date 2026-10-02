@@ -7,11 +7,14 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import ts from 'typescript'
 import type { Browser, Page } from 'playwright-core'
 import { MemoryVaultAdapter, type VaultFile } from '@aether/core'
-import { IPC, type AetherForgeBridge, type ForgeRequest, type ForgeSaveDto } from '../src/shared/ipc.js'
+import { IPC, type AetherForgeBridge, type ForgeFrameDto, type ForgeRequest, type ForgeSaveDto } from '../src/shared/ipc.js'
 import {
+  CAPTURE_TIMEOUT_MS,
   FORGE_CSP,
   FORGE_PARTITION,
   FORGE_TIMEOUT_MS,
+  FRAME_MAX,
+  FRAME_MS,
   ForgeHost,
   ForgeRelay,
   MAX_FORGE_PNG,
@@ -25,7 +28,11 @@ import {
   forgeNavigation,
   forgePermission,
   forgeSettings,
+  frameOf,
+  frameSize,
   isPng,
+  PREVIEW_FPS,
+  PREVIEW_IDLE_MS,
   unanswered,
   type ForgeElectron,
   type ForgeSettings,
@@ -292,11 +299,49 @@ describe('relay', () => {
   })
 })
 
+describe('star screen frames', () => {
+  it('scales a page down to at most FRAME_MAX each way, keeping its shape, and never up', () => {
+    expect(frameSize(1600, 1000)).toEqual({ width: FRAME_MAX, height: 640 })
+    expect(frameSize(800, 500)).toEqual({ width: 800, height: 500 })
+    // A tall window (a screen on its side) is held by its height.
+    expect(frameSize(1000, 4000)).toEqual({ width: 256, height: FRAME_MAX })
+    expect(frameSize(0, 100)).toEqual({ width: 0, height: 0 })
+    expect(frameSize(NaN, 100)).toEqual({ width: 0, height: 0 })
+    expect(frameSize(100000, 1)).toEqual({ width: FRAME_MAX, height: 1 })
+  })
+
+  it('turns a paint into raw pixels, and an empty or odd picture into nothing', () => {
+    const f = frameOf(fakeImage(2048, 1280, 3) as never)
+    expect(f).toMatchObject({ width: 1024, height: 640, bgra: true })
+    expect(f?.data.length).toBe(1024 * 640 * 4)
+    expect(frameOf(fakeImage(0, 0) as never)).toBeNull()
+    const odd = { ...fakeImage(10, 10), resize: () => ({ ...fakeImage(10, 10), toBitmap: () => Buffer.alloc(7) }) }
+    expect(frameOf(odd as never)).toBeNull()
+  })
+})
+
 /* ------------------------------------------------------------------ */
 /* Host, with fake Electron modules                                   */
 /* ------------------------------------------------------------------ */
 
 let nextContentsId = 1
+
+/** A NativeImage stand-in: `width × height` pixels, all `fill`. */
+interface FakeImage {
+  isEmpty(): boolean
+  getSize(): { width: number; height: number }
+  resize(o: { width?: number; height?: number }): FakeImage
+  toBitmap(): Buffer
+}
+
+function fakeImage(width: number, height: number, fill = 9): FakeImage {
+  return {
+    isEmpty: () => width === 0 || height === 0,
+    getSize: () => ({ width, height }),
+    resize: (o) => fakeImage(o.width ?? width, o.height ?? height, fill),
+    toBitmap: () => Buffer.alloc(width * height * 4, fill),
+  }
+}
 
 class FakeContents extends EventEmitter {
   readonly id = nextContentsId++
@@ -305,6 +350,35 @@ class FakeContents extends EventEmitter {
   /** What the window shows (`getURL`). */
   url = ''
   openHandler: ((d: { url: string }) => { action: string }) | null = null
+  muted = false
+  frameRate = 60
+  painting = true
+  invalidated = 0
+  /** What capturePage gives (the Forge window as it looks). */
+  capture: FakeImage = fakeImage(1600, 1000)
+  captures: unknown[] = []
+  setAudioMuted(m: boolean): void {
+    this.muted = m
+  }
+  setFrameRate(fps: number): void {
+    this.frameRate = fps
+  }
+  isPainting(): boolean {
+    return this.painting
+  }
+  startPainting(): void {
+    this.painting = true
+  }
+  stopPainting(): void {
+    this.painting = false
+  }
+  invalidate(): void {
+    this.invalidated++
+  }
+  async capturePage(rect?: unknown, opts?: unknown): Promise<FakeImage> {
+    this.captures.push(opts)
+    return this.capture
+  }
   send(...args: unknown[]): void {
     this.sent.push(args)
   }
@@ -352,6 +426,18 @@ class FakeWindow extends EventEmitter {
     if (this.closed) return
     this.closed = true
     this.emit('closed')
+  }
+  destroyed = false
+  destroy(): void {
+    this.destroyed = true
+    this.close()
+  }
+  getContentSize(): number[] {
+    return [1500, 900]
+  }
+  focusedNow = false
+  isFocused(): boolean {
+    return this.focusedNow
   }
   /** Set to make the next loads fail like Electron's (e.g. `ERR_ABORTED` when the page's "leave?" answer is Stay). */
   loadError: (Error & { code?: string }) | null = null
@@ -717,6 +803,193 @@ describe('host', () => {
     expect(FakeWindow.made[0]?.closed).toBe(true)
     expect(h.status()).toEqual({ file, open: false })
   })
+
+  describe('the star screen', () => {
+    const frames = () => brain.webContents.sent.filter((m) => m[0] === IPC.forgeFrame).map((m) => m[1] as ForgeFrameDto)
+    const previews = () => FakeWindow.made.filter((w) => (w.options['webPreferences'] as { offscreen?: boolean }).offscreen === true)
+
+    beforeEach(() => void vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] }))
+    afterEach(() => void vi.useRealTimers())
+
+    it('paints a hidden, muted copy of the page while the screen is in view, and lets it rest after', async () => {
+      const h = host({ file })
+      h.screen(brain.webContents as never, true)
+      const [p] = previews()
+      expect(previews()).toHaveLength(1)
+      expect(p?.options).toMatchObject({
+        show: false,
+        useContentSize: true,
+        width: 1366,
+        height: 728,
+        webPreferences: { preload: '/app/dist/preload/forge-preload.cjs', partition: FORGE_PARTITION, sandbox: true, contextIsolation: true, offscreen: true },
+      })
+      expect(p?.visible).toBe(false)
+      expect(p?.loaded).toEqual([file])
+      expect(p?.webContents.muted).toBe(true)
+      expect(p?.webContents.frameRate).toBe(PREVIEW_FPS)
+      expect(h.status()).toEqual({ file, open: false })
+
+      // Paints are sent at most every FRAME_MS, the newest one, scaled down to FRAME_MAX wide, as raw BGRA.
+      p?.webContents.emit('paint', {}, {}, fakeImage(800, 500, 1))
+      p?.webContents.emit('paint', {}, {}, fakeImage(1600, 1000, 2))
+      expect(frames()).toHaveLength(0)
+      vi.advanceTimersByTime(FRAME_MS)
+      expect(frames()).toHaveLength(1)
+      const f = frames()[0]!
+      expect(f).toMatchObject({ width: FRAME_MAX, height: 640, bgra: true })
+      expect(f.data.length).toBe(FRAME_MAX * 640 * 4)
+      expect(f.data[0]).toBe(2)
+      // Nothing new painted: nothing sent.
+      vi.advanceTimersByTime(FRAME_MS * 4)
+      expect(frames()).toHaveLength(1)
+      expect(h.screenLive).toBe(true)
+
+      // Folded away: no more frames, the copy stops painting and closes when nobody comes back.
+      h.screen(brain.webContents as never, false)
+      expect(h.screenLive).toBe(false)
+      expect(p?.webContents.painting).toBe(false)
+      p?.webContents.emit('paint', {}, {}, fakeImage(800, 500))
+      vi.advanceTimersByTime(FRAME_MS * 4)
+      expect(frames()).toHaveLength(1)
+      expect(h.previewOpen).toBe(true)
+      vi.advanceTimersByTime(PREVIEW_IDLE_MS)
+      expect(p?.destroyed).toBe(true)
+      expect(h.previewOpen).toBe(false)
+    })
+
+    it('wakes the resting copy when the screen comes back, without loading the page again', () => {
+      const h = host({ file })
+      h.screen(brain.webContents as never, true)
+      h.screen(brain.webContents as never, false)
+      vi.advanceTimersByTime(PREVIEW_IDLE_MS / 2)
+      h.screen(brain.webContents as never, true)
+      const [p] = previews()
+      expect(previews()).toHaveLength(1)
+      expect(p?.loaded).toEqual([file])
+      expect(p?.webContents.painting).toBe(true)
+      expect(p?.webContents.invalidated).toBe(2)
+      vi.advanceTimersByTime(PREVIEW_IDLE_MS)
+      expect(p?.destroyed).toBe(false)
+    })
+
+    it('mirrors the Forge window while it is open, and goes back to the copy when it closes', async () => {
+      const h = host({ file })
+      h.screen(brain.webContents as never, true)
+      const first = previews()[0]
+      await h.open()
+      // The Forge window replaces the copy.
+      expect(first?.destroyed).toBe(true)
+      const w = FakeWindow.made.find((x) => !(x.options['webPreferences'] as { offscreen?: boolean }).offscreen)!
+      w.webContents.capture = fakeImage(1600, 1000, 5)
+      // Not shown yet: nothing is captured (a hidden page's capture may never come back).
+      vi.advanceTimersByTime(FRAME_MS)
+      expect(w.webContents.captures).toHaveLength(0)
+      w.emit('ready-to-show')
+      vi.advanceTimersByTime(FRAME_MS)
+      await vi.waitFor(() => expect(frames()).toHaveLength(1))
+      expect(frames()[0]).toMatchObject({ width: FRAME_MAX, height: 640, bgra: true })
+      expect(frames()[0]?.data[0]).toBe(5)
+      // Captured without telling a hidden page it is shown.
+      expect(w.webContents.captures[0]).toEqual({ stayHidden: true })
+      // An empty capture (a window not painted yet) sends nothing.
+      w.webContents.capture = fakeImage(0, 0)
+      vi.advanceTimersByTime(FRAME_MS)
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(frames()).toHaveLength(1)
+
+      w.close()
+      const [, again] = previews()
+      expect(previews()).toHaveLength(2)
+      expect(again?.loaded).toEqual([file])
+      expect(h.screenLive).toBe(true)
+    })
+
+    it('gives up on a capture that never comes back, and captures again', async () => {
+      const h = host({ file })
+      await h.open()
+      h.screen(brain.webContents as never, true)
+      const w = FakeWindow.made[0]!
+      w.show()
+      let hang = true
+      const real = w.webContents.capturePage.bind(w.webContents)
+      w.webContents.capturePage = (rect?: unknown, opts?: unknown) => (hang ? (w.webContents.captures.push(opts), new Promise<FakeImage>(() => {})) : real(rect, opts))
+      vi.advanceTimersByTime(FRAME_MS * 4)
+      expect(w.webContents.captures).toHaveLength(1)
+      hang = false
+      vi.advanceTimersByTime(CAPTURE_TIMEOUT_MS)
+      await vi.waitFor(() => expect(frames().length).toBeGreaterThan(0))
+      expect(w.webContents.captures.length).toBeGreaterThan(1)
+    })
+
+    it('captures the Forge window once a second while it has the focus (the pen never waits on the main process)', async () => {
+      const h = host({ file })
+      await h.open()
+      h.screen(brain.webContents as never, true)
+      const w = FakeWindow.made[0]!
+      w.show()
+      w.focusedNow = true
+      for (let t = 0; t < 8; t++) {
+        vi.advanceTimersByTime(FRAME_MS)
+        await Promise.resolve()
+      }
+      expect(w.webContents.captures).toHaveLength(2)
+      w.focusedNow = false
+      for (let t = 0; t < 4; t++) {
+        vi.advanceTimersByTime(FRAME_MS)
+        await Promise.resolve()
+      }
+      expect(w.webContents.captures).toHaveLength(6)
+    })
+
+    it('makes no copy before a page is chosen, and turns on only for the brain window', () => {
+      const h = host()
+      h.screen(brain.webContents as never, true)
+      expect(previews()).toHaveLength(0)
+      expect(h.screenLive).toBe(false)
+      const stranger = new FakeWindow()
+      expect(() => h.screen(stranger.webContents as never, true)).toThrow('Only the brain window can do that')
+    })
+
+    it('serves the copy its page and nothing else, and keeps it on it', async () => {
+      const h = host({ file })
+      h.screen(brain.webContents as never, true)
+      const [p] = previews()
+      const handler = protocolHandlers.get('file')!
+      const ok = await handler(new Request(pathToFileURL(file).href))
+      expect(ok.headers.get('Content-Security-Policy')).toBe(FORGE_CSP)
+      const other = await handler(new Request(pathToFileURL(path.join(dir, 'secret.md')).href))
+      expect(other.type).toBe('error')
+      // It goes nowhere: no pop-ups, no other page, not even a web link (nobody asked for one).
+      expect(p?.webContents.openHandler?.({ url: 'https://example.com' })).toEqual({ action: 'deny' })
+      const away = navEvent('https://example.com')
+      p?.webContents.emit('will-navigate', away)
+      expect(away.prevented).toBe(true)
+      expect(electron.shell.openExternal).not.toHaveBeenCalled()
+      const reload = navEvent(`${pathToFileURL(file).href}#x`)
+      p?.webContents.emit('will-navigate', reload)
+      expect(reload.prevented).toBe(false)
+      // A "leave?" question is answered Leave, with no dialog.
+      const unload = navEvent()
+      p?.webContents.emit('will-prevent-unload', unload)
+      expect(unload.prevented).toBe(true)
+      expect(electron.dialog.showMessageBoxSync).not.toHaveBeenCalled()
+    })
+
+    it('stops when the brain window closes, and when its page crashes', () => {
+      const h = host({ file })
+      h.screen(brain.webContents as never, true)
+      const [p] = previews()
+      brain.webContents.emit('render-process-gone')
+      expect(p?.destroyed).toBe(true)
+      expect(h.screenLive).toBe(false)
+      h.screen(brain.webContents as never, true)
+      const [, q] = previews()
+      brain.close()
+      expect(q?.destroyed).toBe(true)
+      expect(h.screenLive).toBe(false)
+    })
+  })
 })
 
 /* ------------------------------------------------------------------ */
@@ -737,7 +1010,20 @@ describe('brain side (renderer)', () => {
     const { useAether } = await import('@aether/ui')
     // The brain window with its bridge: the module hands its request handler to it on import.
     let serve: ((req: ForgeRequest) => Promise<unknown>) | null = null
-    vi.stubGlobal('window', { addEventListener: vi.fn(), aether: { onForgeRequest: (fn: typeof serve) => void (serve = fn), forgeOpen: vi.fn() } })
+    let frameTo: ((f: ForgeFrameDto) => void) | null = null
+    const screens: boolean[] = []
+    const aether = {
+      onForgeRequest: (fn: typeof serve) => void (serve = fn),
+      forgeOpen: vi.fn(async () => ({ file: '/art/forge/concept-forge.html', open: true })),
+      forgeStatus: vi.fn(async () => ({ file: null, open: false })),
+      forgeScreen: vi.fn(async (on: boolean) => void screens.push(on)),
+      onForgeFrame: (fn: typeof frameTo) => {
+        frameTo = fn
+        return () => undefined
+      },
+      platform: 'linux',
+    }
+    vi.stubGlobal('window', { addEventListener: vi.fn(), aether })
     await import('../src/renderer/forge.js')
     expect(serve).not.toBeNull()
     const projects = () => serve!({ id: 1, kind: 'projects' })
@@ -762,6 +1048,33 @@ describe('brain side (renderer)', () => {
     // A vault that failed to open.
     useAether.setState({ status: 'error' })
     await expect(projects()).rejects.toThrow('Open your vault in Aether Brain first')
+
+    // The Concept Forge star: the project of that name, with its folder, carries the live screen.
+    const c = useAether.getState().controller
+    expect(c.screen).toBeNull()
+    await useAether.getState().openVault(
+      new MemoryVaultAdapter([
+        { path: 'Projects/PORTALz.md', content: '---\nstatus: active\n---\n# PORTALz\n', mtime: 1 },
+        { path: 'Projects/PORTALz/Art/Gate.md', content: '# Gate\n', mtime: 1 },
+        { path: 'Projects/ConceptForge.md', content: '---\nstatus: active\naliases: [Concept Forge]\n---\n# ConceptForge\n', mtime: 1 },
+        { path: 'Projects/ConceptForge/Critique/Value study.md', content: '# Value study\n', mtime: 1 },
+      ]),
+    )
+    expect(c.screen?.star).toBe('folder:Projects/ConceptForge')
+    expect(c.screen?.placeholder).toMatch(/Press g/)
+    // In view: main is asked for frames, and they reach the screen.
+    c.screenShown(true)
+    expect(screens).toEqual([true])
+    frameTo!({ data: new Uint8Array(8), width: 2, height: 1, bgra: true })
+    expect(c.screenFrame).toMatchObject({ width: 2, height: 1, bgra: true })
+    // Enter / a click opens the Forge window; the page it remembers now changes the screen's words.
+    c.activateScreen()
+    expect(aether.forgeOpen).toHaveBeenCalledOnce()
+    await vi.waitFor(() => expect(c.screen?.placeholder).toMatch(/waking up/))
+    // Closing the vault takes the screen away (and tells main).
+    useAether.setState({ status: 'idle' })
+    expect(c.screen).toBeNull()
+    expect(screens).toEqual([true, false])
   })
 })
 

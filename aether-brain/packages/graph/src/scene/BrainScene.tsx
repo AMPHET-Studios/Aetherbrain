@@ -55,6 +55,7 @@ import {
 import { shiftTarget } from './follow'
 import { todayLabel } from './labels'
 import { ThumbLayer, thumbTargets, type ThumbTargets } from './thumbLayer'
+import { ScreenLayer } from './screenLayer'
 import { cardFade, thumbDrawnHalf, thumbHalf, thumbPickHit, THUMB_SCALE } from './thumbs'
 
 const HOME_POS: [number, number, number] = [0, 150, 460]
@@ -584,6 +585,9 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
   // Pictures outlive graphs (they are kept by path), so the thumbnail layer lives as long as the scene.
   const thumbs = useMemo(() => new ThumbLayer(), [])
   useEffect(() => () => thumbs.dispose(), [thumbs])
+  // The live screen above a star (desktop: Concept Forge), drawn while the camera is close to it.
+  const screenLayer = useMemo(() => new ScreenLayer(), [])
+  useEffect(() => () => screenLayer.dispose(), [screenLayer])
 
   const gl = useThree((s) => s.gl)
   const camera = useThree((s) => s.camera) as PerspectiveCamera
@@ -617,6 +621,9 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
     cardRings: -1,
     /** When the camera was last measured against the stars. */
     lastNearCheck: -Infinity,
+    /** A press that started on the star screen (a click there opens its app), and whether the pointer is over it. */
+    screenPress: null as null | { x: number; y: number },
+    overScreen: false,
   })
 
   /* ---- pointer events (capture phase so node-drag can pre-empt orbit) ---- */
@@ -648,12 +655,21 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
     const onDown = (e: PointerEvent) => {
       if (e.button !== 0) return
       const [x, y] = toLocal(e)
+      // The star screen is in front of what it covers: a press on it is the screen's.
+      if (screenLayer.hit(x, y, size.width, size.height, camera)) {
+        st.screenPress = { x, y }
+        return
+      }
       const i = pick(x, y)
       if (i < 0) return
       st.drag = { index: i, id: buffers.graph.nodes[i]!.id, sx: x, sy: y, moved: false }
       controller.camera?.setEnabled(false)
     }
     const onUp = () => {
+      const press = st.screenPress
+      st.screenPress = null
+      // A click on the screen (not a drag that orbits the camera) opens its app.
+      if (press && Math.hypot(st.pointer.x - press.x, st.pointer.y - press.y) < 6) controller.activateScreen()
       const d = st.drag
       st.drag = null
       controller.camera?.setEnabled(true)
@@ -666,11 +682,13 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
     }
     const onDbl = (e: MouseEvent) => {
       const r = el.getBoundingClientRect()
+      if (screenLayer.hit(e.clientX - r.left, e.clientY - r.top, size.width, size.height, camera)) return
       const i = pick(e.clientX - r.left, e.clientY - r.top)
       if (i >= 0) controller.events.onOpen?.(buffers.graph.nodes[i]!.id)
     }
     const onClickEmpty = (e: MouseEvent) => {
       const r = el.getBoundingClientRect()
+      if (screenLayer.hit(e.clientX - r.left, e.clientY - r.top, size.width, size.height, camera)) return
       if (pick(e.clientX - r.left, e.clientY - r.top) < 0 && controller.selected) controller.events.onSelect?.(null)
     }
     const pick = (x: number, y: number): number => {
@@ -722,7 +740,7 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
       el.removeEventListener('dblclick', onDbl)
       el.removeEventListener('click', onClickEmpty)
     }
-  }, [buffers, gl, camera, size, controller])
+  }, [buffers, gl, camera, size, controller, screenLayer])
 
   /* ---- camera follow ---- */
   // While planets orbit, keep the selected node where it is on screen by
@@ -784,9 +802,10 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
     ;(buffers.edges.material as ShaderMaterial).uniforms['uTime']!.value = st.time
     ;(buffers.field.material as ShaderMaterial).uniforms['uTime']!.value = st.time
 
-    // Hover pick each frame (cheap; avoids doing it per pointermove event).
+    // Hover pick each frame (cheap; avoids doing it per pointermove event). The star screen covers what is behind it.
     let hoveredIndex = -1
-    if (st.pointerInside && !st.drag) {
+    const overScreen = st.pointerInside && !st.drag && screenLayer.hit(st.pointer.x, st.pointer.y, size.width, size.height, camera)
+    if (st.pointerInside && !st.drag && !overScreen) {
       const s = buffers.screen
       const px = st.pointer.x
       const py = st.pointer.y
@@ -801,12 +820,16 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
         }
       }
     }
-    if (hoveredIndex !== st.hovered) {
+    if (hoveredIndex !== st.hovered || overScreen !== st.overScreen) {
+      const changed = hoveredIndex !== st.hovered
       st.hovered = hoveredIndex
+      st.overScreen = overScreen
       const id = hoveredIndex >= 0 ? (g.nodes[hoveredIndex]?.id ?? null) : null
-      controller.setHovered(id)
-      controller.events.onHover?.(id)
-      gl.domElement.style.cursor = id ? 'pointer' : ''
+      if (changed) {
+        controller.setHovered(id)
+        controller.events.onHover?.(id)
+      }
+      gl.domElement.style.cursor = id || overScreen ? 'pointer' : ''
     }
 
     const fresh = st.buffers !== buffers
@@ -834,6 +857,7 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
     // Pictures: pick, load and place them; a change in who shows one reshapes the cores below.
     const now = performance.now()
     const thumbsChanged = thumbs.update(buffers, controller, pos, selI, hovI, size.width, size.height, now)
+    screenLayer.update(controller, g, pos, eng.extents, camera, now, dt)
 
     if (positionsChanged || versionChanged || thumbsChanged || cardsChanged) {
       // Instance matrices for cores + halos. A node showing its picture keeps
@@ -892,7 +916,7 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
       s[i * 4 + 3] = ((buffers.radii[i] ?? 1) * halfH) / (dist * tanHalf)
     }
 
-    drawLabels(overlayRef.current, buffers, controller, st.labelSet, hovI, selI, size.width, size.height)
+    drawLabels(overlayRef.current, buffers, controller, st.labelSet, hovI, selI, size.width, size.height, screenLayer)
 
     // Star galleries: which project star is the camera close to? Measured where the camera is going
     // (the end of a flight), so flying past a star counts for nothing. Last in the frame: the answer
@@ -932,6 +956,7 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
       <primitive object={buffers.halos} />
       <primitive object={buffers.field} />
       <primitive object={thumbs.mesh} />
+      <primitive object={screenLayer.group} />
     </>
   )
 }
@@ -1264,6 +1289,7 @@ function drawLabels(
   selI: number,
   width: number,
   height: number,
+  screen: ScreenLayer,
 ): void {
   if (!canvas) return
   const dpr = Math.min(window.devicePixelRatio || 1, 2)
@@ -1295,6 +1321,8 @@ function drawLabels(
     const px = bodyPx(b, i)
     const r = shown[i] === 1 ? px * (thumbDrawnHalf(thumbHalf(i, selI, hovI), px, height, TAN_HALF_FOV) + 0.1) : px
     if (x < -40 || x > width + 40 || y < -20 || y > height + 20) return
+    // Behind a star's live screen: the app is in front of it.
+    if (screen.covers(x, y, depth, width, height)) return
     const node = g.nodes[i]!
     const filtered = highlight !== null && !highlight.has(node.id) && emphasis < 2
     if (filtered && !always) return

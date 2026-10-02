@@ -18,6 +18,7 @@ The link is part of the desktop app. The browser version of Aether Brain
 doesn't have it.
 
 - [Set it up](#set-it-up)
+- [Its star: Concept Forge live in the brain](#its-star-concept-forge-live-in-the-brain)
 - [Save a drawing](#save-a-drawing)
 - [What gets written](#what-gets-written)
 - [Tomorrow's practice task](#tomorrows-practice-task)
@@ -39,6 +40,52 @@ away, or brings the window to the front when it's already open.
 - **Using another copy?** Run **Concept Forge — choose file…** from the palette.
 - **Closing Aether Brain** also closes the Forge window. If your page asks
   about unsaved changes, you get to choose *Leave* or *Stay*.
+
+## Its star: Concept Forge live in the brain
+
+Your Concept Forge project's ★ star carries a live screen of the page. Fly up
+to the star and, after a moment, the screen grows out of it: Concept Forge
+exactly as its window lays it out, with the drill, the canvas and the 🪐 Save
+to Brain button, framed in gold above the star. Fly away and it folds back
+into the star.
+
+```
+            ┌───────────────────────────────┐
+            │  Concept Forge, live          │   ← the page, 4 frames a second
+            │  (drills · canvas · grade)    │
+            └───────────────┬───────────────┘
+                            │
+                  ● Critique ★ ConceptForge ● Drills
+```
+
+- **To draw**, press <kbd>Enter</kbd> or click the screen. The Concept Forge
+  window opens (the same as <kbd>g</kbd>), ready for your pen. While it is
+  open, the screen in the brain mirrors it: what you draw shows up at the star
+  (once a second while the Forge window has the focus, so your pen never
+  waits on it; 4 times a second otherwise).
+- **Close the Forge window** and the screen goes back to showing the page on
+  its own.
+- **Which star?** The project called *Concept Forge* (or *ConceptForge*,
+  *concept-forge*: its folder name, its title or an alias). With several, the
+  one whose folder holds your `concept-forge.html`. Without one, the deepest
+  project star whose folder holds the page.
+- **No star yet?** Run **Concept Forge — fly to its star** from the palette.
+  It flies to the star, or makes it: it gives your *Concept Forge* project note
+  its folder, or creates the project *Concept Forge* in `Projects/`.
+- **Before you've picked your page**, the screen says *Press g to choose your
+  concept-forge.html*.
+
+The screen is the system layout's: in the constellation and orbit layouts
+there are no stars, so there is no screen.
+
+**How it works.** While the screen is in view, and only then, Aether Brain
+keeps a hidden copy of your page: the same file in the same session (it sees
+the settings your page saved), laid out at the Forge window's size, muted,
+off screen, taking no input and going nowhere. It paints 4 frames a second at
+most, and only when something on the page moves. When you fly away it stops
+painting, and after a minute without you coming back it closes. While the
+Forge window is open, there is no copy: the screen shows the window itself.
+Frames stay inside the app (at most 1024 px wide), and nothing is saved.
 
 ## Save a drawing
 
@@ -182,12 +229,20 @@ elements, is left out, and so is anything past 256 KB.
   the pointer. Everything else, such as the camera, microphone, location and
   notifications, is refused.
 - **Your page's own *Save PNG*** still works as usual, with a normal save dialog.
+- **The star's screen** is a hidden copy of your page, with the same rules as
+  the Forge window (the same session, the same one-file limit), plus more: it
+  can't open links or pop-ups, it plays no sound, and nothing can type or
+  click in it. Its frames go to the brain window only. It runs only while the
+  screen is in view (it closes a minute after), so whatever your page does
+  when it opens, such as loading its saved settings, it also does then.
 
 ## Keys
 
 | Where | Key | Does |
 |---|---|---|
 | Aether Brain | <kbd>g</kbd> | open / focus Concept Forge |
+| Aether Brain, at the Concept Forge star | <kbd>Enter</kbd> (or a click on the screen) | open Concept Forge to draw |
+| Aether Brain | palette: **Concept Forge — fly to its star** | fly to the star with the live screen (makes it when there is none) |
 | Concept Forge | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>B</kbd> | Save to Brain (press again to close) |
 | the dialog | <kbd>Tab</kbd> / <kbd>Shift</kbd>+<kbd>Tab</kbd> | move between project, title, checkbox, Cancel, Save |
 | the dialog | <kbd>Enter</kbd> | save |

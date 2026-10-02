@@ -47,6 +47,19 @@ export interface ForgeStatus {
   open: boolean
 }
 
+/**
+ * One frame of the Concept Forge page for its ★ star's screen in the brain:
+ * the page as it looks right now, at most 1024 px wide, as raw pixels.
+ */
+export interface ForgeFrameDto {
+  /** width × height × 4 bytes, rows top to bottom. */
+  data: Uint8Array
+  width: number
+  height: number
+  /** Byte order of each pixel: B, G, R, A (Chromium's own) when true, else R, G, B, A. */
+  bgra: boolean
+}
+
 /** A project a graded drawing can be saved to (for the Forge window's picker). */
 export interface ForgeProjectDto {
   id: string
@@ -279,6 +292,14 @@ export interface AetherBridge {
    * A rejected promise reaches the Forge window as an error message.
    */
   onForgeRequest(handler: (req: ForgeRequest) => Promise<unknown>): () => void
+  /**
+   * The Concept Forge star's screen came into view (true) or folded away
+   * (false). While it is in view main sends frames of the page (onForgeFrame):
+   * of the Forge window when it is open, else of a hidden, muted copy of the
+   * page that takes no input.
+   */
+  forgeScreen(on: boolean): Promise<void>
+  onForgeFrame(cb: (frame: ForgeFrameDto) => void): () => void
 
   aiStatus(): Promise<AiLinkStatus>
   aiConfigure(patch: AiLinkPatch): Promise<AiLinkStatus>
@@ -344,6 +365,10 @@ export const IPC = {
   /** Forge window → main (its preload): the project list / a save. */
   forgeProjects: 'forge:win:projects',
   forgeSave: 'forge:win:save',
+  /** brain window → main: the star screen is in view (true) or not (false). */
+  forgeScreen: 'forge:screen',
+  /** main → brain window: a ForgeFrameDto for the star screen. */
+  forgeFrame: 'forge:frame',
   aiStatus: 'ai:status',
   aiConfigure: 'ai:configure',
   aiActivity: 'ai:activity',

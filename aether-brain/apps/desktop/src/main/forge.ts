@@ -16,12 +16,21 @@ import type {
   BrowserWindow,
   BrowserWindowConstructorOptions,
   Dialog,
+  NativeImage,
   Screen,
   Session,
   Shell,
   WebContents,
 } from 'electron'
-import { IPC, type ForgeProjectDto, type ForgeRequest, type ForgeSaveDto, type ForgeSaveResult, type ForgeStatus } from '../shared/ipc.js'
+import {
+  IPC,
+  type ForgeFrameDto,
+  type ForgeProjectDto,
+  type ForgeRequest,
+  type ForgeSaveDto,
+  type ForgeSaveResult,
+  type ForgeStatus,
+} from '../shared/ipc.js'
 import { MAX_ASSET_BYTES } from './assets.js'
 import { within } from './fsvault.js'
 
@@ -44,6 +53,22 @@ export const FORGE_PERMISSIONS: ReadonlySet<string> = new Set(['clipboard-saniti
  * what keeps them, and the blob: workers it is inherited into, off the disk.
  */
 export const FORGE_CSP = "default-src http: https: ws: wss: data: blob: 'unsafe-inline' 'unsafe-eval'"
+
+/** The star screen gets a new frame at most this often (ms). */
+export const FRAME_MS = 250
+/** Frames for the star screen are at most this many pixels wide and high. */
+export const FRAME_MAX = 1024
+/** The hidden copy of the page paints this many frames a second while the star screen is in view. */
+export const PREVIEW_FPS = 4
+/** A hidden copy nobody looks at closes after this long (ms); coming back to the star sooner shows it at once. */
+export const PREVIEW_IDLE_MS = 60_000
+/** A capture of the Forge window that has not come back after this long (ms) is given up on: the next one goes. */
+export const CAPTURE_TIMEOUT_MS = 2000
+/**
+ * While the Forge window has the focus (a pen on it), it is captured at most this often (ms): a 4K window's capture
+ * and resize run in the main process, which also passes the pen's input on, and drawing must never lag for it.
+ */
+export const FOCUSED_CAPTURE_MS = 1000
 
 const MAX_PROJECT_ID = 4096
 const MAX_PROJECTS = 5000
@@ -216,6 +241,32 @@ function bytesOf(v: unknown): Uint8Array | null {
   return null
 }
 
+/** The size of a star-screen frame of a page width × height: at most `max` px each way, the same shape; 0 × 0 for nothing. */
+export function frameSize(width: number, height: number, max = FRAME_MAX): { width: number; height: number } {
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width < 1 || height < 1) return { width: 0, height: 0 }
+  const scale = Math.min(1, max / width, max / height)
+  return { width: Math.max(1, Math.round(width * scale)), height: Math.max(1, Math.round(height * scale)) }
+}
+
+/**
+ * A frame of `image` (a paint or a capture of the page) for the star screen:
+ * scaled down to frameSize, as raw pixels in Chromium's own byte order
+ * (B, G, R, A). Null for an empty picture. Nothing is decoded: the picture is
+ * already pixels.
+ */
+export function frameOf(image: NativeImage, max = FRAME_MAX): ForgeFrameDto | null {
+  if (image.isEmpty()) return null
+  const size = image.getSize()
+  const want = frameSize(size.width, size.height, max)
+  if (!want.width || !want.height) return null
+  // Always through resize, even at full size: its result has exactly one 1x picture, whatever the display's scale.
+  const scaled = image.resize({ width: want.width, height: want.height, quality: 'good' })
+  const { width, height } = scaled.getSize()
+  const data = scaled.toBitmap()
+  if (!width || !height || data.length !== width * height * 4) return null
+  return { data, width, height, bgra: true }
+}
+
 /* ------------------------------------------------------------------ */
 /* Relay: Forge window → main → brain window → main → Forge window    */
 /* ------------------------------------------------------------------ */
@@ -333,8 +384,24 @@ export interface ForgeHostOptions {
 export class ForgeHost {
   private settings: ForgeSettings
   private win: BrowserWindow | null = null
-  /** The file the window shows: navigation may not leave it, and it is the one file the Forge session serves. */
+  /** The file the window shows: navigation may not leave it, and it is (with the hidden copy's) the one file the Forge session serves. */
   private shown: string | null = null
+  /** The brain window's star screen is in view (`forge:screen`). */
+  private screenOn = false
+  /** The hidden copy of the page that paints the star screen while the Forge window is closed (offscreen, muted, no input). */
+  private preview: BrowserWindow | null = null
+  /** The file the hidden copy shows. */
+  private previewShown: string | null = null
+  private previewIdle: ReturnType<typeof setTimeout> | null = null
+  /** The hidden copy's newest paint, not sent yet. */
+  private painted: NativeImage | null = null
+  private frameTimer: ReturnType<typeof setInterval> | null = null
+  /** When the capture in flight started (0: none). */
+  private capturingSince = 0
+  /** When the last capture started. */
+  private lastCapture = 0
+  /** Content size of the Forge window when it last closed: the hidden copy lays the page out the same way. */
+  private lastSize: { width: number; height: number } | null = null
   private opening: Promise<ForgeStatus> | null = null
   private sessionReady = false
   /** Brain windows / webContents already hooked (closing one closes the Forge window, a gone one fails its requests). */
@@ -384,6 +451,30 @@ export class ForgeHost {
     if (this.win && !this.win.isDestroyed()) this.win.close()
   }
 
+  /**
+   * `forge:screen`, from the brain window only: its Concept Forge star's
+   * screen came into view (true) or folded away (false). While it is in view,
+   * frames of the page go to the brain window every FRAME_MS: captures of the
+   * Forge window when it is open, else paints of a hidden copy of the page.
+   */
+  screen(sender: WebContents, on: unknown): void {
+    const brain = this.brainContents()
+    if (!brain || sender.id !== brain.id) throw new Error('Only the brain window can do that')
+    this.hookBrain()
+    this.screenOn = on === true
+    this.syncScreen()
+  }
+
+  /** The star screen is in view and gets frames (for tests and status). */
+  get screenLive(): boolean {
+    return this.screenOn && this.frameTimer !== null
+  }
+
+  /** The hidden copy of the page is there (painting or resting). */
+  get previewOpen(): boolean {
+    return !!this.preview && !this.preview.isDestroyed()
+  }
+
   private isOpen(): boolean {
     return !!this.win && !this.win.isDestroyed()
   }
@@ -398,7 +489,10 @@ export class ForgeHost {
     const wc = b.webContents
     if (!this.hooked.has(wc)) {
       this.hooked.add(wc)
-      const gone = () => this.relay.rejectAll(NO_BRAIN)
+      const gone = () => {
+        this.relay.rejectAll(NO_BRAIN)
+        this.stopScreen()
+      }
       wc.once('destroyed', gone)
       wc.on('render-process-gone', gone)
     }
@@ -521,18 +615,214 @@ export class ForgeHost {
       })
       if (choice === 0) e.preventDefault()
     })
+    w.on('close', () => {
+      const [width, height] = w.getContentSize()
+      if (width && height) this.lastSize = { width, height }
+    })
     w.on('closed', () => {
       if (this.win === w) {
         this.win = null
         this.shown = null
+        // The star screen goes back to the hidden copy.
+        this.syncScreen()
       }
     })
-    // The Forge window belongs to the brain: it closes with it (nothing could answer its saves).
+    this.hookBrain()
+    // The star screen now shows this window: the hidden copy is not needed.
+    this.syncScreen()
+    return w
+  }
+
+  /** The Forge windows belong to the brain window: they close with it (nothing could answer their saves, nobody sees the screen). */
+  private hookBrain(): void {
     const brain = this.opts.brain()
-    if (brain && !brain.isDestroyed() && !this.hooked.has(brain)) {
-      this.hooked.add(brain)
-      brain.once('closed', () => this.close())
+    if (!brain || brain.isDestroyed() || this.hooked.has(brain)) return
+    this.hooked.add(brain)
+    brain.once('closed', () => {
+      this.stopScreen()
+      this.close()
+    })
+  }
+
+  /* ---- the star screen ---- */
+
+  /** Start, switch or stop the frames for what is true now: screen in view or not, Forge window open or not. */
+  private syncScreen(): void {
+    if (!this.screenOn || !this.brainContents()) {
+      this.screenOn = false
+      this.stopFrames()
+      this.restPreview()
+      return
     }
+    if (this.isOpen()) {
+      this.closePreview()
+    } else {
+      const file = this.settings.file ?? null
+      if (!file) {
+        // No page chosen yet: the screen says to press g.
+        this.stopFrames()
+        this.closePreview()
+        return
+      }
+      this.wakePreview(file)
+    }
+    this.frameTimer ??= setInterval(() => this.tick(), FRAME_MS)
+  }
+
+  private stopScreen(): void {
+    this.screenOn = false
+    this.stopFrames()
+    this.closePreview()
+  }
+
+  private stopFrames(): void {
+    if (this.frameTimer) clearInterval(this.frameTimer)
+    this.frameTimer = null
+    this.painted = null
+  }
+
+  /** One frame: a capture of the Forge window when it is open, else the hidden copy's newest paint. */
+  private tick(): void {
+    const brain = this.opts.brain()
+    if (!this.screenOn || !brain || brain.isDestroyed()) {
+      this.syncScreen()
+      return
+    }
+    // Nobody can see the screen of a minimized brain window.
+    if (brain.isMinimized()) return
+    const w = this.win
+    if (w && !w.isDestroyed()) {
+      // Not shown yet (still loading): nothing to capture, and a capture of a hidden page may never come back.
+      if (!w.isVisible()) return
+      const now = Date.now()
+      if (this.capturingSince && now - this.capturingSince < CAPTURE_TIMEOUT_MS) return
+      if (w.isFocused() && now - this.lastCapture < FOCUSED_CAPTURE_MS) return
+      const started = now
+      this.capturingSince = started
+      this.lastCapture = started
+      const done = () => {
+        if (this.capturingSince === started) this.capturingSince = 0
+      }
+      // stayHidden: a Forge window behind others or minimized is captured without telling the page it is shown.
+      w.webContents.capturePage(undefined, { stayHidden: true }).then(
+        (image) => {
+          done()
+          this.sendFrame(image)
+        },
+        done,
+      )
+      return
+    }
+    const image = this.painted
+    this.painted = null
+    if (image) this.sendFrame(image)
+  }
+
+  private sendFrame(image: NativeImage): void {
+    const brain = this.screenOn ? this.brainContents() : null
+    if (!brain) return
+    const frame = frameOf(image)
+    if (!frame) return
+    try {
+      brain.send(IPC.forgeFrame, frame)
+    } catch {
+      // The brain window went away mid-send: its 'destroyed' hook stops the screen.
+    }
+  }
+
+  /** The hidden copy of `file`, painting: made (or reloaded when the file changed) as needed. */
+  private wakePreview(file: string): void {
+    if (this.previewIdle) clearTimeout(this.previewIdle)
+    this.previewIdle = null
+    let w = this.preview
+    if (!w || w.isDestroyed()) {
+      w = this.createPreview()
+      this.previewShown = null
+    }
+    const wc = w.webContents
+    if (this.previewShown !== file) {
+      this.previewShown = file
+      const loading = w
+      loading.loadFile(file).catch((err: unknown) => {
+        // A page that moved on by itself is fine; one that cannot load (moved, deleted) is not shown at all.
+        if ((err as { code?: unknown } | null)?.code === 'ERR_ABORTED') return
+        if (this.preview === loading) this.closePreview()
+      })
+    }
+    if (!wc.isPainting()) wc.startPainting()
+    wc.invalidate()
+  }
+
+  /** The screen folded away: the hidden copy stops painting, and closes if nobody comes back within PREVIEW_IDLE_MS. */
+  private restPreview(): void {
+    const w = this.preview
+    if (!w || w.isDestroyed()) return
+    if (w.webContents.isPainting()) w.webContents.stopPainting()
+    this.previewIdle ??= setTimeout(() => {
+      this.previewIdle = null
+      if (!this.screenOn) this.closePreview()
+    }, PREVIEW_IDLE_MS)
+  }
+
+  private closePreview(): void {
+    if (this.previewIdle) clearTimeout(this.previewIdle)
+    this.previewIdle = null
+    const w = this.preview
+    this.preview = null
+    this.previewShown = null
+    this.painted = null
+    // destroy, not close: a hidden copy never asks "leave?".
+    if (w && !w.isDestroyed()) w.destroy()
+  }
+
+  /**
+   * The hidden copy: the same page, preload and session as the Forge window, laid out at the same size, but
+   * offscreen (never shown, takes no input), muted, painting PREVIEW_FPS frames a second, and it goes nowhere.
+   */
+  private createPreview(): BrowserWindow {
+    const { BrowserWindow: Win, screen } = this.opts.electron
+    this.prepareSession()
+    const area = screen.getPrimaryDisplay().workAreaSize
+    const size = this.lastSize ?? { width: Math.min(1600, area.width), height: Math.min(1000, area.height) }
+    const w = new Win({
+      width: size.width,
+      height: size.height,
+      useContentSize: true,
+      show: false,
+      backgroundColor: '#04050d',
+      title: FORGE_TITLE,
+      webPreferences: {
+        preload: this.opts.preload,
+        partition: FORGE_PARTITION,
+        contextIsolation: true,
+        sandbox: true,
+        nodeIntegration: false,
+        offscreen: true,
+        additionalArguments: [`--aether-forge-version=${this.opts.version}`],
+      },
+    })
+    this.preview = w
+    const wc = w.webContents
+    wc.setAudioMuted(true)
+    wc.setFrameRate(PREVIEW_FPS)
+    wc.on('paint', (_e, _dirty, image) => {
+      if (this.preview === w) this.painted = image
+    })
+    wc.setWindowOpenHandler(() => ({ action: 'deny' }))
+    wc.on('will-navigate', (e) => {
+      if (forgeNavigation(e.url, this.previewShown) !== 'allow') e.preventDefault()
+    })
+    // Nobody is there to answer a "leave?" question: the answer is Leave.
+    wc.on('will-prevent-unload', (e) => e.preventDefault())
+    wc.on('render-process-gone', () => {
+      if (this.preview === w) this.closePreview()
+    })
+    w.on('closed', () => {
+      if (this.preview !== w) return
+      this.preview = null
+      this.previewShown = null
+      this.painted = null
+    })
     return w
   }
 
@@ -549,10 +839,10 @@ export class ForgeHost {
     ses.protocol.handle('file', (req) => this.serveFile(ses, req.url))
   }
 
-  /** One file:// request of the Forge window: the page on show, read from disk and sent with FORGE_CSP, or a network error. */
+  /** One file:// request of the Forge session: the page on show (or the hidden copy's), read from disk and sent with FORGE_CSP, or a network error. */
   private async serveFile(ses: Session, url: string): Promise<Response> {
-    const file = this.shown
-    if (!file || !forgeFileRequest(url, file)) return Response.error()
+    const file = [this.shown, this.previewShown].find((f) => f !== null && forgeFileRequest(url, f))
+    if (!file) return Response.error()
     try {
       // The file itself, not the URL asked for: whatever the URL spells, only the chosen page is ever read.
       const res = await ses.fetch(pathToFileURL(file).href, { bypassCustomProtocolHandlers: true })
