@@ -34,6 +34,7 @@ Every feature has a key. `⌘` is `Ctrl` on Windows/Linux. Single keys are ignor
 | `Home` · `0`         | Fit the whole brain in view                     |
 | `t`                  | Layout: constellation (areas) → orbit (rings = age, newest at the core) → system (folders) |
 | `m`                  | Color mode: area → type → tag → age             |
+| `z`                  | Picture size: medium → large → extra large icons (also the **M · L · XL** buttons in the legend) |
 | `b`                  | Bloom on/off                                    |
 | `l`                  | Hub labels on/off                               |
 
@@ -80,7 +81,9 @@ Focusing a task lights up its note in the graph. With no tasks the brief says *A
 | `Tab` · `⇧ Tab`      | The notes that embed it, and its folder                       |
 | drop files on the window | Import pictures into the selected folder, a selected project's *Critique* planet, else `Inbox` — never replaces a file (`gate 2.png`); up to 40 MB each |
 
-The picture inspector has *Open*, *Reveal* (desktop), *Copy embed* (`![[gate.png]]`, the vault path when two pictures share a name) and *Embedded in*; the folder inspector counts a folder's pictures (*12 pictures · 8 shown*) and has *Import pictures…*. Palette commands (type `> picture`): *Import pictures…*, *Open the selected picture in your image app*, *Copy the embed of the selected picture*, *Toggle image moons*, *Toggle picture thumbnails*; and *Today — daily brief*, *Toggle Today hub*.
+The picture inspector has *Open*, *Reveal* (desktop), *Copy embed* (`![[gate.png]]`, the vault path when two pictures share a name) and *Embedded in*; the folder inspector counts a folder's pictures (*12 pictures · 8 shown*) and has *Import pictures…*. Palette commands (type `> picture`): *Import pictures…*, *Open the selected picture in your image app*, *Copy the embed of the selected picture*, *Toggle image moons*, *Toggle picture thumbnails*, *Picture size* (`z`), *Pictures: medium / large / extra large icons*; and *Today — daily brief*, *Toggle Today hub*.
+
+**Picture size** works like Windows' icon views: *Medium icons* (the brain's first size), *Large icons* (about a big planet, the default) and *Extra large icons* (about a star). The system layout makes room: bigger pictures get wider orbits, so they never cover each other. After a change the camera stays with what is selected (else it shows the whole brain). The choice is remembered.
 
 ## Palette
 
@@ -181,4 +184,4 @@ Inside a panel: `Esc` closes it, its own key closes it too, the other panel's ke
 
 ## Commands (palette `>`)
 
-Today — daily brief · Toggle Today hub · Import AI chats (Claude / ChatGPT export)… (`i`) · Import pictures… · Open the selected picture · Copy the embed of the selected picture · Toggle image moons · Toggle picture thumbnails · Star gallery (`⇧ G`) · Toggle star galleries · Move note → Projects / Areas / Resources / Archive · Set status → evergreen / seedling · Delete note · New project · New folder / new note in the selected folder · Make the selected folder a project · Open the selected star's project board · Show in the file manager (a note, folder or picture) · Leave the selected folder out of the brain (`⇧ H`, desktop) · Cycle layout · Orbits moving / paused · Folder levels − / + · Expand / collapse folder · Reload vault from disk · Re-run layout physics · Vault folders · AI link · Chat with your brain (`q`) · New brain chat · Check in with your brain · Librarian (`⇧ L`) · Concept Forge — open · Concept Forge — choose file… · Concept Forge — fly to its star (live screen) · Unreal companion link: on / off · Unreal companion link: status… (desktop) · everything above.
+Today — daily brief · Toggle Today hub · Import AI chats (Claude / ChatGPT export)… (`i`) · Import pictures… · Open the selected picture · Copy the embed of the selected picture · Toggle image moons · Toggle picture thumbnails · Picture size (`z`) · Pictures: medium / large / extra large icons · Star gallery (`⇧ G`) · Toggle star galleries · Move note → Projects / Areas / Resources / Archive · Set status → evergreen / seedling · Delete note · New project · New folder / new note in the selected folder · Make the selected folder a project · Open the selected star's project board · Show in the file manager (a note, folder or picture) · Leave the selected folder out of the brain (`⇧ H`, desktop) · Cycle layout · Orbits moving / paused · Folder levels − / + · Expand / collapse folder · Reload vault from disk · Re-run layout physics · Vault folders · AI link · Chat with your brain (`q`) · New brain chat · Check in with your brain · Librarian (`⇧ L`) · Concept Forge — open · Concept Forge — choose file… · Concept Forge — fly to its star (live screen) · Unreal companion link: on / off · Unreal companion link: status… (desktop) · everything above.

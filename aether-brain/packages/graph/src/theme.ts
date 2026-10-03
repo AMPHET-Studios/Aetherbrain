@@ -135,15 +135,31 @@ export function nodeBaseColor(
   }
 }
 
+/** How big pictures are drawn, named after Windows' icon views (`z` cycles them). */
+export type PictureSize = 'medium' | 'large' | 'xl'
+export const PICTURE_SIZES: readonly PictureSize[] = ['medium', 'large', 'xl']
+/**
+ * A picture's radius at each size, in world units (its thumbnail is THUMB_SCALE times as wide): medium is
+ * smaller than most planets, large about a big planet, extra large about a star.
+ */
+export const PICTURE_RADIUS: Record<PictureSize, number> = { medium: 1.4, large: 3.2, xl: 5.5 }
+export const PICTURE_SIZE_NAMES: Record<PictureSize, string> = { medium: 'Medium icons', large: 'Large icons', xl: 'Extra large icons' }
+
+export function isPictureSize(v: unknown): v is PictureSize {
+  return v === 'medium' || v === 'large' || v === 'xl'
+}
+
 /**
  * Visual radius in world units. Notes: hubs grow with sqrt(degree); MOCs get a
  * bonus. Folders by role: suns (root 8, mounts 6.5), project stars 5.5, and
  * planets that grow with how much they hold (1.6 to 4.2). The Today hub is a
- * fixed 4.6 (its beams must not inflate it) and pictures a fixed 1.4.
+ * fixed 4.6 (its beams must not inflate it) and pictures the radius of their
+ * size (`pictures`, PICTURE_RADIUS). The system layout spaces orbits by these
+ * radii, so bigger pictures get room of their own.
  */
-export function nodeRadius(n: GraphNode): number {
+export function nodeRadius(n: GraphNode, pictures: PictureSize = 'medium'): number {
   if (n.kind === 'today') return 4.6
-  if (n.kind === 'image') return 1.4
+  if (n.kind === 'image') return PICTURE_RADIUS[pictures] ?? PICTURE_RADIUS.medium
   if (n.folder) {
     const f = n.folder
     if (f.role === 'root') return 8

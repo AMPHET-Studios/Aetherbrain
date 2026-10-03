@@ -83,6 +83,12 @@ const FIB_SPACING = 3.0
 /** Layout kind codes (see `LayoutKind`): folders are always planets; the hub hangs apart. */
 const KIND_FOLDER = 2
 const KIND_TODAY = 3
+const KIND_IMAGE = 4
+/**
+ * A picture moon is drawn as a square THUMB_SCALE (2.4) times its radius wide: it needs that much room,
+ * half of it on each side, or big pictures cover their neighbours.
+ */
+const PICTURE_FOOTPRINT = 1.2
 /** Height of the Today hub above its parent: parent radius × FIRST_RING + this. */
 const HUB_LIFT = 30
 /** Quaternion component of −90° about X: turns the XZ ring into the vertical plane. */
@@ -223,7 +229,8 @@ export function computeSystemLayout(input: SystemInput): SystemLayout {
 
   const bodyRadius = (i: number): number => {
     const r = input.radius[i]
-    return r !== undefined && Number.isFinite(r) && r > 0 ? r : 1
+    const body = r !== undefined && Number.isFinite(r) && r > 0 ? r : 1
+    return input.kind[i] === KIND_IMAGE ? body * PICTURE_FOOTPRINT : body
   }
   const hasChildren = (i: number): boolean => childStart[i + 1]! > childStart[i]!
   const moons: number[] = []

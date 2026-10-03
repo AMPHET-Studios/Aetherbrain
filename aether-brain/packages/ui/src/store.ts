@@ -75,7 +75,15 @@ import {
   type VaultRootInfo,
   type DailyBrief,
 } from '@aether/core'
-import { BrainController, type ColorMode, type LayoutMode } from '@aether/graph'
+import {
+  BrainController,
+  PICTURE_SIZES,
+  PICTURE_SIZE_NAMES,
+  isPictureSize,
+  type ColorMode,
+  type LayoutMode,
+  type PictureSize,
+} from '@aether/graph'
 import { listProjects, moveTaskOnBoard } from './projects'
 import { plural, stillOf, truncate } from './util'
 
@@ -129,6 +137,8 @@ export interface Settings {
   imageMoons: boolean
   /** Picture moons show their thumbnails. */
   thumbnails: boolean
+  /** How big pictures are drawn: medium, large or extra large icons (`z`). The layout makes room for them. */
+  pictureSize: PictureSize
   /** The glowing Today hub (daily brief) is in the graph. */
   todayHub: boolean
   /** System layout: a project star's pictures float around it in 3D when the camera comes close (Shift+G any time). */
@@ -168,6 +178,7 @@ const DEFAULT_SETTINGS: Settings = {
   motion: true,
   imageMoons: true,
   thumbnails: true,
+  pictureSize: 'large',
   todayHub: true,
   starGalleries: true,
   v: SETTINGS_VERSION,
@@ -212,6 +223,7 @@ function loadSettings(): Settings {
   s.motion = s.motion !== false
   s.imageMoons = s.imageMoons !== false
   s.thumbnails = s.thumbnails !== false
+  if (!isPictureSize(s.pictureSize)) s.pictureSize = DEFAULT_SETTINGS.pictureSize
   s.todayHub = s.todayHub !== false
   s.starGalleries = s.starGalleries !== false
   if (stored && !(typeof stored.v === 'number' && stored.v >= SETTINGS_VERSION)) {
@@ -463,6 +475,8 @@ export interface AetherState {
   clearFilters(): void
   setActiveTag(tag: string | null): void
   setSettings(patch: Partial<Settings>): void
+  /** Pictures: medium → large → extra large icons → medium (`z`). */
+  cyclePictureSize(): void
   cycleColorMode(): void
   /** Cycle constellation → orbit → system. */
   toggleLayout(): void
@@ -708,6 +722,7 @@ export const useAether = create<AetherState>()((set, get) => {
   controller.motion = settings.motion
   controller.showThumbnails = settings.thumbnails
   controller.galleries = settings.starGalleries
+  controller.pictureSize = settings.pictureSize
 
   controller.events = {
     onSelect: (id) => get().select(id),
@@ -2094,6 +2109,7 @@ export const useAether = create<AetherState>()((set, get) => {
       const prev = get().settings
       const next = { ...prev, ...patch }
       next.folderDepth = clampDepth(next.folderDepth)
+      if (!isPictureSize(next.pictureSize)) next.pictureSize = prev.pictureSize
       set({ settings: next })
       saveJson(SETTINGS_KEY, next)
       controller.setColorMode(next.colorMode)
@@ -2102,15 +2118,30 @@ export const useAether = create<AetherState>()((set, get) => {
       controller.setMotion(next.motion)
       controller.showThumbnails = next.thumbnails
       controller.galleries = next.starGalleries
+      controller.pictureSize = next.pictureSize
       // Only system graphs carry folder nodes and picture moons: crossing system ↔ others, a new
-      // depth or moons on/off there rebuilds; so does the Today hub coming or going (every layout).
+      // depth or moons on/off there rebuilds; so does the Today hub coming or going (every layout),
+      // and a new picture size (the layout spaces orbits by it).
       const system = next.layoutMode === 'system'
       const crossed = (prev.layoutMode === 'system') !== system
       const depth = system && prev.folderDepth !== next.folderDepth
       const moons = system && prev.imageMoons !== next.imageMoons
       const hub = prev.todayHub !== next.todayHub
-      if (crossed || depth || moons || hub) rebuildGraph()
+      const pictures = prev.pictureSize !== next.pictureSize
+      if (crossed || depth || moons || hub || pictures) rebuildGraph()
+      if (pictures && get().status === 'ready') {
+        // Every orbit moves: keep the selection in view (it is where the user was looking), else see everything.
+        const sel = get().selectedId
+        if (sel && get().graph?.index.has(sel)) flyWhenSettled(sel)
+        else controller.refitWhenSettled()
+      }
       else if (prev.layoutMode !== next.layoutMode) controller.setLayoutMode(next.layoutMode)
+    },
+    cyclePictureSize() {
+      const cur = get().settings.pictureSize
+      const next = PICTURE_SIZES[(PICTURE_SIZES.indexOf(cur) + 1) % PICTURE_SIZES.length]!
+      get().setSettings({ pictureSize: next })
+      get().toast(`Pictures: ${PICTURE_SIZE_NAMES[next].toLowerCase()} (z)`)
     },
     cycleColorMode() {
       const order: ColorMode[] = ['area', 'type', 'tag', 'age']

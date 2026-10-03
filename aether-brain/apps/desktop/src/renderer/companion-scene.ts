@@ -5,7 +5,7 @@
  * unit-tested; companion.ts publishes it.
  */
 import type { GraphData, GraphNode, NoteId } from '@aether/core'
-import { nodeBaseColor, nodeRadius, type ColorMode } from '@aether/graph'
+import { nodeBaseColor, nodeRadius, type ColorMode, type PictureSize } from '@aether/graph'
 import type { CompanionGraphDto, CompanionKind } from '../shared/ipc'
 
 export function companionKind(n: GraphNode): CompanionKind {
@@ -25,6 +25,8 @@ export interface CompanionSceneOptions {
   colorMode: ColorMode
   activeTag: string | null
   selectedId: NoteId | null
+  /** How big the brain draws pictures (their radius). */
+  pictureSize?: PictureSize
 }
 
 /** The published scene of `graph` (same node order as the layout's positions). */
@@ -49,7 +51,7 @@ export function companionScene(graph: GraphData, o: CompanionSceneOptions): Comp
     title: n.title,
     kind: companionKind(n),
     color: `#${nodeBaseColor(n, o.colorMode, o.activeTag, ageOf).getHexString()}`,
-    radius: Math.round(nodeRadius(n) * 1000) / 1000,
+    radius: Math.round(nodeRadius(n, o.pictureSize) * 1000) / 1000,
     parent: at(n.parent),
   }))
   const edges: number[] = []

@@ -1,4 +1,5 @@
 import { folderPathOf, imagePathOf, isFolderId, isImageId, type NoteId } from '@aether/core'
+import { PICTURE_SIZES, PICTURE_SIZE_NAMES } from '@aether/graph'
 import { importChatsFromDialog } from './components/chats'
 import { copyEmbed, importPicturesFromDialog } from './components/pictures'
 import type { AetherState } from './store'
@@ -287,6 +288,16 @@ export const COMMANDS: Command[] = [
       s.toast(on ? `Image moons on${s.settings.layoutMode === 'system' ? '' : ' — they orbit their folders in the system layout (t)'}` : 'Image moons off — embedded pictures stay')
     },
   },
+  { id: 'picture-size', title: 'Picture size: medium → large → extra large icons', keys: 'z', group: 'view', run: (s) => s.cyclePictureSize() },
+  ...PICTURE_SIZES.map((size) => ({
+    id: `picture-size-${size}`,
+    title: `Pictures: ${PICTURE_SIZE_NAMES[size].toLowerCase()}`,
+    group: 'view' as const,
+    run: (s: AetherState) => {
+      s.setSettings({ pictureSize: size })
+      s.toast(`Pictures: ${PICTURE_SIZE_NAMES[size].toLowerCase()}`)
+    },
+  })),
   {
     id: 'picture-thumbnails',
     title: 'Toggle picture thumbnails',

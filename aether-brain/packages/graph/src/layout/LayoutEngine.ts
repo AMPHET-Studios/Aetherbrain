@@ -1,6 +1,6 @@
 import type { FolderRole, GraphData, NodeKind } from '@aether/core'
 import type { LayoutEdgeInput, LayoutKind, LayoutMode, LayoutNodeInput, LayoutRole, MainToWorker, WorkerToMain } from './protocol'
-import { AREA_INDEX, nodeRadius } from '../theme'
+import { AREA_INDEX, nodeRadius, type PictureSize } from '../theme'
 
 const KIND_CODE: Record<NodeKind, LayoutKind> = { note: 0, ghost: 1, folder: 2, today: 3, image: 4 }
 const ROLE_CODE: Record<FolderRole, LayoutRole> = { root: 0, mount: 1, project: 2, folder: 3 }
@@ -38,6 +38,8 @@ export class LayoutEngine {
   ringsVersion = 0
   /** System layout: planets and moons orbit while on (mirrors what the worker was told). */
   motion = true
+  /** How big pictures are: their radius spaces the orbits (set before setGraph; see BrainController.setPictureSize). */
+  pictureSize: PictureSize = 'medium'
   private worker: Worker | null = null
   private listeners = new Set<TickListener>()
   /**
@@ -74,7 +76,7 @@ export class LayoutEngine {
       degree: n.degree,
       created: n.created,
       ghost: n.ghost,
-      radius: nodeRadius(n),
+      radius: nodeRadius(n, this.pictureSize),
       parent: n.parent === null ? -1 : (graph.index.get(n.parent) ?? -1),
       kind: KIND_CODE[n.kind] ?? 0,
       role: n.folder ? (ROLE_CODE[n.folder.role] ?? 3) : -1,

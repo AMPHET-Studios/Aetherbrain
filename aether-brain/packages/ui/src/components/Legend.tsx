@@ -1,6 +1,17 @@
 import { useMemo } from 'react'
 import { AREAS, type Area } from '@aether/core'
-import { AREA_COLORS, AREA_LABELS, IMAGE_COLOR, STAR_COLOR, SUN_COLOR, TODAY_COLOR, tagColor } from '@aether/graph'
+import {
+  AREA_COLORS,
+  AREA_LABELS,
+  IMAGE_COLOR,
+  PICTURE_SIZES,
+  PICTURE_SIZE_NAMES,
+  STAR_COLOR,
+  SUN_COLOR,
+  TODAY_COLOR,
+  tagColor,
+  type PictureSize,
+} from '@aether/graph'
 import { useAether } from '../store'
 import { cx } from '../util'
 
@@ -9,8 +20,13 @@ import { cx } from '../util'
  * and moons; pictures; the ☀ Today hub), area constellations + top tags.
  * Chips filter the graph; the Today entry flies to the hub.
  */
+/** The picture size buttons' labels, like Windows' icon views. */
+const SIZE_LABELS: Record<PictureSize, string> = { medium: 'M', large: 'L', xl: 'XL' }
+
 export function Legend() {
   const graph = useAether((s) => s.graph)
+  const pictureSize = useAether((s) => s.settings.pictureSize)
+  const setSettings = useAether((s) => s.setSettings)
   const filters = useAether((s) => s.filters)
   const toggleArea = useAether((s) => s.toggleArea)
   const toggleTag = useAether((s) => s.toggleTag)
@@ -62,6 +78,22 @@ export function Legend() {
           {pictures > 0 && (
             <span title={system ? "A picture file: each folder's newest ones orbit it, embedded ones link to their notes" : 'A picture file a note embeds (![[name.png]])'}>
               <span style={{ color: IMAGE_COLOR }}>🖼</span> picture · {pictures}
+            </span>
+          )}
+          {pictures > 0 && (
+            <span className="flex items-center gap-0.5" role="group" aria-label="Picture size (z)" title="Picture size: medium, large or extra large icons (z)">
+              {PICTURE_SIZES.map((size) => (
+                <button
+                  key={size}
+                  type="button"
+                  className={cx('hud-btn !h-6 !px-1.5', pictureSize === size ? '!border-accent/60 text-ink' : 'text-dim')}
+                  aria-pressed={pictureSize === size}
+                  aria-label={PICTURE_SIZE_NAMES[size]}
+                  onClick={() => setSettings({ pictureSize: size })}
+                >
+                  {SIZE_LABELS[size]}
+                </button>
+              ))}
             </span>
           )}
           {system && (

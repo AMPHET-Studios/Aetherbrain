@@ -41,6 +41,7 @@ import {
   nodeRadius,
   planetColor,
   tagColor,
+  type PictureSize,
 } from '../theme'
 import {
   NEBULA_COLORS,
@@ -367,7 +368,7 @@ interface Buffers {
   dispose(): void
 }
 
-function buildBuffers(graph: GraphData): Buffers {
+function buildBuffers(graph: GraphData, pictures: PictureSize): Buffers {
   const count = graph.nodes.length
   const sphere = new SphereGeometry(1, 16, 12)
   const plane = new PlaneGeometry(1, 1)
@@ -417,7 +418,7 @@ function buildBuffers(graph: GraphData): Buffers {
   field.renderOrder = 3
 
   const radii = new Float32Array(count)
-  graph.nodes.forEach((n, i) => (radii[i] = nodeRadius(n)))
+  graph.nodes.forEach((n, i) => (radii[i] = nodeRadius(n, pictures)))
   const stars: number[] = []
   const cards: number[] = []
   const cardOnly: number[] = []
@@ -580,7 +581,8 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
     (cb) => controller.subscribe(cb),
     () => controller.graph,
   )
-  const buffers = useMemo(() => (graph ? buildBuffers(graph) : null), [graph])
+  // A new picture size rebuilds the graph (the store), so the graph is the key.
+  const buffers = useMemo(() => (graph ? buildBuffers(graph, controller.pictureSize) : null), [graph, controller])
   useEffect(() => () => buffers?.dispose(), [buffers])
   // Pictures outlive graphs (they are kept by path), so the thumbnail layer lives as long as the scene.
   const thumbs = useMemo(() => new ThumbLayer(), [])
