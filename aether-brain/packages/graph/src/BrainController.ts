@@ -2,7 +2,7 @@ import type { GraphData, GraphNode, NoteId } from '@aether/core'
 import { GALLERY_DWELL_MS, GALLERY_FOLD_MS, GALLERY_FRAMING_MS, GALLERY_REACH_MS, nearestStar as starNearCamera } from './gallery'
 import { LayoutEngine } from './layout/LayoutEngine'
 import type { LayoutMode } from './layout/protocol'
-import { nodeRadius, type ColorMode } from './theme'
+import { nodeRadius, type ColorMode, type PictureSize } from './theme'
 
 /**
  * Loads a picture preview: at most `size` px on its longer side, or null when
@@ -128,6 +128,16 @@ export class BrainController {
     if (this.loader === loader) return
     this.loader = loader
     this.touch()
+  }
+  /**
+   * How big pictures are drawn (`PICTURE_RADIUS`). The layout spaces orbits by it, so a change takes a
+   * new graph: the store rebuilds it right after (`setGraph`), and the scene and the layout read the size then.
+   */
+  get pictureSize(): PictureSize {
+    return this.engine.pictureSize
+  }
+  set pictureSize(size: PictureSize) {
+    this.engine.pictureSize = size
   }
   /** Draw picture thumbnails on image moons (when a loader is set). */
   get showThumbnails(): boolean {
@@ -264,6 +274,11 @@ export class BrainController {
       this.armRefit()
     }
     this.touch()
+  }
+
+  /** Frame the whole graph again once the layout has settled (after a change that moves everything). */
+  refitWhenSettled(): void {
+    this.armRefit()
   }
 
   /** Refit the camera to the whole graph on the next settled layout frame (once). */
@@ -561,9 +576,9 @@ export class BrainController {
     if (node.kind === 'image') {
       // A gallery card is bigger than a moon: come close enough for it to fill a third of the view.
       const card = this.engine.cards[this.engine.index.get(id) ?? -1] ?? 0
-      return Math.max(26, card * 7)
+      return Math.max(26, card * 7, nodeRadius(node, this.pictureSize) * 5)
     }
-    return 34 + nodeRadius(node) * 10
+    return 34 + nodeRadius(node, this.pictureSize) * 10
   }
 
   /** Camera distance that frames a folder's system: its furthest live child, else a radius-based guess. */
@@ -577,9 +592,9 @@ export class BrainController {
       const dx = (pos[i * 3] ?? 0) - p[0]
       const dy = (pos[i * 3 + 1] ?? 0) - p[1]
       const dz = (pos[i * 3 + 2] ?? 0) - p[2]
-      far = Math.max(far, Math.sqrt(dx * dx + dy * dy + dz * dz) + nodeRadius(c) * 3)
+      far = Math.max(far, Math.sqrt(dx * dx + dy * dy + dz * dz) + nodeRadius(c, this.pictureSize) * 3)
     }
-    const r = nodeRadius(node)
+    const r = nodeRadius(node, this.pictureSize)
     // A sphere of radius `far` fills the 55° view at far / sin(27.5°) ≈ 2.17 far.
     return Math.min(3000, far > r * 2 ? far * 2.3 : 34 + r * 14)
   }

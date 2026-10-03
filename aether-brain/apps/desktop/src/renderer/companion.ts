@@ -27,7 +27,7 @@ function tick(bridge: AetherBridge): void {
   const c = s.controller
   const g = c.graph
   if (!g || s.status !== 'ready') return
-  const key = [g, c.colorMode, c.activeTag, s.selectedId, c.layoutMode, s.adapter]
+  const key = [g, c.colorMode, c.activeTag, s.selectedId, c.layoutMode, s.adapter, c.pictureSize]
   if (key.some((k, i) => k !== made[i])) {
     made = key
     version++
@@ -39,6 +39,7 @@ function tick(bridge: AetherBridge): void {
         colorMode: c.colorMode,
         activeTag: c.activeTag,
         selectedId: s.selectedId,
+        pictureSize: c.pictureSize,
       }),
     )
     sentFrame = -1

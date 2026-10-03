@@ -35,6 +35,7 @@ const GROUPS: HelpGroup[] = [
       ['Home · 0', 'Reset camera'],
       ['t', 'Layout: constellation → orbit → system'],
       ['m', 'Color: area → type → tag → age'],
+      ['z', 'Pictures: medium → large → extra large icons'],
       ['b · l', 'Bloom · hub labels'],
       ['Alt ← →', 'History back / forward'],
     ],

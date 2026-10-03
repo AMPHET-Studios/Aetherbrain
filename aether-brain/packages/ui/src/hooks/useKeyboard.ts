@@ -191,6 +191,9 @@ export function handleKey(e: KeyboardEvent): void {
     case 'm':
       s.cycleColorMode()
       return
+    case 'z':
+      s.cyclePictureSize()
+      return
     case 'b':
       s.setSettings({ bloom: !s.settings.bloom })
       return

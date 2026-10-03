@@ -12,8 +12,8 @@ import type { ImageNodeInfo } from '@aether/core'
 
 /** Layers of the thumbnail texture array: at most this many pictures at once. */
 export const THUMB_LAYERS = 256
-/** Width and height of one layer (px). */
-export const THUMB_SIZE = 128
+/** Width and height of one layer (px): Windows' extra large icons, sharp at the biggest picture size. */
+export const THUMB_SIZE = 256
 /** Size asked of the loader: twice the layer, so a cover-cropped wide picture still fills it. */
 export const THUMB_REQUEST = THUMB_SIZE * 2
 /** Smallest projected radius (px) at which a moon's picture is worth a layer. */
