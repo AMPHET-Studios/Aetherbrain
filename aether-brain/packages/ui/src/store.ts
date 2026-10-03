@@ -496,8 +496,18 @@ export interface AetherState {
   showFolder(path: string, opts?: { keepView?: boolean }): void
   /** Create a folder on disk (a new planet); returns its path, or null (with a toast) when it can't. */
   createFolder(path: string): Promise<string | null>
-  /** Make a folder a project star by writing its folder note `<folder>/<name>.md`. */
-  makeProject(folderPath: string): Promise<NoteId | null>
+  /**
+   * Make a folder a project star by writing its folder note `<folder>/<name>.md`.
+   * `quiet` (several at once): no success toast, the board's project stays,
+   * and a failure goes to `onError` instead of a toast.
+   */
+  makeProject(folderPath: string, opts?: { quiet?: boolean; onError?: (message: string) => void }): Promise<NoteId | null>
+  /**
+   * Make several folders stars at once (Find projects): one graph rebuild per
+   * chunk and one toast. Resolves with how many became stars (already ones
+   * count) and the first failure, if any.
+   */
+  makeProjects(folderPaths: readonly string[]): Promise<{ made: number; failed: number; error: string | null }>
   /** Show a file or folder in the OS file manager (desktop). */
   reveal(path: string): Promise<void>
   /** A form a command asked for; the component that owns it opens it and clears this (`window.prompt` does not exist in Electron). */
@@ -2251,26 +2261,25 @@ export const useAether = create<AetherState>()((set, get) => {
       return p
     },
 
-    async makeProject(folderPath) {
+    async makeProject(folderPath, opts) {
       const { adapter, notes, folders, roots } = get()
       if (!adapter) return null
-      if (adapter.readOnly) {
-        get().toast('This vault is read-only', 'error')
+      const quiet = opts?.quiet ?? false
+      const fail = (message: string): null => {
+        if (opts?.onError) opts.onError(message)
+        else get().toast(message, 'error')
         return null
       }
+      if (adapter.readOnly) return fail('This vault is read-only')
       const dir = canonicalFolder(folderPath)
-      if (!dir || (roots.length > 1 && !dir.includes('/'))) {
-        get().toast('Pick a folder inside the vault, not the vault or a drive itself', 'error')
-        return null
-      }
-      if (areaFromFolder(`${dir}/x.md`) === 'archive') {
-        get().toast('Archived folders are not projects; move it out of Archive first', 'error')
-        return null
-      }
+      if (!dir || (roots.length > 1 && !dir.includes('/'))) return fail('Pick a folder inside the vault, not the vault or a drive itself')
+      if (areaFromFolder(`${dir}/x.md`) === 'archive') return fail('Archived folders are not projects; move it out of Archive first')
       const existing = [...notes.values()].find((n) => isProjectNote(n) && projectFolderOf(n, folders) === dir)
       if (existing) {
-        set({ projectId: existing.meta.id })
-        get().toast(`${dir} is already the project ${existing.meta.title}`)
+        if (!quiet) {
+          set({ projectId: existing.meta.id })
+          get().toast(`${dir} is already the project ${existing.meta.title}`)
+        }
         return existing.meta.id
       }
       const p = folderProjectNote(dir)
@@ -2280,10 +2289,7 @@ export const useAether = create<AetherState>()((set, get) => {
       try {
         if (folderNote) {
           // The folder already has its folder note: it becomes the star.
-          if (hasBrokenFrontmatter(folderNote.raw)) {
-            get().toast(`The frontmatter of ${folderNote.meta.path} is not valid YAML; fix it first`, 'error')
-            return null
-          }
+          if (hasBrokenFrontmatter(folderNote.raw)) return fail(`The frontmatter of ${folderNote.meta.path} is not valid YAML; fix it first`)
           await get().patchFrontmatter(id, { type: 'project', ...(folderNote.meta.status ? {} : { status: 'active' }) })
         } else {
           // Something already at that path on disk (a file the brain skips, one not reported yet) is
@@ -2293,12 +2299,42 @@ export const useAether = create<AetherState>()((set, get) => {
           )
         }
       } catch (err) {
-        get().toast(`Could not make ${dir} a project: ${errText(err)}`, 'error')
-        return null
+        return fail(`Could not make ${dir} a project: ${errText(err)}`)
       }
-      set({ projectId: id })
-      get().toast(`★ ${p.title} is a project now${numberedAs(p.path, id)}`, 'success')
+      if (!quiet) {
+        set({ projectId: id })
+        get().toast(`★ ${p.title} is a project now${numberedAs(p.path, id)}`, 'success')
+      }
       return id
+    },
+
+    async makeProjects(folderPaths) {
+      const { adapter } = get()
+      const paths = [...new Set(folderPaths.map((f) => canonicalFolder(f)).filter((f): f is string => !!f))]
+      if (!adapter || !paths.length) return { made: 0, failed: 0, error: null }
+      if (adapter.readOnly) {
+        get().toast('This vault is read-only', 'error')
+        return { made: 0, failed: paths.length, error: 'This vault is read-only' }
+      }
+      let made = 0
+      let failed = 0
+      let error: string | null = null
+      const onError = (message: string) => {
+        failed++
+        error ??= message
+      }
+      // Held per chunk: one graph rebuild for every NOTE_CHUNK new stars, not one each.
+      for (let i = 0; i < paths.length; i += NOTE_CHUNK) {
+        await batched(async () => {
+          for (const p of paths.slice(i, i + NOTE_CHUNK)) {
+            if (await get().makeProject(p, { quiet: true, onError })) made++
+          }
+        })
+      }
+      const stars = `${made} ${made === 1 ? 'folder is a star' : 'folders are stars'} now`
+      if (failed) get().toast(`★ ${stars}; ${failed} could not be: ${error}`, made ? 'info' : 'error')
+      else get().toast(`★ ${stars}`, 'success', { label: 'Projects board', run: () => get().setView('projects') })
+      return { made, failed, error }
     },
 
     async hideFolder(path) {

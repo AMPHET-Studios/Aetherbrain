@@ -214,6 +214,38 @@ export interface FolderListDto {
   truncated: boolean
 }
 
+/** A folder Find projects thinks is one of the user's projects (it can become a star). */
+export interface ProjectCandidateDto {
+  /** Vault path of the folder. */
+  path: string
+  /** Its name. */
+  name: string
+  /** What it is, for people: `Unreal project`, `git repository`, `Blender files` … */
+  kind: string
+  /** A project for sure (an engine or code project, a git repository); creative files alone are a guess. */
+  strong: boolean
+  /** Creative files directly in it (0 for the sure kinds). */
+  files: number
+}
+
+/** What a Find projects run found. Nothing is written by finding. */
+export interface ProjectScanDto {
+  /** Shallowest first. */
+  candidates: ProjectCandidateDto[]
+  /** Folders looked into. */
+  looked: number
+  /** Not every folder was looked into (the scan or the finder stopped at its cap). */
+  truncated: boolean
+  /** A stop, a newer run or another vault ended this run early: `candidates` is partial. */
+  cancelled: boolean
+}
+
+/** Find projects progress: folders looked into of the total. */
+export interface ProjectScanProgressDto {
+  done: number
+  total: number
+}
+
 /** The in-app MCP server that lets Claude and ChatGPT talk to the vault. */
 export interface AiLinkStatus {
   /** User switched the HTTP link on (persisted). */
@@ -285,6 +317,11 @@ export interface AetherBridge {
   setFolderRules(rules: { hidden?: string[]; keep?: string[] }): Promise<VaultInfo>
   /** Installed games and programs left out so far. */
   skippedInstalls(): Promise<SkippedInstallDto[]>
+  /** Find the vault's project folders (progress through onFindProgress); nothing is written. A newer run stops the older one. */
+  findProjects(): Promise<ProjectScanDto>
+  /** Stop a findProjects run (it resolves with what it found so far). */
+  findProjectsStop(): Promise<void>
+  onFindProgress(cb: (p: ProjectScanProgressDto) => void): () => void
 
   /** The brain's chat: its settings and whether it can chat now. */
   chatStatus(): Promise<ChatStatusDto>
@@ -393,6 +430,10 @@ export const IPC = {
   unhideFolder: 'vault:unhideFolder',
   setFolderRules: 'vault:setFolderRules',
   skippedInstalls: 'vault:skippedInstalls',
+  findProjects: 'vault:findProjects',
+  findProjectsStop: 'vault:findProjectsStop',
+  /** main → brain window: a ProjectScanProgressDto. */
+  findProgress: 'vault:findProgress',
   chatStatus: 'chat:status',
   chatConfigure: 'chat:configure',
   chatSend: 'chat:send',

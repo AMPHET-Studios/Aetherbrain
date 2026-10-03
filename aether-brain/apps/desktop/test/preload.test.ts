@@ -86,6 +86,20 @@ describe('preload: pictures', () => {
   })
 })
 
+describe('preload: Find projects', () => {
+  it('invokes the find channels and relays progress until unsubscribed', async () => {
+    await bridge.findProjects()
+    await bridge.findProjectsStop()
+    expect(electron.invoke.mock.calls).toEqual([[IPC.findProjects], [IPC.findProjectsStop]])
+    const seen: unknown[] = []
+    const off = bridge.onFindProgress((p) => seen.push(p))
+    for (const fn of electron.listeners.get(IPC.findProgress) ?? []) fn({}, { done: 200, total: 900 })
+    off()
+    for (const fn of electron.listeners.get(IPC.findProgress) ?? []) fn({}, { done: 400, total: 900 })
+    expect(seen).toEqual([{ done: 200, total: 900 }])
+  })
+})
+
 describe('preload: Forge requests', () => {
   it('answers a request with what the handler resolves to', async () => {
     const off = bridge.onForgeRequest(async (req) => (req.kind === 'projects' ? [{ id: 'Projects/PORTALz' }] : null))

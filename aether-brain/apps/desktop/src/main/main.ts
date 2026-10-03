@@ -20,6 +20,7 @@ import {
   IPC,
   type AssetListDto,
   type FolderListDto,
+  type ProjectScanDto,
   type SkippedInstallDto,
   type VaultChangeDto,
   type VaultFileDto,
@@ -29,6 +30,7 @@ import {
 import type { ChatPatch } from '../shared/chat.js'
 import { FsVault, isVideoName, within } from './fsvault.js'
 import { VaultWatcher } from './watcher.js'
+import { findProjects } from './projects.js'
 import {
   MAX_THUMB_FILE_BYTES,
   ThumbCache,
@@ -670,6 +672,24 @@ async function setFolderRules(rules: { hidden?: unknown; keep?: unknown }): Prom
 }
 
 /** Install folders the scans and the watcher left out so far, as absolute paths. */
+/** The Find projects run going on (a newer run, a stop or another vault ends it). */
+let findRun = 0
+
+/** The vault's project folders among the folders of its last scan (one listing each; nothing written). */
+async function findProjectFolders(): Promise<ProjectScanDto> {
+  const v = requireVault()
+  const run = ++findRun
+  const scan = v.lastScan
+  const ended = () => run !== findRun || vault !== v
+  const res = await findProjects(v, scan ? [...scan.folders] : [], {
+    cancelled: ended,
+    onProgress: (done, total) => {
+      if (!ended()) toRenderer(IPC.findProgress, { done, total })
+    },
+  })
+  return { ...res, truncated: res.truncated || (scan?.truncated ?? false), cancelled: ended() }
+}
+
 function skippedInstalls(): SkippedInstallDto[] {
   const v = vault
   if (!v) return []
@@ -929,6 +949,8 @@ function registerIpc(): void {
     setFolderRules(rules && typeof rules === 'object' ? (rules as { hidden?: unknown; keep?: unknown }) : {}),
   )
   ipcMain.handle(IPC.skippedInstalls, () => skippedInstalls())
+  ipcMain.handle(IPC.findProjects, () => findProjectFolders())
+  ipcMain.handle(IPC.findProjectsStop, () => void findRun++)
   ipcMain.handle(IPC.drives, () => listDrives())
   ipcMain.handle(IPC.list, () => listFiles())
   ipcMain.handle(IPC.folders, (): FolderListDto => {

@@ -1,7 +1,7 @@
 {
   "name": "@aether/desktop",
   "productName": "Aether Brain",
-  "version": "0.8.1",
+  "version": "0.8.2",
   "private": true,
   "description": "Aether Brain desktop shell (Electron): pick a vault folder, watch it, render the 3D brain.",
   "author": "Aether Brain contributors",
