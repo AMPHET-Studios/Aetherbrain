@@ -8,8 +8,8 @@ import { folderKey, idFromPath } from '@aether/core'
 import { useAether } from '@aether/ui'
 import type { AiActivityDto } from '../shared/ipc'
 
-/** roots: vault folders · drives: pick whole drives to mirror · ai: the AI link · library: the librarian. */
-export type PanelId = 'roots' | 'drives' | 'ai' | 'library'
+/** roots: vault folders · drives: pick whole drives to mirror · ai: the AI link · library: the librarian · find: Find projects. */
+export type PanelId = 'roots' | 'drives' | 'ai' | 'library' | 'find'
 
 let current: PanelId | null = null
 const panelSubs = new Set<() => void>()

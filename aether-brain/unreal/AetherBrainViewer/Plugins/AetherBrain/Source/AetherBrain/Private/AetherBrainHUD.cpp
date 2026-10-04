@@ -1,6 +1,7 @@
 #include "AetherBrainHUD.h"
 
 #include "AetherBrainActor.h"
+#include "AetherSpaceActor.h"
 #include "AetherBrainPlayerController.h"
 #include "Engine/Canvas.h"
 
@@ -41,6 +42,15 @@ void AAetherBrainHUD::DrawHUD()
 		DrawText(TEXT("Glow material missing: open the project in the Unreal Editor once (Python plugin on) to make it."), FLinearColor(1.f, 0.45f, 0.5f), 24.f, 64.f);
 	}
 
+	if (const AAetherSpaceActor* Space = Pc->GetSpace())
+	{
+		DrawText(FString::Printf(TEXT("Space: %s  (B)"), Space->GetModeName()), Dim, Canvas->ClipX - 230.f, 20.f);
+		if (Space->IsSpriteMaterialMissing())
+		{
+			DrawText(TEXT("Sky material missing: open the project in the Unreal Editor once (Python plugin on)."), FLinearColor(1.f, 0.45f, 0.5f), 24.f, 84.f);
+		}
+	}
+
 	if (const FAetherNode* Node = Brain->GetNode(Pc->GetHovered()))
 	{
 		float X = 0.f;
@@ -53,6 +63,6 @@ void AAetherBrainHUD::DrawHUD()
 		DrawText(FString::Printf(TEXT("Selected: %s (%s)  -  Enter opens it in Aether Brain  -  F flies to it"), *Node->Title, KindName(Node->Kind)), Ink, 24.f, Canvas->ClipY - 64.f);
 	}
 	DrawText(
-		FString::Printf(TEXT("Right mouse: look  -  WASD: fly  -  Q / E: down / up  -  Shift: faster  -  wheel: speed (%.0f m/s)  -  click: select  -  double-click: open  -  H: everything  -  Tab: next star"), Pc->GetSpeed() / 100.f),
+		FString::Printf(TEXT("Right mouse: look  -  WASD: fly  -  Q / E: down / up  -  Shift: faster  -  wheel: speed (%.0f m/s)  -  click: select  -  double-click: open  -  H: everything  -  Tab: next star  -  B: space"), Pc->GetSpeed() / 100.f),
 		Dim, 24.f, Canvas->ClipY - 40.f);
 }

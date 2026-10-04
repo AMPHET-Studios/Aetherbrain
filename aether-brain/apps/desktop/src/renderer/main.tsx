@@ -8,6 +8,7 @@ import { RootsPanel } from './components/RootsPanel'
 import { AiLinkPanel } from './components/AiLinkPanel'
 import { ChatPanel, registerChat } from './components/ChatPanel'
 import { LibraryPanel, registerLibrary } from './components/LibraryPanel'
+import { FindProjectsPanel, registerFindProjects } from './components/FindProjectsPanel'
 import { activityFailed, clientLabel, errorText, flyToPath, openPanel, pushActivity, samePath, togglePanel, usePanel } from './panels'
 import { useForgeScreen } from './forge'
 import './companion'
@@ -107,6 +108,7 @@ function Desktop() {
       {(panel === 'roots' || panel === 'drives') && <RootsPanel mode={panel} />}
       {panel === 'ai' && <AiLinkPanel />}
       {panel === 'library' && <LibraryPanel />}
+      {panel === 'find' && <FindProjectsPanel />}
       <ChatPanel />
       <ForgeScreenHint />
     </>
@@ -127,6 +129,7 @@ async function boot() {
   registerDesktopKeys()
   registerChat()
   registerLibrary()
+  registerFindProjects()
   const root = createRoot(document.getElementById('root')!)
   root.render(
     <StrictMode>

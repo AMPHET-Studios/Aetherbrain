@@ -1,6 +1,7 @@
 // Flying through the brain: hold the right mouse button to look, WASD to fly (Q / E down / up, Shift faster,
 // the wheel sets the speed), click a node to select it (the desktop app flies there too), double-click or
-// Enter to open it in the desktop app, F to fly to the selection, H to see everything, Tab for the next star.
+// Enter to open it in the desktop app, F to fly to the selection, H to see everything, Tab for the next star,
+// B to cycle the space around the brain (full, calm, off).
 #pragma once
 
 #include "CoreMinimal.h"
@@ -8,6 +9,7 @@
 #include "AetherBrainPlayerController.generated.h"
 
 class AAetherBrainActor;
+class AAetherSpaceActor;
 
 UCLASS()
 class AETHERBRAIN_API AAetherBrainPlayerController : public APlayerController
@@ -26,6 +28,7 @@ public:
 	float LookSensitivity = 0.15f;
 
 	AAetherBrainActor* GetBrain() const { return Brain.Get(); }
+	AAetherSpaceActor* GetSpace() const { return Space.Get(); }
 	int32 GetHovered() const { return Hovered; }
 	float GetSpeed() const;
 
@@ -46,6 +49,7 @@ private:
 	void Keys();
 
 	TWeakObjectPtr<AAetherBrainActor> Brain;
+	TWeakObjectPtr<AAetherSpaceActor> Space;
 	FVector CamLocation = FVector(-3000.0, 0.0, 600.0);
 	FRotator CamRotation = FRotator(-10.0, 0.0, 0.0);
 	int32 SpeedStep = 0;

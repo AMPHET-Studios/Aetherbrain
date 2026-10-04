@@ -15,6 +15,10 @@ public:
 
 	virtual void StartPlay() override;
 
+	/** Fill the level with space (stars, nebulae, galaxies, asteroids, ships) unless it already has one. */
+	UPROPERTY(EditAnywhere, Category = "Aether Brain")
+	bool bSpawnSpace = true;
+
 	/** Bloom strength of the stage's post process. */
 	UPROPERTY(EditAnywhere, Category = "Aether Brain")
 	float BloomIntensity = 1.4f;
