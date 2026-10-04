@@ -4,6 +4,7 @@
 #include "AetherBrainHUD.h"
 #include "AetherBrainPawn.h"
 #include "AetherBrainPlayerController.h"
+#include "AetherSpaceActor.h"
 #include "Engine/PostProcessVolume.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
@@ -34,6 +35,21 @@ void AAetherBrainGameMode::StartPlay()
 	if (!bHasBrain)
 	{
 		World->SpawnActor<AAetherBrainActor>(FVector::ZeroVector, FRotator::ZeroRotator);
+	}
+
+	// The space around it: the sky, asteroids, ships (after the brain, which it looks for).
+	if (bSpawnSpace)
+	{
+		bool bHasSpace = false;
+		for (TActorIterator<AAetherSpaceActor> It(World); It; ++It)
+		{
+			bHasSpace = true;
+			break;
+		}
+		if (!bHasSpace)
+		{
+			World->SpawnActor<AAetherSpaceActor>(FVector::ZeroVector, FRotator::ZeroRotator);
+		}
 	}
 
 	// The stage: no sky, no sun, fixed exposure (glows stay as bright as the brain draws them), bloom.

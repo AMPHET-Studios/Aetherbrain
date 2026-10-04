@@ -1,6 +1,7 @@
 #include "AetherBrainPlayerController.h"
 
 #include "AetherBrainActor.h"
+#include "AetherSpaceActor.h"
 #include "EngineUtils.h"
 #include "Engine/World.h"
 #include "GameFramework/Pawn.h"
@@ -51,6 +52,21 @@ void AAetherBrainPlayerController::PlayerTick(float DeltaTime)
 		{
 			Brain = *It;
 			break;
+		}
+	}
+	if (!Space.IsValid() && GetWorld())
+	{
+		for (TActorIterator<AAetherSpaceActor> It(GetWorld()); It; ++It)
+		{
+			Space = *It;
+			break;
+		}
+	}
+	if (AAetherSpaceActor* Sky = Space.Get())
+	{
+		if (WasInputKeyJustPressed(EKeys::B))
+		{
+			Sky->CycleMode();
 		}
 	}
 	AAetherBrainActor* B = Brain.Get();

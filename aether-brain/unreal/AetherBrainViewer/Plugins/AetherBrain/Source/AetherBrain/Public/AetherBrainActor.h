@@ -84,6 +84,9 @@ public:
 	/** The first positions came in since the last call (frame the brain). */
 	bool ConsumeFirstPositions();
 
+	/** The plain stars the brain draws by itself (the space actor draws a richer sky and turns these off). */
+	void SetBuiltInStars(bool bOn);
+
 	const FString& GetStatus() const { return Status; }
 	bool IsLive() const { return bLive; }
 	const FString& GetVaultName() const { return Graph.Vault; }

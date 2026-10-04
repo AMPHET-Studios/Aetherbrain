@@ -17,3 +17,5 @@ playwright-report/
 .aether-user-settings.json
 release/
 .vitest/
+# Pictures made by unreal/tests/preview.sh when no folder is given.
+unreal/tests/preview/

@@ -412,6 +412,11 @@ void AAetherBrainActor::BuildStarfield()
 	Starfield->MarkRenderStateDirty();
 }
 
+void AAetherBrainActor::SetBuiltInStars(bool bOn)
+{
+	Starfield->SetVisibility(bOn);
+}
+
 float AAetherBrainActor::NodeRadius(int32 Index) const
 {
 	const FAetherNode* N = GetNode(Index);
