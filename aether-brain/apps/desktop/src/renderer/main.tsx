@@ -1,6 +1,6 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
-import { AetherApp, createDemoVault, registerCommands, registerHelpRows, registerKey, useAether, type VaultSource } from '@aether/ui'
+import { AetherApp, ErrorBoundary, createDemoVault, registerCommands, registerHelpRows, registerKey, useAether, type VaultSource } from '@aether/ui'
 import '@aether/ui/styles.css'
 import type { AiActivityDto } from '../shared/ipc'
 import { ElectronVaultAdapter } from './vault/electron'
@@ -105,11 +105,17 @@ function Desktop() {
   return (
     <>
       <AetherApp sources={sources} onPickVault={onPickVault} />
-      {(panel === 'roots' || panel === 'drives') && <RootsPanel mode={panel} />}
-      {panel === 'ai' && <AiLinkPanel />}
-      {panel === 'library' && <LibraryPanel />}
-      {panel === 'find' && <FindProjectsPanel />}
-      <ChatPanel />
+      {panel && (
+        <ErrorBoundary what="this panel" onClose={() => openPanel(null)}>
+          {(panel === 'roots' || panel === 'drives') && <RootsPanel mode={panel} />}
+          {panel === 'ai' && <AiLinkPanel />}
+          {panel === 'library' && <LibraryPanel />}
+          {panel === 'find' && <FindProjectsPanel />}
+        </ErrorBoundary>
+      )}
+      <ErrorBoundary what="the chat" quiet>
+        <ChatPanel />
+      </ErrorBoundary>
       <ForgeScreenHint />
     </>
   )
