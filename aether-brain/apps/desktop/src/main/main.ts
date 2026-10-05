@@ -31,6 +31,7 @@ import type { ChatPatch } from '../shared/chat.js'
 import { FsVault, isVideoName, within } from './fsvault.js'
 import { VaultWatcher } from './watcher.js'
 import { findProjects } from './projects.js'
+import { crashMessage, shouldReload } from './crash.js'
 import {
   MAX_THUMB_FILE_BYTES,
   ThumbCache,
@@ -1034,6 +1035,18 @@ function createWindow(): void {
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:/.test(url)) void shell.openExternal(url)
     return { action: 'deny' }
+  })
+  // A page that died leaves a dark empty window: say why, and open it again (unless it keeps dying).
+  const crashes: number[] = []
+  win.webContents.on('render-process-gone', (_e, details) => {
+    if (details.reason === 'clean-exit') return
+    const now = Date.now()
+    crashes.push(now)
+    const reload = shouldReload(crashes, now)
+    if (reload) win?.webContents.reload()
+    const text = crashMessage(details.reason, reload)
+    const box = { type: 'error' as const, title: 'Aether Brain', message: text.message, detail: text.detail }
+    void (win ? dialog.showMessageBox(win, box) : dialog.showMessageBox(box))
   })
   // The renderer never needs to navigate away from the app.
   win.webContents.on('will-navigate', (e, url) => {

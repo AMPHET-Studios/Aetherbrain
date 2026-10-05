@@ -16,6 +16,7 @@ Every feature has a key. `⌘` is `Ctrl` on Windows/Linux. Single keys are ignor
 | `u`            | The newest toast's action: *Undo* (a ticked brief task, a deleted task) or *Show* (pictures just imported, a Concept Forge critique) |
 | `?`            | Keyboard cheatsheet                               |
 | `Esc`          | Close overlay → close editor → clear filters → deselect (first thing that applies) |
+| `Esc` on a crash notice | Close the part of the app that crashed (the same as its Close button) |
 | `Alt ←` / `Alt →` | History back / forward                         |
 
 ## Graph

@@ -125,7 +125,17 @@ export function ProjectsView() {
 
   const rows = useMemo(() => listProjects(notes, folders), [notes, folders, revision])
 
-  const current = rows.find((r) => r.note.meta.id === projectId) ?? rows[0] ?? null
+  /**
+   * Where a task's [[link]] leads. One index of every note for the whole board, built the first time a task
+   * has a link and again only when the notes change. (A task row used to build its own: a long to-do list
+   * in a big vault froze the window and filled the memory.)
+   */
+  const resolveLink = useMemo(() => {
+    let index: LinkResolver | null = null
+    return (target: string): NoteId | null => (index ??= new LinkResolver(notes.values())).resolve(target)
+  }, [notes, revision])
+
+  const current =rows.find((r) => r.note.meta.id === projectId) ?? rows[0] ?? null
   const currentId = current?.note.meta.id ?? null
   const keys = useMemo(() => (current ? taskKeys(current.note.raw, current.tasks) : new Map<number, string>()), [current])
 
@@ -504,6 +514,7 @@ export function ProjectsView() {
                   tasks={current.open}
                   row={current}
                   keys={keys}
+                  resolveLink={resolveLink}
                   readOnly={readOnly}
                   editing={editing}
                   setEditing={setEditing}
@@ -521,6 +532,7 @@ export function ProjectsView() {
                     tasks={current.done}
                     row={current}
                     keys={keys}
+                    resolveLink={resolveLink}
                     readOnly={readOnly}
                     editing={editing}
                     setEditing={setEditing}
@@ -910,6 +922,7 @@ function TaskList({
   tasks,
   row,
   keys,
+  resolveLink,
   readOnly,
   editing,
   setEditing,
@@ -923,6 +936,7 @@ function TaskList({
   row: ProjectRow
   /** Row keys by task line (see `taskKeys`). */
   keys: Map<number, string>
+  resolveLink: (target: string) => NoteId | null
   readOnly: boolean
   editing: TaskEdit | null
   setEditing: (edit: TaskEdit | null) => void
@@ -949,6 +963,7 @@ function TaskList({
           <TaskRow
             key={key}
             task={t}
+            resolveLink={resolveLink}
             readOnly={readOnly}
             editing={editing?.key === key}
             onStartEdit={() => setEditing({ note: row.note.meta.id, key, line: t.line, raw: row.note.raw, text: t.text })}
@@ -987,6 +1002,7 @@ function TaskList({
 
 function TaskRow({
   task,
+  resolveLink,
   readOnly,
   editing,
   onStartEdit,
@@ -997,6 +1013,7 @@ function TaskRow({
   onMove,
 }: {
   task: TaskItem
+  resolveLink: (target: string) => NoteId | null
   readOnly: boolean
   editing: boolean
   onStartEdit: () => void
@@ -1054,7 +1071,7 @@ function TaskRow({
         </span>
       ) : (
         <span className="min-w-0 flex-1">
-          <TaskText text={task.text} done={task.done} />
+          <TaskText text={task.text} done={task.done} resolveLink={resolveLink} />
         </span>
       )}
       {task.section && task.section.toLowerCase() !== 'to do' && <span className="shrink-0 text-[10px] text-faint">{task.section}</span>}
@@ -1102,13 +1119,10 @@ function RowButton({ label, onClick, danger, children }: { label: string; onClic
 const INLINE_RE = /(!?\[\[[^\]]+?\]\])|((?:^|(?<=\s))#[\p{L}\p{N}_][\p{L}\p{N}_\-/]*)/gu
 
 /** Task text with clickable [[wikilinks]] and #tags; everything else verbatim. */
-function TaskText({ text, done }: { text: string; done: boolean }) {
-  const notes = useAether((s) => s.notes)
-  const revision = useAether((s) => s.revision)
+function TaskText({ text, done, resolveLink }: { text: string; done: boolean; resolveLink: (target: string) => NoteId | null }) {
   const openNote = useAether((s) => s.openNote)
   const createGhost = useAether((s) => s.createGhost)
   const toggleTag = useAether((s) => s.toggleTag)
-  const resolver = useMemo(() => new LinkResolver(notes.values()), [notes, revision])
   const parts = useMemo(() => {
     const out: React.ReactNode[] = []
     let last = 0
@@ -1128,7 +1142,7 @@ function TaskText({ text, done }: { text: string; done: boolean }) {
         const inner = tok.replace(/^!?\[\[|\]\]$/g, '')
         const [left = '', alias] = inner.split('|')
         const target = (left.split('#')[0] ?? '').trim()
-        const id = resolver.resolve(target)
+        const id = resolveLink(target)
         out.push(
           <a
             key={k++}
@@ -1150,7 +1164,7 @@ function TaskText({ text, done }: { text: string; done: boolean }) {
     }
     if (last < text.length) out.push(text.slice(last))
     return out
-  }, [text, resolver, openNote, createGhost, toggleTag])
+  }, [text, resolveLink, openNote, createGhost, toggleTag])
   return <span className={cx('md !max-w-none !p-0 text-[13.5px] leading-snug', done ? 'text-faint line-through' : 'text-ink')}>{parts}</span>
 }
 

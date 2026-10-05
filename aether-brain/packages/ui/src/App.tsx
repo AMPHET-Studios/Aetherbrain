@@ -12,11 +12,15 @@ import { Capture } from './components/Capture'
 import { Review } from './components/Review'
 import { ProjectsView } from './components/ProjectsView'
 import { Help } from './components/Help'
+import { ErrorBoundary } from './components/ErrorBoundary'
 import { Toasts } from './components/Toasts'
 import { Welcome, type VaultSource } from './components/Welcome'
 import { importChatFiles, isChatExportFile, isChatExportType } from './components/chats'
 import { importPictureFiles } from './components/pictures'
 import { cx } from './util'
+
+/** Back to the plain graph: what closing a crashed board or editor does. */
+const toGraph = () => useAether.getState().setView('graph')
 
 /** How often the Today brief checks whether the day turned (a brief left open overnight). */
 const BRIEF_REFRESH_MS = 60_000
@@ -93,7 +97,14 @@ export function AetherApp({ sources, onPickVault, autoOpen }: AetherAppProps) {
   }, [setFps])
 
   const showEditor = view === 'editor' && !!editorId
-  const scene = useMemo(() => <BrainScene controller={controller} />, [controller])
+  const scene = useMemo(
+    () => (
+      <ErrorBoundary what="the 3D view">
+        <BrainScene controller={controller} />
+      </ErrorBoundary>
+    ),
+    [controller],
+  )
 
   // Push the camera's focal point right while the editor covers the left half,
   // so the selected neuron and its neighborhood stay visible beside the text.
@@ -108,7 +119,9 @@ export function AetherApp({ sources, onPickVault, autoOpen }: AetherAppProps) {
       {/* HUD */}
       <div className="pointer-events-none absolute inset-0 flex flex-col p-3">
         <div className="pointer-events-auto">
-          <TopBar onPickVault={onPickVault} />
+          <ErrorBoundary what="the top bar">
+            <TopBar onPickVault={onPickVault} />
+          </ErrorBoundary>
         </div>
         <div className="flex min-h-0 flex-1 items-stretch gap-3 pt-3">
           {/* Left: editor panel */}
@@ -119,30 +132,56 @@ export function AetherApp({ sources, onPickVault, autoOpen }: AetherAppProps) {
             )}
             aria-hidden={!showEditor}
           >
-            {showEditor && <Editor />}
+            {showEditor && (
+              <ErrorBoundary what="the editor" onClose={toGraph}>
+                <Editor />
+              </ErrorBoundary>
+            )}
           </div>
           <div className="min-w-0 flex-1" />
           {/* Right: inspector */}
           {status === 'ready' && selectedId && view !== 'projects' && (
             <div className="pointer-events-auto flex max-h-full items-start">
-              <Inspector />
+              <ErrorBoundary what="the inspector" onClose={() => useAether.getState().select(null)}>
+                <Inspector />
+              </ErrorBoundary>
             </div>
           )}
         </div>
         <div className="pointer-events-auto mt-3 flex items-end justify-between gap-3">
-          {status === 'ready' ? <Legend /> : <span />}
-          <Hint />
+          <ErrorBoundary what="the legend" quiet>
+            {status === 'ready' ? <Legend /> : <span />}
+          </ErrorBoundary>
+          <ErrorBoundary what="the hint" quiet>
+            <Hint />
+          </ErrorBoundary>
         </div>
       </div>
 
-      <CommandPalette />
-      <Capture />
-      <Review />
-      <ProjectsView />
-      <Help />
-      <Toasts />
-      <Welcome sources={sources} />
-      <DropZone />
+      <ErrorBoundary what="the search" onClose={() => useAether.getState().setPalette(false)}>
+        <CommandPalette />
+      </ErrorBoundary>
+      <ErrorBoundary what="quick capture" onClose={toGraph}>
+        <Capture />
+      </ErrorBoundary>
+      <ErrorBoundary what="the review" onClose={toGraph}>
+        <Review />
+      </ErrorBoundary>
+      <ErrorBoundary what="the Projects board" onClose={toGraph}>
+        <ProjectsView />
+      </ErrorBoundary>
+      <ErrorBoundary what="the shortcuts list" onClose={() => useAether.getState().setHelp(false)}>
+        <Help />
+      </ErrorBoundary>
+      <ErrorBoundary what="the messages" quiet>
+        <Toasts />
+      </ErrorBoundary>
+      <ErrorBoundary what="the welcome screen">
+        <Welcome sources={sources} />
+      </ErrorBoundary>
+      <ErrorBoundary what="the drop zone" quiet>
+        <DropZone />
+      </ErrorBoundary>
     </div>
   )
 }
