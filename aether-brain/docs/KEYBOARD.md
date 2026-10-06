@@ -136,6 +136,7 @@ Board keys work when no text field has focus.
 | `n`        | Focus the new-task box (`Enter` writes `- [ ] …` under `## To do`) |
 | `⇧ N`      | New project (creates `Projects/<name>.md` with a to-do section) |
 | `x`        | Show / hide the done list                                       |
+| `m`        | Draw one more page of the tasks (a long list is drawn 200 at a time; also the *Show more* button) |
 | `u`        | Undo (while the toast offers it, e.g. after deleting a task)    |
 | `Tab`      | Move through the board's controls and task rows                 |
 | `Esc`      | Back to the graph                                               |

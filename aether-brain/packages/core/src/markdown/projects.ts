@@ -348,15 +348,29 @@ function plainInline(text: string): string {
     .trim()
 }
 
+/** How much of a note is read for its summary, and of the summary itself (a note can be megabytes of one paragraph). */
+const SUMMARY_SCAN_CHARS = 200_000
+const SUMMARY_MAX_CHARS = 20_000
+
 /** Project summary as shown on cards: the blockquote right after the H1, else the first paragraph. */
 export function projectSummary(note: ParsedNote): string {
-  const lines = note.body.split(/\r?\n/)
+  const lines = (note.body.length > SUMMARY_SCAN_CHARS ? note.body.slice(0, SUMMARY_SCAN_CHARS) : note.body).split(/\r?\n/)
   const h1 = findH1(lines)
   const { start, end } = summaryBlock(lines, h1)
-  if (end > start) return plainInline(lines.slice(start, end).map((l) => l.replace(QUOTE_RE, '')).join(' '))
+  if (end > start) {
+    const quote: string[] = []
+    let size = 0
+    for (let i = start; i < end && size < SUMMARY_MAX_CHARS; i++) {
+      const line = (lines[i] ?? '').replace(QUOTE_RE, '')
+      quote.push(line)
+      size += line.length + 1
+    }
+    return plainInline(quote.join(' ').slice(0, SUMMARY_MAX_CHARS))
+  }
   let inFence = false
   const para: string[] = []
-  for (let i = h1 + 1; i < lines.length; i++) {
+  let paraSize = 0
+  for (let i = h1 + 1; i < lines.length && paraSize < SUMMARY_MAX_CHARS; i++) {
     const l = lines[i] ?? ''
     if (FENCE_RE.test(l)) {
       if (para.length) break
@@ -370,8 +384,9 @@ export function projectSummary(note: ParsedNote): string {
       continue
     }
     para.push(l)
+    paraSize += l.length + 1
   }
-  return plainInline(para.join(' '))
+  return plainInline(para.join(' ').slice(0, SUMMARY_MAX_CHARS))
 }
 
 /**
