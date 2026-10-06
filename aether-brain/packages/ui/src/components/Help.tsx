@@ -87,6 +87,7 @@ const GROUPS: HelpGroup[] = [
       ['Del · u', 'Delete the focused task · undo'],
       ['⇧N', 'New project note'],
       ['x', 'Show / hide done list'],
+      ['m', 'Draw one more page of tasks (200 at a time)'],
     ],
   },
   {

@@ -78,27 +78,28 @@ describe('ProjectCardList in Chromium', () => {
   beforeAll(async () => {
     const exe = findChromium()
     if (!exe) return
+    const { chromium } = await import('playwright-core')
     try {
-      const { chromium } = await import('playwright-core')
       browser = await chromium.launch({ executablePath: exe })
-      const { build } = await import('vite')
-      dir = mkdtempSync(path.join(here, '..', '.cards-'))
-      const entry = path.join(dir, 'entry.tsx')
-      writeFileSync(entry, ENTRY)
-      const out = await build({
-        configFile: false,
-        logLevel: 'silent',
-        root: path.join(here, '..'),
-        define: { 'process.env.NODE_ENV': '"development"' },
-        build: { write: false, minify: false, lib: { entry, formats: ['iife'], name: 'Cards', fileName: 'c' } },
-      })
-      const bundle = Array.isArray(out) ? out[0] : out
-      const chunk = 'output' in bundle ? bundle.output.find((o) => o.type === 'chunk') : undefined
-      js = chunk && chunk.type === 'chunk' ? chunk.code : ''
     } catch (err) {
-      console.warn('project card list test skipped:', err)
-      browser = null
+      console.warn('project card list test skipped, Chromium does not start:', err)
+      return
     }
+    // A bundle that fails to build is a failure, not a skip: the test must not go quiet.
+    const { build } = await import('vite')
+    dir = mkdtempSync(path.join(here, '..', '.cards-'))
+    const entry = path.join(dir, 'entry.tsx')
+    writeFileSync(entry, ENTRY)
+    const out = await build({
+      configFile: false,
+      logLevel: 'silent',
+      root: path.join(here, '..'),
+      define: { 'process.env.NODE_ENV': '"development"' },
+      build: { write: false, minify: false, lib: { entry, formats: ['iife'], name: 'Cards', fileName: 'c' } },
+    })
+    const bundle = Array.isArray(out) ? out[0] : out
+    const chunk = 'output' in bundle ? bundle.output.find((o) => o.type === 'chunk') : undefined
+    js = chunk && chunk.type === 'chunk' ? chunk.code : ''
   }, 120_000)
 
   afterAll(async () => {

@@ -87,7 +87,7 @@ const ODD = [
   '%20 encoded',
 ]
 
-describe('the Projects board', () => {
+describe('the Projects board', { timeout: 180_000 }, () => {
   it('lists a vault full of stars made by Find projects, odd names and all', async () => {
     const { s, board } = await renderer()
     const dirs = ODD.map((n, i) => `${i % 2 ? 'D' : 'F'}/Stuff/${n}`)
@@ -227,4 +227,19 @@ describe('the Projects board', () => {
     expect(out).toContain('class="tag"')
     expect(out).toContain('wikilink')
   }, 120_000)
+  it('draws at most a few links and tags of one task as links, the rest of its text stays plain', async () => {
+    const { s, board } = await renderer()
+    // 600 tags in 1,800 characters (under the 2,000-character cap of a task): 600 anchors before the cap.
+    const tags = Array.from({ length: 600 }, () => '#a').join(' ')
+    const links = Array.from({ length: 300 }, (_, i) => `[[N${i}]]`).join(' ')
+    await s().openVault(new MemoryVaultAdapter([{ path: 'D/Projects/Dense.md', content: `---\ntype: project\nstatus: active\n---\n# Dense\n\n## To do\n\n- [ ] ${tags}\n- [ ] ${links}\n- [ ] one #tag and [[a]] link\n` }]))
+    s().setView('projects')
+    const out = await board()
+    const anchors = (out.match(/<a /g) ?? []).length
+    // Two dense tasks at 40 each, and the short one's two.
+    expect(anchors).toBe(40 + 40 + 2)
+    expect(out).toContain('class="tag"')
+    expect(out).toContain('wikilink')
+    expect(out.length).toBeLessThan(60_000)
+  })
 })

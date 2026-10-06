@@ -8,7 +8,7 @@ import { DEFAULT_VIEWPORT_PX, rowWindow, scrollToReveal } from '../windowing'
 export const CARD_HEIGHT = 108
 export const CARD_GAP = 6
 const CARD_ROW = CARD_HEIGHT + CARD_GAP
-/** The list's own padding (p-2), px: the first card starts this far down. */
+/** The list's own padding, px (set inline: Tailwind's p-2 is 7 px under the app's 14 px root font): the first card starts this far down. */
 const LIST_PAD = 8
 
 /** Longest text a card draws for a title, the next task, a tag or a status. */
@@ -61,7 +61,7 @@ const ProjectCard = memo(function ProjectCard({ row: r, active, subfolders, onSe
           <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-white/10">
             <div className="h-full rounded-full bg-gradient-to-r from-accent to-accent2" style={{ width: `${r.pct}%` }} />
           </div>
-          <span className="w-16 text-right text-[10.5px] tabular-nums text-dim">
+          <span className="min-w-16 shrink-0 whitespace-nowrap text-right text-[10.5px] tabular-nums text-dim">
             {r.done.length}/{r.tasks.length} · {r.pct}%
           </span>
         </div>
@@ -147,7 +147,7 @@ export function ProjectCardList({
 
   const win = rowWindow(rows.length, CARD_ROW, Math.max(0, pane.top - LIST_PAD), pane.height)
   return (
-    <div ref={box} onScroll={onScroll} className="scroll flex-1 p-2" data-cards={rows.length}>
+    <div ref={box} onScroll={onScroll} className="scroll flex-1" style={{ padding: LIST_PAD }} data-cards={rows.length}>
       {rows.length === 0 && (
         <div className="p-4 text-center text-[12.5px] text-dim">
           No projects yet. A project is a note directly in <code>Projects/</code>, a folder note like <code>Projects/X/X.md</code>, or any note with{' '}

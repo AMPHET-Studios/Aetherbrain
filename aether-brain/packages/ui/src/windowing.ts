@@ -52,8 +52,3 @@ export function scrollToReveal(index: number, rowHeight: number, scrollTop: numb
   if (bottom > scrollTop + view) return Math.min(top, Math.max(0, bottom - view))
   return scrollTop
 }
-
-/** A list shown a page at a time: how many rows to draw now. */
-export function pageLimit(total: number, shown: number): number {
-  return Math.max(0, Math.min(total, shown))
-}

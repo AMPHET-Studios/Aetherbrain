@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { DEFAULT_VIEWPORT_PX, OVERSCAN_ROWS, pageLimit, rowWindow, scrollToReveal } from '../src/windowing'
+import { DEFAULT_VIEWPORT_PX, OVERSCAN_ROWS, rowWindow, scrollToReveal } from '../src/windowing'
 
 describe('rowWindow', () => {
   it('draws the rows in view plus a margin, and stands in for the rest with spacers that keep the scroll height', () => {
@@ -60,14 +60,5 @@ describe('scrollToReveal', () => {
   it('never scrolls to a negative position', () => {
     expect(scrollToReveal(-3, 100, 0, 500)).toBe(0)
     expect(scrollToReveal(0, 100, 0, 50)).toBe(0)
-  })
-})
-
-describe('pageLimit', () => {
-  it('draws the rows asked for but never more than there are', () => {
-    expect(pageLimit(1000, 150)).toBe(150)
-    expect(pageLimit(40, 150)).toBe(40)
-    expect(pageLimit(0, 150)).toBe(0)
-    expect(pageLimit(100, -4)).toBe(0)
   })
 })
