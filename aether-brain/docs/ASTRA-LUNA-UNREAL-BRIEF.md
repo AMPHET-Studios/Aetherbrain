@@ -1,6 +1,6 @@
 # Astra-Luna: build Aether Brain in Unreal Engine 5.8
 
-Two parts. Part A goes into Astra-Luna's standing instructions (the box that always applies). Part B is the build brief: paste it as your first message. Also upload these files from the repo (aether-brain/): docs/SPEC.md, docs/KEYBOARD.md, docs/UNREAL.md, CLAUDE.md, and the whole unreal/ folder. They are the source of truth for behaviour; Part B is the summary.
+Two parts. Part A goes into Astra-Luna's standing instructions (the box that always applies). Part B is the build brief: paste it as your first message. Also upload these files from the repo (aether-brain/): docs/SPEC.md, docs/KEYBOARD.md, docs/UNREAL.md, docs/UNREAL-NIAGARA.md, CLAUDE.md, and the whole unreal/ folder. They are the source of truth for behaviour; Part B is the summary.
 
 How to drive it after that: say "Milestone 0", test what it gives you, paste back any error word for word, and only say "next" when you have seen it work on your screen.
 
@@ -51,6 +51,7 @@ The person flies a camera through it, clicks things, edits notes and ticks tasks
 
 - The desktop app lives in aether-brain/ of the GitHub repo YEASTINFECTIONCHEESE/desktop-tutorial (private, so the person uploads the files). Its specs: docs/SPEC.md, docs/KEYBOARD.md, docs/UNREAL.md, CLAUDE.md.
 - An Unreal 5.8 project already exists: unreal/AetherBrainViewer, with a C++ plugin called AetherBrain. It draws the brain live from the desktop app over a loopback link, and it has a space world: AetherSpaceActor, with nine parallax layers of generated star, nebula and galaxy sprites, asteroid belts, rocks zooming through, shooting stars and alien ships. Everything that moves is a pure function of time (Private/AetherSpaceMath.h is plain C++, tested outside Unreal).
+- It also has a Niagara layer (v0.9.0): AetherFxActor plays five Niagara systems in /Game/AetherFX (pulses along links, coronas, ripples, dust, shooting stars) by setting their User parameters, planned by plain C++ in AetherFxMath.h. The five Niagara assets are binary and are NOT in the repo: they are built once in the editor from docs/UNREAL-NIAGARA.md (the parameter table there is the contract; the C++ is tested against it). A missing system is skipped, never an error.
 - Honest status: that project was written from memory of the Unreal API and checked only against a stand-in engine. It has never been compiled in a real 5.8 editor. Milestone 0 is to compile it and fix whatever breaks.
 - Two sources, one renderer. Build the renderer so it only needs a scene: nodes (id, kind, title, colour, radius, position), edges, labels. The scene can come from (A) the desktop app over the companion link, which exists, or (B) a native vault reader, which is the new work. Everything after the scene is shared.
 
@@ -75,7 +76,7 @@ The person flies a camera through it, clicks things, edits notes and ticks tasks
 
 ### 5. The look
 
-Dark cosmos, ancient high-tech sci-fi: deep navy-black, gold stars, cyan and violet accents, soft bloom, additive halos and a parallax space backdrop (reuse AetherSpaceActor, with B cycling Full, Calm and Off). The selection is bright with pulses; its neighbours stay lit and everything else dims. Labels are screen-space overlays that fade with distance. Colour modes (m): by area, by type, by tag, by age. Picture sizes (z): medium, large, extra large.
+Dark cosmos, ancient high-tech sci-fi: deep navy-black, gold stars, cyan and violet accents, soft bloom, additive halos and a parallax space backdrop (reuse AetherSpaceActor, with B cycling Full, Calm and Off), plus Niagara effects that follow the brain (reuse AetherFxActor; N switches them): light running along links, a breathing corona on each sun, a ripple on selection, dust and shooting stars. The selection is bright with pulses; its neighbours stay lit and everything else dims. Labels are screen-space overlays that fade with distance. Colour modes (m): by area, by type, by tag, by age. Picture sizes (z): medium, large, extra large.
 
 Star galleries: when the camera comes close to a project star, every picture under its folder floats around it as cards on a slowly turning sphere (at most 480), growing out in 0.9 s and folding back in 0.42 s.
 
@@ -117,6 +118,7 @@ Star galleries: when the camera comes close to a project star, every picture und
 - M2 Graph build and system layout with a dots-only debug view. Done when the same vault gives identical positions on two runs and the demo vault reads as solar systems.
 - M3 Real rendering: instanced moons, planets, stars and suns, halos, edges with pulses, labels, picking, fly-to, camera follow, bloom, colour modes. Done when 100,000 synthetic notes hold 60 fps.
 - M4 The space backdrop merged in (B cycles Full, Calm, Off).
+- M4b The Niagara layer: build the five systems in the editor from docs/UNREAL-NIAGARA.md (start with NS_AetherPulses), then drive them from the native scene the same way AetherFxActor does (a link index built once, a fixed pool of components, a numbered stream of events). Done when pulses run on links, a click makes a ripple and a halo, and N switches it all off.
 - M5 UI shell: top bar, legend, hint, inspector, command palette with search.
 - M6 Editor, capture and safe writes, plus a file watcher so outside edits appear live.
 - M7 Projects board and tasks (virtualised), the Today hub and brief, the Review queue.

@@ -326,6 +326,10 @@ void AAetherBrainActor::ApplyGraph(FAetherGraph&& NewGraph)
 
 	Graph = MoveTemp(NewGraph);
 	bHasGraph = true;
+	if (!bSameShape)
+	{
+		++ShapeSerial;
+	}
 	const int32 N = Graph.Nodes.Num();
 	Current.SetNum(N);
 	Target.SetNum(N);

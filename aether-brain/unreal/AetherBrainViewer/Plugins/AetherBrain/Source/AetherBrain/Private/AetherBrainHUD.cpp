@@ -1,6 +1,7 @@
 #include "AetherBrainHUD.h"
 
 #include "AetherBrainActor.h"
+#include "AetherFxActor.h"
 #include "AetherSpaceActor.h"
 #include "AetherBrainPlayerController.h"
 #include "Engine/Canvas.h"
@@ -51,6 +52,30 @@ void AAetherBrainHUD::DrawHUD()
 		}
 	}
 
+	if (const AAetherFxActor* Fx = Pc->GetFx())
+	{
+		const FString Line = Fx->IsOn()
+			? FString::Printf(TEXT("Effects: on - %d/%d systems, %d playing  (N)"), Fx->NumReady(), AAetherFxActor::NumSystems(), Fx->NumPlaying())
+			: FString(TEXT("Effects: off  (N)"));
+		DrawText(Line, Dim, Canvas->ClipX - 340.f, 44.f);
+		if (Fx->NumReady() < AAetherFxActor::NumSystems())
+		{
+			FString Missing;
+			for (int32 I = 0; I < AAetherFxActor::NumSystems(); ++I)
+			{
+				if (!Fx->IsReady(I))
+				{
+					if (!Missing.IsEmpty())
+					{
+						Missing += TEXT(", ");
+					}
+					Missing += AAetherFxActor::SystemName(I);
+				}
+			}
+			DrawText(FString::Printf(TEXT("Niagara systems missing (not played): %s - build them from docs/UNREAL-NIAGARA.md"), *Missing), FLinearColor(1.f, 0.45f, 0.5f), 24.f, 104.f);
+		}
+	}
+
 	if (const FAetherNode* Node = Brain->GetNode(Pc->GetHovered()))
 	{
 		float X = 0.f;
@@ -63,6 +88,6 @@ void AAetherBrainHUD::DrawHUD()
 		DrawText(FString::Printf(TEXT("Selected: %s (%s)  -  Enter opens it in Aether Brain  -  F flies to it"), *Node->Title, KindName(Node->Kind)), Ink, 24.f, Canvas->ClipY - 64.f);
 	}
 	DrawText(
-		FString::Printf(TEXT("Right mouse: look  -  WASD: fly  -  Q / E: down / up  -  Shift: faster  -  wheel: speed (%.0f m/s)  -  click: select  -  double-click: open  -  H: everything  -  Tab: next star  -  B: space"), Pc->GetSpeed() / 100.f),
+		FString::Printf(TEXT("Right mouse: look  -  WASD: fly  -  Q / E: down / up  -  Shift: faster  -  wheel: speed (%.0f m/s)  -  click: select  -  double-click: open  -  H: everything  -  Tab: next star  -  B: space  -  N: effects"), Pc->GetSpeed() / 100.f),
 		Dim, 24.f, Canvas->ClipY - 40.f);
 }

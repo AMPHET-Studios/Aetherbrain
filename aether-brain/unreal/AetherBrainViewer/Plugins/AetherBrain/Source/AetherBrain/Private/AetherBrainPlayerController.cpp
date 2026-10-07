@@ -1,6 +1,7 @@
 #include "AetherBrainPlayerController.h"
 
 #include "AetherBrainActor.h"
+#include "AetherFxActor.h"
 #include "AetherSpaceActor.h"
 #include "EngineUtils.h"
 #include "Engine/World.h"
@@ -62,11 +63,26 @@ void AAetherBrainPlayerController::PlayerTick(float DeltaTime)
 			break;
 		}
 	}
+	if (!Fx.IsValid() && GetWorld())
+	{
+		for (TActorIterator<AAetherFxActor> It(GetWorld()); It; ++It)
+		{
+			Fx = *It;
+			break;
+		}
+	}
 	if (AAetherSpaceActor* Sky = Space.Get())
 	{
 		if (WasInputKeyJustPressed(EKeys::B))
 		{
 			Sky->CycleMode();
+		}
+	}
+	if (AAetherFxActor* Effects = Fx.Get())
+	{
+		if (WasInputKeyJustPressed(EKeys::N))
+		{
+			Effects->Toggle();
 		}
 	}
 	AAetherBrainActor* B = Brain.Get();

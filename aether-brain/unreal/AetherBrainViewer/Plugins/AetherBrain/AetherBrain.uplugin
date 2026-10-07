@@ -1,13 +1,19 @@
 {
 	"FileVersion": 3,
 	"Version": 1,
-	"VersionName": "0.8.2",
+	"VersionName": "0.9.0",
 	"FriendlyName": "Aether Brain",
 	"Description": "Draws the brain of the Aether Brain desktop app, live, from its companion link on 127.0.0.1.",
 	"Category": "Aether",
 	"CreatedBy": "Aether Brain",
 	"CanContainContent": true,
 	"EnabledByDefault": true,
+	"Plugins": [
+		{
+			"Name": "Niagara",
+			"Enabled": true
+		}
+	],
 	"Modules": [
 		{
 			"Name": "AetherBrain",

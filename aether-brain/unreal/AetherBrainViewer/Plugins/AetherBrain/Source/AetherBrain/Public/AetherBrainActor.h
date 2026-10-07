@@ -75,6 +75,15 @@ public:
 	/** The next project star after From (Tab), or INDEX_NONE. */
 	int32 NextStar(int32 From) const;
 
+	/** The brain's links as pairs of node numbers (a0, b0, a1, b1 ...). */
+	const TArray<int32>& GetLinks() const { return Graph.Edges; }
+	/** Counts up when the nodes or links are not the ones before (a new vault, a rescan), not when only colours or the selection change. */
+	uint32 GetShapeSerial() const { return ShapeSerial; }
+	/** How many links are drawn: the first Max Links of them, none when Show Links is off. */
+	int32 GetDrawnLinkCount() const { return LinkCount; }
+	/** The first positions have come in: the nodes are where the brain says they are. */
+	bool HasPositions() const { return bHasPositions; }
+
 	int32 GetSelected() const { return Selected; }
 	void SetHovered(int32 Index);
 	/** Select a node here and in the desktop app (which flies to it); bOpen opens it there. */
@@ -160,6 +169,7 @@ private:
 
 	FAetherGraph Graph;
 	bool bHasGraph = false;
+	uint32 ShapeSerial = 0;
 	/** Unreal space: where the brain says each node is, and where it is drawn (eased toward the target). */
 	TArray<FVector> Target;
 	TArray<FVector> Current;
