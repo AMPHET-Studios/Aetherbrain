@@ -2,9 +2,12 @@ import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent }
 import { basenameOf, folderOf } from '@aether/core'
 import { useAether } from '../store'
 import { MarkdownPreview } from './MarkdownPreview'
+import { EDIT_MAX, groups, tooBigToEdit } from '../preview'
 import { cx, MOD, relativeTime } from '../util'
 
 const AUTOSAVE_MS = 900
+/** Drafts longer than this are not counted word by word (see `stats`). */
+const STATS_FULL_CHARS = 300_000
 
 /**
  * Split editor: raw markdown on the left (with [[ autocomplete), live
@@ -132,11 +135,19 @@ export function Editor() {
   }
 
   const title = note?.meta.title ?? ''
+  const wordCount = note?.meta.wordCount ?? 0
   const stats = useMemo(() => {
     if (!draft) return null
+    // Counting every word of a 16 MB chat on each keystroke builds a list of millions of them: past this size the
+    // count is the one from the last parse, and only the lines are counted (without making a list of them).
+    if (draft.length > STATS_FULL_CHARS) {
+      let lines = 1
+      for (let i = draft.indexOf('\n'); i >= 0; i = draft.indexOf('\n', i + 1)) lines++
+      return `about ${wordCount.toLocaleString('en-US')} words · ${lines.toLocaleString('en-US')} lines`
+    }
     const words = draft.match(/[\p{L}\p{N}]+/gu)?.length ?? 0
     return `${words} words · ${draft.split('\n').length} lines`
-  }, [draft])
+  }, [draft, wordCount])
 
   if (!editorId || !note || draft === null) {
     return (
@@ -149,8 +160,10 @@ export function Editor() {
     )
   }
 
-  const showEdit = previewMode !== 'preview'
-  const showPreview = previewMode !== 'edit'
+  // A very long note (an imported chat of megabytes) is read here, not edited: its text box alone would take gigabytes.
+  const big = tooBigToEdit(note.raw.length)
+  const showEdit = !big && previewMode !== 'preview'
+  const showPreview = big || previewMode !== 'edit'
 
   return (
     <div className="flex h-full flex-col">
@@ -189,15 +202,24 @@ export function Editor() {
           <div className="truncate font-mono text-[11px] text-faint">{note.meta.path}</div>
         </div>
         <span className={cx('text-[11px]', dirty ? 'text-inbox' : 'text-faint')} aria-live="polite">
-          {readOnly ? 'read-only' : dirty ? 'unsaved…' : `saved · ${relativeTime(note.meta.updated)}`}
+          {readOnly || big ? 'read-only' : dirty ? 'unsaved…' : `saved · ${relativeTime(note.meta.updated)}`}
         </span>
-        <button type="button" className="hud-btn" onClick={cycleMode} title={`Cycle edit / split / preview (${MOD}+E)`}>
-          {previewMode === 'split' ? '⫿ Split' : previewMode === 'edit' ? '✎ Edit' : '◉ Preview'}
-        </button>
+        {!big && (
+          <button type="button" className="hud-btn" onClick={cycleMode} title={`Cycle edit / split / preview (${MOD}+E)`}>
+            {previewMode === 'split' ? '⫿ Split' : previewMode === 'edit' ? '✎ Edit' : '◉ Preview'}
+          </button>
+        )}
         <button type="button" className="hud-btn" onClick={closeEditor} title="Close (Esc)">
           ✕
         </button>
       </div>
+
+      {big && (
+        <div className="border-b border-[var(--line)] bg-[var(--panel)] px-4 py-2 text-[12px] text-dim" role="status">
+          This note is {groups(note.raw.length)} characters long, more than the {groups(EDIT_MAX)} the editor opens, so it is shown here to read, not to
+          edit (a text box this long would use gigabytes of memory and the window would stop). The file is untouched: open it in any text editor to change it.
+        </div>
+      )}
 
       {/* Body */}
       <div className="relative flex min-h-0 flex-1">
