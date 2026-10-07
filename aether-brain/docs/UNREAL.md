@@ -82,6 +82,7 @@ the Unreal app is asking for it.
 | <kbd>H</kbd> or <kbd>Home</kbd> | fly back to see everything |
 | <kbd>Tab</kbd> | the next project star |
 | <kbd>B</kbd> | the space: **full** (sky, rocks, shooting stars, ships) → **calm** (the sky only) → **off** (plain black, the brain's own plain stars) |
+| <kbd>N</kbd> | the Niagara effects (pulses along links, coronas, ripples, dust, shooting stars): on / off. See [UNREAL-NIAGARA.md](UNREAL-NIAGARA.md) |
 
 The name of what is under the cursor floats next to it; suns, stars and planets carry their names.
 
@@ -115,6 +116,14 @@ split is the depth.
 Press <kbd>B</kbd> to cycle *full*, *calm* and *off*. If the frame rate drops, set **Density** to 0.5 (see
 [Change how it looks](#change-how-it-looks)): the numbers below are what is drawn, and none of it is measured on
 your computer yet.
+
+## Niagara effects
+
+On top of the brain and the space there is a layer of **Niagara effects** (v0.9.0): light that runs along the links, a
+breathing corona round each sun and a halo on the selection, a ripple when something is selected, dust drifting round the
+camera, and shooting stars. <kbd>N</kbd> switches them. The C++ that plays them is in the project; the five Niagara
+systems themselves are made once in the editor from the recipes in [UNREAL-NIAGARA.md](UNREAL-NIAGARA.md) (nothing outside
+the editor can write a Niagara asset), and an effect whose system is missing is simply not played.
 
 ## How it works
 
@@ -160,6 +169,11 @@ post-process volume fixes the exposure and adds bloom. The game mode sets all of
 - *Light*: a warm key and a cool fill (directional lights, no shadows) light the rocks and hulls through
   `M_AetherRock`; everything glowing uses `M_AetherNode`. The stage's exposure is fixed (EV 0), so a glow of 1
   stays as bright as it is drawn and values above 1 bloom.
+
+**The Niagara layer** is a third actor, `AetherFxActor`, that the game mode adds (switch off with **Spawn Fx**). It makes a
+fixed pool of Niagara components for each of five systems and plays them by setting their User parameters from the live
+brain (links, selection, positions, the camera); `Private/AetherFxMath.h` plans what happens when, as plain C++ and pure
+functions of time. Details, the parameter contract and the recipes: [UNREAL-NIAGARA.md](UNREAL-NIAGARA.md).
 
 Any other program can read the same link. A web page can't: it has no token, and the link sends no CORS headers.
 
@@ -216,8 +230,9 @@ Lumen settings. The game mode then leaves it alone.
 | *Sky material missing*, plain black behind the brain | Open the project in the Unreal Editor once (the Python plugin makes `M_AetherSprite`). The brain draws its own plain stars meanwhile |
 | Grey squares where the nebulae should be | `M_AetherSprite` did not compile: delete it in `Content/AetherBrain` and reopen the editor to make it again (the Output Log says why if it can't) |
 | Rocks and ships look flat or very dark | `M_AetherRock` is missing (see above) or *Stage Lights* is off. The lights are on the Aether Space Actor: raise the key light's intensity there |
-| The viewer is slow | Set **Density** to 0.5 on an Aether Space Actor, or press <kbd>B</kbd> for *calm* or *off* |
-| Grey spheres in a packaged build only | Make sure `Content/AetherBrain` is cooked: the project's `DefaultGame.ini` lists it under *Directories to always cook* |
+| The viewer is slow | Set **Density** to 0.5 on an Aether Space Actor, or press <kbd>B</kbd> for *calm* or *off*; <kbd>N</kbd> switches the Niagara effects off |
+| *Niagara systems missing (not played)* | Make them from [UNREAL-NIAGARA.md](UNREAL-NIAGARA.md) and save them in `Content/AetherFX` with those names |
+| Grey spheres in a packaged build only | Make sure `Content/AetherBrain` (and `Content/AetherFX`) is cooked: the project's `DefaultGame.ini` lists both under *Directories to always cook* |
 | Right mouse doesn't look around | Click into the game window first; the project's `DefaultInput.ini` captures the mouse only while the right button is down |
 | The link works but the viewer refuses the token | Press **New token…** in the panel; the viewer reads `companion.json` again |
 
@@ -226,7 +241,7 @@ Lumen settings. The game mode then leaves it alone.
 The space world's logic is plain C++ that does not need Unreal, so it is tested on an ordinary computer:
 
 ```
-unreal/tests/run.sh        # compiles with strict warnings and runs: the maths tests, then the actor run against a stand-in engine
+unreal/tests/run.sh        # compiles with strict warnings and runs, four stages: the space maths, the space actor against a stand-in engine, the Niagara maths, the Niagara actor against the stand-in (fake Niagara components)
 unreal/tests/preview.sh    # draws the pictures above (needs Python 3 for the PNGs)
 ```
 
@@ -234,6 +249,7 @@ unreal/tests/preview.sh    # draws the pictures above (needs Python 3 for the PN
 parallax is capped and ordered by depth, a pass never misses the brain by less than it should, ships point the way
 they fly). `actor_harness.cpp` compiles the real `AetherSpaceActor.cpp` against `ue_stubs/` (a stand-in for the part
 of Unreal's API it uses), flies a camera for ten seconds and checks the actor's bookkeeping: instance counts, one
-update per frame, which material each part wears, the parallax wiring, the modes. `pnpm test` runs both when a C++
-compiler is installed. What this cannot say is how Unreal compiles or draws it: that needs you to open the project
+update per frame, which material each part wears, the parallax wiring, the modes. `fx_core_test.cpp` and
+`fx_actor_harness.cpp` do the same for the Niagara layer (see [UNREAL-NIAGARA.md](UNREAL-NIAGARA.md)). `pnpm test` runs
+all four when a C++ compiler is installed. What this cannot say is how Unreal compiles or draws it: that needs you to open the project
 (the stand-in follows Unreal 5's API as the plugin uses it, from memory of that API).

@@ -18,11 +18,12 @@ function compiler(): string | null {
 }
 const cxx = process.platform === 'win32' ? null : compiler()
 
-describe.skipIf(!cxx)('the Unreal space world, run as plain C++', () => {
-  it('passes its maths tests and the actor harness (strict warnings, two stages)', () => {
+describe.skipIf(!cxx)('the Unreal space world and Niagara layer, run as plain C++', () => {
+  it('passes the maths tests and the actor harnesses of both (strict warnings, four stages)', () => {
     const run = spawnSync('sh', [path.join(unreal, 'tests/run.sh')], { env: { ...process.env, CXX: cxx! }, encoding: 'utf8', timeout: 280_000 })
     const out = `${run.stdout}${run.stderr}`
-    expect(out).toMatch(/\d+ checks, 0 failed[\s\S]*\d+ checks, 0 failed/)
+    expect(out.match(/\d+ checks, 0 failed/g)).toHaveLength(4)
+    expect(out).not.toMatch(/FAIL /)
     expect(run.status).toBe(0)
   }, 300_000)
 })
@@ -55,5 +56,49 @@ describe('the Unreal space world, wiring', () => {
   it('has a key and a HUD line for the space', () => {
     expect(read(path.join(plugin, 'Private/AetherBrainPlayerController.cpp'))).toContain('EKeys::B')
     expect(read(path.join(plugin, 'Private/AetherBrainHUD.cpp'))).toContain('Space: %s')
+  })
+})
+
+describe('the Unreal Niagara layer, wiring', () => {
+  const cpp = read(path.join(plugin, 'Private/AetherFxActor.cpp'))
+  const doc = read(path.join(unreal, '../docs/UNREAL-NIAGARA.md'))
+  const python = read(path.join(unreal, 'AetherBrainViewer/Content/Python/init_unreal.py'))
+
+  it('names the same five systems in the C++, the editor script and the recipes', () => {
+    const inCpp = [...cpp.matchAll(/\/Game\/AetherFX\/(NS_\w+)\.\1/g)].map((m) => m[1]!)
+    expect(inCpp).toEqual(['NS_AetherPulses', 'NS_AetherCorona', 'NS_AetherDust', 'NS_AetherShootingStars', 'NS_AetherRipple'])
+    const listed = python.match(/FX_SYSTEMS = \[([^\]]*)\]/)![1]!
+    expect([...listed.matchAll(/"(NS_\w+)"/g)].map((m) => m[1]).sort()).toEqual([...inCpp].sort())
+    for (const name of inCpp) {
+      expect(doc).toContain(`### \`${name}\``)
+      expect(cpp).toContain(`TEXT("${name}")`)
+    }
+  })
+
+  it('sets only User parameters the recipes document, with the types they name', () => {
+    const params = new Set([...cpp.matchAll(/TEXT\("User\.(\w+)"\)/g)].map((m) => m[1]!))
+    expect([...params].sort()).toEqual(['Color', 'Duration', 'End', 'Extent', 'Intensity', 'Radius', 'Size', 'SpawnRate', 'Start', 'Width'])
+    for (const p of params) expect(doc).toMatch(new RegExp(`\`${p}\``))
+    // Start and End are Positions (the default of the actor), Extent a size, always a Vector.
+    expect(doc).toMatch(/`Start`, `End` \| \*\*Position\*\*/)
+    expect(doc).toMatch(/`Extent` \| \*\*Vector\*\*/)
+    expect(cpp).toContain('C->SetVariableVec3(P.Extent')
+    expect(read(path.join(plugin, 'Public/AetherFxActor.h'))).toContain('bool bPositionParameters = true;')
+  })
+
+  it('has a key, a HUD line, a game mode spawn, the module and plugin dependencies, and the cook folder', () => {
+    expect(read(path.join(plugin, 'Private/AetherBrainPlayerController.cpp'))).toContain('EKeys::N')
+    expect(read(path.join(plugin, 'Private/AetherBrainHUD.cpp'))).toContain('Effects: on')
+    expect(read(path.join(plugin, 'Private/AetherBrainGameMode.cpp'))).toContain('SpawnActor<AAetherFxActor>')
+    expect(read(path.join(plugin, 'AetherBrain.Build.cs'))).toContain('"Niagara"')
+    expect(read(path.join(plugin, '../../AetherBrain.uplugin'))).toContain('"Name": "Niagara"')
+    expect(read(path.join(unreal, 'AetherBrainViewer/AetherBrainViewer.uproject'))).toContain('"Name": "Niagara"')
+    expect(read(path.join(unreal, 'AetherBrainViewer/Config/DefaultGame.ini'))).toContain('/Game/AetherFX')
+  })
+
+  it('keeps the plugin, the app and the docs on one version', () => {
+    const version = (JSON.parse(read(path.join(unreal, '../package.json'))) as { version: string }).version
+    expect((JSON.parse(read(path.join(plugin, '../../AetherBrain.uplugin'))) as { VersionName: string }).VersionName).toBe(version)
+    expect(doc).toContain(`(v${version})`)
   })
 })

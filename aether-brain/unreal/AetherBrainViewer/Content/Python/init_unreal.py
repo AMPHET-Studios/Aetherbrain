@@ -13,6 +13,10 @@ The first time, it makes the assets the viewer needs, so there is nothing to set
 - /Game/AetherBrain/Maps/Brain: an empty level (space). The game mode fills it when you press Play.
 
 Each is made once; if it exists it is left alone (edit it freely). Errors only go to the Output Log.
+
+It also makes the empty folder /Game/AetherFX and tells the Output Log which of the five Niagara systems the effects
+layer plays are still missing there. Python cannot build Niagara graphs, so those are made by hand, once, from the
+recipes in docs/UNREAL-NIAGARA.md (a missing system is simply not played).
 """
 
 import unreal
@@ -22,6 +26,8 @@ MATERIAL = FOLDER + "/M_AetherNode"
 SPRITE_MATERIAL = FOLDER + "/M_AetherSprite"
 ROCK_MATERIAL = FOLDER + "/M_AetherRock"
 MAP = FOLDER + "/Maps/Brain"
+FX_FOLDER = "/Game/AetherFX"
+FX_SYSTEMS = ["NS_AetherPulses", "NS_AetherCorona", "NS_AetherDust", "NS_AetherShootingStars", "NS_AetherRipple"]
 
 
 def log(message):
@@ -199,6 +205,21 @@ def make_map():
     log("made " + MAP + " (press Play: the brain appears when Aether Brain's companion link is on)")
 
 
+def check_fx_systems():
+    unreal.EditorAssetLibrary.make_directory(FX_FOLDER)
+    missing = [name for name in FX_SYSTEMS if not unreal.EditorAssetLibrary.does_asset_exist(FX_FOLDER + "/" + name)]
+    if missing:
+        log(
+            "Niagara systems not made yet (those effects are not played): "
+            + ", ".join(missing)
+            + ". Recipes: docs/UNREAL-NIAGARA.md. Save them in "
+            + FX_FOLDER
+            + "."
+        )
+    else:
+        log("all five Niagara systems are in " + FX_FOLDER)
+
+
 _handle = None
 
 
@@ -222,6 +243,10 @@ def _once(_delta):
         make_map()
     except Exception as err:  # noqa: BLE001
         unreal.log_error("Aether Brain: the map could not be made: {}".format(err))
+    try:
+        check_fx_systems()
+    except Exception as err:  # noqa: BLE001
+        unreal.log_error("Aether Brain: the Niagara folder could not be checked: {}".format(err))
 
 
 if unreal.is_editor():

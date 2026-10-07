@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <string>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -120,6 +121,9 @@ struct TArray
 {
 	std::vector<T> V;
 	int32 Num() const { return static_cast<int32>(V.size()); }
+	T* GetData() { return V.data(); }
+	const T* GetData() const { return V.data(); }
+	bool IsValidIndex(int32 I) const { return I >= 0 && I < Num(); }
 	int32 Add(const T& X) { V.push_back(X); return Num() - 1; }
 	int32 Add(T&& X) { V.push_back(std::move(X)); return Num() - 1; }
 	void SetNum(int32 N) { V.resize(static_cast<size_t>(N)); }
@@ -163,7 +167,8 @@ struct FSoftObjectPath
 
 struct FName
 {
-	FName(const TCHAR*) {}
+	std::string S;
+	FName(const TCHAR* In) : S(In) {}
 };
 
 /** Everything made through NewObject / CreateDefaultSubobject, for the harness to look at. */
@@ -297,6 +302,7 @@ public:
 	void SetupAttachment(USceneComponent*) {}
 	void SetRelativeRotation(const FRotator&) {}
 	void SetWorldLocationAndRotation(FVector L, const FQuat& R, bool = false, void* = nullptr, int = 0) { WorldLocation = L; WorldRotation = R; }
+	void SetWorldLocation(FVector L, bool = false, void* = nullptr, int = 0) { WorldLocation = L; }
 	void SetVisibility(bool V, bool = false) { bVisible = V; }
 	void RegisterComponent() { bRegistered = true; }
 };
@@ -379,10 +385,12 @@ public:
 	FActorTickFunction PrimaryActorTick;
 	USceneComponent* RootComponent = nullptr;
 	FVector Location;
+	FVector ForwardDir{1.0, 0.0, 0.0};
 	UWorld* WorldPtr = nullptr;
 	void SetRootComponent(USceneComponent* R) { RootComponent = R; }
 	UWorld* GetWorld() const { return WorldPtr; }
 	FVector GetActorLocation() const { return Location; }
+	FVector GetActorForwardVector() const { return ForwardDir; }
 	virtual void BeginPlay() {}
 	virtual void Tick(float) {}
 };

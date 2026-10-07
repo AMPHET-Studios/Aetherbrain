@@ -4,6 +4,7 @@
 #include "AetherBrainHUD.h"
 #include "AetherBrainPawn.h"
 #include "AetherBrainPlayerController.h"
+#include "AetherFxActor.h"
 #include "AetherSpaceActor.h"
 #include "Engine/PostProcessVolume.h"
 #include "Engine/World.h"
@@ -49,6 +50,21 @@ void AAetherBrainGameMode::StartPlay()
 		if (!bHasSpace)
 		{
 			World->SpawnActor<AAetherSpaceActor>(FVector::ZeroVector, FRotator::ZeroRotator);
+		}
+	}
+
+	// The Niagara effects: light along the links, coronas, ripples, dust, shooting stars (they find the brain themselves).
+	if (bSpawnFx)
+	{
+		bool bHasFx = false;
+		for (TActorIterator<AAetherFxActor> It(World); It; ++It)
+		{
+			bHasFx = true;
+			break;
+		}
+		if (!bHasFx)
+		{
+			World->SpawnActor<AAetherFxActor>(FVector::ZeroVector, FRotator::ZeroRotator);
 		}
 	}
 
