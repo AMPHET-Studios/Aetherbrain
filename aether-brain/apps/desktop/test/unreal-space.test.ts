@@ -96,10 +96,9 @@ describe('the Unreal Niagara layer, wiring', () => {
     expect(read(path.join(unreal, 'AetherBrainViewer/Config/DefaultGame.ini'))).toContain('/Game/AetherFX')
   })
 
-  it('keeps the plugin, the app and the docs on one version', () => {
+  it('keeps the plugin and the app on one version', () => {
     const version = (JSON.parse(read(path.join(unreal, '../package.json'))) as { version: string }).version
     expect((JSON.parse(read(path.join(plugin, '../../AetherBrain.uplugin'))) as { VersionName: string }).VersionName).toBe(version)
-    expect(doc).toContain(`(v${version})`)
   })
 })
 

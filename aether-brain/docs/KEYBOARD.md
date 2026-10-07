@@ -112,6 +112,8 @@ Folders match by name or path (up to six, after the three best notes); `Enter` s
 | `Esc`       | Close editor (saves)                     |
 | click title | Rename the file                          |
 
+**Long notes.** The preview draws the first 60,000 characters of a note; a *Show N more* button under it (reach it with `Tab`, press `Enter`) adds 60,000 at a time, up to 300,000. A note over 400,000 characters (an imported chat of megabytes) opens read-only as that preview, with no text box, so the editor never takes gigabytes of memory; the file is untouched and any text editor can change it.
+
 Preview: wikilinks open the note (ghost links create it), `#tags` filter the graph, `![[embeds]]` render inline one level deep.
 
 ## Capture
