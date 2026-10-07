@@ -93,7 +93,7 @@ Multi-root vaults (e.g. `D:\` + `F:\`): every vault path starts with the root's 
 pnpm install
 pnpm dev             # web app at http://localhost:5173  (?demo=1 auto-opens the demo, ?stress=1000 the synthetic vault)
 pnpm dev:desktop     # Electron + Vite dev server
-pnpm test            # vitest: packages/core, packages/graph, packages/ui, apps/desktop (about 820 tests + 1 skipped in 57 files at v0.9.1; the exact count is in the last full run)
+pnpm test            # vitest: packages/core, packages/graph, packages/ui, apps/desktop (826 tests + 1 skipped in 57 files at v0.9.1)
 pnpm typecheck       # tsc for renderer code + Electron main + MCP server
 pnpm build           # web build → apps/web/dist
 pnpm build:desktop   # MCP bundle (vite) + main/preload (tsc) + renderer (vite) → apps/desktop/dist
