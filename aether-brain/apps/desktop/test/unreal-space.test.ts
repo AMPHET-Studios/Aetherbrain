@@ -136,3 +136,32 @@ describe('the Windows packaging script', () => {
   })
 })
 
+describe('the Unreal version on the release page', () => {
+  const app = path.resolve(unreal, '..')
+  const workflow = read(path.join(app, '..', '.github/workflows/desktop.yml'))
+  const start = read(path.join(unreal, 'START-HERE.txt'))
+
+  it('has steps a person can follow, naming the files that are in the zip', () => {
+    expect(start).toContain('unreal\\AetherBrainViewer\\AetherBrainViewer.uproject')
+    expect(start).toContain('unreal\\PackageWindows.bat')
+    expect(start).toContain('Unreal Engine 5.8')
+    expect(start).toContain('Visual Studio 2022')
+  })
+
+  it('is zipped by the Windows job on every run and attached to the release', () => {
+    for (const f of ['unreal/AetherBrainViewer', 'unreal/PackageWindows.bat', 'unreal/README.md', 'unreal/START-HERE.txt', 'docs/UNREAL.md', 'docs/UNREAL-NIAGARA.md', 'docs/img/unreal-*.png']) {
+      expect(workflow).toContain(f)
+    }
+    // The zip step runs before the artifact upload and the release attach, which both list it.
+    const zip = workflow.indexOf('Zip the Unreal version')
+    const upload = workflow.indexOf('Upload run artifact')
+    const attach = workflow.indexOf('Attach to release')
+    expect(zip).toBeGreaterThan(0)
+    expect(zip).toBeLessThan(upload)
+    expect(upload).toBeLessThan(attach)
+    expect(workflow.match(/AetherBrain-Unreal-\*\.zip/g)?.length).toBeGreaterThanOrEqual(2)
+    // Every file it copies exists in the repository.
+    for (const f of ['unreal/PackageWindows.bat', 'unreal/README.md', 'unreal/START-HERE.txt', 'docs/UNREAL.md', 'docs/UNREAL-NIAGARA.md']) expect(() => read(path.join(app, f))).not.toThrow()
+  })
+})
+

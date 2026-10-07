@@ -42,8 +42,9 @@ remains the one place anything is written. The Unreal app reads the scene from t
 
 ## Build it (once)
 
-1. Get the project: it is the `aether-brain/unreal/AetherBrainViewer` folder of this repository (download the source
-   zip from GitHub, or clone it).
+1. Get the project: every release has it as `AetherBrain-Unreal-<version>.zip` next to the installers (with a
+   `START-HERE.txt`); or it is the `aether-brain/unreal/AetherBrainViewer` folder of this repository (download the
+   source zip from GitHub, or clone it).
 2. Double-click `AetherBrainViewer.uproject`. Unreal asks to build the missing modules: press **Yes**. It takes a
    few minutes the first time.
    - If it says it can't build them, right-click the `.uproject` → *Generate Visual Studio project files*, open the
