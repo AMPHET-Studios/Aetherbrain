@@ -58,7 +58,12 @@ export function plural(n: number, s: string, p = `${s}s`): string {
 }
 
 export function truncate(s: string, n: number): string {
-  return s.length > n ? `${s.slice(0, n - 1)}…` : s
+  if (s.length <= n) return s
+  let end = Math.max(0, n - 1)
+  // Not between the two halves of a character outside the BMP (an emoji): a lone half draws as a replacement character.
+  const last = s.charCodeAt(end - 1)
+  if (end > 0 && last >= 0xd800 && last <= 0xdbff) end--
+  return `${s.slice(0, end)}…`
 }
 
 /** A video's still is a tenth of the way in, at most 5 s (as the desktop thumbnail helper takes it). */

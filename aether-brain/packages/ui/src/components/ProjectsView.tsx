@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   LinkResolver,
   asString,
@@ -15,10 +15,44 @@ import {
 import { folderIndex, matchFolders } from '../folderSearch'
 import { listProjects, moveTaskOnBoard, type ProjectRow } from '../projects'
 import { useAether } from '../store'
-import { cx, isControl, MOD, plural, relativeTime } from '../util'
+import { cx, isControl, MOD, plural, truncate } from '../util'
+import { ProjectCardList } from './ProjectCardList'
 
 /** What the status select offers (plus the project's own value when it is something else). */
 const STATUSES = ['active', 'paused', 'done', 'someday']
+
+/*
+ * Nothing the board draws is unbounded. A vault can hold thousands of projects, a note can hold
+ * a hundred thousand tasks and a folder a hundred thousand subfolders; every element drawn costs
+ * a DOM node and a React fiber (~3 to 5 KB), so drawn whole, such a board needs gigabytes and the
+ * window dies. Lists are drawn a page at a time or a window at a time, and long texts are cut.
+ */
+/** Tasks drawn per page of the to-do list and of the done list ("Show more" and `m` add a page). */
+export const TASK_PAGE = 200
+/** Folder chips drawn at first, and added by each "more". */
+export const PLANET_FIRST = 48
+const PLANET_MORE = 200
+/** The most tasks of one list, and the most folder chips, ever drawn: "Show more" stops here, the rest is in the note and the folder. */
+export const TASK_MAX_SHOWN = 2000
+export const PLANET_MAX_SHOWN = 2000
+/** Links and tags drawn as links in one task: the rest of its text is plain. */
+const MAX_TOKENS_PER_TASK = 40
+/** One more page of a list: never past the ceiling. */
+const nextPage = (shown: number) => Math.min(TASK_MAX_SHOWN, shown + TASK_PAGE)
+/** Longest text drawn for a task, the heading label of a task, a title, a path, a tag and a summary. */
+const MAX_TASK_CHARS = 2000
+const MAX_SECTION_CHARS = 40
+const MAX_TITLE_CHARS = 200
+const MAX_PATH_CHARS = 300
+const MAX_TAG_CHARS = 40
+const MAX_SUMMARY_CHARS = 600
+/** Tags drawn under the title. */
+const MAX_TAGS = 40
+/** A summary this long is not edited in place: the edit would rewrite only the part that was read. */
+const SUMMARY_EDIT_MAX = 20_000
+/** Top of a note scanned for the summary: the title and the quote under it sit at the top. */
+const SUMMARY_SCAN_CHARS = 200_000
+const FOLDER_COLLATOR = new Intl.Collator(undefined, { sensitivity: 'base' })
 
 type EditField = 'title' | 'summary' | 'tags'
 
@@ -46,7 +80,8 @@ function taskKeys(raw: string, tasks: TaskItem[]): Map<number, string> {
   const lines = raw.split('\n')
   const seen = new Map<string, number>()
   const out = new Map<number, string>()
-  for (const t of [...tasks].sort((a, b) => a.line - b.line)) {
+  const inOrder = tasks.every((t, i) => i === 0 || (tasks[i - 1]?.line ?? 0) <= t.line)
+  for (const t of inOrder ? tasks : [...tasks].sort((a, b) => a.line - b.line)) {
     const text = lines[t.line] ?? ''
     const n = seen.get(text) ?? 0
     seen.set(text, n + 1)
@@ -59,13 +94,26 @@ function taskKeys(raw: string, tasks: TaskItem[]): Map<number, string> {
  * The summary as written: the `>` lines right after the H1, markdown kept (so
  * an edit doesn't flatten its [[links]]); null when the note has none.
  */
-function summaryQuote(note: ParsedNote): string | null {
-  const lines = note.body.split(/\r?\n/)
-  let i = lines.findIndex((l) => /^#\s+/.test(l)) + 1
+function summaryQuote(note: ParsedNote): { text: string | null; whole: boolean } {
+  const cut = note.body.length > SUMMARY_SCAN_CHARS
+  const body = cut ? note.body.slice(0, SUMMARY_SCAN_CHARS) : note.body
+  const lines = body.split(/\r?\n/)
+  const h1 = lines.findIndex((l) => /^#\s+/.test(l))
+  let i = h1 + 1
   while (i < lines.length && (lines[i] ?? '').trim() === '') i++
   const quote: string[] = []
-  while (i < lines.length && /^\s{0,3}>/.test(lines[i] ?? '')) quote.push((lines[i++] ?? '').replace(/^\s{0,3}>\s?/, ''))
-  return quote.length ? quote.join(' ').replace(/\s+/g, ' ').trim() : null
+  let size = 0
+  while (i < lines.length && /^\s{0,3}>/.test(lines[i] ?? '') && size < SUMMARY_EDIT_MAX) {
+    const line = (lines[i++] ?? '').replace(/^\s{0,3}>\s?/, '')
+    quote.push(line)
+    size += line.length + 1
+  }
+  // Read to its end: the quote was not stopped by the size bound (a quote line still to come), nor by the end of
+  // the part of a long note that is scanned, and the title it hangs from is in that part.
+  const whole = !(i < lines.length && /^\s{0,3}>/.test(lines[i] ?? '')) && !(cut && (i >= lines.length || h1 < 0))
+  if (!quote.length) return { text: null, whole: whole && !(cut && h1 < 0) }
+  const text = quote.join(' ').replace(/\s+/g, ' ').trim()
+  return { text: text.length > SUMMARY_EDIT_MAX ? text.slice(0, SUMMARY_EDIT_MAX) : text, whole }
 }
 
 /** A text field that takes the keys (checkboxes, buttons and task rows don't). */
@@ -84,7 +132,27 @@ function isTextEntry(target: EventTarget | null): boolean {
  * back into the note's markdown. The file is the memory.
  */
 export function ProjectsView() {
-  const view = useAether((s) => s.view)
+  // Nothing of the board exists, and none of its work is done, while it is closed.
+  const open = useAether((s) => s.view === 'projects')
+  // What was typed or opened on the board lives here, so closing it (Esc, a click outside) loses neither a half-written task nor project.
+  const drafts = useDrafts()
+  return open ? <ProjectsBoard drafts={drafts} /> : null
+}
+
+function useDrafts() {
+  const [newTask, setNewTask] = useState('')
+  const [creating, setCreating] = useState(false)
+  const [newName, setNewName] = useState('')
+  const [newSummary, setNewSummary] = useState('')
+  const [showDone, setShowDone] = useState(false)
+  const [newFolder, setNewFolder] = useState('')
+  return { newTask, setNewTask, creating, setCreating, newName, setNewName, newSummary, setNewSummary, showDone, setShowDone, newFolder, setNewFolder }
+}
+
+type Drafts = ReturnType<typeof useDrafts>
+
+function ProjectsBoard({ drafts }: { drafts: Drafts }) {
+  const { newTask, setNewTask, creating, setCreating, newName, setNewName, newSummary, setNewSummary, showDone, setShowDone, newFolder, setNewFolder } = drafts
   const setView = useAether((s) => s.setView)
   const notes = useAether((s) => s.notes)
   const folders = useAether((s) => s.folders)
@@ -107,18 +175,16 @@ export function ProjectsView() {
   const readOnly = useAether((s) => s.adapter?.readOnly ?? false)
   const canMkdir = useAether((s) => !!s.adapter?.createFolder)
 
-  const [newTask, setNewTask] = useState('')
-  const [creating, setCreating] = useState(false)
   /** Bumped per palette request so the name field mounts again and takes the focus. */
   const [asked, setAsked] = useState(0)
-  const [newName, setNewName] = useState('')
-  const [newSummary, setNewSummary] = useState('')
-  const [showDone, setShowDone] = useState(false)
   const [edit, setEdit] = useState<EditField | null>(null)
   const [picking, setPicking] = useState(false)
-  const [newFolder, setNewFolder] = useState('')
   const [editing, setEditing] = useState<TaskEdit | null>(null)
   const [focusLine, setFocusLine] = useState<number | null>(null)
+  /** How many of the open tasks, the done tasks and the folder chips are drawn. */
+  const [openShown, setOpenShown] = useState(TASK_PAGE)
+  const [doneShown, setDoneShown] = useState(TASK_PAGE)
+  const [planetsShown, setPlanetsShown] = useState(PLANET_FIRST)
   const taskInput = useRef<HTMLInputElement | null>(null)
   const folderInput = useRef<HTMLInputElement | null>(null)
   const board = useRef<HTMLDivElement | null>(null)
@@ -135,65 +201,79 @@ export function ProjectsView() {
     return (target: string): NoteId | null => (index ??= new LinkResolver(notes.values())).resolve(target)
   }, [notes, revision])
 
-  const current =rows.find((r) => r.note.meta.id === projectId) ?? rows[0] ?? null
+  const current = rows.find((r) => r.note.meta.id === projectId) ?? rows[0] ?? null
   const currentId = current?.note.meta.id ?? null
   const keys = useMemo(() => (current ? taskKeys(current.note.raw, current.tasks) : new Map<number, string>()), [current])
 
-  /** Direct subfolder counts, per folder. */
-  const childCounts = useMemo(() => {
-    const m = new Map<string, number>()
+  /** The subfolders of each folder: one pass over the folders per change of the folder set. */
+  const subfolders = useMemo(() => {
+    const m = new Map<string, string[]>()
     for (const f of folders) {
-      const p = folderOf(f)
-      m.set(p, (m.get(p) ?? 0) + 1)
+      const parent = folderOf(f)
+      const list = m.get(parent)
+      if (list) list.push(f)
+      else m.set(parent, [f])
     }
     return m
   }, [folders])
 
+  /** The notes in each folder, its subfolders included: one pass over the notes per change of the notes. */
+  const noteCounts = useMemo(() => {
+    const m = new Map<string, number>()
+    for (const n of notes.values()) {
+      let f = n.meta.folder
+      for (;;) {
+        m.set(f, (m.get(f) ?? 0) + 1)
+        const cut = f.lastIndexOf('/')
+        if (cut < 0) break
+        f = f.slice(0, cut)
+      }
+    }
+    return m
+  }, [notes, revision])
+
   // The planets of the current project: subfolders of its home folder, with the notes under each.
   const home = current?.home ?? null
-  const planets = useMemo(() => {
-    if (!home) return { list: [] as { path: string; name: string; notes: number; sub: number }[], total: 0 }
-    const list = [...folders].filter((f) => folderOf(f) === home).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }))
-    const counts = new Map(list.map((f) => [f, 0]))
-    let total = 0
-    for (const n of notes.values()) {
-      const f = n.meta.folder
-      if (f !== home && !f.startsWith(`${home}/`)) continue
-      total++
-      if (f === home) continue
-      const top = `${home}/${f.slice(home.length + 1).split('/')[0] ?? ''}`
-      const c = counts.get(top)
-      if (c !== undefined) counts.set(top, c + 1)
-    }
-    return { list: list.map((f) => ({ path: f, name: f.slice(home.length + 1), notes: counts.get(f) ?? 0, sub: childCounts.get(f) ?? 0 })), total }
-  }, [home, folders, notes, revision, childCounts])
+  const allPlanets = useMemo(() => (home ? [...(subfolders.get(home) ?? [])].sort(FOLDER_COLLATOR.compare) : []), [home, subfolders])
+  const planets = useMemo(
+    () => ({
+      list: home
+        ? allPlanets.slice(0, planetsShown).map((f) => ({ path: f, name: f.slice(home.length + 1), notes: noteCounts.get(f) ?? 0, sub: subfolders.get(f)?.length ?? 0 }))
+        : [],
+      total: home ? (noteCounts.get(home) ?? 0) : 0,
+    }),
+    [home, allPlanets, planetsShown, noteCounts, subfolders],
+  )
 
   // Keep the store's selection valid so the graph highlights the right neuron.
   useEffect(() => {
-    if (view !== 'projects') return
     if (current && current.note.meta.id !== projectId) selectProject(current.note.meta.id)
-  }, [view, current?.note.meta.id, projectId, selectProject])
+  }, [current?.note.meta.id, projectId, selectProject])
 
   // The palette's "New project…" opens the create form here.
   const formRequest = useAether((s) => s.formRequest)
   useEffect(() => {
-    if (formRequest !== 'project' || view !== 'projects') return
+    if (formRequest !== 'project') return
     useAether.getState().requestForm(null)
     if (readOnly) return
     setCreating(true)
     setAsked((n) => n + 1)
-  }, [formRequest, view, readOnly])
+  }, [formRequest, readOnly])
 
   // Another project: leave any half-done edit behind.
   useEffect(() => {
     setEdit(null)
     setPicking(false)
     setEditing(null)
+    setOpenShown(TASK_PAGE)
+    setDoneShown(TASK_PAGE)
+    setPlanetsShown(PLANET_FIRST)
   }, [currentId])
 
   // The task being edited was changed or removed by another writer (an AI, another app): stop, and say so.
   useEffect(() => {
-    if (!editing || editing.note !== currentId || [...keys.values()].includes(editing.key)) return
+    if (!editing || editing.note !== currentId) return
+    for (const key of keys.values()) if (key === editing.key) return
     setEditing(null)
     useAether.getState().toast('The task you were editing changed on disk; edit it again', 'error')
   }, [keys, editing, currentId])
@@ -201,9 +281,19 @@ export function ProjectsView() {
   // Put focus back on a task row after it was edited, moved or deleted (its line may have changed).
   useEffect(() => {
     if (focusLine === null) return
-    board.current?.querySelector<HTMLElement>(`[data-task="${focusLine}"]`)?.focus()
+    const row = board.current?.querySelector<HTMLElement>(`[data-task="${focusLine}"]`)
+    if (row) {
+      row.focus()
+      setFocusLine(null)
+      return
+    }
+    // A row past the part of the list that is drawn: draw down to it; this effect then runs again and finds it.
+    const open = current?.open.findIndex((t) => t.line === focusLine) ?? -1
+    if (open >= openShown && openShown < TASK_MAX_SHOWN) return setOpenShown(Math.min(TASK_MAX_SHOWN, open + 1 + TASK_PAGE / 2))
+    const done = current?.done.findIndex((t) => t.line === focusLine) ?? -1
+    if (showDone && done >= doneShown && doneShown < TASK_MAX_SHOWN) return setDoneShown(Math.min(TASK_MAX_SHOWN, done + 1 + TASK_PAGE / 2))
     setFocusLine(null)
-  }, [focusLine, current])
+  }, [focusLine, current, openShown, doneShown, showDone])
 
   const cycleStatus = () => {
     if (!current || readOnly) return
@@ -213,7 +303,6 @@ export function ProjectsView() {
   }
 
   useEffect(() => {
-    if (view !== 'projects') return
     const onKey = (e: KeyboardEvent) => {
       if (e.ctrlKey || e.metaKey || e.altKey || isTextEntry(e.target)) return
       const st = useAether.getState()
@@ -253,6 +342,18 @@ export function ProjectsView() {
         case 'x':
           setShowDone((v) => !v)
           break
+        case 'm': {
+          // Draw one more page of the tasks (the open list, and the done list when it is open). The key is the
+          // board's own even when there is nothing more to draw (else it would cycle the graph's colours behind
+          // the board), and a held key draws one page, not the whole list.
+          if (!current) return
+          if (e.repeat) break
+          const moreOpen = current.open.length > openShown && openShown < TASK_MAX_SHOWN
+          const moreDone = showDone && current.done.length > doneShown && doneShown < TASK_MAX_SHOWN
+          if (moreOpen) setOpenShown(nextPage)
+          if (moreDone) setDoneShown(nextPage)
+          break
+        }
         case 'e':
           if (!current || readOnly) return
           setCreating(false)
@@ -275,15 +376,17 @@ export function ProjectsView() {
     }
     window.addEventListener('keydown', onKey, { capture: true })
     return () => window.removeEventListener('keydown', onKey, { capture: true })
-  }, [view, rows, current, selectProject, openNote, readOnly, canMkdir])
+  }, [rows, current, selectProject, openNote, readOnly, canMkdir, openShown, doneShown, showDone])
 
-  if (view !== 'projects') return null
+  const openFromCard = useCallback((id: NoteId) => openNote(id, { fly: true, view: 'editor' }), [openNote])
 
   const submitTask = async () => {
     if (!current || !newTask.trim()) return
     const text = newTask
     setNewTask('')
     await addTask(current.note.meta.id, text)
+    // It is written at the end of the list: when that is past the part drawn, say so rather than seem to lose it.
+    if (current.open.length >= openShown) useAether.getState().toast('Task added at the end of the to-do list (Show more, or m, draws it)', 'success')
   }
 
   const submitProject = async () => {
@@ -339,57 +442,10 @@ export function ProjectsView() {
               + New
             </button>
           </div>
-          <div className="scroll flex-1 p-2">
-            {rows.length === 0 && (
-              <div className="p-4 text-center text-[12.5px] text-dim">
-                No projects yet. A project is a note directly in <code>Projects/</code>, a folder note like <code>Projects/X/X.md</code>, or any note with{' '}
-                <code>type: project</code>.
-              </div>
-            )}
-            {rows.map((r) => {
-              const m = r.note.meta
-              const active = current?.note.meta.id === m.id
-              const next = r.open[0]
-              const planetCount = r.home ? (childCounts.get(r.home) ?? 0) : 0
-              return (
-                <button
-                  type="button"
-                  key={m.id}
-                  onClick={() => selectProject(m.id)}
-                  onDoubleClick={() => openNote(m.id, { fly: true, view: 'editor' })}
-                  className={cx(
-                    'mb-1.5 block w-full rounded-xl border px-3 py-2.5 text-left transition',
-                    active ? 'border-projects/60 bg-projects/10' : 'border-transparent hover:border-[var(--panel-border)] hover:bg-white/5',
-                  )}
-                  aria-current={active ? 'true' : undefined}
-                >
-                  <div className="flex items-center gap-2">
-                    <span className="min-w-0 flex-1 truncate text-[13.5px] font-semibold text-white">{m.title}</span>
-                    <StatusChip status={m.status} />
-                  </div>
-                  <div className="mt-1.5 flex items-center gap-2">
-                    <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-white/10">
-                      <div className="h-full rounded-full bg-gradient-to-r from-accent to-accent2" style={{ width: `${r.pct}%` }} />
-                    </div>
-                    <span className="w-16 text-right text-[10.5px] tabular-nums text-dim">
-                      {r.done.length}/{r.tasks.length} · {r.pct}%
-                    </span>
-                  </div>
-                  <div className="mt-1 truncate text-[11.5px] text-dim">{next ? `next: ${next.text}` : r.tasks.length ? 'all done ✓' : 'no tasks yet'}</div>
-                  <div className="mt-1 flex items-center gap-2 text-[10.5px] text-faint">
-                    <span>✎ {relativeTime(m.updated)}</span>
-                    {planetCount > 0 && <span title="Folders inside the project folder">● {plural(planetCount, 'planet')}</span>}
-                    {m.tags.slice(0, 3).map((t) => (
-                      <span key={t}>#{t}</span>
-                    ))}
-                  </div>
-                </button>
-              )
-            })}
-          </div>
+          <ProjectCardList rows={rows} currentId={currentId} subfolders={subfolders} onSelect={selectProject} onOpen={openFromCard} />
           <div className="border-t border-[var(--line)] px-3 py-1.5 text-[11px] leading-relaxed text-faint">
             <kbd>j</kbd>/<kbd>k</kbd> move · <kbd>Enter</kbd> open · <kbd>e</kbd> rename · <kbd>s</kbd> status · <kbd>f</kbd> folder · <kbd>n</kbd> task · <kbd>⇧N</kbd> new
-            project · <kbd>x</kbd> done list
+            project · <kbd>x</kbd> done list · <kbd>m</kbd> more tasks
           </div>
         </div>
 
@@ -479,10 +535,20 @@ export function ProjectsView() {
                         title={`${p.path} · ${plural(p.notes, 'note')}${p.sub ? ` · ${plural(p.sub, 'folder')}` : ''} — fly there`}
                       >
                         <span className="dot" style={{ background: 'var(--accent-2)', color: 'var(--accent-2)' }} />
-                        {p.name}
+                        {truncate(p.name, 60)}
                         <span className="opacity-60">{p.notes}</span>
                       </button>
                     ))}
+                    {allPlanets.length > planetsShown &&
+                      (planetsShown < PLANET_MAX_SHOWN ? (
+                        <button type="button" className="chip" onClick={() => setPlanetsShown((n) => Math.min(PLANET_MAX_SHOWN, n + PLANET_MORE))} title="Draw more of this project's folders">
+                          +{allPlanets.length - planetsShown} more
+                        </button>
+                      ) : (
+                        <span className="text-[11px] text-faint" title="Open the folder in space to see the rest">
+                          +{allPlanets.length - planetsShown} more: open the folder in space
+                        </span>
+                      ))}
                   </div>
                 )}
                 {!readOnly && canMkdir && (
@@ -511,7 +577,10 @@ export function ProjectsView() {
                 <div className="section-title mb-2">To do · {current.open.length}</div>
                 {current.open.length === 0 && <div className="mb-3 text-[12.5px] text-dim">Nothing open. Add one below.</div>}
                 <TaskList
-                  tasks={current.open}
+                  tasks={current.open.length > openShown ? current.open.slice(0, openShown) : current.open}
+                  all={current.open}
+                  total={current.open.length}
+                  onMore={() => setOpenShown(nextPage)}
                   row={current}
                   keys={keys}
                   resolveLink={resolveLink}
@@ -529,7 +598,10 @@ export function ProjectsView() {
                 </button>
                 {showDone && (
                   <TaskList
-                    tasks={current.done}
+                    tasks={current.done.length > doneShown ? current.done.slice(0, doneShown) : current.done}
+                    all={current.done}
+                    total={current.done.length}
+                    onMore={() => setDoneShown(nextPage)}
                     row={current}
                     keys={keys}
                     resolveLink={resolveLink}
@@ -652,7 +724,10 @@ function ProjectHeader({
 }) {
   const m = row.note.meta
   const summary = useMemo(() => projectSummary(row.note), [row.note])
-  const summarySource = useMemo(() => summaryQuote(row.note) ?? summary, [row.note, summary])
+  const quote = useMemo(() => summaryQuote(row.note), [row.note])
+  const summarySource = quote.text ?? summary
+  /** A summary too long to be read whole is not edited in place: saving would rewrite only the part that was read. */
+  const summaryEditable = quote.whole && summarySource.length < SUMMARY_EDIT_MAX
   const tags = useMemo(() => asStringArray(row.note.frontmatter['tags']).map(normalizeTag).filter(Boolean), [row.note])
   const status = m.status
   const options = status && !STATUSES.includes(status.toLowerCase()) ? [...STATUSES, status] : STATUSES
@@ -679,10 +754,10 @@ function ProjectHeader({
               disabled={readOnly}
               title="Rename the project (e) — the file follows unless it is the folder's own note"
             >
-              {m.title}
+              {truncate(m.title, MAX_TITLE_CHARS)}
             </button>
           )}
-          <div className="mt-0.5 font-mono text-[10.5px] text-faint">{m.path}</div>
+          <div className="mt-0.5 font-mono text-[10.5px] text-faint">{truncate(m.path, MAX_PATH_CHARS)}</div>
         </div>
         <select
           className="input !w-auto !py-1 !pr-2 !pl-2 !text-[11.5px] font-semibold uppercase tracking-wider"
@@ -721,10 +796,10 @@ function ProjectHeader({
           type="button"
           className="mt-2 line-clamp-2 block w-full text-left text-[12.5px] leading-relaxed text-dim hover:text-ink disabled:hover:text-dim"
           onClick={() => setEdit('summary')}
-          disabled={readOnly}
-          title="Edit the summary (the > line under the title)"
+          disabled={readOnly || !summaryEditable}
+          title={summaryEditable ? 'Edit the summary (the > line under the title)' : 'This summary is too long to edit here: edit the note'}
         >
-          {summary || <span className="text-faint">{readOnly ? 'No summary' : '+ Add a one-line summary'}</span>}
+          {truncate(summary, MAX_SUMMARY_CHARS) || <span className="text-faint">{readOnly ? 'No summary' : '+ Add a one-line summary'}</span>}
         </button>
       )}
 
@@ -747,11 +822,12 @@ function ProjectHeader({
           />
         ) : (
           <>
-            {tags.map((t) => (
+            {tags.slice(0, MAX_TAGS).map((t) => (
               <span key={t} className="chip !cursor-default">
-                #{t}
+                #{truncate(t, MAX_TAG_CHARS)}
               </span>
             ))}
+            {tags.length > MAX_TAGS && <span className="text-[11px] text-faint">+{tags.length - MAX_TAGS} more</span>}
             {!readOnly && (
               <button type="button" className="text-[11px] text-faint hover:text-accent2" onClick={() => setEdit('tags')}>
                 {tags.length ? '✎ tags' : '+ tags'}
@@ -920,6 +996,9 @@ function FolderPicker({ folders, near, onPick, onCancel }: { folders: Set<string
 /** Task rows; each is focusable and keeps its keys (Enter edit, Alt ↑↓ move, Del delete, Space tick, ↑↓ focus). */
 function TaskList({
   tasks,
+  all,
+  total,
+  onMore,
   row,
   keys,
   resolveLink,
@@ -932,7 +1011,14 @@ function TaskList({
   onDelete,
   onMove,
 }: {
+  /** The tasks drawn: the first page or pages of the list. */
   tasks: TaskItem[]
+  /** The whole list (the focus after a tick or a delete goes to the next task, drawn or not). */
+  all: TaskItem[]
+  /** All the tasks of the list (more than are drawn when a page is still to come). */
+  total: number
+  /** Draw one more page. */
+  onMore: () => void
   row: ProjectRow
   /** Row keys by task line (see `taskKeys`). */
   keys: Map<number, string>
@@ -950,8 +1036,8 @@ function TaskList({
   if (tasks.length === 0) return null
   /** The row to focus after `t` leaves this list (the next one, else the previous), as a line after `shift` lines went at `t`. */
   const neighborLine = (t: TaskItem, shift: number): number | null => {
-    const i = tasks.indexOf(t)
-    const n = tasks[i + 1] ?? tasks[i - 1]
+    const i = all.indexOf(t)
+    const n = all[i + 1] ?? all[i - 1]
     if (!n) return null
     return n.line > t.line ? n.line - shift : n.line
   }
@@ -996,6 +1082,18 @@ function TaskList({
           />
         )
       })}
+      {total > tasks.length &&
+        (tasks.length < TASK_MAX_SHOWN ? (
+          <li className="py-1 pl-1">
+            <button type="button" className="hud-btn !h-7" onClick={onMore}>
+              Show {Math.min(TASK_PAGE, total - tasks.length)} more · {total - tasks.length} left <kbd>m</kbd>
+            </button>
+          </li>
+        ) : (
+          <li className="py-1 pl-1 text-[11.5px] text-faint">
+            The first {TASK_MAX_SHOWN.toLocaleString('en-US')} are drawn; {(total - tasks.length).toLocaleString('en-US')} more are in the note.
+          </li>
+        ))}
     </ul>
   )
 }
@@ -1063,7 +1161,7 @@ function TaskRow({
         checked={task.done}
         disabled={readOnly}
         onChange={(e) => onToggle(e.target.checked)}
-        aria-label={task.text}
+        aria-label={truncate(task.text, 200)}
       />
       {editing ? (
         <span className="min-w-0 flex-1">
@@ -1074,7 +1172,11 @@ function TaskRow({
           <TaskText text={task.text} done={task.done} resolveLink={resolveLink} />
         </span>
       )}
-      {task.section && task.section.toLowerCase() !== 'to do' && <span className="shrink-0 text-[10px] text-faint">{task.section}</span>}
+      {task.section && task.section.toLowerCase() !== 'to do' && (
+        <span className="shrink-0 text-[10px] text-faint" title={truncate(task.section, MAX_PATH_CHARS)}>
+          {truncate(task.section, MAX_SECTION_CHARS)}
+        </span>
+      )}
       {task.doneAt && (
         <span className="shrink-0 text-[10.5px] tabular-nums text-faint" title={`Done ${task.doneAt}`}>
           ✅ {task.doneAt}
@@ -1116,25 +1218,27 @@ function RowButton({ label, onClick, danger, children }: { label: string; onClic
   )
 }
 
-const INLINE_RE = /(!?\[\[[^\]]+?\]\])|((?:^|(?<=\s))#[\p{L}\p{N}_][\p{L}\p{N}_\-/]*)/gu
+// A link target holds no bracket and is at most 200 characters, a tag at most 101 (the '#' and 100 more): a run of '[' with no ']]' after it must not make the scan quadratic.
+const INLINE_RE = /(!?\[\[[^[\]]{1,200}\]\])|((?:^|(?<=\s))#[\p{L}\p{N}_][\p{L}\p{N}_\-/]{0,100})/gu
 
-/** Task text with clickable [[wikilinks]] and #tags; everything else verbatim. */
+/** Task text with clickable [[wikilinks]] and #tags; everything else verbatim (a very long task is cut). */
 function TaskText({ text, done, resolveLink }: { text: string; done: boolean; resolveLink: (target: string) => NoteId | null }) {
-  const openNote = useAether((s) => s.openNote)
-  const createGhost = useAether((s) => s.createGhost)
-  const toggleTag = useAether((s) => s.toggleTag)
   const parts = useMemo(() => {
+    const shown = truncate(text, MAX_TASK_CHARS)
     const out: React.ReactNode[] = []
     let last = 0
     let k = 0
-    for (const m of text.matchAll(INLINE_RE)) {
+    for (const m of shown.matchAll(INLINE_RE)) {
+      // The links and tags past the first few stay plain text (a task of 700 tags would draw 700 anchors).
+      if (k >= MAX_TOKENS_PER_TASK) break
       const i = m.index ?? 0
-      if (i > last) out.push(text.slice(last, i))
+      if (i > last) out.push(shown.slice(last, i))
       const tok = m[0]
       if (tok.startsWith('#')) {
         const tag = tok.slice(1).toLowerCase()
         out.push(
-          <a key={k++} href="#" className="tag" onClick={(e) => (e.preventDefault(), e.stopPropagation(), toggleTag(tag))}>
+          // The store's actions are stable: they are read when clicked, not subscribed to by every row.
+          <a key={k++} href="#" className="tag" onClick={(e) => (e.preventDefault(), e.stopPropagation(), useAether.getState().toggleTag(tag))}>
             {tok}
           </a>,
         )
@@ -1152,8 +1256,9 @@ function TaskText({ text, done, resolveLink }: { text: string; done: boolean; re
             onClick={(e) => {
               e.preventDefault()
               e.stopPropagation()
-              if (id) openNote(id, { fly: true, view: 'editor' })
-              else void createGhost(`ghost:${target}`)
+              const st = useAether.getState()
+              if (id) st.openNote(id, { fly: true, view: 'editor' })
+              else void st.createGhost(`ghost:${target}`)
             }}
           >
             {alias?.trim() || target}
@@ -1162,15 +1267,8 @@ function TaskText({ text, done, resolveLink }: { text: string; done: boolean; re
       }
       last = i + tok.length
     }
-    if (last < text.length) out.push(text.slice(last))
+    if (last < shown.length) out.push(shown.slice(last))
     return out
-  }, [text, resolveLink, openNote, createGhost, toggleTag])
+  }, [text, resolveLink])
   return <span className={cx('md !max-w-none !p-0 text-[13.5px] leading-snug', done ? 'text-faint line-through' : 'text-ink')}>{parts}</span>
-}
-
-function StatusChip({ status }: { status: string | null }) {
-  if (!status) return null
-  const s = status.toLowerCase()
-  const color = s === 'active' || s === 'in progress' ? 'text-untagged' : s === 'done' ? 'text-faint' : s === 'paused' ? 'text-inbox' : 'text-dim'
-  return <span className={cx('shrink-0 rounded-full border border-[var(--panel-border)] px-2 py-0.5 text-[10.5px] font-semibold uppercase tracking-wider', color)}>{status}</span>
 }

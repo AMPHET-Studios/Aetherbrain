@@ -414,6 +414,21 @@ describe('projectSummary', () => {
     expect(projectSummary(n)).toBe('The real point of Aether Brain, see site. Second line.')
     expect(projectSummary(note('Projects/B.md', '# B\n'))).toBe('')
   })
+
+  it('reads a bounded part of a huge note: the summary is cut, the rest of the note is never read for it', () => {
+    // Hand-built notes (no parse: parsing megabytes of one paragraph is slow, and is not what is tested).
+    const big = (body: string) => ({ ...note('Projects/Big.md', '# Big\n'), body })
+    const quote = projectSummary(big(`# Big\n\n${'> word word word\n'.repeat(200_000)}`))
+    expect(quote.length).toBeLessThanOrEqual(20_000)
+    expect(quote.startsWith('word word word word word word')).toBe(true)
+    const paragraph = projectSummary(big(`# Big\n\n${'plain words on a line\n'.repeat(400_000)}`))
+    expect(paragraph.length).toBeLessThanOrEqual(20_000)
+    expect(paragraph.startsWith('plain words on a line plain words')).toBe(true)
+    const oneLine = projectSummary(big(`# Big\n\n${'x'.repeat(5_000_000)}\n`))
+    expect(oneLine.length).toBeLessThanOrEqual(20_000)
+    // A summary under the cap is read whole, as before.
+    expect(projectSummary(big('# Big\n\n> ' + 'a'.repeat(1500) + '\n')).length).toBe(1500)
+  })
 })
 
 describe('project notes', () => {

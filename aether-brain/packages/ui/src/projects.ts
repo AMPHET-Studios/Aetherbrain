@@ -1,4 +1,4 @@
-import { extractTasks, isProjectNote, moveTask, projectFolderOf, taskProgress, type NoteId, type ParsedNote, type TaskItem } from '@aether/core'
+import { isProjectNote, moveTask, projectFolderOf, taskProgress, tasksOf, type NoteId, type ParsedNote, type TaskItem } from '@aether/core'
 
 /** One card on the Projects board. */
 export interface ProjectRow {
@@ -23,7 +23,8 @@ export function listProjects(notes: Map<NoteId, ParsedNote>, folders: Set<string
   const out: ProjectRow[] = []
   for (const n of notes.values()) {
     if (!isProjectNote(n)) continue
-    const tasks = extractTasks(n.raw)
+    // Read-only and cached per note (tasksOf): the board draws again on every change without scanning every project again.
+    const tasks = tasksOf(n)
     out.push({
       note: n,
       tasks,
