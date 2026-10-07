@@ -51,8 +51,11 @@ remains the one place anything is written. The Unreal app reads the scene from t
 3. The editor opens. On its first start it makes four assets by itself, in `Content/AetherBrain/` (see the Output Log):
    `M_AetherNode` (the glow material), `M_AetherSprite` (the sky's material), `M_AetherRock` (the lit material of
    rocks and ships) and `Maps/Brain` (an empty level of space). Nothing to click.
-4. Optional: **Platforms → Windows → Package Project** makes a standalone `AetherBrainViewer.exe` you can start
-   without the editor.
+4. Optional: a standalone `AetherBrainViewer.exe` you can start without the editor. Close the editor, then double-click
+   `unreal/PackageWindows.bat` (it finds Unreal Engine 5.8 in `C:\Program Files\Epic Games\UE_5.8`, or in the folder
+   named by `UE_ROOT`, builds, cooks and packages; 10 to 30 minutes the first time) and take the program from
+   `unreal/Packaged/Windows/`. Or, inside the editor: **Platforms → Windows → Package Project**. The batch file
+   is not run by the repository's tests: it drives Unreal's own build tool, which is not available there.
 
 ## Use it
 

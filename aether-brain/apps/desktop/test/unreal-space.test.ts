@@ -102,3 +102,37 @@ describe('the Unreal Niagara layer, wiring', () => {
     expect(doc).toContain(`(v${version})`)
   })
 })
+
+describe('the Windows packaging script', () => {
+  const bat = read(path.join(unreal, 'PackageWindows.bat'))
+
+  it('packages this project, and checks for what the editor makes on its first start', () => {
+    expect(bat).toContain('AetherBrainViewer\\AetherBrainViewer.uproject')
+    expect(bat).toContain('RunUAT.bat')
+    const uat = bat.split(/\r\n/).find((l) => l.includes('BuildCookRun')) ?? ''
+    for (const flag of ['-platform=Win64', '-build', '-cook', '-stage', '-pak', '-archive', '-archivedirectory=']) expect(uat).toContain(flag)
+    // The map and the glow material named in the script are the ones the editor script and the config use.
+    const python = read(path.join(unreal, 'AetherBrainViewer/Content/Python/init_unreal.py'))
+    expect(python).toContain('MAP = FOLDER + "/Maps/Brain"')
+    expect(bat).toContain('Content\\AetherBrain\\Maps\\Brain.umap')
+    expect(python).toContain('FOLDER = "/Game/AetherBrain"')
+    expect(python).toContain('"M_AetherNode"')
+    expect(bat).toContain('Content\\AetherBrain\\M_AetherNode.uasset')
+    expect(read(path.join(unreal, 'AetherBrainViewer/Config/DefaultEngine.ini'))).toContain('GameDefaultMap=/Game/AetherBrain/Maps/Brain.Brain')
+    // The engine version of the project is the one the script looks for.
+    expect(read(path.join(unreal, 'AetherBrainViewer/AetherBrainViewer.uproject'))).toContain('"EngineAssociation": "5.8"')
+    expect(bat).toContain('UE_5.8')
+  })
+
+  it('is a Windows batch file: CRLF line endings, every goto has its label, nothing runs past its end', () => {
+    expect(bat).toContain('\r\n')
+    expect(bat.replace(/\r\n/g, '').includes('\n')).toBe(false)
+    const labels = new Set([...bat.matchAll(/^:(\w+)\s*$/gm)].map((m) => m[1]))
+    for (const m of bat.matchAll(/goto :(\w+)/g)) expect(labels.has(m[1]!)).toBe(true)
+    // A parenthesis inside a block's echo would end the block early: the script uses no blocks.
+    expect(bat).not.toMatch(/^\s*\(/m)
+    // Every path through the script ends in exit /b.
+    expect(bat.trimEnd().endsWith('exit /b 1')).toBe(true)
+  })
+})
+
