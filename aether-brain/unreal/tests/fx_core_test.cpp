@@ -71,6 +71,12 @@ static void TestLinkIndex()
 	}
 	CHECK(Total == 2 * L.LinkCount());
 
+	// A link whose first end is the first number past the nodes (and one whose second end is) is out of the graph.
+	const int Past[] = {4, 1, 1, 4, 3, 1};
+	LinkIndex PastEnd;
+	PastEnd.Build(Past, 6, 4);
+	CHECK(PastEnd.LinkCount() == 1 && PastEnd.Degree(3) == 1 && PastEnd.Degree(1) == 1);
+
 	// Nothing, nowhere.
 	LinkIndex Empty;
 	Empty.Build(nullptr, 0, 0);
@@ -167,10 +173,14 @@ static void TestDueEvents()
 
 	// A long frame (a hitch of two seconds) never makes a burst: only what is within MaxLate, and never more than the cap.
 	const std::vector<uint32_t> Hitch = DueEvents(3U, kPulseSalt, 14.0, 10.0, 12.0);
-	CHECK(static_cast<int>(Hitch.size()) <= kMaxEventsPerFrame);
+	// (Pinned as numbers on purpose: six starts in a frame at most, nothing more than a quarter of a second late.)
+	CHECK(kMaxEventsPerFrame == 6 && kMaxLateSeconds == 0.25 && kLingerSeconds == 0.8);
+	CHECK(kPulseSlots == 40 && kMeteorSlots == 6 && kRippleSlots == 4 && kSunSlots == 3);
+	CHECK(static_cast<int>(Hitch.size()) <= 6);
+	CHECK(Hitch.size() >= 2U);
 	for (const uint32_t K : Hitch)
 	{
-		CHECK(EventTime(3U, kPulseSalt, 14.0, K) >= 12.0 - kMaxLateSeconds);
+		CHECK(EventTime(3U, kPulseSalt, 14.0, K) >= 12.0 - 0.25);
 		CHECK(EventTime(3U, kPulseSalt, 14.0, K) < 12.0);
 	}
 	// The cap keeps the newest.
@@ -213,6 +223,10 @@ static void TestPulseRate()
 		Last = Rate;
 	}
 	CHECK_NEAR(PulseRate(500, 2.0), 2.0 * PulseRate(500, 1.0), 1e-9);
+	// A rate from the formula: 2 + 1.5 log10(1 + links); held to 14 a second however many links (and Density multiplies after).
+	CHECK_NEAR(PulseRate(99, 1.0), 5.0, 1e-9);
+	CHECK_NEAR(PulseRate(1000000000, 1.0), 14.0, 1e-9);
+	CHECK_NEAR(PulseRate(1000000000, 2.0), 28.0, 1e-9);
 }
 
 static void TestPulseSizes()

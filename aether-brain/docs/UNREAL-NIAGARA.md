@@ -11,7 +11,7 @@ effects** that follow what the brain is doing.
 | **Dust** | A box of slow motes around the camera. They stay where they are born, so flying through them shows your speed | `NS_AetherDust` |
 | **Shooting stars** | A streak across the part of the sky you are looking at, about one every three seconds | `NS_AetherShootingStars` |
 
-Press <kbd>N</kbd> to switch them on and off. The HUD (top right) says `Effects: on - 5 of 5 Niagara systems, 14 playing`.
+Press <kbd>N</kbd> to switch them on and off. The HUD (top right) says `Effects: on - 5/5 systems, 14 playing`.
 
 ## What is here, and what you have to make
 
@@ -30,7 +30,7 @@ The editor script (`Content/Python/init_unreal.py`) makes the folder `/Game/Aeth
 writes into the Output Log which of the five are still missing.
 
 > **Not verified in a real Unreal Editor.** The planning maths and the actor's bookkeeping (which parameters each component
-> gets, that no component is played while busy, that nothing breaks with a system or the brain missing) are run as plain C++
+> gets, that no pulse or ripple component is played while busy, that nothing breaks with a system or the brain missing) are run as plain C++
 > against a stand-in engine (`unreal/tests/run.sh`). The Niagara calls themselves (`SetAsset`, `SetVariableFloat`,
 > `SetVariableVec3`, `SetVariablePosition`, `SetVariableLinearColor`, `Activate`, `Deactivate`) are written from the
 > engine's documented API and have never been compiled against Unreal 5.8; and the recipes below were written from memory of
@@ -140,8 +140,8 @@ fast and settles), Scale Color: RGB scale ← `User.Intensity`, Alpha scale a cu
 
 1. Press Play on the `Brain` map with the desktop app's companion link on. The HUD says how many systems were found and
    names the ones that are missing; the Output Log has a line per missing asset.
-2. Pulses should run along links within a second of the brain appearing. Click a node: a ripple, a halo, and most pulses
-   now start at it. <kbd>N</kbd> switches everything off and on.
+2. Pulses should run along links within a second of the brain appearing. Click a node: a ripple, a halo, and about two
+   thirds of the pulses now run on its links. <kbd>N</kbd> switches everything off and on.
 3. If a system plays at the world's origin, or not at all, see the table at the end.
 
 ## Settings (Aether Fx Actor)
@@ -168,10 +168,16 @@ not at all when **Spawn Fx** is off on the game mode).
 - **Pulses are a stream of numbered events** (`EventTime`, `DueEvents`): the K-th pulse is the same pulse whenever it
   is asked for, one lands in each 1/rate-second slot, and a long frame never makes a burst (anything more than a quarter
   second late is dropped, at most six start in one frame). The rate follows the link count (`2 + 1.5·log10(1 + links)` a
-  second, at most 14) times **Density**. Links are indexed once per change of the brain, for any size of vault (the first
-  200,000 links).
+  second: 4.8 for 76 links, about 10 for 200,000) times **Density**. Pulses run only along links the brain *draws* (its
+  first **Max Links**, 20,000 by default; none with **Show Links** off), so the index holds those, built once per change
+  of the brain or of that number, for any size of vault (at most 200,000 links).
 - **Nothing runs while it is off or before there is something to show:** pulses, coronas and ripples wait for the brain's
   first positions; dust and shooting stars belong to the camera and play without a brain.
+- **A pulse follows its nodes.** The layout keeps turning while a pulse runs (up to 3.5 s), so every frame a pulse that
+  is still playing gets its two nodes' current places in `Start` and `End` (and its component moves with `Start`); the
+  recipe's position expression reads them each time it spawns a sprite, so the head stays on the thread.
+- **Selecting is a click, not a renumbering.** A rescan that inserts nodes before the selected one changes its number but
+  not the selection: no ripple for it.
 - **A pulse that has no length yet** (a layout still folded onto one point, or positions that are not numbers) is skipped.
 
 ## Troubleshooting
@@ -184,12 +190,12 @@ not at all when **Spawn Fx** is off on the game mode).
 | The dust box does not follow the camera, or has the wrong size | `Extent` must be a **Vector** (half size in cm), the emitter's Box Location must read it, and the emitter must be in **world** space |
 | The corona sits behind its sun when the layout moves | The corona's emitters must be **Local Space** |
 | It stutters | Lower **Density**, or switch off a layer. Each active effect is one Niagara component; 55 is the most |
-| The compiler stops on `SetVariablePosition`, `SetAsset` or `NiagaraComponent.h` | The `Niagara` module must be in `AetherBrain.Build.cs` (it is) and the Niagara plugin on in the `.uproject` and `.uplugin` (it is); if your 5.8 renamed a call, change the one line in `Private/AetherFxActor.cpp` (all engine calls are in the helpers at its top and in `NewFx`) |
+| The compiler stops on `SetVariablePosition`, `SetAsset` or `NiagaraComponent.h` | The `Niagara` module must be in `AetherBrain.Build.cs` (it is) and the Niagara plugin on in the `.uproject` and `.uplugin` (it is); if your 5.8 renamed a call, change that line in `Private/AetherFxActor.cpp` (search it for `SetAsset`, `SetVariable`, `Activate`, `Deactivate`, `LoadSynchronous`; the `User.` names are in one struct at its top) |
 
 ## Check it without Unreal
 
 ```
-unreal/tests/run.sh      # four stages; the last two are the Niagara layer's
+unreal/tests/run.sh      # five stages; the third and fourth are the Niagara layer's, the fifth joins both actors into one file the way Unreal's unity build does
 ```
 
 `fx_core_test.cpp` checks `AetherFxMath.h` (the link index, the event streams deliver each event once and never a burst, link
@@ -197,5 +203,5 @@ picks follow the selection share, shooting stars stay in the view cone and cross
 the pool never hands out a busy slot). `fx_actor_harness.cpp` compiles the real `AetherFxActor.cpp` against `ue_stubs/` with
 fake Niagara components that record every call: it flies a camera, runs a fake brain, selects nodes, switches layers and the
 whole layer off and on, and checks which parameters each component got (the table above, exactly), that every pulse runs a
-real link, that no component is played while busy, and that nothing breaks with a system, the brain, the positions or the
+real link, that no pulse or ripple component is played while busy, and that nothing breaks with a system, the brain, the positions or the
 world missing. What it cannot say is whether Unreal accepts the calls or how Niagara draws the result.

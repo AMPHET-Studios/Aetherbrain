@@ -19,7 +19,7 @@ namespace Sp = AetherSpace;
 namespace
 {
 	/** The five systems, in the order the HUD and the player controller number them. */
-	enum EFx : int32
+	enum EFxSystem : int32
 	{
 		FxPulses = 0,
 		FxCorona,
@@ -29,10 +29,10 @@ namespace
 		FxCount,
 	};
 
-	const TCHAR* const SystemNames[FxCount] = {
+	const TCHAR* const FxSystemNames[FxCount] = {
 		TEXT("NS_AetherPulses"), TEXT("NS_AetherCorona"), TEXT("NS_AetherDust"), TEXT("NS_AetherShootingStars"), TEXT("NS_AetherRipple"),
 	};
-	const TCHAR* const SystemPaths[FxCount] = {
+	const TCHAR* const FxSystemPaths[FxCount] = {
 		TEXT("/Game/AetherFX/NS_AetherPulses.NS_AetherPulses"),
 		TEXT("/Game/AetherFX/NS_AetherCorona.NS_AetherCorona"),
 		TEXT("/Game/AetherFX/NS_AetherDust.NS_AetherDust"),
@@ -40,7 +40,7 @@ namespace
 		TEXT("/Game/AetherFX/NS_AetherRipple.NS_AetherRipple"),
 	};
 
-	int32 SlotsOf(int32 System)
+	int32 FxSlotsOf(int32 System)
 	{
 		switch (System)
 		{
@@ -52,12 +52,12 @@ namespace
 		}
 	}
 
-	FVector ToFVector(const Sp::Vec3& V) { return FVector(V.X, V.Y, V.Z); }
-	Sp::Vec3 FromFVector(const FVector& V) { return Sp::Vec3{V.X, V.Y, V.Z}; }
-	Sp::Vec3 ColorOf(const FLinearColor& C) { return Sp::Vec3{static_cast<double>(C.R), static_cast<double>(C.G), static_cast<double>(C.B)}; }
+	FVector FxToFVector(const Sp::Vec3& V) { return FVector(V.X, V.Y, V.Z); }
+	Sp::Vec3 FxFromFVector(const FVector& V) { return Sp::Vec3{V.X, V.Y, V.Z}; }
+	Sp::Vec3 FxColorOf(const FLinearColor& C) { return Sp::Vec3{static_cast<double>(C.R), static_cast<double>(C.G), static_cast<double>(C.B)}; }
 
 	/** The User parameters the systems read (the names are the contract with the Niagara assets: docs/UNREAL-NIAGARA.md). */
-	struct FParams
+	struct FFxParams
 	{
 		const FName Start{TEXT("User.Start")};
 		const FName End{TEXT("User.End")};
@@ -70,20 +70,20 @@ namespace
 		const FName SpawnRate{TEXT("User.SpawnRate")};
 		const FName Intensity{TEXT("User.Intensity")};
 	};
-	const FParams& Params()
+	const FFxParams& FxParams()
 	{
-		static const FParams P{};
+		static const FFxParams P{};
 		return P;
 	}
 
-	void SetFloat(UNiagaraComponent* C, const FName& Name, double V) { C->SetVariableFloat(Name, static_cast<float>(V)); }
+	void FxSetFloat(UNiagaraComponent* C, const FName& Name, double V) { C->SetVariableFloat(Name, static_cast<float>(V)); }
 
-	void SetColor(UNiagaraComponent* C, const FName& Name, double R, double G, double B)
+	void FxSetColor(UNiagaraComponent* C, const FName& Name, double R, double G, double B)
 	{
 		C->SetVariableLinearColor(Name, FLinearColor(static_cast<float>(R), static_cast<float>(G), static_cast<float>(B), 1.f));
 	}
 
-	void SetPoint(UNiagaraComponent* C, const FName& Name, const FVector& V, bool bPosition)
+	void FxSetPoint(UNiagaraComponent* C, const FName& Name, const FVector& V, bool bPosition)
 	{
 		if (bPosition)
 		{
@@ -121,11 +121,16 @@ struct FAetherFxState
 		Fx::SlotPool Pool;
 		/** For the effects that keep playing (corona, dust): which component is playing now. */
 		std::vector<char> Playing;
+		/** For pulses: the two nodes each busy slot runs between (the nodes keep moving, so the pulse follows them). */
+		std::vector<int32> From;
+		std::vector<int32> To;
 	};
 
 	FGroup Groups[FxCount];
 	Fx::LinkIndex Links;
 	uint32 LinksFor = 0;
+	/** How many links the brain draws, as the index was built (it follows what is drawn: Max Links, Show Links). */
+	int32 DrawnFor = 0;
 	bool bLinks = false;
 	/** The first few suns (node numbers). */
 	std::vector<int32> Suns;
@@ -150,11 +155,11 @@ AAetherFxActor::AAetherFxActor()
 	Root->SetMobility(EComponentMobility::Movable);
 	SetRootComponent(Root);
 
-	PulseSystem = TSoftObjectPtr<UNiagaraSystem>(FSoftObjectPath(SystemPaths[FxPulses]));
-	CoronaSystem = TSoftObjectPtr<UNiagaraSystem>(FSoftObjectPath(SystemPaths[FxCorona]));
-	DustSystem = TSoftObjectPtr<UNiagaraSystem>(FSoftObjectPath(SystemPaths[FxDust]));
-	MeteorSystem = TSoftObjectPtr<UNiagaraSystem>(FSoftObjectPath(SystemPaths[FxMeteors]));
-	RippleSystem = TSoftObjectPtr<UNiagaraSystem>(FSoftObjectPath(SystemPaths[FxRipples]));
+	PulseSystem = TSoftObjectPtr<UNiagaraSystem>(FSoftObjectPath(FxSystemPaths[FxPulses]));
+	CoronaSystem = TSoftObjectPtr<UNiagaraSystem>(FSoftObjectPath(FxSystemPaths[FxCorona]));
+	DustSystem = TSoftObjectPtr<UNiagaraSystem>(FSoftObjectPath(FxSystemPaths[FxDust]));
+	MeteorSystem = TSoftObjectPtr<UNiagaraSystem>(FSoftObjectPath(FxSystemPaths[FxMeteors]));
+	RippleSystem = TSoftObjectPtr<UNiagaraSystem>(FSoftObjectPath(FxSystemPaths[FxRipples]));
 }
 
 const TSoftObjectPtr<UNiagaraSystem>& AAetherFxActor::SoftOf(int32 System) const
@@ -171,7 +176,7 @@ const TSoftObjectPtr<UNiagaraSystem>& AAetherFxActor::SoftOf(int32 System) const
 
 const TCHAR* AAetherFxActor::SystemName(int32 System)
 {
-	return System >= 0 && System < FxCount ? SystemNames[System] : TEXT("");
+	return System >= 0 && System < FxCount ? FxSystemNames[System] : TEXT("");
 }
 
 bool AAetherFxActor::IsReady(int32 System) const
@@ -224,10 +229,10 @@ void AAetherFxActor::BeginPlay()
 		G.System = SoftOf(I).LoadSynchronous();
 		if (!G.System)
 		{
-			UE_LOG(LogTemp, Warning, TEXT("Aether FX: %s is missing (build it in the Unreal Editor from docs/UNREAL-NIAGARA.md). That effect is not played."), SystemPaths[I]);
+			UE_LOG(LogTemp, Warning, TEXT("Aether FX: %s is missing (build it in the Unreal Editor from docs/UNREAL-NIAGARA.md). That effect is not played."), FxSystemPaths[I]);
 			continue;
 		}
-		const int32 Count = SlotsOf(I);
+		const int32 Count = FxSlotsOf(I);
 		for (int32 Slot = 0; Slot < Count; ++Slot)
 		{
 			UNiagaraComponent* C = NewFx(this, Root, G.System);
@@ -237,6 +242,8 @@ void AAetherFxActor::BeginPlay()
 		}
 		G.Pool.Resize(Count);
 		G.Playing.assign(static_cast<size_t>(Count), 0);
+		G.From.assign(static_cast<size_t>(Count), INDEX_NONE);
+		G.To.assign(static_cast<size_t>(Count), INDEX_NONE);
 	}
 }
 
@@ -273,7 +280,7 @@ void AAetherFxActor::ApplyOn()
 	State->bDustAt = false;
 }
 
-UNiagaraComponent* AAetherFxActor::Take(int32 System, double Now, double Seconds, const FVector& Where)
+UNiagaraComponent* AAetherFxActor::Take(int32 System, double Now, double Seconds, const FVector& Where, int32* OutSlot)
 {
 	FAetherFxState::FGroup& G = State->Groups[System];
 	if (!G.System || G.Comps.Num() == 0)
@@ -288,18 +295,30 @@ UNiagaraComponent* AAetherFxActor::Take(int32 System, double Now, double Seconds
 	}
 	UNiagaraComponent* C = G.Comps[Slot];
 	C->SetWorldLocation(Where);
+	if (OutSlot)
+	{
+		*OutSlot = Slot;
+	}
 	return C;
 }
 
 void AAetherFxActor::RefreshShape(const AAetherBrainActor& B)
 {
 	FAetherFxState& S = *State;
-	if (S.bLinks && S.LinksFor == B.GetShapeSerial() && S.Links.NodeCount() == B.NumNodes())
+	// Pulses run only along the links the brain draws (its first Max Links, none when Show Links is off).
+	const int32 Drawn = FMath::Max(B.GetDrawnLinkCount(), 0);
+	if (S.bLinks && S.LinksFor == B.GetShapeSerial() && S.Links.NodeCount() == B.NumNodes() && S.DrawnFor == Drawn)
 	{
 		return;
 	}
+	if (S.bLinks)
+	{
+		// New nodes and links may have moved the selection to another number: not a new selection, so no ripple for it.
+		S.LastSelected = B.GetSelected();
+	}
 	const TArray<int32>& Links = B.GetLinks();
-	S.Links.Build(Links.GetData(), Links.Num(), B.NumNodes());
+	S.Links.Build(Links.GetData(), FMath::Min(Links.Num(), Drawn * 2), B.NumNodes());
+	S.DrawnFor = Drawn;
 	S.Suns.clear();
 	for (int32 I = 0; I < B.NumNodes() && static_cast<int32>(S.Suns.size()) < Fx::kSunSlots; ++I)
 	{
@@ -372,6 +391,7 @@ void AAetherFxActor::Tick(float DeltaSeconds)
 		RefreshShape(*B);
 		UpdateCoronas(Now, *B);
 		FireRipples(Now, *B);
+		FollowPulses(Now, *B);
 		FirePulses(Prev, Now, *B);
 	}
 }
@@ -395,17 +415,17 @@ void AAetherFxActor::UpdateDust(double Dt, const FVector& Camera, double Field)
 		return;
 	}
 	// The dust box follows the camera, eased (the motes already made stay where they are, so flying through it shows speed).
-	const Sp::Vec3 Cam = FromFVector(Camera);
+	const Sp::Vec3 Cam = FxFromFVector(Camera);
 	S.DustAt = S.bDustAt ? Fx::Ease(S.DustAt, Cam, Dt, 2.0) : Cam;
 	S.bDustAt = true;
 	const Fx::DustLook Look = Fx::Dust(Field, static_cast<double>(Density));
-	const FParams& P = Params();
-	C->SetWorldLocation(ToFVector(S.DustAt));
+	const FFxParams& P = FxParams();
+	C->SetWorldLocation(FxToFVector(S.DustAt));
 	// A size, not a place: always a Vector.
-	C->SetVariableVec3(P.Extent, ToFVector(Look.HalfExtent));
-	SetFloat(C, P.SpawnRate, Look.SpawnRate);
-	SetColor(C, P.Color, 0.62, 0.74, 1.0);
-	SetFloat(C, P.Intensity, 0.6 * static_cast<double>(Glow));
+	C->SetVariableVec3(P.Extent, FxToFVector(Look.HalfExtent));
+	FxSetFloat(C, P.SpawnRate, Look.SpawnRate);
+	FxSetColor(C, P.Color, 0.62, 0.74, 1.0);
+	FxSetFloat(C, P.Intensity, 0.6 * static_cast<double>(Glow));
 	if (!G.Playing[0])
 	{
 		C->Activate(true);
@@ -421,7 +441,7 @@ void AAetherFxActor::UpdateCoronas(double Now, const AAetherBrainActor& B)
 	{
 		return;
 	}
-	const FParams& P = Params();
+	const FFxParams& P = FxParams();
 	for (int32 Slot = 0; Slot < Fx::kCoronaSlots; ++Slot)
 	{
 		// The first slots are the suns; the last is a halo on the selection (a selected sun already has its corona).
@@ -455,11 +475,11 @@ void AAetherFxActor::UpdateCoronas(double Now, const AAetherBrainActor& B)
 			continue;
 		}
 		const Fx::CoronaLook Look = Fx::Corona(Now, static_cast<double>(B.NodeRadius(Node)) * Scale, static_cast<uint32>(Node) + (Slot >= Fx::kSunSlots ? 7000U : 0U));
-		const Sp::Vec3 Color = ColorOf(N->Color);
+		const Sp::Vec3 Color = FxColorOf(N->Color);
 		C->SetWorldLocation(B.NodeLocation(Node));
-		SetFloat(C, P.Radius, Look.Radius);
-		SetColor(C, P.Color, Color.X, Color.Y, Color.Z);
-		SetFloat(C, P.Intensity, Look.Intensity * static_cast<double>(Glow));
+		FxSetFloat(C, P.Radius, Look.Radius);
+		FxSetColor(C, P.Color, Color.X, Color.Y, Color.Z);
+		FxSetFloat(C, P.Intensity, Look.Intensity * static_cast<double>(Glow));
 		if (!G.Playing[static_cast<size_t>(Slot)])
 		{
 			C->Activate(true);
@@ -507,13 +527,44 @@ void AAetherFxActor::RippleAt(double Now, const AAetherBrainActor& B, int32 Node
 	{
 		return;
 	}
-	const FParams& P = Params();
-	const Sp::Vec3 Color = Fx::PulseTint(ColorOf(N->Color));
-	SetFloat(C, P.Radius, Look.Radius);
-	SetColor(C, P.Color, Color.X, Color.Y, Color.Z);
-	SetFloat(C, P.Duration, Look.Seconds);
-	SetFloat(C, P.Intensity, Look.Intensity * static_cast<double>(Glow));
+	const FFxParams& P = FxParams();
+	const Sp::Vec3 Color = Fx::PulseTint(FxColorOf(N->Color));
+	FxSetFloat(C, P.Radius, Look.Radius);
+	FxSetColor(C, P.Color, Color.X, Color.Y, Color.Z);
+	FxSetFloat(C, P.Duration, Look.Seconds);
+	FxSetFloat(C, P.Intensity, Look.Intensity * static_cast<double>(Glow));
 	C->Activate(true);
+}
+
+void AAetherFxActor::FollowPulses(double Now, const AAetherBrainActor& B)
+{
+	// The nodes keep orbiting while a pulse runs between them: hand every pulse that is still playing the nodes' places now, so it
+	// arrives where the node is and not where it was.
+	FAetherFxState::FGroup& G = State->Groups[FxPulses];
+	if (!G.System)
+	{
+		return;
+	}
+	const FFxParams& P = FxParams();
+	for (int32 Slot = 0; Slot < G.Comps.Num(); ++Slot)
+	{
+		const int32 From = G.From[static_cast<size_t>(Slot)];
+		const int32 To = G.To[static_cast<size_t>(Slot)];
+		if (!G.Pool.IsBusy(Slot, Now) || !B.GetNode(From) || !B.GetNode(To))
+		{
+			continue;
+		}
+		const FVector Start = B.NodeLocation(From);
+		const FVector End = B.NodeLocation(To);
+		if (!std::isfinite(Sp::Length(FxFromFVector(End) - FxFromFVector(Start))))
+		{
+			continue;
+		}
+		UNiagaraComponent* C = G.Comps[Slot];
+		C->SetWorldLocation(Start);
+		FxSetPoint(C, P.Start, Start, bPositionParameters);
+		FxSetPoint(C, P.End, End, bPositionParameters);
+	}
 }
 
 void AAetherFxActor::FirePulses(double Prev, double Now, const AAetherBrainActor& B)
@@ -525,7 +576,7 @@ void AAetherFxActor::FirePulses(double Prev, double Now, const AAetherBrainActor
 	}
 	const double Rate = Fx::PulseRate(S.Links.LinkCount(), static_cast<double>(Density));
 	const int32 Focus = B.GetSelected();
-	const FParams& P = Params();
+	const FFxParams& P = FxParams();
 	for (const uint32 K : Fx::DueEvents(static_cast<uint32>(Seed), Fx::kPulseSalt, Rate, Prev, Now))
 	{
 		const Fx::LinkPick Pick = Fx::PickLink(S.Links, static_cast<uint32>(Seed), K, Focus, static_cast<double>(SelectionShare));
@@ -536,25 +587,28 @@ void AAetherFxActor::FirePulses(double Prev, double Now, const AAetherBrainActor
 		}
 		const FVector Start = B.NodeLocation(Pick.From);
 		const FVector End = B.NodeLocation(Pick.To);
-		const double Length = Sp::Length(FromFVector(End) - FromFVector(Start));
+		const double Length = Sp::Length(FxFromFVector(End) - FxFromFVector(Start));
 		// Before the nodes have moved apart (or if the layout is degenerate) there is nothing to run along.
 		if (!std::isfinite(Length) || Length < 5.0)
 		{
 			continue;
 		}
 		const double Seconds = Fx::PulseSeconds(Length);
-		UNiagaraComponent* C = Take(FxPulses, Now, Seconds, Start);
+		int32 Slot = INDEX_NONE;
+		UNiagaraComponent* C = Take(FxPulses, Now, Seconds, Start, &Slot);
 		if (!C)
 		{
 			continue;
 		}
-		const Sp::Vec3 Color = Fx::PulseTint(ColorOf(From->Color));
-		SetPoint(C, P.Start, Start, bPositionParameters);
-		SetPoint(C, P.End, End, bPositionParameters);
-		SetColor(C, P.Color, Color.X, Color.Y, Color.Z);
-		SetFloat(C, P.Duration, Seconds);
-		SetFloat(C, P.Size, Fx::PulseSize(static_cast<double>(B.NodeRadius(Pick.From))));
-		SetFloat(C, P.Intensity, 3.0 * static_cast<double>(Glow));
+		S.Groups[FxPulses].From[static_cast<size_t>(Slot)] = Pick.From;
+		S.Groups[FxPulses].To[static_cast<size_t>(Slot)] = Pick.To;
+		const Sp::Vec3 Color = Fx::PulseTint(FxColorOf(From->Color));
+		FxSetPoint(C, P.Start, Start, bPositionParameters);
+		FxSetPoint(C, P.End, End, bPositionParameters);
+		FxSetColor(C, P.Color, Color.X, Color.Y, Color.Z);
+		FxSetFloat(C, P.Duration, Seconds);
+		FxSetFloat(C, P.Size, Fx::PulseSize(static_cast<double>(B.NodeRadius(Pick.From))));
+		FxSetFloat(C, P.Intensity, 3.0 * static_cast<double>(Glow));
 		C->Activate(true);
 	}
 }
@@ -566,22 +620,22 @@ void AAetherFxActor::FireMeteors(double Prev, double Now, const FVector& Camera,
 	{
 		return;
 	}
-	const FParams& P = Params();
+	const FFxParams& P = FxParams();
 	const double Rate = Fx::kMeteorRate * static_cast<double>(FMath::Clamp(Density, 0.f, 3.f));
 	for (const uint32 K : Fx::DueEvents(static_cast<uint32>(Seed), Fx::kMeteorSalt, Rate, Prev, Now))
 	{
-		const Fx::MeteorShot Star = Fx::Meteor(static_cast<uint32>(Seed), K, FromFVector(Camera), FromFVector(Forward));
-		UNiagaraComponent* C = Take(FxMeteors, Now, Star.Seconds, ToFVector(Star.From));
+		const Fx::MeteorShot Star = Fx::Meteor(static_cast<uint32>(Seed), K, FxFromFVector(Camera), FxFromFVector(Forward));
+		UNiagaraComponent* C = Take(FxMeteors, Now, Star.Seconds, FxToFVector(Star.From));
 		if (!C)
 		{
 			continue;
 		}
-		SetPoint(C, P.Start, ToFVector(Star.From), bPositionParameters);
-		SetPoint(C, P.End, ToFVector(Star.To), bPositionParameters);
-		SetColor(C, P.Color, Star.R, Star.G, Star.B);
-		SetFloat(C, P.Duration, Star.Seconds);
-		SetFloat(C, P.Width, Star.Width);
-		SetFloat(C, P.Intensity, 3.0 * static_cast<double>(Glow));
+		FxSetPoint(C, P.Start, FxToFVector(Star.From), bPositionParameters);
+		FxSetPoint(C, P.End, FxToFVector(Star.To), bPositionParameters);
+		FxSetColor(C, P.Color, Star.R, Star.G, Star.B);
+		FxSetFloat(C, P.Duration, Star.Seconds);
+		FxSetFloat(C, P.Width, Star.Width);
+		FxSetFloat(C, P.Intensity, 3.0 * static_cast<double>(Glow));
 		C->Activate(true);
 	}
 }

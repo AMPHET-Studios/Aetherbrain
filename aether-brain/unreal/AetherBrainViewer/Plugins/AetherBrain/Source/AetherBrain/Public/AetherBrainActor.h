@@ -79,6 +79,8 @@ public:
 	const TArray<int32>& GetLinks() const { return Graph.Edges; }
 	/** Counts up when the nodes or links are not the ones before (a new vault, a rescan), not when only colours or the selection change. */
 	uint32 GetShapeSerial() const { return ShapeSerial; }
+	/** How many links are drawn: the first Max Links of them, none when Show Links is off. */
+	int32 GetDrawnLinkCount() const { return LinkCount; }
 	/** The first positions have come in: the nodes are where the brain says they are. */
 	bool HasPositions() const { return bHasPositions; }
 

@@ -923,7 +923,7 @@ static void TestPoolExhaustion()
 		const auto It = Last.find(E.Comp);
 		if (It != Last.end())
 		{
-			CHECK(E.At - It->second->At >= static_cast<double>(It->second->Play.Floats.at("User.Duration")) + Fx::kLingerSeconds - 1e-3);
+			CHECK(E.At - It->second->At >= static_cast<double>(It->second->Play.Floats.at("User.Duration")) + 0.8 - 1e-3);
 		}
 		Last[E.Comp] = &E;
 	}
@@ -942,7 +942,7 @@ static void TestPoolExhaustion()
 		}
 		for (const auto& P : Latest)
 		{
-			Now += T < P.second->At + static_cast<double>(P.second->Play.Floats.at("User.Duration")) + Fx::kLingerSeconds ? 1U : 0U;
+			Now += T < P.second->At + static_cast<double>(P.second->Play.Floats.at("User.Duration")) + 0.8 ? 1U : 0U;
 		}
 		Busiest = std::max(Busiest, Now);
 	}
@@ -1114,6 +1114,304 @@ static void TestShootingStars()
 	CHECK(Used.size() >= 2U);
 }
 
+static void TestDrawnLinks()
+{
+	// The brain draws only its first Max Links (and none with Show Links off): pulses run along drawn links only.
+	Scene Off;
+	MakeBrain(Off.Brain, 40, true);
+	Off.Brain.DrawnOverride = 0;
+	Off.Start();
+	Off.Run(20.0);
+	CHECK(Off.CountOf(Pulses) == 0U);
+	CHECK(Off.CountOf(Corona) > 0U && Off.CountOf(Dust) > 0U);
+
+	Scene One;
+	MakeBrain(One.Brain, 40, true);
+	One.Brain.DrawnOverride = 1;
+	One.Start();
+	One.Run(40.0);
+	const std::vector<const Event*> Pulse = One.EventsOf(Pulses);
+	CHECK(Pulse.size() > 60U);
+	for (const Event* E : Pulse)
+	{
+		const int A = NodeAt(One.Brain, E->Play.Points.at("User.Start"));
+		const int B = NodeAt(One.Brain, E->Play.Points.at("User.End"));
+		// The first link is 0 - 2.
+		CHECK((A == 0 && B == 2) || (A == 2 && B == 0));
+	}
+	// The rate is that of the drawn links, not of all of them (2.45 a second for one).
+	CHECK(static_cast<double>(Pulse.size()) < Fx::PulseRate(1, 1.0) * 41.0 + 1.0);
+
+	// It follows when the number changes (a setting, a new graph): all, then none, then two.
+	Scene S;
+	MakeBrain(S.Brain, 40, true);
+	S.Start();
+	S.Run(5.0);
+	S.Brain.DrawnOverride = 0;
+	S.Frame();
+	const size_t Mark = S.Events.size();
+	S.Run(5.0);
+	CHECK(S.EventsOf(Pulses, Mark).empty());
+	S.Brain.DrawnOverride = 2;
+	S.Run(20.0);
+	const std::vector<const Event*> Two = S.EventsOf(Pulses, Mark);
+	CHECK(Two.size() > 20U);
+	std::set<std::pair<int, int>> Ways;
+	for (const Event* E : Two)
+	{
+		const int A = NodeAt(S.Brain, E->Play.Points.at("User.Start"));
+		const int B = NodeAt(S.Brain, E->Play.Points.at("User.End"));
+		Ways.insert({std::min(A, B), std::max(A, B)});
+	}
+	// The first two links are 0 - 2 and 2 - 3.
+	CHECK(Ways == (std::set<std::pair<int, int>>{{0, 2}, {2, 3}}));
+	// More drawn than there are links: just the links there are.
+	S.Brain.DrawnOverride = 100000;
+	S.Run(5.0);
+	CHECK(S.Fx.NumDropped() == 0);
+}
+
+static void TestPulsesFollowTheNodes()
+{
+	Scene S;
+	MakeBrain(S.Brain, 40, true);
+	S.Start();
+	S.Run(3.0);
+	const std::vector<const Event*> Pulse = S.EventsOf(Pulses);
+	CHECK(!Pulse.empty());
+	const Event& Last = *Pulse.back();
+	UNiagaraComponent* C = S.Comps[Last.Comp];
+	const int From = NodeAt(S.Brain, Last.Play.Points.at("User.Start"));
+	const int To = NodeAt(S.Brain, Last.Play.Points.at("User.End"));
+	CHECK(From >= 0 && To >= 0);
+	const size_t Plays = C->Plays.size();
+
+	// The layout turns: every node has moved a little. The pulse that is still playing is given the new places, and is not played again.
+	for (int I = 0; I < S.Brain.Where.Num(); ++I)
+	{
+		S.Brain.Where[I].X += 300.0;
+		S.Brain.Where[I].Y -= 120.0;
+	}
+	S.Frame();
+	CHECK(C->bActive);
+	CHECK(SameVec(C->Points.at("User.Start"), S.Brain.Where[From]));
+	CHECK(SameVec(C->Points.at("User.End"), S.Brain.Where[To]));
+	CHECK(SameVec(C->WorldLocation, S.Brain.Where[From]));
+	CHECK(C->Plays.size() == Plays);
+
+	// Once its slot is free again nothing touches it: the parameters stay as they were.
+	S.Brain.Selected = INDEX_NONE;
+	S.Run(8.0);
+	const size_t Later = C->Plays.size();
+	for (int I = 0; I < S.Brain.Where.Num(); ++I)
+	{
+		S.Brain.Where[I].Z += 777.0;
+	}
+	// With no new pulses every slot ends: none is busy, so none is followed any more.
+	S.Fx.bPulses = false;
+	S.Run(5.0);
+	const std::map<std::string, FVector> Settled = C->Points;
+	for (int I = 0; I < S.Brain.Where.Num(); ++I)
+	{
+		S.Brain.Where[I].Z += 555.0;
+	}
+	S.Frame();
+	CHECK(C->Plays.size() == Later);
+	for (const auto& P : Settled)
+	{
+		CHECK(SameVec(C->Points.at(P.first), P.second));
+	}
+
+	// A node that is gone (a smaller brain) leaves the pulse as it was, and nothing breaks.
+	Scene G;
+	MakeBrain(G.Brain, 40, true);
+	G.Start();
+	G.Run(2.0);
+	MakeBrain(G.Brain, 4, true);
+	G.Run(2.0);
+	CHECK(G.Fx.NumDropped() == 0);
+	// Positions that stop being numbers: the pulse keeps its last good ones.
+	Scene N;
+	MakeBrain(N.Brain, 40, true);
+	N.Start();
+	N.Run(2.0);
+	for (int I = 0; I < N.Brain.Where.Num(); ++I)
+	{
+		N.Brain.Where[I] = FVector(std::nan(""), 0.0, 0.0);
+	}
+	N.Frame();
+	for (const UNiagaraComponent* Comp : N.Of(Pulses))
+	{
+		for (const auto& P : Comp->Points)
+		{
+			CHECK(std::isfinite(P.second.X) && std::isfinite(P.second.Y) && std::isfinite(P.second.Z));
+		}
+	}
+}
+
+static void TestReindexIsNotASelection()
+{
+	Scene S;
+	MakeBrain(S.Brain, 40, true);
+	S.Start();
+	S.Brain.Selected = 5;
+	S.Run(2.0);
+	const size_t Ripples0 = S.CountOf(Ripples);
+	CHECK(Ripples0 == 3U);
+	// A rescan puts a node before the selected one: the same node is now number 6. Nobody clicked anything.
+	MakeBrain(S.Brain, 41, true);
+	S.Brain.Selected = 6;
+	S.Run(2.0);
+	CHECK(S.CountOf(Ripples) == Ripples0);
+	CHECK(SameVec(S.Of(Corona)[3]->WorldLocation, S.Brain.Where[6]));
+	// A click after that is a selection again.
+	S.Brain.Selected = 9;
+	S.Frame();
+	CHECK(S.CountOf(Ripples) == Ripples0 + 1U);
+	// The same without a change of shape (the desktop app selected something): a ripple, as before.
+	S.Brain.Selected = 12;
+	S.Frame();
+	CHECK(S.CountOf(Ripples) == Ripples0 + 2U);
+}
+
+static void TestSettingsAreRead()
+{
+	// Selection Share: none of them, or all of them, on the selection's links.
+	for (const float Share : {0.f, 1.f})
+	{
+		Scene S;
+		MakeBrain(S.Brain, 40, true);
+		S.Fx.SelectionShare = Share;
+		S.Brain.Selected = 5;
+		S.Start();
+		S.Run(60.0);
+		int Touching = 0;
+		int Total = 0;
+		for (const Event* E : S.EventsOf(Pulses))
+		{
+			++Total;
+			const int A = NodeAt(S.Brain, E->Play.Points.at("User.Start"));
+			const int B = NodeAt(S.Brain, E->Play.Points.at("User.End"));
+			Touching += (A == 5 || B == 5) ? 1 : 0;
+		}
+		CHECK(Total > 200);
+		if (Share == 0.f)
+		{
+			CHECK(static_cast<double>(Touching) / Total < 0.12);
+		}
+		else
+		{
+			CHECK(Touching == Total);
+		}
+	}
+
+	// Glow multiplies every effect's brightness, not only the pulses'.
+	Scene S;
+	MakeBrain(S.Brain, 40, true);
+	S.Fx.Glow = 2.f;
+	S.Start();
+	S.Brain.Selected = 5;
+	S.Run(30.0);
+	S.Brain.Selected = 7;
+	S.Run(3.0);
+	CHECK_NEAR(static_cast<double>(S.Of(Dust)[0]->Floats.at("User.Intensity")), 1.2, 1e-5);
+	for (const Event* E : S.EventsOf(Meteors))
+	{
+		CHECK_NEAR(static_cast<double>(E->Play.Floats.at("User.Intensity")), 6.0, 1e-5);
+	}
+	const std::vector<const Event*> Rip = S.EventsOf(Ripples);
+	CHECK(Rip.size() >= 4U);
+	for (const Event* E : Rip)
+	{
+		CHECK_NEAR(static_cast<double>(E->Play.Floats.at("User.Intensity")), 2.0 * Fx::Ripple(1.0).Intensity, 1e-5);
+		// The ripple's colour is its node's, lifted toward white like a pulse's.
+		const FLinearColor C = E->Play.Colors.at("User.Color");
+		CHECK(C.R >= 0.35f && C.G >= 0.5f + (1.f - 0.5f) * 0.35f - 1e-5f);
+	}
+	for (const UNiagaraComponent* C : S.Of(Corona))
+	{
+		if (C->bActive)
+		{
+			CHECK(C->Floats.at("User.Intensity") > 2.f * 0.7f && C->Floats.at("User.Intensity") < 2.f * 1.3f);
+		}
+	}
+
+	// A sun's corona and the halo are sized from their node (the halo at 0.6 of it), by the plan's own function.
+	const double Now = S.Clock;
+	const UNiagaraComponent* Sun = S.Of(Corona)[0];
+	CHECK_NEAR(static_cast<double>(Sun->Floats.at("User.Radius")), Fx::Corona(Now, static_cast<double>(S.Brain.NodeRadius(0)), 0U).Radius, 1e-2);
+	const UNiagaraComponent* Halo = S.Of(Corona)[3];
+	CHECK(Halo->bActive);
+	CHECK_NEAR(static_cast<double>(Halo->Floats.at("User.Radius")), Fx::Corona(Now, static_cast<double>(S.Brain.NodeRadius(7)) * 0.6, 7000U + 7U).Radius, 1e-2);
+}
+
+static void TestRipplesAreNotReusedWhileBusy()
+{
+	// A selection that changes every frame: more ripples are asked for than there are components. The extra ones are dropped, and
+	// no component is played again while its ring still grows or its trail still fades.
+	Scene S;
+	MakeBrain(S.Brain, 40, true);
+	S.Start();
+	S.Frame();
+	for (int I = 0; I < 400; ++I)
+	{
+		S.Brain.Selected = 3 + I % 30;
+		S.Frame();
+	}
+	CHECK(S.Fx.NumDropped() > 0);
+	std::map<size_t, const Event*> Last;
+	size_t Count = 0;
+	for (const Event& E : S.Events)
+	{
+		if (E.Group != Ripples)
+		{
+			continue;
+		}
+		++Count;
+		const auto It = Last.find(E.Comp);
+		if (It != Last.end())
+		{
+			CHECK(E.At - It->second->At >= static_cast<double>(It->second->Play.Floats.at("User.Duration")) + 0.8 - 1e-3);
+		}
+		Last[E.Comp] = &E;
+	}
+	CHECK(Count > 4U);
+	// Never more than the four at once.
+	CHECK(Last.size() == 4U);
+}
+
+static void TestToggleResets()
+{
+	// While it was off the camera went far away: the dust starts round the camera where it is now, not where it was.
+	Scene S;
+	MakeBrain(S.Brain, 40, true);
+	S.Start();
+	S.Run(3.0);
+	S.Fx.Toggle();
+	S.Pawn.Location = FVector(90000.0, 5000.0, -300.0);
+	S.Fx.Toggle();
+	S.Frame();
+	CHECK(Dist(S.Of(Dust)[0]->WorldLocation, S.Pawn.Location) < 1e-6);
+
+	// A full pool is emptied by switching off and on: no pulse is dropped for what was playing before.
+	Scene P;
+	MakeBrain(P.Brain, 40, true, 15000.0);
+	P.Fx.Density = 3.f;
+	P.Start();
+	P.Run(30.0);
+	CHECK(P.Fx.NumDropped() > 0);
+	CHECK(P.Fx.NumPlaying() > 20);
+	P.Fx.Toggle();
+	P.Fx.Toggle();
+	// Straight away, before anything new is played, nothing is held.
+	CHECK(P.Fx.NumPlaying() == 0);
+	const int Dropped = P.Fx.NumDropped();
+	const size_t Before = P.CountOf(Pulses);
+	P.Run(0.3);
+	CHECK(P.CountOf(Pulses) > Before);
+	CHECK(P.Fx.NumDropped() == Dropped);
+}
+
 int main()
 {
 	TestMakesTheComponents();
@@ -1134,6 +1432,12 @@ int main()
 	TestDeterminism();
 	TestDustFollowsTheCamera();
 	TestShootingStars();
+	TestDrawnLinks();
+	TestPulsesFollowTheNodes();
+	TestReindexIsNotASelection();
+	TestSettingsAreRead();
+	TestRipplesAreNotReusedWhileBusy();
+	TestToggleResets();
 	std::printf("%d checks, %d failed\n", Checks, Failures);
 	return Failures == 0 ? 0 : 1;
 }

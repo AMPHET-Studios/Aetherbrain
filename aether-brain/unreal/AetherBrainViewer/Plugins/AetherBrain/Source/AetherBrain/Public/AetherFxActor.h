@@ -118,7 +118,7 @@ private:
 
 	const TSoftObjectPtr<UNiagaraSystem>& SoftOf(int32 System) const;
 	/** A free component of a system, placed at Where and held for Seconds; null when there is none (the effect is dropped). */
-	UNiagaraComponent* Take(int32 System, double Now, double Seconds, const FVector& Where);
+	UNiagaraComponent* Take(int32 System, double Now, double Seconds, const FVector& Where, int32* OutSlot = nullptr);
 	void ApplyOn();
 	void RefreshShape(const AAetherBrainActor& B);
 	void UpdateDust(double Dt, const FVector& Camera, double Field);
@@ -126,6 +126,7 @@ private:
 	void FireRipples(double Now, const AAetherBrainActor& B);
 	void RippleAt(double Now, const AAetherBrainActor& B, int32 Node);
 	void FirePulses(double Prev, double Now, const AAetherBrainActor& B);
+	void FollowPulses(double Now, const AAetherBrainActor& B);
 	void FireMeteors(double Prev, double Now, const FVector& Camera, const FVector& Forward);
 
 	TSharedPtr<FAetherFxState> State;

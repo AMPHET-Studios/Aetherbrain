@@ -58,6 +58,9 @@ public:
 		return N ? N->Radius * 20.f * (I == Selected ? 1.35f : 1.f) : 0.f;
 	}
 	const TArray<int32>& GetLinks() const { return Links; }
+	/** -1: all of them are drawn; otherwise how many (Max Links, Show Links). */
+	int32 DrawnOverride = -1;
+	int32 GetDrawnLinkCount() const { return DrawnOverride >= 0 ? DrawnOverride : Links.Num() / 2; }
 	uint32 GetShapeSerial() const { return ShapeSerial; }
 	bool HasPositions() const { return bPositions; }
 	int32 GetSelected() const { return Selected; }

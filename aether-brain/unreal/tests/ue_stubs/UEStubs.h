@@ -105,6 +105,8 @@ struct FMath
 	static T Clamp(T V, T Lo, T Hi) { return V < Lo ? Lo : (V > Hi ? Hi : V); }
 	template <class T>
 	static T Max(T A, T B) { return A > B ? A : B; }
+	template <class T>
+	static T Min(T A, T B) { return A < B ? A : B; }
 	static int32 RoundToInt(float F) { return static_cast<int32>(std::floor(F + 0.5f)); }
 	static double Exp(double V) { return std::exp(V); }
 };

@@ -55,9 +55,9 @@ void AAetherBrainHUD::DrawHUD()
 	if (const AAetherFxActor* Fx = Pc->GetFx())
 	{
 		const FString Line = Fx->IsOn()
-			? FString::Printf(TEXT("Effects: on - %d of %d Niagara systems, %d playing  (N)"), Fx->NumReady(), AAetherFxActor::NumSystems(), Fx->NumPlaying())
+			? FString::Printf(TEXT("Effects: on - %d/%d systems, %d playing  (N)"), Fx->NumReady(), AAetherFxActor::NumSystems(), Fx->NumPlaying())
 			: FString(TEXT("Effects: off  (N)"));
-		DrawText(Line, Dim, Canvas->ClipX - 330.f, 44.f);
+		DrawText(Line, Dim, Canvas->ClipX - 340.f, 44.f);
 		if (Fx->NumReady() < AAetherFxActor::NumSystems())
 		{
 			FString Missing;
