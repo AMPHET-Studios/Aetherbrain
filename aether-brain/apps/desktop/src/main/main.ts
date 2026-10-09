@@ -900,6 +900,11 @@ function createCompanion(): CompanionHost {
     brain: () => (win && !win.isDestroyed() ? win.webContents : null),
     connectionFile: path.join(app.getPath('userData'), 'companion.json'),
     version: app.getVersion(),
+    // A window covered by the Unreal app is "in the background": Chromium would slow its timers to once a second
+    // and then once a minute, and the scene would stop reaching the viewer. While one reads, it runs at full speed.
+    onWanted: (on) => {
+      if (win && !win.isDestroyed()) win.webContents.setBackgroundThrottling(!on)
+    },
   })
 }
 

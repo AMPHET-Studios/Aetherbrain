@@ -1,5 +1,6 @@
 #include "AetherBrainActor.h"
 
+#include "AetherViewMath.h"
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Components/TextRenderComponent.h"
 #include "Dom/JsonObject.h"
@@ -46,6 +47,17 @@ namespace
 	bool IsLabelled(EAetherKind Kind)
 	{
 		return Kind == EAetherKind::Sun || Kind == EAetherKind::Star || Kind == EAetherKind::Planet || Kind == EAetherKind::Today;
+	}
+
+	/** A fingerprint of the first Count rings (their parents and radii): the same rings, the same fingerprint. */
+	uint32 BrainRingPrint(const TArray<FAetherRing>& Rings, int32 Count)
+	{
+		uint32 Hash = AetherView::kRingSeed;
+		for (int32 K = 0; K < Count && K < Rings.Num(); ++K)
+		{
+			Hash = AetherView::FoldRing(Hash, Rings[K].Parent, static_cast<double>(Rings[K].Radius));
+		}
+		return Hash;
 	}
 
 	void SetLook(UInstancedStaticMeshComponent* Ism, int32 Index, const FLinearColor& Color, float Glow)
@@ -344,7 +356,8 @@ void AAetherBrainActor::ApplyGraph(FAetherGraph&& NewGraph)
 	// Positions belong to one graph: wait for this one's.
 	PositionsTag.Reset();
 	NextPositions = 0.0;
-	if (Rings.Num() > 0 && N == 0)
+	// The rings name nodes by number: another node set cannot use them. The positions of this one bring its own.
+	if (!bSameShape && Rings.Num() > 0)
 	{
 		Rings.Reset();
 	}
@@ -369,8 +382,18 @@ void AAetherBrainActor::ApplyGraph(FAetherGraph&& NewGraph)
 		}
 	}
 
-	Status = FString::Printf(TEXT("%s - %d nodes - live from Aether Brain"), Graph.Vault.IsEmpty() ? TEXT("Vault") : *Graph.Vault, N);
 	RebuildInstances(bSameShape && Spheres->GetInstanceCount() == N);
+	RefreshStatus();
+}
+
+void AAetherBrainActor::RefreshStatus()
+{
+	const int32 N = Graph.Nodes.Num();
+	const FString Name = Graph.Vault.IsEmpty() ? FString(TEXT("Vault")) : Graph.Vault;
+	const FString Size = Graph.TotalNodes > N
+		? FString::Printf(TEXT("the %d most important of %d nodes"), N, Graph.TotalNodes)
+		: FString::Printf(TEXT("%d nodes"), N);
+	Status = FString::Printf(TEXT("%s - %s, %d links, %d orbit rings - live from Aether Brain"), *Name, *Size, LinkCount, RingsDrawn);
 }
 
 void AAetherBrainActor::ApplyPositions(FAetherPositions&& NewPositions)
@@ -379,6 +402,13 @@ void AAetherBrainActor::ApplyPositions(FAetherPositions&& NewPositions)
 	{
 		// Another graph's positions: the graph is behind.
 		NextGraph = 0.0;
+		return;
+	}
+	// A vault only just opened sends every node at one spot until its layout is worked out: those are not places yet. Drawing them,
+	// and framing the camera on them, is the clump with no orbits.
+	if (!bHasPositions && AetherView::LooksUnplaced(NewPositions.Points.Num(), [&NewPositions](int I, int Axis) { return NewPositions.Points[I][Axis]; }))
+	{
+		PositionsTag.Reset();
 		return;
 	}
 	for (int32 I = 0; I < Target.Num(); ++I)
@@ -391,11 +421,13 @@ void AAetherBrainActor::ApplyPositions(FAetherPositions&& NewPositions)
 		bHasPositions = true;
 		bFirstPositions = true;
 	}
-	const bool bRingsChanged = NewPositions.Rings.Num() != Rings.Num();
 	Rings = MoveTemp(NewPositions.Rings);
-	if (bRingsChanged)
+	// Only the orbits are made again, and only when the rings are not the ones they were made from.
+	const int32 Wanted = bShowOrbits ? FMath::Clamp(Rings.Num(), 0, FMath::Max(MaxRings, 0)) : 0;
+	if (Wanted != RingsDrawn || BrainRingPrint(Rings, Wanted) != RingPrint)
 	{
-		RebuildInstances(false);
+		RebuildOrbits();
+		RefreshStatus();
 	}
 }
 
@@ -502,23 +534,7 @@ void AAetherBrainActor::RebuildInstances(bool bKeepInstances)
 		// Orbits and names are those of the same nodes.
 		return;
 	}
-	Orbits->ClearInstances();
-	OrbitSegments = 0;
-	if (bShowOrbits)
-	{
-		for (const FAetherRing& Ring : Rings)
-		{
-			const bool bUsable = Graph.Nodes.IsValidIndex(Ring.Parent);
-			const FLinearColor Color = bUsable ? Graph.Nodes[Ring.Parent].Color : FLinearColor::White;
-			for (int32 S = 0; S < RingSegments; ++S)
-			{
-				const int32 Index = Orbits->AddInstance(FTransform(FQuat::Identity, FVector::ZeroVector, FVector(0.0)));
-				SetLook(Orbits, Index, Color, 0.32f * GlowScale);
-				++OrbitSegments;
-			}
-		}
-	}
-	Orbits->MarkRenderStateDirty();
+	RebuildOrbits();
 
 	// Names: suns first, then stars, the Today hub, then the biggest planets.
 	TArray<int32> Order;
@@ -554,6 +570,28 @@ void AAetherBrainActor::RebuildInstances(bool bKeepInstances)
 		Label->SetWorldSize(FMath::Clamp(Node.Radius * WorldScale * 0.75f, 24.f, 260.f));
 		Label->SetVisibility(true);
 	}
+}
+
+void AAetherBrainActor::RebuildOrbits()
+{
+	Orbits->ClearInstances();
+	OrbitSegments = 0;
+	// 48 pieces a ring: a brain with thousands of rings would make hundreds of thousands of them, so only the first Max Rings are drawn.
+	RingsDrawn = bShowOrbits ? FMath::Clamp(Rings.Num(), 0, FMath::Max(MaxRings, 0)) : 0;
+	RingPrint = BrainRingPrint(Rings, RingsDrawn);
+	for (int32 K = 0; K < RingsDrawn; ++K)
+	{
+		const FAetherRing& Ring = Rings[K];
+		const bool bUsable = Graph.Nodes.IsValidIndex(Ring.Parent);
+		const FLinearColor Color = bUsable ? Graph.Nodes[Ring.Parent].Color : FLinearColor::White;
+		for (int32 S = 0; S < RingSegments; ++S)
+		{
+			const int32 Index = Orbits->AddInstance(FTransform(FQuat::Identity, FVector::ZeroVector, FVector(0.0)));
+			SetLook(Orbits, Index, Color, 0.32f * GlowScale);
+			++OrbitSegments;
+		}
+	}
+	Orbits->MarkRenderStateDirty();
 }
 
 void AAetherBrainActor::SetHovered(int32 Index)
@@ -704,37 +742,68 @@ void AAetherBrainActor::UpdateInstances(float DeltaSeconds)
 	{
 		return;
 	}
+	// Redrawn 30 times a second at most, and less often when a redraw takes more than a fifth of the time: a big brain slows its own
+	// motion down and never the editor. The nodes ease toward their places by the time that has passed since the last redraw.
+	RedrawClock += static_cast<double>(DeltaSeconds);
+	if (RedrawClock < RedrawGap)
+	{
+		return;
+	}
+	const float Elapsed = static_cast<float>(RedrawClock);
+	RedrawClock = 0.0;
+	const double Started = FPlatformTime::Seconds();
+
+	// From the distance that shows the whole brain a moon is a fraction of a pixel and an orbit thread a hundredth of one: nothing is
+	// drawn thinner than a pixel or two, however far away.
+	FVector Eye = FVector::ZeroVector;
+	bool bHasEye = false;
+	if (const UWorld* World = GetWorld())
+	{
+		const APlayerController* Pc = World->GetFirstPlayerController();
+		if (Pc && Pc->PlayerCameraManager)
+		{
+			Eye = Pc->PlayerCameraManager->GetCameraLocation();
+			bHasEye = true;
+		}
+	}
+	const auto Seen = [&Eye, bHasEye](double RadiusCm, const FVector& At, double MinAngle) -> double {
+		return bHasEye ? AetherView::ApparentRadius(RadiusCm, FVector::Dist(At, Eye), MinAngle) : RadiusCm;
+	};
+
 	// Ease toward where the brain says things are (it sends 10 frames a second; orbits keep moving smoothly here).
-	const float Alpha = 1.f - FMath::Exp(-DeltaSeconds * 10.f);
+	const float Alpha = 1.f - FMath::Exp(-Elapsed * 10.f);
 	for (int32 I = 0; I < N; ++I)
 	{
 		Current[I] = FMath::Lerp(Current[I], Target[I], Alpha);
 	}
 
-	TArray<FTransform> Transforms;
-	Transforms.SetNum(N);
+	Scratch.Reset(N);
 	for (int32 I = 0; I < N; ++I)
 	{
-		Transforms[I] = FTransform(FQuat::Identity, Current[I], FVector(static_cast<double>(NodeRadius(I) / MeshRadius)));
+		const double Radius = Seen(static_cast<double>(NodeRadius(I)), Current[I], AetherView::kMinNodeAngle);
+		Scratch.Add(FTransform(FQuat::Identity, Current[I], FVector(Radius / static_cast<double>(MeshRadius))));
 	}
-	Spheres->BatchUpdateInstancesTransforms(0, Transforms, false, true, true);
+	Spheres->BatchUpdateInstancesTransforms(0, Scratch, false, true, true);
 
 	if (LinkCount > 0 && Links->GetInstanceCount() == LinkCount)
 	{
-		Transforms.SetNum(LinkCount);
+		Scratch.Reset(LinkCount);
 		for (int32 E = 0; E < LinkCount; ++E)
 		{
-			Transforms[E] = Thread(Current[Graph.Edges[E * 2]], Current[Graph.Edges[E * 2 + 1]], LinkRadius * WorldScale);
+			const FVector& A = Current[Graph.Edges[E * 2]];
+			const FVector& B = Current[Graph.Edges[E * 2 + 1]];
+			const double Thick = Seen(static_cast<double>(LinkRadius * WorldScale), (A + B) * 0.5, AetherView::kMinThreadAngle);
+			Scratch.Add(Thread(A, B, static_cast<float>(Thick)));
 		}
-		Links->BatchUpdateInstancesTransforms(0, Transforms, false, true, true);
+		Links->BatchUpdateInstancesTransforms(0, Scratch, false, true, true);
 	}
 
 	if (OrbitSegments > 0 && Orbits->GetInstanceCount() == OrbitSegments)
 	{
-		Transforms.SetNum(OrbitSegments);
-		int32 K = 0;
-		for (const FAetherRing& Ring : Rings)
+		Scratch.Reset(OrbitSegments);
+		for (int32 K = 0; K < RingsDrawn && K < Rings.Num(); ++K)
 		{
+			const FAetherRing& Ring = Rings[K];
 			const bool bUsable = Current.IsValidIndex(Ring.Parent);
 			const FVector Centre = bUsable ? ToBrain(Current[Ring.Parent]) : FVector::ZeroVector;
 			FVector Prev = AetherScene::ToUnreal(AetherScene::RingPoint(Ring, Centre, 0.f), WorldScale);
@@ -742,12 +811,22 @@ void AAetherBrainActor::UpdateInstances(float DeltaSeconds)
 			{
 				const float T = 2.f * UE_PI * S / RingSegments;
 				const FVector Next = AetherScene::ToUnreal(AetherScene::RingPoint(Ring, Centre, T), WorldScale);
-				Transforms[K++] = bUsable ? Thread(Prev, Next, OrbitRadius * WorldScale) : FTransform(FQuat::Identity, FVector::ZeroVector, FVector(0.0));
+				if (bUsable)
+				{
+					const double Thick = Seen(static_cast<double>(OrbitRadius * WorldScale), Prev, AetherView::kMinThreadAngle);
+					Scratch.Add(Thread(Prev, Next, static_cast<float>(Thick)));
+				}
+				else
+				{
+					Scratch.Add(FTransform(FQuat::Identity, FVector::ZeroVector, FVector(0.0)));
+				}
 				Prev = Next;
 			}
 		}
-		Orbits->BatchUpdateInstancesTransforms(0, Transforms, false, true, true);
+		Orbits->BatchUpdateInstancesTransforms(0, Scratch, false, true, true);
 	}
+
+	RedrawGap = AetherView::UpdateGap(FPlatformTime::Seconds() - Started);
 }
 
 void AAetherBrainActor::UpdateLabels()

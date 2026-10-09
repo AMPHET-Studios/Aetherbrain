@@ -14,7 +14,13 @@ namespace
 	/** "AEP1" read as a little-endian uint32. */
 	constexpr uint32 PositionsMagic = 0x31504541;
 	constexpr int32 PositionsHeader = 16;
-	constexpr int32 MaxNodes = 200000;
+	/**
+	 * What a scene may hold. The desktop app sends far less (it cuts a big brain to a budget well under these); they are a backstop, so
+	 * a scene that is not that app's, or from a build without the cut, is refused and not drawn into a stall.
+	 */
+	constexpr int32 MaxNodes = 50000;
+	constexpr int32 MaxEdgeNumbers = 100000;
+	constexpr int32 MaxRings = 2000;
 
 	EAetherKind KindOf(const FString& Kind)
 	{
@@ -51,7 +57,7 @@ bool AetherScene::ParseGraph(const FString& Json, FAetherGraph& Out)
 	{
 		return false;
 	}
-	if (!Nodes || !Edges || Nodes->Num() > MaxNodes || Edges->Num() % 2 != 0)
+	if (!Nodes || !Edges || Nodes->Num() > MaxNodes || Edges->Num() > MaxEdgeNumbers || Edges->Num() % 2 != 0)
 	{
 		return false;
 	}
@@ -114,6 +120,18 @@ bool AetherScene::ParseGraph(const FString& Json, FAetherGraph& Out)
 	const int32 S = static_cast<int32>(Selected);
 	G.Selected = S >= 0 && S < N ? S : INDEX_NONE;
 
+	// Present when what is here is a part of a bigger brain.
+	const TSharedPtr<FJsonObject>* Limits = nullptr;
+	if (Root->TryGetObjectField(TEXT("limits"), Limits) && Limits != nullptr && Limits->IsValid())
+	{
+		double OfNodes = 0.0;
+		double OfLinks = 0.0;
+		(*Limits)->TryGetNumberField(TEXT("ofNodes"), OfNodes);
+		(*Limits)->TryGetNumberField(TEXT("ofLinks"), OfLinks);
+		G.TotalNodes = static_cast<int32>(FMath::Clamp(OfNodes, 0.0, 2000000000.0));
+		G.TotalLinks = static_cast<int32>(FMath::Clamp(OfLinks, 0.0, 2000000000.0));
+	}
+
 	Out = MoveTemp(G);
 	return true;
 }
@@ -127,7 +145,7 @@ bool AetherScene::ParsePositions(const TArray<uint8>& Bytes, FAetherPositions& O
 	const uint32 Version = ReadU32(Bytes, 4);
 	const int64 NodeCount = ReadU32(Bytes, 8);
 	const int64 RingCount = ReadU32(Bytes, 12);
-	if (NodeCount > MaxNodes || RingCount > MaxNodes)
+	if (NodeCount > MaxNodes || RingCount > MaxRings)
 	{
 		return false;
 	}

@@ -44,6 +44,10 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Aether Brain", meta = (ClampMin = "0"))
 	int32 MaxLinks = 20000;
 
+	/** At most this many orbit rings are drawn, each of 48 glowing pieces: the first ones the brain sends, which are the biggest systems. */
+	UPROPERTY(EditAnywhere, Category = "Aether Brain", meta = (ClampMin = "0", ClampMax = "2000"))
+	int32 MaxRings = 400;
+
 	/** Suns, stars and planets get a floating name, up to this many. */
 	UPROPERTY(EditAnywhere, Category = "Aether Brain", meta = (ClampMin = "0"))
 	int32 MaxLabels = 160;
@@ -81,6 +85,8 @@ public:
 	uint32 GetShapeSerial() const { return ShapeSerial; }
 	/** How many links are drawn: the first Max Links of them, none when Show Links is off. */
 	int32 GetDrawnLinkCount() const { return LinkCount; }
+	/** How many orbit rings are drawn: the first Max Rings of those the brain sends, none when Show Orbits is off. */
+	int32 GetDrawnRingCount() const { return RingsDrawn; }
 	/** The first positions have come in: the nodes are where the brain says they are. */
 	bool HasPositions() const { return bHasPositions; }
 
@@ -150,6 +156,10 @@ private:
 	void BuildStarfield();
 	/** Make every instance again (bKeepInstances: same nodes and links, only colours and glows change). */
 	void RebuildInstances(bool bKeepInstances);
+	/** Make the orbit pieces again (the rings are not the ones they were made from). */
+	void RebuildOrbits();
+	/** The line the HUD shows: the vault, how much of it is drawn, and whether the link is live. */
+	void RefreshStatus();
 	void UpdateInstances(float DeltaSeconds);
 	void UpdateLabels();
 	void SetNodeLook(int32 Index);
@@ -178,6 +188,13 @@ private:
 	bool bFirstPositions = false;
 	int32 LinkCount = 0;
 	int32 OrbitSegments = 0;
+	/** Rings drawn (at most Max Rings) and a fingerprint of them: the orbit pieces are made again only when the rings are not the same. */
+	int32 RingsDrawn = 0;
+	uint32 RingPrint = 0;
+	/** Redraw pacing (see AetherViewMath.h) and the transforms of a redraw, kept so a frame allocates nothing. */
+	double RedrawClock = 0.0;
+	double RedrawGap = 1.0 / 30.0;
+	TArray<FTransform> Scratch;
 	/** Label slot -> node index. */
 	TArray<int32> LabelNodes;
 

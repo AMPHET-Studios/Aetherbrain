@@ -22,6 +22,11 @@ export class LayoutEngine {
   /** Increments on every positions frame. */
   frame = 0
   /**
+   * False from `setGraph` until the worker has laid out that node set: `positions` is only a seed until then
+   * (all zeros for a vault that was not there before), and nothing should show it as the brain's places.
+   */
+  placed = false
+  /**
    * Orbit rings of the system layout: 6 floats per ring (parentIndex, radius,
    * qx, qy, qz, qw; see protocol). Empty in the other modes.
    */
@@ -143,6 +148,7 @@ export class LayoutEngine {
     this.ringsVersion++
     this.positions = next
     this.settled = false
+    this.placed = false
     this.frame++
     const msg: MainToWorker = { type: 'graph', nodes, edges, mode, seed }
     if (prev) msg.prev = { ids: prev.ids, positions: prev.positions }
@@ -227,6 +233,7 @@ export class LayoutEngine {
     }
     if (msg.positions.length !== this.ids.length * 3) return
     this.positions = msg.positions as Float32Array<ArrayBuffer>
+    this.placed = true
     this.alpha = msg.alpha
     this.settled = msg.settled
     this.frame++

@@ -39,6 +39,12 @@ struct AETHERBRAIN_API FAetherGraph
 	/** Links as pairs of node indices. */
 	TArray<int32> Edges;
 	int32 Selected = INDEX_NONE;
+	/**
+	 * When the desktop app sends a part of a big brain (it keeps the most important nodes, see docs/UNREAL.md): how many nodes and
+	 * links there are in all. 0: what is here is all of it.
+	 */
+	int32 TotalNodes = 0;
+	int32 TotalLinks = 0;
 };
 
 /** An orbit ring of the system layout: a circle of Radius in the XZ plane, turned by Rotation, around node Parent (brain space). */

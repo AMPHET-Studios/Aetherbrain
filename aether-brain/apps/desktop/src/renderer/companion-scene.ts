@@ -7,6 +7,7 @@
 import type { GraphData, GraphNode, NoteId } from '@aether/core'
 import { nodeBaseColor, nodeRadius, type ColorMode, type PictureSize } from '@aether/graph'
 import type { CompanionGraphDto, CompanionKind } from '../shared/ipc'
+import type { ScenePlan } from './companion-bound'
 
 export function companionKind(n: GraphNode): CompanionKind {
   if (n.kind === 'today') return 'today'
@@ -29,8 +30,12 @@ export interface CompanionSceneOptions {
   pictureSize?: PictureSize
 }
 
-/** The published scene of `graph` (same node order as the layout's positions). */
-export function companionScene(graph: GraphData, o: CompanionSceneOptions): CompanionGraphDto {
+/**
+ * The published scene of `graph`: every node in the layout's order, or with a `plan` (companion-bound.ts) only the
+ * nodes it keeps, in the same relative order, with their parents, the links and the selection renumbered, and a
+ * `limits` field that says how much of the brain it is.
+ */
+export function companionScene(graph: GraphData, o: CompanionSceneOptions, plan?: ScenePlan): CompanionGraphDto {
   // Age colours run from the oldest note (1) to the newest (0), as the brain draws them.
   let minT = Infinity
   let maxT = -Infinity
@@ -45,15 +50,32 @@ export function companionScene(graph: GraphData, o: CompanionSceneOptions): Comp
   }
   const span = Math.max(1, maxT - minT)
   const ageOf = (n: GraphNode) => (n.created === null ? 0.9 : 1 - (n.created - minT) / span)
-  const at = (id: NoteId | null) => (id === null ? -1 : (graph.index.get(id) ?? -1))
-  const nodes = graph.nodes.map((n) => ({
+  const dto = (n: GraphNode, parent: number) => ({
     id: n.id,
     title: n.title,
     kind: companionKind(n),
     color: `#${nodeBaseColor(n, o.colorMode, o.activeTag, ageOf).getHexString()}`,
     radius: Math.round(nodeRadius(n, o.pictureSize) * 1000) / 1000,
-    parent: at(n.parent),
-  }))
+    parent,
+  })
+  if (plan) {
+    const nodes = Array.from(plan.keep, (i) => {
+      const p = plan.parent[i]!
+      return dto(graph.nodes[i]!, p < 0 ? -1 : plan.newIndex[p]!)
+    })
+    const edges = plan.edges.map((i) => plan.newIndex[i]!)
+    return {
+      version: o.version,
+      vault: o.vault,
+      layout: o.layout,
+      nodes,
+      edges,
+      selected: plan.selected < 0 ? -1 : plan.newIndex[plan.selected]!,
+      limits: { nodes: nodes.length, ofNodes: plan.n, links: edges.length / 2, ofLinks: plan.linksTotal },
+    }
+  }
+  const at = (id: NoteId | null) => (id === null ? -1 : (graph.index.get(id) ?? -1))
+  const nodes = graph.nodes.map((n) => dto(n, at(n.parent)))
   const edges: number[] = []
   for (const e of graph.edges) {
     const a = at(e.from)

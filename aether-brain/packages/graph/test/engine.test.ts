@@ -80,4 +80,27 @@ describe('LayoutEngine', () => {
     expect(engine.positions).toBe(p)
     engine.dispose()
   })
+
+  it('says whether the positions are a layout or only the seed a new node set starts from', async () => {
+    const { LayoutEngine } = await import('../src/layout/LayoutEngine')
+    const engine = new LayoutEngine()
+    const worker = FakeWorker.last!
+    expect(engine.placed).toBe(false)
+    engine.setGraph(graphOf(['a.md', 'b.md']), 'system')
+    // All zeros until the worker answers: nothing may show them as the brain's places.
+    expect(engine.placed).toBe(false)
+    expect(Array.from(engine.positions)).toEqual([0, 0, 0, 0, 0, 0])
+    // A reply for a graph that is already gone does not count.
+    worker.reply({ type: 'positions', positions: new Float32Array(6).fill(4), alpha: 0, settled: true, generation: 0 })
+    expect(engine.placed).toBe(false)
+    worker.reply({ type: 'positions', positions: new Float32Array(6).fill(4), alpha: 0, settled: true, generation: 1 })
+    expect(engine.placed).toBe(true)
+    // A new node set starts from a seed again, even though the old places carry over into it.
+    engine.setGraph(graphOf(['a.md', 'b.md', 'c.md']), 'system')
+    expect(engine.placed).toBe(false)
+    expect(engine.positions[0]).toBe(4)
+    worker.reply({ type: 'positions', positions: new Float32Array(9).fill(6), alpha: 0, settled: true, generation: 2 })
+    expect(engine.placed).toBe(true)
+    engine.dispose()
+  })
 })

@@ -432,9 +432,18 @@ function buildBuffers(graph: GraphData, pictures: PictureSize): Buffers {
     isCard[i] = 1
   })
 
-  const times = graph.nodes.map((n) => n.created).filter((t): t is number => t !== null)
-  const minT = times.length ? Math.min(...times) : 0
-  const maxT = times.length ? Math.max(...times) : 1
+  // A loop, not Math.min(...times): spreading more than about 125,000 numbers overflows the call stack.
+  let minT = Infinity
+  let maxT = -Infinity
+  for (const n of graph.nodes) {
+    if (n.created === null) continue
+    if (n.created < minT) minT = n.created
+    if (n.created > maxT) maxT = n.created
+  }
+  if (minT === Infinity) {
+    minT = 0
+    maxT = 1
+  }
   const span = Math.max(1, maxT - minT)
   const ageOf = (n: GraphNode) => (n.created === null ? 0.9 : 1 - (n.created - minT) / span)
 
