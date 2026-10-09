@@ -1,0 +1,241 @@
+/**
+ * The reference board's seams: what the board view needs from its host (the docked view in the brain window, or the floating
+ * window), what the controller takes in and gives out, and how pictures are cached. Types only, no behaviour: the contract the
+ * controller (controller.ts), the picture cache (imageCache.ts), the canvas renderer (renderer.ts) and the React shell
+ * (BoardView.tsx) are written against. Design: docs/design/reference-board.md.
+ *
+ * Everything in a board that is not a picture's pixels is plain data from @aether/core (BoardDoc), so the controller runs, and is
+ * tested, in node with no DOM.
+ */
+import type { BoardDoc, BoardItem, Rect, TextMetrics, Vec2, VaultAsset } from '@aether/core'
+
+/* ---------------------------------------------------------------- host --- */
+
+/** Where a board's pictures come from and go to. Implemented over the store (docked) or the bridge (floating window). */
+export interface BoardPictureHost {
+  /** A PNG or JPEG of at most `px` on its longer side (never enlarged), or null when there is none. */
+  preview(path: string, px: number): Promise<Blob | null>
+  /** The picture file itself (at most 64 MB), or null when it cannot be read. */
+  original(path: string): Promise<Blob | null>
+  /**
+   * Writes pictures into this board's own folder (create-only, a taken name gets " 2"). Resolves with the vault path of each, in the
+   * order given; null for one that was refused (not an image, too big, ...).
+   */
+  add(files: { name: string; data: Uint8Array }[]): Promise<(string | null)[]>
+  /** Every picture of the vault (for the picker). */
+  list(): Promise<VaultAsset[]>
+  /** Whether the vault has this picture now (a board keeps the place of one that is gone, drawn as a missing picture). */
+  exists(path: string): boolean
+  /** Open in the system's image program (desktop). */
+  open?(path: string): void
+  /** Show in the file manager (desktop). */
+  reveal?(path: string): void
+  /** Close the board and select the picture's node in the brain (docked only). */
+  showInBrain?(path: string): void
+  /** The set of pictures changed (one was added, removed or replaced). Returns the unsubscribe. */
+  onChange?(cb: () => void): () => void
+}
+
+/** Floating-window controls; present only on the desktop. */
+export interface BoardWindowHost {
+  /** This view is the floating window (true) or the docked view (false). */
+  floating: boolean
+  alwaysOnTop: boolean
+  /** 0.2 to 1. */
+  opacity: number
+  /** Window opacity works on this platform (Windows, macOS). */
+  supportsOpacity: boolean
+  /** Docked: open this board in the floating window (and rest here). Floating: nothing. */
+  popOut(): void
+  /** Floating: close the window and give the board back to the docked view. Docked: nothing. */
+  dock(): void
+  setAlwaysOnTop(on: boolean): void
+  setOpacity(opacity: number): void
+}
+
+export type BoardTone = 'info' | 'success' | 'error'
+
+export interface BoardHost {
+  /** The board's note: a vault path ending in .md. */
+  readonly path: string
+  /** The board's title. */
+  readonly title: string
+  /** Reads the whole note (the raw text, frontmatter included). */
+  load(): Promise<string>
+  /** Writes the whole note. Callers debounce; the host serialises writes and never overwrites a newer outside change silently. */
+  save(raw: string): Promise<void>
+  /** The note changed somewhere else (an editor, an AI, another window). Returns the unsubscribe. */
+  onExternalChange?(cb: () => void): () => void
+  pictures: BoardPictureHost
+  toast(text: string, tone?: BoardTone, action?: { label: string; run(): void }): void
+  /** Copy text to the system clipboard (the sandbox has no navigator.clipboard). */
+  copyText(text: string): Promise<void>
+  window?: BoardWindowHost
+}
+
+/* --------------------------------------------------------------- input --- */
+
+/** A pointer event in the canvas's own CSS pixels (0,0 is its top-left corner). */
+export interface PointerIn {
+  id: number
+  x: number
+  y: number
+  /** 0 primary (left, pen tip, touch), 1 middle, 2 secondary (right, pen barrel). */
+  button: number
+  /** Bit field as in PointerEvent.buttons. */
+  buttons: number
+  shift: boolean
+  ctrl: boolean
+  alt: boolean
+  meta: boolean
+  pointerType: 'mouse' | 'pen' | 'touch'
+  /** 0 to 1; 0.5 for a mouse. */
+  pressure: number
+  /** Milliseconds, monotonic (event.timeStamp). */
+  time: number
+}
+
+export interface WheelIn {
+  x: number
+  y: number
+  deltaX: number
+  deltaY: number
+  /** 0 pixels, 1 lines, 2 pages. */
+  deltaMode: number
+  ctrl: boolean
+  shift: boolean
+  alt: boolean
+}
+
+export interface KeyIn {
+  /** KeyboardEvent.key ('a', 'Delete', ' ' ...). */
+  key: string
+  code: string
+  down: boolean
+  shift: boolean
+  ctrl: boolean
+  alt: boolean
+  meta: boolean
+  repeat: boolean
+}
+
+/* -------------------------------------------------------------- tools ---- */
+
+export type BoardTool = 'select' | 'hand' | 'note' | 'pen' | 'line' | 'rect' | 'ellipse' | 'eraser' | 'sampler' | 'crop'
+
+/** Where on a selected item the pointer is. */
+export type HandleKind = 'body' | 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w' | 'rotate' | 'crop-nw' | 'crop-n' | 'crop-ne' | 'crop-e' | 'crop-se' | 'crop-s' | 'crop-sw' | 'crop-w'
+
+/** The box drawn round the selection: four corners (board units, in order top-left, top-right, bottom-right, bottom-left of the box). */
+export interface SelectionBox {
+  corners: [Vec2, Vec2, Vec2, Vec2]
+  /** Where the rotate handle sits (board units), or null when the selection cannot be rotated. */
+  rotateHandle: Vec2 | null
+  /** Rotation of the box in degrees: a single rotated item shows a rotated box; several items an upright one. */
+  rotation: number
+}
+
+/** What the renderer and the shell draw. A new object whenever anything in it changed; never mutated. */
+export interface BoardUiState {
+  doc: BoardDoc
+  /** Selected item ids (groups are expanded: every member of a selected group is in here). */
+  selection: number[]
+  tool: BoardTool
+  /** The canvas size in CSS pixels. */
+  viewport: { w: number; h: number }
+  /** The selection rectangle being dragged, in board units. */
+  marquee: Rect | null
+  /** Alignment guides while dragging: x positions of vertical lines and y positions of horizontal ones, in board units. */
+  guides: { v: number[]; h: number[] }
+  box: SelectionBox | null
+  /** The mark being drawn (pen, line, rectangle, ellipse), not yet part of the board. */
+  draft: BoardItem | null
+  /** Id of the note being edited in place, or null. */
+  editingNote: number | null
+  /** Id of the picture being cropped (crop tool), or null. */
+  cropping: number | null
+  /** The colour under the pointer in sampler mode (6 hex digits) and where; null when not sampling. */
+  sample: { x: number; y: number; hex: string } | null
+  /** A CSS cursor name for the pointer's current place. */
+  cursor: string
+  canUndo: boolean
+  canRedo: boolean
+  /** The board has changed since it was loaded or last saved. */
+  dirty: boolean
+  /** A pan or zoom in progress (the renderer may draw coarser pictures while it lasts). */
+  moving: boolean
+}
+
+/* ----------------------------------------------------------- commands ---- */
+
+/**
+ * Every action of the board has an id here, a palette command, a help row and (for the common ones) a key. The table
+ * BOARD_COMMANDS (commands.ts) lists them all; a test pins that each id is in the table and in docs/KEYBOARD.md.
+ */
+export type BoardCommandId =
+  // tools
+  | 'tool.select' | 'tool.hand' | 'tool.note' | 'tool.pen' | 'tool.line' | 'tool.rect' | 'tool.ellipse' | 'tool.eraser' | 'tool.sampler' | 'tool.crop'
+  // edit
+  | 'edit.undo' | 'edit.redo' | 'edit.selectAll' | 'edit.selectNone' | 'edit.invertSelection' | 'edit.duplicate' | 'edit.delete'
+  | 'edit.copy' | 'edit.cut' | 'edit.paste' | 'edit.group' | 'edit.ungroup' | 'edit.lock' | 'edit.unlock'
+  // stacking
+  | 'order.front' | 'order.forward' | 'order.backward' | 'order.back'
+  // transform
+  | 'transform.flipH' | 'transform.flipV' | 'transform.rotateCw' | 'transform.rotateCcw' | 'transform.resetRotation'
+  | 'transform.resetScale' | 'transform.resetCrop' | 'transform.resetAll'
+  // arrange
+  | 'arrange.optimal' | 'arrange.row' | 'arrange.column' | 'arrange.grid' | 'arrange.stack'
+  | 'sort.name' | 'sort.added' | 'sort.size' | 'sort.shuffle'
+  | 'align.left' | 'align.right' | 'align.top' | 'align.bottom' | 'align.centerH' | 'align.centerV'
+  | 'distribute.h' | 'distribute.v'
+  | 'normalize.width' | 'normalize.height' | 'normalize.size' | 'normalize.scale'
+  // appearance
+  | 'view.gray' | 'view.grayItem' | 'view.smooth' | 'view.captions' | 'view.background' | 'view.gridSnap'
+  | 'item.opacityUp' | 'item.opacityDown'
+  // view
+  | 'view.fitAll' | 'view.fitSelection' | 'view.zoom100' | 'view.zoomIn' | 'view.zoomOut' | 'view.hideUi'
+  // pictures
+  | 'picture.add' | 'picture.open' | 'picture.reveal' | 'picture.showInBrain' | 'picture.info' | 'picture.palette'
+  | 'export.selection' | 'export.board'
+  // window (desktop)
+  | 'window.popOut' | 'window.dock' | 'window.onTop'
+
+export interface BoardCommandInfo {
+  id: BoardCommandId
+  /** Palette title, prefixed "Board: ". */
+  title: string
+  group: 'Tools' | 'Edit' | 'Order' | 'Transform' | 'Arrange' | 'Appearance' | 'View' | 'Pictures' | 'Window'
+  /** The key as shown in the cheatsheet ("⌘ Z", "⇧ H", "]"), or undefined for a palette-only command. */
+  keys?: string
+  /** The command needs at least this many items selected (default 0). */
+  needs?: number
+  /** The command is only offered on the desktop. */
+  desktopOnly?: boolean
+}
+
+/* ----------------------------------------------------- picture cache ----- */
+
+/** The three sizes a picture is held at, smallest first: 256 and 1024 px (longer side) and the picture itself (capped at 8192 px). */
+export const IMAGE_TIERS = [256, 1024, 8192] as const
+export type ImageTier = (typeof IMAGE_TIERS)[number]
+
+/** What the renderer draws for a picture right now. */
+export interface ImageSlot {
+  /** A decoded picture, the best the cache holds for the requested size (maybe a smaller tier than wanted), or null while nothing is loaded. */
+  bitmap: ImageBitmap | null
+  /** The size of the picture itself in pixels, once known (from any tier), else null. */
+  natural: { w: number; h: number } | null
+  /** The picture could not be read (missing, too big, broken): draw a placeholder. */
+  failed: boolean
+}
+
+export interface ImageSource {
+  /**
+   * The bitmap to draw `path` with when it is `wantPx` device pixels on its longer side, and — as a side effect — starts loading the
+   * tier that size needs (and releases nothing). Cheap: called for every visible picture on every frame.
+   */
+  get(path: string, wantPx: number): ImageSlot
+}
+
+/** The text measuring a canvas gives (real font metrics); the controller falls back to the estimate in @aether/core without one. */
+export type BoardTextMetrics = TextMetrics
