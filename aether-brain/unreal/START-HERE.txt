@@ -10,11 +10,18 @@ Steps:
   2. Open  unreal\AetherBrainViewer\AetherBrainViewer.uproject   (double-click)
        - It asks "build the missing modules?"  ->  Yes. First time takes a few minutes.
        - The editor opens. It makes its own glow materials and an empty map. Nothing to click.
+       - First start only: the editor compiles the project's shaders (look for "Compiling Shaders"
+         in the bottom right corner). Wait until it says nothing before you press Play; it can
+         take several minutes, and a big brain is slow until it is done.
   3. Press Play (the green triangle). You see a dark space and a status line at the top.
   4. In the Aether Brain desktop app: press the  a  key, switch "Unreal companion" ON.
        Your brain appears in Unreal. Fly: hold right mouse + WASD.
 
-Want a standalone  AetherBrainViewer.exe  (no editor needed)?
+Use Aether Brain and this viewer from the SAME release (both 0.9.2 or later, same version number).
+A very big vault is cut to its most important 12,000 nodes so that Unreal stays fast; the Aether
+Brain panel (a key) and the line at the bottom of the viewer say how much of it you are seeing.
+
+Want a standalone  AetherBrainViewer.exe  (no editor needed)? It is the better way to look at a big vault.
   - Close the editor, then double-click  unreal\PackageWindows.bat
   - 10 to 30 minutes the first time. The program ends up in  unreal\Packaged\Windows\
 
