@@ -14,7 +14,12 @@ namespace
 	/** "AEP1" read as a little-endian uint32. */
 	constexpr uint32 PositionsMagic = 0x31504541;
 	constexpr int32 PositionsHeader = 16;
-	constexpr int32 MaxNodes = 200000;
+	/**
+	 * What a scene may hold. The desktop app sends far less (it cuts a big brain to a budget well under these); they are a backstop, so
+	 * a scene that is not that app's, or from a build without the cut, is refused and not drawn into a stall.
+	 */
+	constexpr int32 MaxNodes = 50000;
+	constexpr int32 MaxEdgeNumbers = 100000;
 
 	EAetherKind KindOf(const FString& Kind)
 	{
@@ -35,8 +40,12 @@ namespace
 	}
 }
 
-bool AetherScene::ParseGraph(const FString& Json, FAetherGraph& Out)
+bool AetherScene::ParseGraph(const FString& Json, FAetherGraph& Out, bool* bOutTooBig)
 {
+	if (bOutTooBig)
+	{
+		*bOutTooBig = false;
+	}
 	TSharedPtr<FJsonObject> Root;
 	const TSharedRef<TJsonReader<TCHAR>> Reader = TJsonReaderFactory<TCHAR>::Create(Json);
 	if (!FJsonSerializer::Deserialize(Reader, Root) || !Root.IsValid())
@@ -51,8 +60,16 @@ bool AetherScene::ParseGraph(const FString& Json, FAetherGraph& Out)
 	{
 		return false;
 	}
-	if (!Nodes || !Edges || Nodes->Num() > MaxNodes || Edges->Num() % 2 != 0)
+	if (!Nodes || !Edges || Edges->Num() % 2 != 0)
 	{
+		return false;
+	}
+	if (Nodes->Num() > MaxNodes)
+	{
+		if (bOutTooBig)
+		{
+			*bOutTooBig = true;
+		}
 		return false;
 	}
 
@@ -93,9 +110,12 @@ bool AetherScene::ParseGraph(const FString& Json, FAetherGraph& Out)
 		G.Nodes.Add(MoveTemp(Node));
 	}
 
-	G.Edges.Reserve(Edges->Num());
-	for (const TSharedPtr<FJsonValue>& Value : *Edges)
+	// Links past the limit are not drawn (the first are the ones that matter); the rest of the scene is.
+	const int32 EdgeNumbers = FMath::Min(Edges->Num(), MaxEdgeNumbers);
+	G.Edges.Reserve(EdgeNumbers);
+	for (int32 K = 0; K < EdgeNumbers; ++K)
 	{
+		const TSharedPtr<FJsonValue>& Value = (*Edges)[K];
 		double X = -1.0;
 		if (!Value.IsValid() || !Value->TryGetNumber(X))
 		{
@@ -114,6 +134,18 @@ bool AetherScene::ParseGraph(const FString& Json, FAetherGraph& Out)
 	const int32 S = static_cast<int32>(Selected);
 	G.Selected = S >= 0 && S < N ? S : INDEX_NONE;
 
+	// Present when what is here is a part of a bigger brain.
+	const TSharedPtr<FJsonObject>* Limits = nullptr;
+	if (Root->TryGetObjectField(TEXT("limits"), Limits) && Limits != nullptr && Limits->IsValid())
+	{
+		double OfNodes = 0.0;
+		double OfLinks = 0.0;
+		(*Limits)->TryGetNumberField(TEXT("ofNodes"), OfNodes);
+		(*Limits)->TryGetNumberField(TEXT("ofLinks"), OfLinks);
+		G.TotalNodes = static_cast<int32>(FMath::Clamp(OfNodes, 0.0, 2000000000.0));
+		G.TotalLinks = static_cast<int32>(FMath::Clamp(OfLinks, 0.0, 2000000000.0));
+	}
+
 	Out = MoveTemp(G);
 	return true;
 }
@@ -127,15 +159,17 @@ bool AetherScene::ParsePositions(const TArray<uint8>& Bytes, FAetherPositions& O
 	const uint32 Version = ReadU32(Bytes, 4);
 	const int64 NodeCount = ReadU32(Bytes, 8);
 	const int64 RingCount = ReadU32(Bytes, 12);
-	if (NodeCount > MaxNodes || RingCount > MaxNodes)
+	if (NodeCount > MaxNodes)
 	{
 		return false;
 	}
-	const int64 FloatCount = NodeCount * 3 + RingCount * 6;
-	if (static_cast<int64>(Bytes.Num()) != PositionsHeader + FloatCount * 4)
+	// The frame must be exactly as long as it says; of its rings only the first (the biggest systems) are kept.
+	if (static_cast<int64>(Bytes.Num()) != PositionsHeader + (NodeCount * 3 + RingCount * 6) * 4)
 	{
 		return false;
 	}
+	const int64 KeptRings = FMath::Min<int64>(RingCount, MaxPositionRings);
+	const int64 FloatCount = NodeCount * 3 + KeptRings * 6;
 
 	TArray<float> F;
 	F.SetNumUninitialized(static_cast<int32>(FloatCount));
@@ -152,8 +186,8 @@ bool AetherScene::ParsePositions(const TArray<uint8>& Bytes, FAetherPositions& O
 		P.Points[I] = FVector(static_cast<double>(F[I * 3]), static_cast<double>(F[I * 3 + 1]), static_cast<double>(F[I * 3 + 2]));
 	}
 	const int32 Base = static_cast<int32>(NodeCount * 3);
-	P.Rings.SetNum(static_cast<int32>(RingCount));
-	for (int32 K = 0; K < RingCount; ++K)
+	P.Rings.SetNum(static_cast<int32>(KeptRings));
+	for (int32 K = 0; K < KeptRings; ++K)
 	{
 		const float* R = F.GetData() + Base + K * 6;
 		FAetherRing& Ring = P.Rings[K];

@@ -1,14 +1,14 @@
 /**
  * The companion link, brain side: while a viewer (the Unreal app) reads the
- * scene, publish what this window draws (companion-scene.ts) whenever it
- * changes, and where everything is, up to 10 times a second; select or open
- * what the viewer picks. Nothing is published while nobody reads.
- * See docs/UNREAL.md.
+ * scene, publish what this window draws (companion-scene.ts, cut to a budget
+ * by companion-bound.ts) whenever it changes, and where everything is, up to
+ * 10 times a second; select or open what the viewer picks. Nothing is
+ * published while nobody reads. See docs/UNREAL.md.
  */
 import { isVirtualId } from '@aether/core'
 import { registerCommands, useAether } from '@aether/ui'
 import type { AetherBridge } from '../shared/ipc'
-import { companionScene } from './companion-scene'
+import { CompanionFeed, type FeedSource } from './companion-feed'
 import { errorText, openPanel } from './panels'
 import { ElectronVaultAdapter } from './vault/electron'
 
@@ -16,52 +16,51 @@ import { ElectronVaultAdapter } from './vault/electron'
 export const COMPANION_TICK_MS = 100
 
 let timer: ReturnType<typeof setInterval> | null = null
-let version = 0
-/** What the last published scene was made from: a new graph, colours or selection publish again. */
-let made: unknown[] = []
-let sentFrame = -1
-let sentRings = -1
+let feed: CompanionFeed | null = null
 
-function tick(bridge: AetherBridge): void {
+/** What the brain window shows now, or null while it shows nothing. */
+function source(): FeedSource | null {
   const s = useAether.getState()
   const c = s.controller
   const g = c.graph
-  if (!g || s.status !== 'ready') return
-  const key = [g, c.colorMode, c.activeTag, s.selectedId, c.layoutMode, s.adapter, c.pictureSize]
-  if (key.some((k, i) => k !== made[i])) {
-    made = key
-    version++
-    bridge.companionGraph(
-      companionScene(g, {
-        version,
-        vault: s.adapter?.name ?? 'Vault',
-        layout: c.layoutMode,
-        colorMode: c.colorMode,
-        activeTag: c.activeTag,
-        selectedId: s.selectedId,
-        pictureSize: c.pictureSize,
-      }),
-    )
-    sentFrame = -1
+  if (!g || s.status !== 'ready') return null
+  return {
+    graph: g,
+    engine: c.engine,
+    vault: s.adapter?.name ?? 'Vault',
+    adapter: s.adapter,
+    selectedId: s.selectedId,
+    colorMode: c.colorMode,
+    activeTag: c.activeTag,
+    layoutMode: c.layoutMode,
+    pictureSize: c.pictureSize,
   }
-  const eng = c.engine
-  // Mid-rebuild the positions may still be the previous node set's.
-  if (eng.positions.length !== g.nodes.length * 3) return
-  if (eng.frame === sentFrame && eng.ringsVersion === sentRings) return
-  sentFrame = eng.frame
-  sentRings = eng.ringsVersion
-  bridge.companionPositions(version, eng.positions, eng.rings)
 }
 
 function want(bridge: AetherBridge, on: boolean): void {
+  feed ??= new CompanionFeed(source, bridge)
+  // The main process keeps this window running at full speed while a viewer reads (a covered window would be slowed
+  // down, and the scene would stop reaching the viewer); the 3D view does not need to be drawn behind the viewer.
+  useAether.getState().controller.setRestBehind(on)
+  if (on && timer) {
+    // The link asking a window that is already publishing (nothing was published for a few seconds: a layout that
+    // stands still sends no frames). Send the places again; the scene is the same, and a viewer that has it must not
+    // be handed the whole of it under a new version.
+    feed.resend()
+    feed.tick()
+    return
+  }
   if (timer) clearInterval(timer)
   timer = null
+  if (!on) {
+    // Nobody reads: let go of what was held for them.
+    feed.stop()
+    return
+  }
   // A viewer coming (back) gets everything again.
-  made = []
-  sentFrame = -1
-  if (!on) return
-  tick(bridge)
-  timer = setInterval(() => tick(bridge), COMPANION_TICK_MS)
+  feed.restart()
+  feed.tick()
+  timer = setInterval(() => feed?.tick(), COMPANION_TICK_MS)
 }
 
 async function toggle(bridge: AetherBridge): Promise<void> {

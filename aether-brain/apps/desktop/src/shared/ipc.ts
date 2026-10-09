@@ -94,6 +94,19 @@ export interface CompanionGraphDto {
   edges: number[]
   /** Index of the selected node, -1 for none. */
   selected: number
+  /**
+   * How much of the brain `nodes` and `edges` are (a big vault is cut to a budget, see renderer/companion-bound.ts):
+   * how many are shown, and how many there are. Sent with every scene the brain window cuts; absent from older ones.
+   */
+  limits?: CompanionLimits
+}
+
+/** How much of the brain a published scene shows. */
+export interface CompanionLimits {
+  nodes: number
+  ofNodes: number
+  links: number
+  ofLinks: number
 }
 
 export interface CompanionStatus {
@@ -108,6 +121,10 @@ export interface CompanionStatus {
   error: string | null
   /** Where the viewer finds the address and token (written while running). */
   file: string
+  /** Why the last scene was refused (the viewer is not told of it), or null. */
+  warning?: string | null
+  /** When the viewer is shown a part of a big brain: how much. Null while nothing is published or it is all of it. */
+  showing?: CompanionLimits | null
 }
 
 export interface CompanionPatch {

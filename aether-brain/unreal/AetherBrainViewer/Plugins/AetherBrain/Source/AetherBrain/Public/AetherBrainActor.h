@@ -44,6 +44,10 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Aether Brain", meta = (ClampMin = "0"))
 	int32 MaxLinks = 20000;
 
+	/** At most this many orbit rings are drawn, each of 48 glowing pieces: the first ones the brain sends, which are the biggest systems. */
+	UPROPERTY(EditAnywhere, Category = "Aether Brain", meta = (ClampMin = "0", ClampMax = "2000"))
+	int32 MaxRings = 400;
+
 	/** Suns, stars and planets get a floating name, up to this many. */
 	UPROPERTY(EditAnywhere, Category = "Aether Brain", meta = (ClampMin = "0"))
 	int32 MaxLabels = 160;
@@ -66,7 +70,9 @@ public:
 	const FAetherNode* GetNode(int32 Index) const { return Graph.Nodes.IsValidIndex(Index) ? &Graph.Nodes[Index] : nullptr; }
 	/** Where the node is drawn now (Unreal space). */
 	FVector NodeLocation(int32 Index) const { return Current.IsValidIndex(Index) ? Current[Index] : FVector::ZeroVector; }
-	/** Its drawn radius (cm). */
+	/** Where it is going to be drawn (Unreal space): where the brain says it is, which the drawn place eases toward. */
+	FVector NodeTarget(int32 Index) const { return Target.IsValidIndex(Index) ? Target[Index] : FVector::ZeroVector; }
+	/** Its radius (cm), a little bigger while it is hovered or selected. */
 	float NodeRadius(int32 Index) const;
 	/** The node under a ray (the nearest one hit, a little generous far away), or INDEX_NONE. */
 	int32 Pick(const FVector& Origin, const FVector& Direction) const;
@@ -81,6 +87,8 @@ public:
 	uint32 GetShapeSerial() const { return ShapeSerial; }
 	/** How many links are drawn: the first Max Links of them, none when Show Links is off. */
 	int32 GetDrawnLinkCount() const { return LinkCount; }
+	/** How many orbit rings are drawn: the first Max Rings of those the brain sends, none when Show Orbits is off. */
+	int32 GetDrawnRingCount() const { return RingsDrawn; }
 	/** The first positions have come in: the nodes are where the brain says they are. */
 	bool HasPositions() const { return bHasPositions; }
 
@@ -150,10 +158,19 @@ private:
 	void BuildStarfield();
 	/** Make every instance again (bKeepInstances: same nodes and links, only colours and glows change). */
 	void RebuildInstances(bool bKeepInstances);
+	/** Make the orbit pieces again (the rings are not the ones they were made from). */
+	void RebuildOrbits();
+	/** The line the HUD shows: the vault, how much of it is drawn, and whether the link is live. */
+	void RefreshStatus();
 	void UpdateInstances(float DeltaSeconds);
 	void UpdateLabels();
+	/** The colour and glow of one sphere (the caller marks the render state dirty once, after all it changed). */
+	void ApplyNodeLook(int32 Index);
 	void SetNodeLook(int32 Index);
 	float GlowOf(int32 Index) const;
+	/** Its radius without the growth of being hovered or selected (cm), and that growth. */
+	float BaseRadius(int32 Index) const;
+	float GrowOf(int32 Index) const;
 	FTransform Thread(const FVector& A, const FVector& B, float RadiusCm) const;
 	FVector ToBrain(const FVector& U) const { return FVector(U.X, U.Z, U.Y) / static_cast<double>(WorldScale); }
 
@@ -178,13 +195,31 @@ private:
 	bool bFirstPositions = false;
 	int32 LinkCount = 0;
 	int32 OrbitSegments = 0;
+	/** Rings drawn (at most Max Rings) and a fingerprint of them: the orbit pieces are made again only when the rings are not the same. */
+	int32 RingsDrawn = 0;
+	uint32 RingPrint = 0;
+	/** Redraw pacing (see AetherViewMath.h) and the transforms of a redraw, kept so a frame allocates nothing. */
+	double RedrawClock = 0.0;
+	double RedrawGap = 1.0 / 30.0;
+	/** What the last redraw cost (seconds), and whether the frame after it is still to be counted into that. */
+	double RedrawSpent = 0.0;
+	bool bMeasureNext = false;
+	TArray<FTransform> Scratch;
+	/** Size each name was last set to (cm): names are resized only when the camera moved enough to matter. */
+	TArray<float> LabelSizes;
 	/** Label slot -> node index. */
 	TArray<int32> LabelNodes;
 
 	int32 Selected = INDEX_NONE;
 	int32 Hovered = INDEX_NONE;
+	/** What the desktop app has selected: its number in this scene, and its id (the number changes when the scene's nodes do). */
 	int32 BrainSelected = INDEX_NONE;
+	FString BrainSelectedId;
 	bool bBrainSelectionChanged = false;
+	/** The places of the graph held now have come in (a flight to a node waits for them). */
+	bool bPositionsCurrent = false;
+	/** The status line says something that is no longer true (waiting, unreachable): the next good answer writes it again. */
+	bool bStatusStale = false;
 
 	FString Status;
 	bool bLive = false;

@@ -23,7 +23,7 @@ import { promises as fs, rmSync } from 'node:fs'
 import http, { type IncomingMessage, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import path from 'node:path'
-import { IPC, type CompanionGraphDto, type CompanionKind, type CompanionNodeDto, type CompanionPatch, type CompanionStatus } from '../shared/ipc.js'
+import { IPC, type CompanionGraphDto, type CompanionKind, type CompanionLimits, type CompanionNodeDto, type CompanionPatch, type CompanionStatus } from '../shared/ipc.js'
 
 export const COMPANION_HOST = '127.0.0.1'
 export const COMPANION_DEFAULT_PORT = 7459
@@ -33,9 +33,13 @@ export const CLIENT_IDLE_MS = 8000
 export const IDLE_CHECK_MS = 2000
 /** While a viewer reads but nothing was published this long (ms), the brain window is asked again (it may have reloaded). */
 export const REPUBLISH_MS = 5000
-export const MAX_NODES = 200_000
-export const MAX_EDGE_NUMBERS = 2_000_000
-const MAX_RINGS = 200_000
+/**
+ * What the link takes from the brain window. The window cuts a big brain to a budget well below these
+ * (renderer/companion-bound.ts), so they are a backstop: past them the scene is refused, and the panel says so.
+ */
+export const MAX_NODES = 50_000
+export const MAX_EDGE_NUMBERS = 100_000
+const MAX_RINGS = 2_000
 const MAX_ID = 4096
 const MAX_TITLE = 500
 const MAX_BODY = 8192
@@ -91,7 +95,7 @@ export function cleanCompanionPatch(raw: unknown): CompanionPatch {
 /** A graph as the brain window sent it, checked and reduced to its known fields; throws on anything else. */
 export function cleanGraph(raw: unknown): CompanionGraphDto {
   if (!isRecord(raw)) throw new Error('not a graph')
-  const { version, vault, layout, nodes, edges, selected } = raw
+  const { version, vault, layout, nodes, edges, selected, limits } = raw
   if (!isCount(version)) throw new Error('bad version')
   if (typeof layout !== 'string' || !LAYOUTS.has(layout)) throw new Error('bad layout')
   if (!Array.isArray(nodes) || nodes.length > MAX_NODES) throw new Error('bad nodes')
@@ -118,7 +122,7 @@ export function cleanGraph(raw: unknown): CompanionGraphDto {
   if (!Array.isArray(edges) || edges.length > MAX_EDGE_NUMBERS || edges.length % 2 !== 0) throw new Error('bad edges')
   for (const e of edges) if (!Number.isInteger(e) || (e as number) < 0 || (e as number) >= n) throw new Error('bad edge')
   if (!Number.isInteger(selected) || (selected as number) < -1 || (selected as number) >= n) throw new Error('bad selection')
-  return {
+  const dto: CompanionGraphDto = {
     version,
     vault: typeof vault === 'string' ? vault.slice(0, MAX_TITLE) : '',
     layout: layout as CompanionGraphDto['layout'],
@@ -126,6 +130,17 @@ export function cleanGraph(raw: unknown): CompanionGraphDto {
     edges: edges as number[],
     selected: selected as number,
   }
+  const lim = cleanLimits(limits)
+  if (lim) dto.limits = lim
+  return dto
+}
+
+/** How much of the brain the scene is (companion-bound.ts), or undefined when it is all of it or malformed. */
+function cleanLimits(raw: unknown): CompanionLimits | undefined {
+  if (!isRecord(raw)) return undefined
+  const { nodes, ofNodes, links, ofLinks } = raw
+  const ok = (v: unknown): v is number => typeof v === 'number' && Number.isInteger(v) && v >= 0 && v <= 1_000_000_000
+  return ok(nodes) && ok(ofNodes) && ok(links) && ok(ofLinks) ? { nodes, ofNodes, links, ofLinks } : undefined
 }
 
 /**
@@ -193,6 +208,8 @@ export interface CompanionHostOptions {
   connectionFile: string
   /** App version, for /v1/hello and companion.json. */
   version: string
+  /** The link starts or stops wanting the scene (a viewer reads, or went quiet): the window must not slow itself down while it is read. */
+  onWanted?(on: boolean): void
   /** Clock (ms), for tests. */
   now?: () => number
 }
@@ -208,6 +225,8 @@ export class CompanionHost {
   private server: http.Server | null = null
   private port: number | null = null
   private error: string | null = null
+  /** Why the last scene from the brain window was refused, or null. */
+  private rejected: string | null = null
   private starting: Promise<void> | null = null
   private scene: Scene | null = null
   private positions: Buffer | null = null
@@ -231,6 +250,8 @@ export class CompanionHost {
       connected: this.server !== null && this.lastSeen > 0 && this.now() - this.lastSeen < CLIENT_IDLE_MS,
       error: this.error,
       file: this.opts.connectionFile,
+      warning: this.rejected,
+      showing: this.scene?.graph.limits ?? null,
     }
   }
 
@@ -302,9 +323,11 @@ export class CompanionHost {
     let graph: CompanionGraphDto
     try {
       graph = cleanGraph(raw)
-    } catch {
+    } catch (err) {
+      this.rejected = `The Unreal app was sent a scene it can't take (${err instanceof Error ? err.message : 'malformed'}); a viewer shows nothing new until the next scene is good.`
       return false
     }
+    this.rejected = null
     const ids = new Map<string, number>()
     graph.nodes.forEach((n, i) => ids.set(n.id, i))
     this.scene = { graph, json: JSON.stringify(graph), ids }
@@ -349,8 +372,24 @@ export class CompanionHost {
       // Stale the moment nobody keeps it fresh.
       this.scene = null
       this.positions = null
+      this.rejected = null
     }
     this.send(IPC.companionWant, on)
+    this.applyWanted(on)
+  }
+
+  /** Tell the app a viewer is (or is no longer) reading: a failing hook must not stop the link. */
+  private applyWanted(on: boolean): void {
+    try {
+      this.opts.onWanted?.(on)
+    } catch {
+      // Nothing to do: the link works without it.
+    }
+  }
+
+  /** A viewer is reading now. */
+  isWanted(): boolean {
+    return this.wanted
   }
 
   /** A viewer asked for something: the brain window publishes (again, if it went quiet: a reload). */
@@ -363,6 +402,8 @@ export class CompanionHost {
     } else if (now - this.lastPublish > REPUBLISH_MS) {
       this.lastPublish = now
       this.send(IPC.companionWant, true)
+      // The window may be a new one (closed and opened again) that never heard a viewer was reading.
+      this.applyWanted(true)
     }
   }
 

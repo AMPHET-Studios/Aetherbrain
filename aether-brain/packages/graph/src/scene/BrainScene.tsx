@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useSyncExternalStore } from 'react'
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import { CameraControls } from '@react-three/drei'
 import { EffectComposer, Bloom } from '@react-three/postprocessing'
@@ -86,9 +86,25 @@ export function BrainScene({ controller, maxDpr = 1.5, className }: BrainScenePr
     (cb) => controller.subscribe(cb),
     () => controller.bloom,
   )
+  const restBehind = useSyncExternalStore(
+    (cb) => controller.subscribe(cb),
+    () => controller.restBehind,
+  )
+  const [front, setFront] = useState(() => typeof document === 'undefined' || document.hasFocus())
+  useEffect(() => {
+    const on = () => setFront(true)
+    const off = () => setFront(false)
+    window.addEventListener('focus', on)
+    window.addEventListener('blur', off)
+    return () => {
+      window.removeEventListener('focus', on)
+      window.removeEventListener('blur', off)
+    }
+  }, [])
   return (
     <div className={className ?? 'absolute inset-0'} style={{ background: BG }}>
       <Canvas
+        frameloop={restBehind && !front ? 'never' : 'always'}
         dpr={[1, maxDpr]}
         gl={{ antialias: false, powerPreference: 'high-performance', alpha: false, stencil: false }}
         camera={{ fov: FOV, near: 1, far: DEFAULT_FAR, position: HOME_POS }}
@@ -432,9 +448,18 @@ function buildBuffers(graph: GraphData, pictures: PictureSize): Buffers {
     isCard[i] = 1
   })
 
-  const times = graph.nodes.map((n) => n.created).filter((t): t is number => t !== null)
-  const minT = times.length ? Math.min(...times) : 0
-  const maxT = times.length ? Math.max(...times) : 1
+  // A loop, not Math.min(...times): spreading more than about 125,000 numbers overflows the call stack.
+  let minT = Infinity
+  let maxT = -Infinity
+  for (const n of graph.nodes) {
+    if (n.created === null) continue
+    if (n.created < minT) minT = n.created
+    if (n.created > maxT) maxT = n.created
+  }
+  if (minT === Infinity) {
+    minT = 0
+    maxT = 1
+  }
   const span = Math.max(1, maxT - minT)
   const ageOf = (n: GraphNode) => (n.created === null ? 0.9 : 1 - (n.created - minT) / span)
 

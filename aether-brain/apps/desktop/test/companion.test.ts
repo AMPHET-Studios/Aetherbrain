@@ -8,6 +8,8 @@ import {
   CLIENT_IDLE_MS,
   COMPANION_DEFAULT_PORT,
   CompanionHost,
+  MAX_EDGE_NUMBERS,
+  MAX_NODES,
   POSITIONS_HEADER,
   POSITIONS_MAGIC,
   REPUBLISH_MS,
@@ -15,6 +17,7 @@ import {
   cleanGraph,
   companionSettings,
   positionsBody,
+  type CompanionHostOptions,
   type CompanionSettings,
 } from '../src/main/companion.js'
 import { companionKind, companionScene } from '../src/renderer/companion-scene.js'
@@ -64,6 +67,26 @@ describe('companion checks', () => {
     ]) {
       expect(() => cleanGraph(bad)).toThrow()
     }
+  })
+
+  it('keeps the note about how much of the brain the scene is, when it is well-formed', () => {
+    const limits = { nodes: 3, ofNodes: 90_000, links: 1, ofLinks: 250_000 }
+    expect(cleanGraph({ ...graph(), limits, extra: 1 }).limits).toEqual(limits)
+    expect(cleanGraph(graph()).limits).toBeUndefined()
+    for (const bad of [null, 5, { nodes: 3 }, { ...limits, nodes: -1 }, { ...limits, ofNodes: 1.5 }, { ...limits, links: '1' }, { ...limits, ofLinks: 2e9 }]) {
+      expect(cleanGraph({ ...graph(), limits: bad }).limits).toBeUndefined()
+    }
+  })
+
+  it('refuses a scene past the backstop, which the window keeps its own budget well under', () => {
+    const node = graph().nodes[0]!
+    const many = (n: number) => Array.from({ length: n }, (_, i) => ({ ...node, id: `n${i}`, parent: -1 }))
+    expect(cleanGraph({ ...graph(), nodes: many(MAX_NODES), edges: [] }).nodes).toHaveLength(MAX_NODES)
+    expect(() => cleanGraph({ ...graph(), nodes: many(MAX_NODES + 1), edges: [] })).toThrow('bad nodes')
+    expect(() => cleanGraph({ ...graph(), edges: new Array<number>(MAX_EDGE_NUMBERS + 2).fill(0) })).toThrow('bad edges')
+    // Far above what the window's own budget (12,000 nodes, 8,000 links) can send.
+    expect(MAX_NODES).toBeGreaterThan(12_000 * 3)
+    expect(MAX_EDGE_NUMBERS).toBeGreaterThan(8_000 * 2 * 3)
   })
 
   it('packs positions and rings behind a header, and refuses counts that do not fit', () => {
@@ -141,7 +164,7 @@ describe('the companion link server', () => {
     await fs.rm(dir, { recursive: true, force: true })
   })
 
-  const host = (over: Partial<CompanionSettings> = {}) => {
+  const host = (over: Partial<CompanionSettings> = {}, more: Partial<CompanionHostOptions> = {}) => {
     const h = new CompanionHost({
       settings: { enabled: true, port: 0, token: TOKEN, ...over } as CompanionSettings,
       save: async (s) => void saved.push(s),
@@ -149,13 +172,14 @@ describe('the companion link server', () => {
       connectionFile: file,
       version: '0.8.0',
       now: () => clock,
+      ...more,
     })
     hosts.push(h)
     return h
   }
   /** port 0 is refused by settings: start on a free port through configure. */
-  const started = async () => {
-    const h = host({ enabled: false })
+  const started = async (more: Partial<CompanionHostOptions> = {}) => {
+    const h = host({ enabled: false }, more)
     const st = await h.configure({ enabled: true, port: 0 }).catch(() => null)
     if (st) return h
     // Pick a free port the way the OS does.
@@ -223,6 +247,57 @@ describe('the companion link server', () => {
     expect(h.status().connected).toBe(false)
     expect((await fetch(url(h, '/v1/graph'), { headers: auth })).status).toBe(503)
     expect(wants()).toEqual([true, true, false, true])
+  })
+
+  it('tells the window to run at full speed while a viewer reads, and to ease off when it goes quiet', async () => {
+    const calls: boolean[] = []
+    const h = await started({ onWanted: (on) => void calls.push(on) })
+    expect(calls).toEqual([])
+    await fetch(url(h, '/v1/hello'), { headers: auth })
+    expect(calls).toEqual([true])
+    // Asking again is not a new wish.
+    await fetch(url(h, '/v1/hello'), { headers: auth })
+    expect(calls).toEqual([true])
+    expect(h.isWanted()).toBe(true)
+    // A window that went quiet and is asked again may be a new one that never heard: the hook is told again.
+    clock += REPUBLISH_MS + 1
+    await fetch(url(h, '/v1/hello'), { headers: auth })
+    expect(calls).toEqual([true, true])
+    clock += CLIENT_IDLE_MS + 1
+    ;(h as unknown as { checkIdle(): void }).checkIdle()
+    expect(calls).toEqual([true, true, false])
+    expect(h.isWanted()).toBe(false)
+    // A hook that throws does not stop the link.
+    const h2 = await started({
+      onWanted: () => {
+        throw new Error('window gone')
+      },
+    })
+    expect((await fetch(url(h2, '/v1/hello'), { headers: auth })).status).toBe(200)
+    expect(wants().filter((w) => w === true).length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('says when a scene is refused and when the viewer is shown only a part of a big brain', async () => {
+    const h = await started()
+    await fetch(url(h, '/v1/hello'), { headers: auth })
+    expect(h.status().warning).toBeNull()
+    expect(h.status().showing).toBeNull()
+    expect(h.publishGraph(42, { ...graph(), layout: 'flat' })).toBe(false)
+    expect(h.status().warning).toMatch(/can't take/)
+    // The next good scene clears it; a part of the brain is said so.
+    const limits = { nodes: 3, ofNodes: 61_000, links: 1, ofLinks: 120_000 }
+    expect(h.publishGraph(42, { ...graph(), limits })).toBe(true)
+    expect(h.status().warning).toBeNull()
+    expect(h.status().showing).toEqual(limits)
+    const served = (await (await fetch(url(h, '/v1/graph'), { headers: auth })).json()) as CompanionGraphDto
+    expect(served.limits).toEqual(limits)
+    // A scene from anyone else is ignored without a word.
+    expect(h.publishGraph(7, { ...graph(), layout: 'flat' })).toBe(false)
+    expect(h.status().warning).toBeNull()
+    // Nobody reads any more: nothing is held, nothing is said.
+    clock += CLIENT_IDLE_MS + 1
+    ;(h as unknown as { checkIdle(): void }).checkIdle()
+    expect(h.status().showing).toBeNull()
   })
 
   it('serves positions of the current graph only, as binary with a header', async () => {
@@ -355,6 +430,13 @@ describe('the brain window side', () => {
     await new Promise((r) => setTimeout(r, 250))
     const last = graphs.at(-1)!
     expect(last.nodes[last.selected]?.id).toBe('Projects/Forge/Plan')
+    // The link nudging a window that is already publishing (a layout that stands still sends no frames) must not
+    // hand the viewer the whole scene again under a new version.
+    const published = graphs.length
+    wantTo!(true)
+    wantTo!(true)
+    await new Promise((r) => setTimeout(r, 150))
+    expect(graphs.length).toBe(published)
     wantTo!(false)
     const n = graphs.length
     useAether.getState().select(null)

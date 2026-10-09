@@ -549,6 +549,18 @@ export class BrainController {
     this.touch()
   }
 
+  /**
+   * While on, the 3D view is not drawn when its window is not the one in front. A viewer reading the scene (the Unreal
+   * companion) needs the graphics card for itself, and the layout it reads from runs without any drawing.
+   */
+  restBehind = false
+
+  setRestBehind(on: boolean): void {
+    if (this.restBehind === on) return
+    this.restBehind = on
+    this.touch()
+  }
+
   setHubLabels(v: boolean): void {
     this.hubLabels = v
     this.touch()

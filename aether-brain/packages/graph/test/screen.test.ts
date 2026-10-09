@@ -159,3 +159,23 @@ describe('the screen layer hides what is behind it', () => {
     layer.dispose()
   })
 })
+
+describe('resting behind a viewer', () => {
+  it('is a switch the 3D view listens to, and only tells it when it changes', () => {
+    const c = new BrainController()
+    const seen = vi.fn()
+    c.subscribe(seen)
+    expect(c.restBehind).toBe(false)
+    c.setRestBehind(false)
+    expect(seen).not.toHaveBeenCalled()
+    c.setRestBehind(true)
+    expect(c.restBehind).toBe(true)
+    expect(seen).toHaveBeenCalledTimes(1)
+    c.setRestBehind(true)
+    expect(seen).toHaveBeenCalledTimes(1)
+    c.setRestBehind(false)
+    expect(c.restBehind).toBe(false)
+    expect(seen).toHaveBeenCalledTimes(2)
+    c.dispose()
+  })
+})

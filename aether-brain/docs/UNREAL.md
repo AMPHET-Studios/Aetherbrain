@@ -140,13 +140,31 @@ nothing to copy.
 | Request | Answer |
 |---|---|
 | `GET /v1/hello` | the app, its version, the vault's name |
-| `GET /v1/graph` | JSON: every node (id, title, kind, colour, radius, parent), the links as index pairs, the selection, the layout. `ETag`, so asking again costs a `304` until something changes |
+| `GET /v1/graph` | JSON: the nodes (id, title, kind, colour, radius, parent), the links as index pairs, the selection, the layout, and `limits` (how many of how many nodes and links this is). `ETag`, so asking again costs a `304` until something changes |
 | `GET /v1/positions` | binary: a 16-byte header (`AEP1`, graph version, node count, ring count), then x y z per node and 6 floats per orbit ring (parent, radius, quaternion), little-endian float32 |
 | `POST /v1/select` | `{"id": "...", "open": false}`: the desktop app selects the node and flies to it (with `open: true` it opens it) |
 
 Every request carries `Authorization: Bearer <token>`. The scene is the one the desktop window draws, in its
 current layout and colour mode. The desktop app publishes it only while a viewer asks (graph on change, positions
 up to 10 times a second). The viewer eases toward the positions, so orbits keep turning smoothly between frames.
+
+**A big vault is cut to fit** (v0.9.2). Unreal makes a real object for every sphere and link and 48 pieces for every orbit
+ring, and rewrites them all many times a second, so a drive with tens of thousands of notes and folders gave it a million
+objects and a stall, and then *ran out of memory*. The desktop app therefore sends the most important part of a big brain
+and says so (the panel: *It shows the 12,000 most important of 109,282 nodes*; the viewer's line at the bottom says it too):
+every sun and the Today hub, the project stars with the most notes, the folders that hold the most, a few notes in each of
+those (the most linked first, then the most that the budget leaves room for), the notes the Today hub points at, a few
+pictures. At most 12,000 nodes, 8,000 links and 400 orbit rings, nothing more than about 40,000 things for Unreal to draw.
+Every folder that is shown brings the folders above it, so what you see still orbits what it orbits in the desktop app, in
+the same places. What you **select** is always shown (with its folders), so a note you search for in the desktop app is
+there to fly to. Nothing is cut from a vault that fits.
+
+Two more things the desktop app does so that the viewer shows the brain and not a clump: a vault that has just been opened
+is sent only once its layout has grown out into its places (a second or two for a big one; the viewer says *Aether Brain
+is working out where everything goes* until then), and the orbit rings are worked out from where the bodies finally sit.
+Seen from the distance that frames the whole brain, a moon is a fraction of a pixel and an orbit thread thinner still, so
+the viewer never draws a body or a thread thinner than a pixel or two, however far away (a sun a little bigger than a star,
+a star than a planet, a planet than a moon).
 
 In Unreal everything is a handful of instanced meshes (one draw call each): spheres for nodes, thin cylinders for
 links and orbit rings. The glow material reads each instance's colour and glow from its custom data. A
@@ -199,7 +217,7 @@ mode only adds one when the level has none.
 |---|---|
 | World Scale | centimetres per brain unit (20). Bigger: a bigger brain, slower to cross |
 | Glow Scale | every glow ×; bloom starts above 1 |
-| Show Links / Show Orbits, Max Links | the threads; big vaults may want fewer |
+| Show Links / Show Orbits, Max Links, Max Rings | the threads; big vaults may want fewer (20,000 links and 400 orbit rings of 48 pieces each at most) |
 | Max Labels | how many suns, stars and planets carry a name |
 | Follow Brain Selection | fly where the desktop app's selection goes |
 | Url / Token | only to connect to a link by hand (otherwise `companion.json`) |
@@ -230,6 +248,10 @@ Lumen settings. The game mode then leaves it alone.
 | *Aether Brain's companion link is off* | Switch it on in the desktop app (<kbd>a</kbd> → Unreal companion). The viewer checks every 2 seconds |
 | *Can't reach Aether Brain* | The desktop app is closed, or another program holds port 7459: change the port in the panel |
 | *Waiting for Aether Brain to show a vault* | Open a vault in the desktop app |
+| *Aether Brain is working out where everything goes* | The desktop app is laying a vault out (a second or two; a vault with tens of thousands of notes takes longer). It appears by itself |
+| *This Aether Brain sends more of the brain than this viewer can draw* | The desktop app is older than the viewer (or the other way round): use the Aether Brain and the viewer from the same release |
+| Everything is one clump, no orbits | Use the viewer and the desktop app from the same release (v0.9.2 or later). If it still happens, look at the line at the bottom: it says how many nodes and orbit rings are drawn |
+| The first start of the editor takes minutes and the viewer is slow | The editor compiles the shaders of the project once (*Compiling Shaders* in the corner); wait until it reaches zero. A packaged `.exe` (`PackageWindows.bat`) does not do this each time, and is the better way to look at a very big vault |
 | *Glow material missing*, everything grey | Open the project in the Unreal Editor once with the Python Editor Script Plugin on (the `.uproject` turns it on). Then package again |
 | *Sky material missing*, plain black behind the brain | Open the project in the Unreal Editor once (the Python plugin makes `M_AetherSprite`). The brain draws its own plain stars meanwhile |
 | Grey squares where the nebulae should be | `M_AetherSprite` did not compile: delete it in `Content/AetherBrain` and reopen the editor to make it again (the Output Log says why if it can't) |
@@ -245,7 +267,7 @@ Lumen settings. The game mode then leaves it alone.
 The space world's logic is plain C++ that does not need Unreal, so it is tested on an ordinary computer:
 
 ```
-unreal/tests/run.sh        # compiles with strict warnings and runs, four stages: the space maths, the space actor against a stand-in engine, the Niagara maths, the Niagara actor against the stand-in (fake Niagara components)
+unreal/tests/run.sh        # compiles with strict warnings and runs, six stages: the space maths, the space actor against a stand-in engine, the Niagara maths, the Niagara actor against the stand-in (fake Niagara components), the brain viewer's maths, the brain actor and scene reader against their own stand-in
 unreal/tests/preview.sh    # draws the pictures above (needs Python 3 for the PNGs)
 ```
 
@@ -254,6 +276,10 @@ parallax is capped and ordered by depth, a pass never misses the brain by less t
 they fly). `actor_harness.cpp` compiles the real `AetherSpaceActor.cpp` against `ue_stubs/` (a stand-in for the part
 of Unreal's API it uses), flies a camera for ten seconds and checks the actor's bookkeeping: instance counts, one
 update per frame, which material each part wears, the parallax wiring, the modes. `fx_core_test.cpp` and
-`fx_actor_harness.cpp` do the same for the Niagara layer (see [UNREAL-NIAGARA.md](UNREAL-NIAGARA.md)). `pnpm test` runs
-all four when a C++ compiler is installed. What this cannot say is how Unreal compiles or draws it: that needs you to open the project
+`fx_actor_harness.cpp` do the same for the Niagara layer (see [UNREAL-NIAGARA.md](UNREAL-NIAGARA.md)). `view_core_test.cpp`
+checks the viewer's own maths (how big a far body must be drawn, how often a big scene is redrawn, which body is under the
+ray) and `brain_actor_harness.cpp` compiles the real `AetherBrainActor.cpp` and `AetherScene.cpp` against `brain_stubs/` and
+checks what the viewer is sent and what it does with it: rings capped and rebuilt only when they changed, nothing drawn
+before it has places, a scene too big to read, the status line, a flight that waits for the places. `pnpm test` runs
+all six when a C++ compiler is installed. What this cannot say is how Unreal compiles or draws it: that needs you to open the project
 (the stand-in follows Unreal 5's API as the plugin uses it, from memory of that API).
