@@ -384,6 +384,14 @@ export interface VaultAdapter {
    */
   thumbnail?(path: string, size: number): Promise<Blob | null>
   /**
+   * The picture file itself, whole and undecoded (the reference board draws
+   * it at full size when zoomed in; `thumbnail` stops at 1024 px), as a Blob
+   * typed by its extension. Null when the path is not a picture of the vault
+   * (a video, a note, a path outside it), it is missing, unreadable or empty,
+   * or it is over 64 MB. Never rejects. Absent: only previews can be read.
+   */
+  readAsset?(path: string): Promise<Blob | null>
+  /**
    * Create a NEW image file from its bytes (a PNG from Concept Forge, a
    * dropped picture). Create-only like `create` (EEXIST when anything is
    * there); only image paths. Reports an 'add' change for it.
