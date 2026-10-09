@@ -89,18 +89,32 @@ describe('LayoutEngine', () => {
     engine.setGraph(graphOf(['a.md', 'b.md']), 'system')
     // All zeros until the worker answers: nothing may show them as the brain's places.
     expect(engine.placed).toBe(false)
+    expect(engine.answered).toBe(false)
+    expect(engine.carried).toBe(0)
     expect(Array.from(engine.positions)).toEqual([0, 0, 0, 0, 0, 0])
     // A reply for a graph that is already gone does not count.
     worker.reply({ type: 'positions', positions: new Float32Array(6).fill(4), alpha: 0, settled: true, generation: 0 })
     expect(engine.placed).toBe(false)
+    expect(engine.answered).toBe(false)
     worker.reply({ type: 'positions', positions: new Float32Array(6).fill(4), alpha: 0, settled: true, generation: 1 })
     expect(engine.placed).toBe(true)
-    // A new node set starts from a seed again, even though the old places carry over into it.
+    expect(engine.answered).toBe(true)
+    // A node set most of which was there before starts from the old places, which are places: placed at once, not yet answered.
     engine.setGraph(graphOf(['a.md', 'b.md', 'c.md']), 'system')
-    expect(engine.placed).toBe(false)
+    expect(engine.placed).toBe(true)
+    expect(engine.answered).toBe(false)
+    expect(engine.carried).toBeCloseTo(2 / 3, 5)
     expect(engine.positions[0]).toBe(4)
     worker.reply({ type: 'positions', positions: new Float32Array(9).fill(6), alpha: 0, settled: true, generation: 2 })
-    expect(engine.placed).toBe(true)
+    expect(engine.answered).toBe(true)
+    // Another vault shares almost nothing with it: a seed again.
+    engine.setGraph(graphOf(['x.md', 'y.md', 'z.md', 'a.md']), 'system')
+    expect(engine.carried).toBe(0.25)
+    expect(engine.placed).toBe(false)
+    // And a node set that follows one nobody has laid out yet inherits no places, whatever it shares with it.
+    engine.setGraph(graphOf(['x.md', 'y.md', 'z.md', 'a.md', 'b.md']), 'system')
+    expect(engine.carried).toBe(0.8)
+    expect(engine.placed).toBe(false)
     engine.dispose()
   })
 })

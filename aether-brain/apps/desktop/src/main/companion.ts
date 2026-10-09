@@ -324,7 +324,7 @@ export class CompanionHost {
     try {
       graph = cleanGraph(raw)
     } catch (err) {
-      this.rejected = `The Unreal app was sent a scene it can't take (${err instanceof Error ? err.message : 'malformed'}); it keeps showing the one before.`
+      this.rejected = `The Unreal app was sent a scene it can't take (${err instanceof Error ? err.message : 'malformed'}); a viewer shows nothing new until the next scene is good.`
       return false
     }
     this.rejected = null
@@ -375,11 +375,21 @@ export class CompanionHost {
       this.rejected = null
     }
     this.send(IPC.companionWant, on)
+    this.applyWanted(on)
+  }
+
+  /** Tell the app a viewer is (or is no longer) reading: a failing hook must not stop the link. */
+  private applyWanted(on: boolean): void {
     try {
       this.opts.onWanted?.(on)
     } catch {
-      // A failing hook must not stop the link.
+      // Nothing to do: the link works without it.
     }
+  }
+
+  /** A viewer is reading now. */
+  isWanted(): boolean {
+    return this.wanted
   }
 
   /** A viewer asked for something: the brain window publishes (again, if it went quiet: a reload). */
@@ -392,6 +402,8 @@ export class CompanionHost {
     } else if (now - this.lastPublish > REPUBLISH_MS) {
       this.lastPublish = now
       this.send(IPC.companionWant, true)
+      // The window may be a new one (closed and opened again) that never heard a viewer was reading.
+      this.applyWanted(true)
     }
   }
 

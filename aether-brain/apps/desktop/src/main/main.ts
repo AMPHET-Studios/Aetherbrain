@@ -1032,6 +1032,8 @@ function createWindow(): void {
       spellcheck: true,
     },
   })
+  // A window opened while a viewer is reading must not be slowed down for being covered by it either.
+  if (companion?.isWanted()) win.webContents.setBackgroundThrottling(false)
   const reveal = () => {
     if (win && !win.isVisible()) win.show()
   }

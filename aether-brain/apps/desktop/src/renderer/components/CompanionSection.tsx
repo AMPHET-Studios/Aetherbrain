@@ -11,7 +11,11 @@ function state(st: CompanionStatus): { text: string; tone: string } {
   if (!st.running) return { text: 'Starting…', tone: 'bg-inbox' }
   if (st.warning) return { text: st.warning, tone: 'bg-danger' }
   if (st.connected) {
-    const part = st.showing && st.showing.nodes < st.showing.ofNodes ? ` It shows the ${groups(st.showing.nodes)} most important of ${groups(st.showing.ofNodes)} nodes, so Unreal stays fast.` : ''
+    const cut = st.showing && (st.showing.nodes < st.showing.ofNodes || st.showing.links < st.showing.ofLinks)
+    const part =
+      st.showing && cut
+        ? ` It shows the ${groups(st.showing.nodes)} most important of ${groups(st.showing.ofNodes)} nodes${st.showing.links < st.showing.ofLinks ? ` and ${groups(st.showing.links)} of ${groups(st.showing.ofLinks)} links` : ''}, so Unreal stays fast.`
+        : ''
     return { text: `The Unreal app is showing this brain (port ${st.port}).${part}`, tone: 'bg-untagged shadow-[0_0_10px_#9dffb3]' }
   }
   return { text: `On (port ${st.port}): waiting for the Unreal app.`, tone: 'bg-inbox' }

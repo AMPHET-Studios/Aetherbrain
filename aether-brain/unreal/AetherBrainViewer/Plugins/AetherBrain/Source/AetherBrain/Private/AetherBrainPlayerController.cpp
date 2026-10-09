@@ -248,7 +248,8 @@ void AAetherBrainPlayerController::FlyToNode(int32 Index)
 	{
 		return;
 	}
-	const FVector Node = B->NodeLocation(Index);
+	// Where it will be drawn, not where it is on its way there (a node that has only just come in starts at its folder).
+	const FVector Node = B->NodeTarget(Index);
 	const double Distance = FMath::Max(static_cast<double>(B->NodeRadius(Index)) * 9.0, 450.0);
 	// Keep looking the way the camera looks, a little from above.
 	FVector Back = (CamLocation - Node).GetSafeNormal();

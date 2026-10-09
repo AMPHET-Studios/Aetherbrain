@@ -70,7 +70,9 @@ public:
 	const FAetherNode* GetNode(int32 Index) const { return Graph.Nodes.IsValidIndex(Index) ? &Graph.Nodes[Index] : nullptr; }
 	/** Where the node is drawn now (Unreal space). */
 	FVector NodeLocation(int32 Index) const { return Current.IsValidIndex(Index) ? Current[Index] : FVector::ZeroVector; }
-	/** Its drawn radius (cm). */
+	/** Where it is going to be drawn (Unreal space): where the brain says it is, which the drawn place eases toward. */
+	FVector NodeTarget(int32 Index) const { return Target.IsValidIndex(Index) ? Target[Index] : FVector::ZeroVector; }
+	/** Its radius (cm), a little bigger while it is hovered or selected. */
 	float NodeRadius(int32 Index) const;
 	/** The node under a ray (the nearest one hit, a little generous far away), or INDEX_NONE. */
 	int32 Pick(const FVector& Origin, const FVector& Direction) const;
@@ -162,8 +164,13 @@ private:
 	void RefreshStatus();
 	void UpdateInstances(float DeltaSeconds);
 	void UpdateLabels();
+	/** The colour and glow of one sphere (the caller marks the render state dirty once, after all it changed). */
+	void ApplyNodeLook(int32 Index);
 	void SetNodeLook(int32 Index);
 	float GlowOf(int32 Index) const;
+	/** Its radius without the growth of being hovered or selected (cm), and that growth. */
+	float BaseRadius(int32 Index) const;
+	float GrowOf(int32 Index) const;
 	FTransform Thread(const FVector& A, const FVector& B, float RadiusCm) const;
 	FVector ToBrain(const FVector& U) const { return FVector(U.X, U.Z, U.Y) / static_cast<double>(WorldScale); }
 
@@ -194,14 +201,25 @@ private:
 	/** Redraw pacing (see AetherViewMath.h) and the transforms of a redraw, kept so a frame allocates nothing. */
 	double RedrawClock = 0.0;
 	double RedrawGap = 1.0 / 30.0;
+	/** What the last redraw cost (seconds), and whether the frame after it is still to be counted into that. */
+	double RedrawSpent = 0.0;
+	bool bMeasureNext = false;
 	TArray<FTransform> Scratch;
+	/** Size each name was last set to (cm): names are resized only when the camera moved enough to matter. */
+	TArray<float> LabelSizes;
 	/** Label slot -> node index. */
 	TArray<int32> LabelNodes;
 
 	int32 Selected = INDEX_NONE;
 	int32 Hovered = INDEX_NONE;
+	/** What the desktop app has selected: its number in this scene, and its id (the number changes when the scene's nodes do). */
 	int32 BrainSelected = INDEX_NONE;
+	FString BrainSelectedId;
 	bool bBrainSelectionChanged = false;
+	/** The places of the graph held now have come in (a flight to a node waits for them). */
+	bool bPositionsCurrent = false;
+	/** The status line says something that is no longer true (waiting, unreachable): the next good answer writes it again. */
+	bool bStatusStale = false;
 
 	FString Status;
 	bool bLive = false;

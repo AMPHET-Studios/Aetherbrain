@@ -1,6 +1,5 @@
 #include "AetherBrainActor.h"
 
-#include "AetherViewMath.h"
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Components/TextRenderComponent.h"
 #include "Dom/JsonObject.h"
@@ -15,6 +14,10 @@
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
 #include "UObject/ConstructorHelpers.h"
+
+THIRD_PARTY_INCLUDES_START
+#include "AetherViewMath.h"
+THIRD_PARTY_INCLUDES_END
 
 namespace
 {
@@ -41,6 +44,19 @@ namespace
 		case EAetherKind::Picture: return 1.1f;
 		case EAetherKind::Ghost: return 0.55f;
 		default: return 1.15f;
+		}
+	}
+
+	/** 0 sun, 1 star, 2 planet and the Today hub, 3 the rest: how small a body may be drawn from afar (AetherViewMath.h). */
+	int32 RankOf(EAetherKind Kind)
+	{
+		switch (Kind)
+		{
+		case EAetherKind::Sun: return 0;
+		case EAetherKind::Star: return 1;
+		case EAetherKind::Planet:
+		case EAetherKind::Today: return 2;
+		default: return 3;
 		}
 	}
 
@@ -238,6 +254,7 @@ bool AAetherBrainActor::CheckAnswer(FHttpResponsePtr Response, bool bConnectedSu
 	if (!bConnectedSuccessfully || !Response.IsValid())
 	{
 		bLive = false;
+		bStatusStale = true;
 		Status = TEXT("Can't reach Aether Brain. Is it running, with its Unreal companion link on (press a)?");
 		// The app may have restarted on another port or token: read companion.json again.
 		if (!bConnFromSettings)
@@ -253,6 +270,7 @@ bool AAetherBrainActor::CheckAnswer(FHttpResponsePtr Response, bool bConnectedSu
 	if (Code == 401)
 	{
 		bLive = false;
+		bStatusStale = true;
 		Status = TEXT("Aether Brain refused the token (it was renewed?). Reading companion.json again...");
 		if (!bConnFromSettings)
 		{
@@ -264,19 +282,26 @@ bool AAetherBrainActor::CheckAnswer(FHttpResponsePtr Response, bool bConnectedSu
 	if (Code == 503)
 	{
 		bLive = true;
-		Status = TEXT("Connected. Waiting for Aether Brain to show a vault...");
+		bStatusStale = true;
+		Status = bHasGraph ? TEXT("Connected. Aether Brain is working out where everything goes...") : TEXT("Connected. Waiting for Aether Brain to show a vault...");
 		NextGraph = FMath::Max(NextGraph, Now + GraphPollSeconds);
 		NextPositions = FMath::Max(NextPositions, Now + PositionsPollSeconds);
 		return false;
 	}
 	if (Code != 200 && Code != 304)
 	{
+		bStatusStale = true;
 		Status = FString::Printf(TEXT("Aether Brain answered %d."), Code);
 		NextGraph = Now + RetrySeconds;
 		NextPositions = Now + RetrySeconds;
 		return false;
 	}
 	bLive = true;
+	if (bStatusStale && bHasGraph)
+	{
+		// The wait, or the error, is over: say what is drawn again.
+		RefreshStatus();
+	}
 	return true;
 }
 
@@ -288,13 +313,22 @@ void AAetherBrainActor::OnGraph(FHttpRequestPtr Request, FHttpResponsePtr Respon
 	{
 		return;
 	}
+	// Looked at before it is read: a scene that is far more than a viewer takes is not made into a document in memory first.
+	const FString Tag = Response->GetHeader(TEXT("ETag"));
 	FAetherGraph NewGraph;
-	if (!AetherScene::ParseGraph(Response->GetContentAsString(), NewGraph))
+	bool bTooBig = Response->GetContent().Num() > AetherScene::MaxGraphBytes;
+	if (bTooBig || !AetherScene::ParseGraph(Response->GetContentAsString(), NewGraph, &bTooBig))
 	{
-		Status = TEXT("Aether Brain sent a scene this viewer can't read: update the viewer.");
+		Status = bTooBig
+			? TEXT("This Aether Brain sends more of the brain than this viewer can draw. Update Aether Brain to the version that came with the viewer.")
+			: TEXT("Aether Brain sent a scene this viewer can't read. Update the viewer and Aether Brain to the same version.");
+		// The line stays until the next scene (and a good answer from the positions does not write over it).
+		bStatusStale = false;
+		// Not fetched and read again every half second: the next scene has another tag.
+		GraphTag = Tag;
 		return;
 	}
-	GraphTag = Response->GetHeader(TEXT("ETag"));
+	GraphTag = Tag;
 	ApplyGraph(MoveTemp(NewGraph));
 }
 
@@ -341,17 +375,35 @@ void AAetherBrainActor::ApplyGraph(FAetherGraph&& NewGraph)
 	if (!bSameShape)
 	{
 		++ShapeSerial;
+		// A flight to a node waits for the places of this node set.
+		bPositionsCurrent = false;
 	}
 	const int32 N = Graph.Nodes.Num();
 	Current.SetNum(N);
 	Target.SetNum(N);
 	for (int32 I = 0; I < N; ++I)
 	{
-		const FVector* Old = Was.Find(Graph.Nodes[I].Id);
-		const int32 P = Graph.Nodes[I].Parent;
-		const FVector* Parent = Graph.Nodes.IsValidIndex(P) ? Was.Find(Graph.Nodes[P].Id) : nullptr;
-		Current[I] = Old ? *Old : Parent ? *Parent : FVector::ZeroVector;
-		Target[I] = Current[I];
+		// A node that is new starts where the nearest of the folders it sits in (that was drawn before) is, and grows out of it.
+		FVector Born = FVector::ZeroVector;
+		int32 At = I;
+		for (int32 Guard = 0; Graph.Nodes.IsValidIndex(At) && Guard < 64; ++Guard)
+		{
+			if (const FVector* Seen = Was.Find(Graph.Nodes[At].Id))
+			{
+				Born = *Seen;
+				break;
+			}
+			At = Graph.Nodes[At].Parent;
+		}
+		Current[I] = Born;
+		Target[I] = Born;
+	}
+	if (!bHasPositions)
+	{
+		// Until the layout says where things are they are all at one spot: nothing is shown (a clump, with no orbits, is not the brain).
+		Spheres->SetVisibility(false);
+		Links->SetVisibility(false);
+		Orbits->SetVisibility(false);
 	}
 	// Positions belong to one graph: wait for this one's.
 	PositionsTag.Reset();
@@ -372,18 +424,23 @@ void AAetherBrainActor::ApplyGraph(FAetherGraph&& NewGraph)
 			break;
 		}
 	}
-	if (Graph.Selected != BrainSelected)
+	// The desktop app's selection is known by its id: the same note is another number when the scene's nodes change.
+	const FString BrainId = Graph.Nodes.IsValidIndex(Graph.Selected) ? Graph.Nodes[Graph.Selected].Id : FString();
+	BrainSelected = Graph.Selected;
+	if (BrainId != BrainSelectedId)
 	{
-		BrainSelected = Graph.Selected;
-		if (BrainSelected != INDEX_NONE)
+		BrainSelectedId = BrainId;
+		if (!BrainId.IsEmpty())
 		{
-			Selected = BrainSelected;
+			Selected = Graph.Selected;
 			bBrainSelectionChanged = true;
 		}
 	}
 
 	RebuildInstances(bSameShape && Spheres->GetInstanceCount() == N);
 	RefreshStatus();
+	// Drawn the next frame, not up to a redraw gap later.
+	RedrawClock = RedrawGap;
 }
 
 void AAetherBrainActor::RefreshStatus()
@@ -394,6 +451,7 @@ void AAetherBrainActor::RefreshStatus()
 		? FString::Printf(TEXT("the %d most important of %d nodes"), N, Graph.TotalNodes)
 		: FString::Printf(TEXT("%d nodes"), N);
 	Status = FString::Printf(TEXT("%s - %s, %d links, %d orbit rings - live from Aether Brain"), *Name, *Size, LinkCount, RingsDrawn);
+	bStatusStale = false;
 }
 
 void AAetherBrainActor::ApplyPositions(FAetherPositions&& NewPositions)
@@ -406,7 +464,7 @@ void AAetherBrainActor::ApplyPositions(FAetherPositions&& NewPositions)
 	}
 	// A vault only just opened sends every node at one spot until its layout is worked out: those are not places yet. Drawing them,
 	// and framing the camera on them, is the clump with no orbits.
-	if (!bHasPositions && AetherView::LooksUnplaced(NewPositions.Points.Num(), [&NewPositions](int I, int Axis) { return NewPositions.Points[I][Axis]; }))
+	if (!bPositionsCurrent && AetherView::LooksUnplaced(NewPositions.Points.Num(), [&NewPositions](int I, int Axis) { return NewPositions.Points[I][Axis]; }))
 	{
 		PositionsTag.Reset();
 		return;
@@ -420,7 +478,12 @@ void AAetherBrainActor::ApplyPositions(FAetherPositions&& NewPositions)
 		Current = Target;
 		bHasPositions = true;
 		bFirstPositions = true;
+		Spheres->SetVisibility(true);
+		Links->SetVisibility(true);
+		Orbits->SetVisibility(true);
+		RedrawClock = RedrawGap;
 	}
+	bPositionsCurrent = true;
 	Rings = MoveTemp(NewPositions.Rings);
 	// Only the orbits are made again, and only when the rings are not the ones they were made from.
 	const int32 Wanted = bShowOrbits ? FMath::Clamp(Rings.Num(), 0, FMath::Max(MaxRings, 0)) : 0;
@@ -428,6 +491,7 @@ void AAetherBrainActor::ApplyPositions(FAetherPositions&& NewPositions)
 	{
 		RebuildOrbits();
 		RefreshStatus();
+		RedrawClock = RedrawGap;
 	}
 }
 
@@ -453,15 +517,20 @@ void AAetherBrainActor::SetBuiltInStars(bool bOn)
 	Starfield->SetVisibility(bOn);
 }
 
-float AAetherBrainActor::NodeRadius(int32 Index) const
+float AAetherBrainActor::BaseRadius(int32 Index) const
 {
 	const FAetherNode* N = GetNode(Index);
-	if (!N)
-	{
-		return 0.f;
-	}
-	const float Grow = Index == Selected ? 1.35f : Index == Hovered ? 1.15f : 1.f;
-	return FMath::Max(N->Radius, 0.2f) * WorldScale * Grow;
+	return N ? FMath::Max(N->Radius, 0.2f) * WorldScale : 0.f;
+}
+
+float AAetherBrainActor::GrowOf(int32 Index) const
+{
+	return Index == Selected ? 1.35f : Index == Hovered ? 1.15f : 1.f;
+}
+
+float AAetherBrainActor::NodeRadius(int32 Index) const
+{
+	return BaseRadius(Index) * GrowOf(Index);
 }
 
 float AAetherBrainActor::GlowOf(int32 Index) const
@@ -471,13 +540,18 @@ float AAetherBrainActor::GlowOf(int32 Index) const
 	return KindGlow(N.Kind) * Boost * GlowScale;
 }
 
-void AAetherBrainActor::SetNodeLook(int32 Index)
+void AAetherBrainActor::ApplyNodeLook(int32 Index)
 {
 	if (Graph.Nodes.IsValidIndex(Index) && Index < Spheres->GetInstanceCount())
 	{
 		SetLook(Spheres, Index, Graph.Nodes[Index].Color, GlowOf(Index));
-		Spheres->MarkRenderStateDirty();
 	}
+}
+
+void AAetherBrainActor::SetNodeLook(int32 Index)
+{
+	ApplyNodeLook(Index);
+	Spheres->MarkRenderStateDirty();
 }
 
 FTransform AAetherBrainActor::Thread(const FVector& A, const FVector& B, float RadiusCm) const
@@ -553,6 +627,8 @@ void AAetherBrainActor::RebuildInstances(bool bKeepInstances)
 		return RankX != RankY ? RankX < RankY : X.Radius > Y.Radius;
 	});
 	LabelNodes.Reset();
+	LabelSizes.Reset();
+	LabelSizes.SetNumZeroed(Labels.Num());
 	for (int32 Slot = 0; Slot < Labels.Num(); ++Slot)
 	{
 		UTextRenderComponent* Label = Labels[Slot];
@@ -567,7 +643,8 @@ void AAetherBrainActor::RebuildInstances(bool bKeepInstances)
 		const FString Text = Node.Title;
 		Label->SetText(FText::FromString(Text));
 		Label->SetTextRenderColor(Node.Color.ToFColor(true));
-		Label->SetWorldSize(FMath::Clamp(Node.Radius * WorldScale * 0.75f, 24.f, 260.f));
+		LabelSizes[Slot] = FMath::Clamp(Node.Radius * WorldScale * 0.75f, 24.f, 260.f);
+		Label->SetWorldSize(LabelSizes[Slot]);
 		Label->SetVisibility(true);
 	}
 }
@@ -602,8 +679,9 @@ void AAetherBrainActor::SetHovered(int32 Index)
 	}
 	const int32 Was = Hovered;
 	Hovered = Graph.Nodes.IsValidIndex(Index) ? Index : INDEX_NONE;
-	SetNodeLook(Was);
-	SetNodeLook(Hovered);
+	ApplyNodeLook(Was);
+	ApplyNodeLook(Hovered);
+	Spheres->MarkRenderStateDirty();
 }
 
 void AAetherBrainActor::SelectNode(int32 Index, bool bOpen)
@@ -614,8 +692,9 @@ void AAetherBrainActor::SelectNode(int32 Index, bool bOpen)
 	}
 	const int32 Was = Selected;
 	Selected = Index;
-	SetNodeLook(Was);
-	SetNodeLook(Selected);
+	ApplyNodeLook(Was);
+	ApplyNodeLook(Selected);
+	Spheres->MarkRenderStateDirty();
 	if (!Conn.IsValid())
 	{
 		return;
@@ -633,6 +712,7 @@ void AAetherBrainActor::SelectNode(int32 Index, bool bOpen)
 	Request->ProcessRequest();
 	// The brain's own selection comes back with the next graph: no second flight for it.
 	BrainSelected = Index;
+	BrainSelectedId = Graph.Nodes[Index].Id;
 }
 
 bool AAetherBrainActor::ConsumeBrainSelection(int32& OutIndex)
@@ -640,6 +720,11 @@ bool AAetherBrainActor::ConsumeBrainSelection(int32& OutIndex)
 	if (!bBrainSelectionChanged || !bFollowBrainSelection)
 	{
 		bBrainSelectionChanged = false;
+		return false;
+	}
+	if (!bPositionsCurrent)
+	{
+		// Fly when this scene's places are in: before that the node is where it was born, not where it is.
 		return false;
 	}
 	bBrainSelectionChanged = false;
@@ -657,8 +742,7 @@ bool AAetherBrainActor::ConsumeFirstPositions()
 int32 AAetherBrainActor::Pick(const FVector& Origin, const FVector& Direction) const
 {
 	const FVector D = Direction.GetSafeNormal();
-	int32 Best = INDEX_NONE;
-	double BestT = TNumericLimits<double>::Max();
+	AetherView::PickState Best;
 	for (int32 I = 0; I < Current.Num(); ++I)
 	{
 		const FVector ToNode = Current[I] - Origin;
@@ -667,26 +751,23 @@ int32 AAetherBrainActor::Pick(const FVector& Origin, const FVector& Direction) c
 		{
 			continue;
 		}
-		// A little generous far away: at least about half a degree.
-		const double R = FMath::Max(static_cast<double>(NodeRadius(I)) * 1.15, T * 0.009);
-		const double Miss = (ToNode - D * T).SizeSquared();
-		if (Miss <= R * R && T < BestT)
-		{
-			BestT = T;
-			Best = I;
-		}
+		const double Miss = (ToNode - D * T).Size();
+		// The size it is drawn at, which from afar is more than the node's own.
+		const double Drawn = AetherView::ApparentRadius(static_cast<double>(NodeRadius(I)), T, AetherView::MinAngleOfRank(RankOf(Graph.Nodes[I].Kind)));
+		AetherView::PickOffer(Best, I, Miss, Drawn, T);
 	}
-	return Best;
+	return Best.Index;
 }
 
 bool AAetherBrainActor::GetBounds(FVector& Center, float& Radius) const
 {
-	if (!bHasPositions || Current.Num() == 0)
+	if (!bHasPositions || Target.Num() == 0)
 	{
 		return false;
 	}
+	// Where the brain will be drawn, not where it is on the way there.
 	FBox Box(ForceInit);
-	for (const FVector& P : Current)
+	for (const FVector& P : Target)
 	{
 		Box += P;
 	}
@@ -744,6 +825,13 @@ void AAetherBrainActor::UpdateInstances(float DeltaSeconds)
 	}
 	// Redrawn 30 times a second at most, and less often when a redraw takes more than a fifth of the time: a big brain slows its own
 	// motion down and never the editor. The nodes ease toward their places by the time that has passed since the last redraw.
+	if (bMeasureNext)
+	{
+		// What the frame after a redraw took beyond a 60 a second frame is the engine uploading it: it counts as part of its cost.
+		bMeasureNext = false;
+		RedrawSpent += FMath::Max(0.0, static_cast<double>(DeltaSeconds) - 1.0 / 60.0);
+		RedrawGap = AetherView::UpdateGap(RedrawSpent);
+	}
 	RedrawClock += static_cast<double>(DeltaSeconds);
 	if (RedrawClock < RedrawGap)
 	{
@@ -780,7 +868,8 @@ void AAetherBrainActor::UpdateInstances(float DeltaSeconds)
 	Scratch.Reset(N);
 	for (int32 I = 0; I < N; ++I)
 	{
-		const double Radius = Seen(static_cast<double>(NodeRadius(I)), Current[I], AetherView::kMinNodeAngle);
+		// The minimum is by rank, so a sun is still bigger than a moon from far away; hover and selection grow what is drawn.
+		const double Radius = Seen(static_cast<double>(BaseRadius(I)), Current[I], AetherView::MinAngleOfRank(RankOf(Graph.Nodes[I].Kind))) * static_cast<double>(GrowOf(I));
 		Scratch.Add(FTransform(FQuat::Identity, Current[I], FVector(Radius / static_cast<double>(MeshRadius))));
 	}
 	Spheres->BatchUpdateInstancesTransforms(0, Scratch, false, true, true);
@@ -826,7 +915,9 @@ void AAetherBrainActor::UpdateInstances(float DeltaSeconds)
 		Orbits->BatchUpdateInstancesTransforms(0, Scratch, false, true, true);
 	}
 
-	RedrawGap = AetherView::UpdateGap(FPlatformTime::Seconds() - Started);
+	RedrawSpent = FPlatformTime::Seconds() - Started;
+	RedrawGap = AetherView::UpdateGap(RedrawSpent);
+	bMeasureNext = true;
 }
 
 void AAetherBrainActor::UpdateLabels()
@@ -846,7 +937,22 @@ void AAetherBrainActor::UpdateLabels()
 			continue;
 		}
 		UTextRenderComponent* Label = Labels[Slot];
-		const FVector Where = Current[I] + FVector(0.0, 0.0, static_cast<double>(NodeRadius(I) * 1.25f + 8.f));
+		// From the distance that shows the whole brain a name is no bigger than a pixel or two: it is made bigger with the distance,
+		// in steps (a name is made again each time it is resized), and lifted over the body as it is drawn.
+		const double Distance = FVector::Dist(Current[I], Eye);
+		const FAetherNode& Node = Graph.Nodes[I];
+		if (LabelSizes.IsValidIndex(Slot) && LabelSizes[Slot] > 0.f)
+		{
+			const float Base = FMath::Clamp(Node.Radius * WorldScale * 0.75f, 24.f, 260.f);
+			const float Want = static_cast<float>(AetherView::ApparentRadius(static_cast<double>(Base), Distance, AetherView::kMinLabelAngle));
+			if (Want > LabelSizes[Slot] * 1.25f || Want < LabelSizes[Slot] * 0.8f)
+			{
+				LabelSizes[Slot] = Want;
+				Label->SetWorldSize(Want);
+			}
+		}
+		const double Body = AetherView::ApparentRadius(static_cast<double>(NodeRadius(I)), Distance, AetherView::MinAngleOfRank(RankOf(Node.Kind)));
+		const FVector Where = Current[I] + FVector(0.0, 0.0, Body * 1.25 + 8.0);
 		// Text faces +X: turn it to the camera.
 		Label->SetWorldLocationAndRotation(Where, (Eye - Where).Rotation());
 	}

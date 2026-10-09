@@ -258,9 +258,15 @@ describe('the companion link server', () => {
     // Asking again is not a new wish.
     await fetch(url(h, '/v1/hello'), { headers: auth })
     expect(calls).toEqual([true])
+    expect(h.isWanted()).toBe(true)
+    // A window that went quiet and is asked again may be a new one that never heard: the hook is told again.
+    clock += REPUBLISH_MS + 1
+    await fetch(url(h, '/v1/hello'), { headers: auth })
+    expect(calls).toEqual([true, true])
     clock += CLIENT_IDLE_MS + 1
     ;(h as unknown as { checkIdle(): void }).checkIdle()
-    expect(calls).toEqual([true, false])
+    expect(calls).toEqual([true, true, false])
+    expect(h.isWanted()).toBe(false)
     // A hook that throws does not stop the link.
     const h2 = await started({
       onWanted: () => {

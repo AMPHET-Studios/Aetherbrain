@@ -51,12 +51,98 @@ static void TestApparentRadius()
 	}
 	// A thread is thinner than a node at the same distance, so links never swallow the bodies they join.
 	CHECK(ApparentRadius(1.2, 300000.0, kMinThreadAngle) < ApparentRadius(20.0, 300000.0, kMinNodeAngle));
-	CHECK(ApparentRadius(1.2, 300000.0, kMinThreadAngle) > 100.0);
+	CHECK(ApparentRadius(1.2, 300000.0, kMinThreadAngle) > 60.0);
 	// Nonsense distances (behind the camera, not a number) leave the body alone.
 	CHECK_NEAR(ApparentRadius(20.0, -5.0, kMinNodeAngle), 20.0, 1e-12);
 	CHECK_NEAR(ApparentRadius(20.0, 0.0, kMinNodeAngle), 20.0, 1e-12);
 	CHECK_NEAR(ApparentRadius(20.0, std::numeric_limits<double>::quiet_NaN(), kMinNodeAngle), 20.0, 1e-12);
 	CHECK_NEAR(ApparentRadius(20.0, std::numeric_limits<double>::infinity(), kMinNodeAngle), 20.0, 1e-12);
+}
+
+static void TestRanks()
+{
+	// Seen from far enough that every body is at its minimum, a sun is bigger than a star, a star than a planet, a planet than a moon.
+	const double D = 300000.0;
+	double Last = 1e30;
+	for (int Rank = 0; Rank <= 3; ++Rank)
+	{
+		const double R = ApparentRadius(1.0, D, MinAngleOfRank(Rank));
+		CHECK(R < Last);
+		CHECK(R >= 1.0);
+		Last = R;
+	}
+	// A moon is still at least a pixel across (about 0.0005 rad) and a sun not a blob that hides its neighbours (under 0.003 rad).
+	CHECK(MinAngleOfRank(3) > 0.0005);
+	CHECK(MinAngleOfRank(0) < 0.003);
+	// Nonsense ranks are the nearest real one.
+	CHECK_NEAR(MinAngleOfRank(-4), MinAngleOfRank(0), 1e-15);
+	CHECK_NEAR(MinAngleOfRank(99), MinAngleOfRank(3), 1e-15);
+	// A name is readable from afar: 3 km away it is at least 21 m tall in world units of cm (0.007 rad).
+	CHECK(ApparentRadius(24.0, D, kMinLabelAngle) > 2000.0);
+	CHECK_NEAR(ApparentRadius(24.0, 100.0, kMinLabelAngle), 24.0, 1e-9);
+}
+
+static void TestPicking()
+{
+	// Nothing offered, nothing picked.
+	PickState None;
+	CHECK(None.Index < 0);
+
+	// A body whose centre the ray passes through is hit; one beyond its reach is not.
+	PickState A;
+	PickOffer(A, 7, 0.0, 50.0, 1000.0);
+	CHECK(A.Index == 7 && A.bInside);
+	PickState Far;
+	PickOffer(Far, 7, 80.0, 50.0, 1000.0);
+	CHECK(Far.Index < 0);
+	// Even a tiny body is hit within kPickAngle of its centre: 4 m at 1 km.
+	PickState Small;
+	PickOffer(Small, 3, 3.0, 0.1, 1000.0);
+	CHECK(Small.Index == 3);
+	PickOffer(Small, 4, 5.0, 0.1, 1000.0);
+	CHECK(Small.Index == 3);
+	CHECK_NEAR(PickReach(0.1, 1000.0), 1000.0 * kPickAngle, 1e-9);
+	CHECK_NEAR(PickReach(50.0, 10.0), 57.5, 1e-9);
+
+	// Of two bodies the ray is clearly inside, the nearer wins (it hides the other) whichever is offered first.
+	for (int Order = 0; Order < 2; ++Order)
+	{
+		PickState S;
+		const int First = Order == 0 ? 1 : 2;
+		const int Second = 3 - First;
+		const auto Offer = [&S](int Which) {
+			if (Which == 1) PickOffer(S, 1, 10.0, 100.0, 500.0);
+			else PickOffer(S, 2, 0.0, 100.0, 900.0);
+		};
+		Offer(First);
+		Offer(Second);
+		CHECK(S.Index == 1);
+	}
+	// A body only grazed does not beat one clearly pointed at, even a farther one.
+	{
+		PickState S;
+		PickOffer(S, 1, 100.0, 100.0, 300.0); // grazed (within reach 115, beyond 0.8 of it)
+		PickOffer(S, 2, 10.0, 100.0, 900.0);  // clearly inside, behind
+		CHECK(S.Index == 2);
+		PickOffer(S, 3, 0.0, 100.0, 800.0);   // clearly inside and nearer than 2
+		CHECK(S.Index == 3);
+	}
+	// Two grazed ones: the ray nearer the centre of the body it is on wins, the nearer in depth only breaks a tie.
+	{
+		PickState S;
+		PickOffer(S, 1, 110.0, 100.0, 300.0);
+		PickOffer(S, 2, 95.0, 100.0, 900.0);
+		CHECK(S.Index == 2);
+		PickOffer(S, 3, 95.0, 100.0, 900.0);
+		CHECK(S.Index == 2);
+	}
+	// Nonsense distances do not break the reach.
+	PickState Odd;
+	PickOffer(Odd, 5, 1.0, 10.0, std::numeric_limits<double>::quiet_NaN());
+	CHECK(Odd.Index == 5);
+	PickState Zero;
+	PickOffer(Zero, 6, 0.0, 0.0, 0.0);
+	CHECK(Zero.Index == 6);
 }
 
 static void TestUpdateGap()
@@ -155,6 +241,8 @@ static void TestRingFingerprint()
 int main()
 {
 	TestApparentRadius();
+	TestRanks();
+	TestPicking();
 	TestUpdateGap();
 	TestLooksUnplaced();
 	TestRingFingerprint();

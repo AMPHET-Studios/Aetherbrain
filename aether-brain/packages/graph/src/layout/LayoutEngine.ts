@@ -22,10 +22,18 @@ export class LayoutEngine {
   /** Increments on every positions frame. */
   frame = 0
   /**
-   * False from `setGraph` until the worker has laid out that node set: `positions` is only a seed until then
-   * (all zeros for a vault that was not there before), and nothing should show it as the brain's places.
+   * False from `setGraph` until `positions` are the brain's places: a node set most of which was there before is placed
+   * at once (its seed is the old places), a new vault only when the worker has answered (its seed is all zeros, and
+   * nothing should show that as the brain's places).
    */
   placed = false
+  /** False from `setGraph` until the worker has answered for that node set (its first frame is in `positions`). */
+  answered = false
+  /**
+   * The share (0 to 1) of the last `setGraph`'s nodes that were there before, by their own id. High: an edit, a new note,
+   * a folder opened; the bodies are where they were and only the new ones grow out of their parents. Low: another vault.
+   */
+  carried = 0
   /**
    * Orbit rings of the system layout: 6 floats per ring (parentIndex, radius,
    * qx, qy, qz, qw; see protocol). Empty in the other modes.
@@ -75,6 +83,8 @@ export class LayoutEngine {
   setGraph(graph: GraphData, mode = this.mode, seed = 7): void {
     this.mode = mode
     const prev = this.ids.length ? { ids: this.ids, positions: this.positions } : undefined
+    // The old places only count as places if they were (a vault still waiting for its first layout has none).
+    const prevPlaced = this.placed
     const nodes: LayoutNodeInput[] = graph.nodes.map((n) => ({
       id: n.id,
       area: AREA_INDEX[n.area] ?? 5,
@@ -107,11 +117,13 @@ export class LayoutEngine {
     let rings: Float32Array = new Float32Array(0)
     let cards: Float32Array = new Float32Array(0)
     let extents: Float32Array = new Float32Array(0)
+    let known = 0
     if (prev) {
       const pi = new Map(prev.ids.map((id, i) => [id, i]))
       nodes.forEach((n, i) => {
         let j = pi.get(n.id)
-        if (j === undefined && n.parent >= 0) j = pi.get(nodes[n.parent]!.id)
+        if (j !== undefined) known++
+        else if (n.parent >= 0) j = pi.get(nodes[n.parent]!.id)
         if (j !== undefined) {
           next[i * 3] = prev.positions[j * 3] ?? 0
           next[i * 3 + 1] = prev.positions[j * 3 + 1] ?? 0
@@ -148,7 +160,9 @@ export class LayoutEngine {
     this.ringsVersion++
     this.positions = next
     this.settled = false
-    this.placed = false
+    this.carried = nodes.length > 0 ? known / nodes.length : 0
+    this.answered = false
+    this.placed = prevPlaced && this.carried >= 0.5
     this.frame++
     const msg: MainToWorker = { type: 'graph', nodes, edges, mode, seed }
     if (prev) msg.prev = { ids: prev.ids, positions: prev.positions }
@@ -234,6 +248,7 @@ export class LayoutEngine {
     if (msg.positions.length !== this.ids.length * 3) return
     this.positions = msg.positions as Float32Array<ArrayBuffer>
     this.placed = true
+    this.answered = true
     this.alpha = msg.alpha
     this.settled = msg.settled
     this.frame++

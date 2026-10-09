@@ -71,7 +71,7 @@ export function companionScene(graph: GraphData, o: CompanionSceneOptions, plan?
       nodes,
       edges,
       selected: plan.selected < 0 ? -1 : plan.newIndex[plan.selected]!,
-      limits: { nodes: nodes.length, ofNodes: plan.n, links: edges.length / 2, ofLinks: plan.linksTotal },
+      limits: { nodes: nodes.length, ofNodes: plan.ofNodes, links: edges.length / 2, ofLinks: plan.linksTotal },
     }
   }
   const at = (id: NoteId | null) => (id === null ? -1 : (graph.index.get(id) ?? -1))
@@ -83,4 +83,44 @@ export function companionScene(graph: GraphData, o: CompanionSceneOptions, plan?
     if (a >= 0 && b >= 0) edges.push(a, b)
   }
   return { version: o.version, vault: o.vault, layout: o.layout, nodes, edges, selected: at(o.selectedId) }
+}
+
+/**
+ * A fingerprint of everything in a scene but its version. Two scenes with the same one are the very same picture, so
+ * a viewer that has the first needs no second copy (a note edited, a file the watcher saw twice: the graph is a new
+ * object, the scene is not).
+ */
+export function sceneSignature(g: CompanionGraphDto): string {
+  let a = 2166136261
+  let b = 5381
+  const eat = (v: string | number): void => {
+    const s = typeof v === 'number' ? String(v) : v
+    for (let i = 0; i < s.length; i++) {
+      const c = s.charCodeAt(i)
+      a = Math.imul(a ^ c, 16777619) >>> 0
+      b = (Math.imul(b, 33) ^ c) >>> 0
+    }
+    // A separator, so ['ab', 'c'] and ['a', 'bc'] differ.
+    a = Math.imul(a ^ 31, 16777619) >>> 0
+    b = (Math.imul(b, 33) ^ 31) >>> 0
+  }
+  eat(g.vault)
+  eat(g.layout)
+  eat(g.selected)
+  for (const n of g.nodes) {
+    eat(n.id)
+    eat(n.title)
+    eat(n.kind)
+    eat(n.color)
+    eat(n.radius)
+    eat(n.parent)
+  }
+  for (const e of g.edges) eat(e)
+  if (g.limits) {
+    eat(g.limits.nodes)
+    eat(g.limits.ofNodes)
+    eat(g.limits.links)
+    eat(g.limits.ofLinks)
+  }
+  return `${a.toString(36)}.${b.toString(36)}.${g.nodes.length}.${g.edges.length}`
 }

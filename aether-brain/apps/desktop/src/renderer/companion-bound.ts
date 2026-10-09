@@ -17,7 +17,8 @@
  * orbits exactly the body it orbits in the brain window and no parent index is ever re-pointed. Indices are
  * positional, so parents, links, rings, the selection and the positions all go through one `newIndex` table.
  * Places come from the brain window's own layout, so what the viewer shows is where the same bodies are there.
- * Pure (no electron, no three.js): unit-tested.
+ * The budgets are targets, not walls: a kept node always brings the chain of folders it sits in, so a scene may pass
+ * them by that chain (a few hundred nodes at most). Pure (no electron, no three.js): unit-tested.
  */
 import type { GraphData, GraphNode, NoteId } from '@aether/core'
 import { companionKind } from './companion-scene'
@@ -70,6 +71,8 @@ export interface BasePlan {
   /** Nodes of each class in the graph, and kept. */
   total: number[]
   kept: number[]
+  /** Nodes that are never sent (the cards of an open star gallery belong to the brain window's camera). */
+  hidden: number
   /** Links as node indices (-1 when an end is not in the graph), their weight, and 1 for the Today hub's beams. */
   ea: Int32Array
   eb: Int32Array
@@ -81,13 +84,15 @@ export interface BasePlan {
 export interface ScenePlan {
   /** Nodes in the graph. */
   n: number
+  /** Nodes in the graph that could be sent (all but the cards of an open star gallery). */
+  ofNodes: number
   /** Original index of each kept node, ascending (the kept nodes keep the brain's own relative order). */
   keep: Int32Array
   /** New index per original index, -1 when dropped. */
   newIndex: Int32Array
   /** Structural parent per original index, -1 for none. */
   parent: Int32Array
-  /** Kept links as pairs of ORIGINAL indices, most important first. */
+  /** Kept links as pairs of ORIGINAL indices, in ascending order. */
   edges: number[]
   /** The selected node (original index), -1 for none. */
   selected: number
@@ -103,9 +108,6 @@ const GHOST = 4
 const PICTURE = 5
 const TODAY = 6
 const CLASS_OF: Record<ReturnType<typeof companionKind>, number> = { sun: SUN, star: STAR, planet: PLANET, moon: MOON, ghost: GHOST, picture: PICTURE, today: TODAY }
-
-/** Longest chain of parents followed (a cycle in the data must not hang the window). */
-const MAX_DEPTH = 64
 
 /** A stable total order: bigger score first, then id, so an unrelated edit never reshuffles the kept set. */
 function byScore(score: Float64Array, ids: string[]) {
@@ -142,10 +144,10 @@ export function planBase(graph: GraphData, B: SceneBudget = COMPANION_BUDGET): B
   const kept = [0, 0, 0, 0, 0, 0, 0]
   for (let i = 0; i < n; i++) total[cls[i]!]!++
 
-  /** Keep `i` and every ancestor of it; returns how many were new. */
+  /** Keep `i` and every ancestor of it; returns how many were new. Marking as it climbs stops it at a cycle in the data too. */
   const take = (i: number): number => {
     let added = 0
-    for (let c = i, guard = 0; c >= 0 && !keep[c] && guard < MAX_DEPTH; c = parent[c]!, guard++) {
+    for (let c = i; c >= 0 && !keep[c]; c = parent[c]!) {
       keep[c] = 1
       kept[cls[c]!]!++
       added++
@@ -186,10 +188,13 @@ export function planBase(graph: GraphData, B: SceneBudget = COMPANION_BUDGET): B
     perStar.set(p, c + 1)
     used += take(i)
   }
+  // Among folders that hold the same, the ones whose notes are linked to the most come first.
+  const linked = new Float64Array(n)
+  for (let i = 0; i < n; i++) if (cls[i] === MOON && parent[i]! >= 0) linked[parent[i]!]! += nodes[i]!.degree
   planets.sort((a, b) => {
     const fa = nodes[a]!.folder!
     const fb = nodes[b]!.folder!
-    return fb.notes - fa.notes || fb.totalNotes - fa.totalNotes || fa.depth - fb.depth || (ids[a]! < ids[b]! ? -1 : 1)
+    return fb.notes - fa.notes || fb.totalNotes - fa.totalNotes || linked[b]! - linked[a]! || fa.depth - fb.depth || (ids[a]! < ids[b]! ? -1 : 1)
   })
   for (const i of planets) {
     if (planetsLeft() <= 0 || used >= B.nodes) break
@@ -197,16 +202,23 @@ export function planBase(graph: GraphData, B: SceneBudget = COMPANION_BUDGET): B
   }
 
   // 4. Note moons. Each kept folder keeps its best `perFolderMoons` (a bounded insertion, O(n·K)) and is
-  //    guaranteed its first few; the rest of the moon budget goes to the notes with the most links.
+  //    guaranteed its first few; the rest of the moon budget goes to the notes with the most links, and what is
+  //    still left after that to the notes a crowded folder was cut to (the cap only matters when the budget is short).
   const noteScore = (nd: GraphNode): number =>
     nd.degree * 1000 + (nd.type === 'moc' ? 400 : nd.type === 'project' || nd.type === 'area' ? 200 : 0) + Math.min(999, ((nd.created ?? 0) / 1e13) * 999)
   const best = new Map<number, number[]>()
+  /** Notes in no folder (the constellation and orbit layouts have none): one sort, not an insertion per note. */
+  const loose: number[] = []
   for (let i = 0; i < n; i++) {
     if (cls[i] !== MOON) continue
     const p = parent[i]!
     if (p >= 0 && !keep[p]) continue
     score[i] = noteScore(nodes[i]!)
-    const cap = p < 0 ? B.moons : B.perFolderMoons
+    if (p < 0) {
+      loose.push(i)
+      continue
+    }
+    const cap = B.perFolderMoons
     let list = best.get(p)
     if (!list) best.set(p, (list = []))
     let at = list.length
@@ -216,7 +228,7 @@ export function planBase(graph: GraphData, B: SceneBudget = COMPANION_BUDGET): B
     if (list.length > cap) list.pop()
   }
   const moonsLeft = (): number => Math.min(B.moons - kept[MOON]!, B.nodes - used)
-  const rest: number[] = []
+  const rest: number[] = loose
   for (const [, list] of [...best.entries()].sort((a, b) => a[0] - b[0])) {
     for (let r = 0; r < list.length; r++) {
       const i = list[r]!
@@ -230,6 +242,22 @@ export function planBase(graph: GraphData, B: SceneBudget = COMPANION_BUDGET): B
     if (moonsLeft() <= 0) break
     if (!keep[i]) used += take(i)
   }
+  if (moonsLeft() > 0) {
+    const over: number[] = []
+    for (let i = 0; i < n; i++) {
+      if (cls[i] !== MOON || keep[i]) continue
+      const p = parent[i]!
+      if (p >= 0 && keep[p]) {
+        score[i] = noteScore(nodes[i]!)
+        over.push(i)
+      }
+    }
+    over.sort(byScore(score, ids))
+    for (const i of over) {
+      if (moonsLeft() <= 0) break
+      used += take(i)
+    }
+  }
 
   // 4b. The notes the Today hub points at, when their folder is kept: the hub keeps its beams.
   let beams = 0
@@ -238,7 +266,8 @@ export function planBase(graph: GraphData, B: SceneBudget = COMPANION_BUDGET): B
     const b = eb[k]!
     if (b < 0 || keep[b] || cls[b] !== MOON) continue
     const p = parent[b]!
-    if (p >= 0 && keep[p]) {
+    // In a layout without folders the hub keeps its beams to whatever notes it points at.
+    if (p < 0 || keep[p]) {
       used += take(b)
       beams++
     }
@@ -267,30 +296,37 @@ export function planBase(graph: GraphData, B: SceneBudget = COMPANION_BUDGET): B
     used += take(i)
   }
 
-  // 6. Pictures: never the cards of an open gallery (they belong to the brain window's camera); a few per kept
-  //    folder, the ones notes embed first, then the newest.
+  // 6. Pictures: never the cards of an open gallery (they belong to the brain window's camera); a few per folder, the
+  //    ones notes embed first, then the newest. Those of a kept folder first, then those of folders nothing else made
+  //    the cut for (a folder that holds only pictures ranks last as a planet), which come with the folder they sit in.
   const perFolder = new Map<number, number>()
   const pics: number[] = []
+  let hidden = 0
   for (let i = 0; i < n; i++) {
     if (cls[i] !== PICTURE) continue
     const img = nodes[i]!.image
-    if (img?.gallery?.only) continue
-    const p = parent[i]!
-    if (p >= 0 && !keep[p]) continue
+    if (img?.gallery?.only) {
+      hidden++
+      continue
+    }
     score[i] = (img?.embeddedBy ?? 0) * 1e13 + (img?.mtime ?? 0)
     pics.push(i)
   }
-  pics.sort(byScore(score, ids))
+  const home = (i: number): number => (parent[i]! < 0 || keep[parent[i]!] ? 1 : 0)
+  const homeless = new Uint8Array(n)
+  for (const i of pics) homeless[i] = home(i) ? 0 : 1
+  const byWorth = byScore(score, ids)
+  pics.sort((a, b) => homeless[a]! - homeless[b]! || byWorth(a, b))
   for (const i of pics) {
     if (kept[PICTURE]! >= B.pictures || used >= B.nodes) break
     const p = parent[i]!
     const c = perFolder.get(p) ?? 0
-    if (c >= B.perFolderPictures) continue
+    if (c >= (p < 0 ? B.pictures : B.perFolderPictures)) continue
     perFolder.set(p, c + 1)
     used += take(i)
   }
 
-  return { n, cls, parent, keep, total, kept, ea, eb, ew, ebeam }
+  return { n, cls, parent, keep, total, kept, hidden, ea, eb, ew, ebeam }
 }
 
 /** The plan for one selection: the base set, the selected node and its chain of parents, and the links between kept nodes. */
@@ -300,7 +336,7 @@ export function planFor(graph: GraphData, base: BasePlan, selectedId: NoteId | n
   const keep = Uint8Array.from(base.keep)
   const selected = selectedId === null ? -1 : (graph.index.get(selectedId) ?? -1)
   if (selected >= 0) {
-    for (let c = selected, guard = 0; c >= 0 && !keep[c] && guard < MAX_DEPTH; c = parent[c]!, guard++) keep[c] = 1
+    for (let c = selected; c >= 0 && !keep[c]; c = parent[c]!) keep[c] = 1
   }
 
   let count = 0
@@ -313,7 +349,7 @@ export function planFor(graph: GraphData, base: BasePlan, selectedId: NoteId | n
     kept[k++] = i
   }
 
-  // Links between kept nodes, the Today hub's beams and the selection's first; the viewer draws the first it is sent.
+  // Links between kept nodes: the Today hub's beams and the selection's come first when there are more than the budget.
   const { ea, eb, ew, ebeam } = base
   const cand: { a: number; b: number; s: number }[] = []
   for (let k = 0; k < ea.length; k++) {
@@ -323,20 +359,27 @@ export function planFor(graph: GraphData, base: BasePlan, selectedId: NoteId | n
     cand.push({ a, b, s: (ebeam[k] ? 3e9 : 0) + (a === selected || b === selected ? 2e9 : 0) + ew[k]! * 1e6 + nodes[a]!.degree + nodes[b]!.degree })
   }
   cand.sort((x, y) => y.s - x.s || x.a - y.a || x.b - y.b)
+  // Sent in one fixed order, so that the same links make the same array whatever is selected: a viewer that sees the
+  // very same nodes and links keeps what it has drawn instead of making it all again.
+  const chosen = cand.length > B.links ? cand.slice(0, B.links).sort((x, y) => x.a - y.a || x.b - y.b) : cand.sort((x, y) => x.a - y.a || x.b - y.b)
   const edges: number[] = []
-  for (let k = 0; k < cand.length && k < B.links; k++) edges.push(cand[k]!.a, cand[k]!.b)
-  return { n, keep: kept, newIndex, parent, edges, selected, linksTotal: ea.length }
+  for (const e of chosen) edges.push(e.a, e.b)
+  return { n, ofNodes: n - base.hidden, keep: kept, newIndex, parent, edges, selected, linksTotal: ea.length }
 }
 
-/** The kept nodes' xyz, in the new order (into `out` when it fits). */
-export function gatherPositions(plan: ScenePlan, positions: Float32Array, out?: Float32Array): Float32Array {
+/**
+ * The kept nodes' xyz, in the new order (into `out` when it fits); null when `positions` is not one place for every
+ * node of the graph the plan was made for (mid-rebuild), which must not be sent as a layout.
+ */
+export function gatherPositions(plan: ScenePlan, positions: Float32Array, out?: Float32Array): Float32Array | null {
+  if (positions.length !== plan.n * 3) return null
   const m = plan.keep.length
   const dst = out && out.length === m * 3 ? out : new Float32Array(m * 3)
   for (let k = 0; k < m; k++) {
     const i = plan.keep[k]! * 3
-    dst[k * 3] = positions[i] ?? 0
-    dst[k * 3 + 1] = positions[i + 1] ?? 0
-    dst[k * 3 + 2] = positions[i + 2] ?? 0
+    dst[k * 3] = positions[i]!
+    dst[k * 3 + 1] = positions[i + 1]!
+    dst[k * 3 + 2] = positions[i + 2]!
   }
   return dst
 }
@@ -352,7 +395,7 @@ export function boundRings(graph: GraphData, plan: ScenePlan, rings: Float32Arra
   const mine: number[] = []
   for (let r = 0; r < total; r++) {
     const p = rings[r * 6]!
-    if (Number.isInteger(p) && p >= 0 && p < plan.n && plan.newIndex[p]! >= 0) mine.push(r)
+    if (Number.isInteger(p) && p >= 0 && p < plan.n && plan.newIndex[p]! >= 0 && Number.isFinite(rings[r * 6 + 1]!)) mine.push(r)
   }
   if (mine.length === 0 || cap <= 0) return new Float32Array(0)
 
@@ -364,6 +407,7 @@ export function boundRings(graph: GraphData, plan: ScenePlan, rings: Float32Arra
     list.push(r)
   }
   for (const list of byParent.values()) list.sort((a, b) => rings[a * 6 + 1]! - rings[b * 6 + 1]!)
+  if (positions.length !== plan.n * 3) return new Float32Array(0)
   const bodies = new Int32Array(plan.n)
   const used = new Set<number>()
   for (let k = 0; k < plan.keep.length; k++) {
@@ -372,10 +416,20 @@ export function boundRings(graph: GraphData, plan: ScenePlan, rings: Float32Arra
     const list = p >= 0 ? byParent.get(p) : undefined
     if (!list) continue
     bodies[p]!++
-    const dx = (positions[c * 3] ?? 0) - (positions[p * 3] ?? 0)
-    const dy = (positions[c * 3 + 1] ?? 0) - (positions[p * 3 + 1] ?? 0)
-    const dz = (positions[c * 3 + 2] ?? 0) - (positions[p * 3 + 2] ?? 0)
+    const cx = positions[c * 3]!
+    const cy = positions[c * 3 + 1]!
+    const cz = positions[c * 3 + 2]!
+    const px = positions[p * 3]!
+    const py = positions[p * 3 + 1]!
+    const pz = positions[p * 3 + 2]!
+    const dx = cx - px
+    const dy = cy - py
+    const dz = cz - pz
     const d = Math.sqrt(dx * dx + dy * dy + dz * dz)
+    if (!Number.isFinite(d)) continue
+    // Places are single precision: how far a distance can be off grows with how far from the origin they are.
+    const far = Math.max(Math.abs(cx), Math.abs(cy), Math.abs(cz), Math.abs(px), Math.abs(py), Math.abs(pz))
+    const tol = 1e-3 * (1 + Math.min(d, 100)) + 4e-7 * far
     let lo = 0
     let hi = list.length - 1
     while (lo < hi) {
@@ -385,7 +439,7 @@ export function boundRings(graph: GraphData, plan: ScenePlan, rings: Float32Arra
     }
     for (const j of [lo - 1, lo]) {
       const r = list[j]
-      if (r !== undefined && Math.abs(rings[r * 6 + 1]! - d) <= 1e-3 * (1 + d)) used.add(r)
+      if (r !== undefined && Math.abs(rings[r * 6 + 1]! - d) <= tol) used.add(r)
     }
   }
   const live = mine.filter((r) => used.has(r))
@@ -394,7 +448,8 @@ export function boundRings(graph: GraphData, plan: ScenePlan, rings: Float32Arra
     const f = graph.nodes[p]!.folder
     return (f ? (f.role === 'root' || f.role === 'mount' ? 3e9 : f.role === 'project' ? 2e9 : 1e6) : 0) + bodies[p]!
   }
-  live.sort((a, b) => rank(b) - rank(a) || rings[a * 6 + 1]! - rings[b * 6 + 1]! || a - b)
+  // The biggest systems first, a system whole before the next one starts (inner rings before outer ones).
+  live.sort((a, b) => rank(b) - rank(a) || rings[a * 6]! - rings[b * 6]! || rings[a * 6 + 1]! - rings[b * 6 + 1]! || a - b)
   const top = live.slice(0, cap)
   const out = new Float32Array(top.length * 6)
   top.forEach((r, k) => {

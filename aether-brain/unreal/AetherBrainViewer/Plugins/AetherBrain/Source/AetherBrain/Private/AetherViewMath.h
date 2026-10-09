@@ -26,13 +26,77 @@ namespace AetherView
  */
 constexpr double kMinNodeAngle = 0.0009;
 /** The same for the threads (links and orbit rings): about one pixel thick. */
-constexpr double kMinThreadAngle = 0.00035;
+constexpr double kMinThreadAngle = 0.00025;
+/** The same for a name floating over a body: tall enough to read from the distance that shows the whole brain. */
+constexpr double kMinLabelAngle = 0.007;
+
+/**
+ * How much of kMinNodeAngle a body of each rank gets, so a sun still reads bigger than a star, a star than a planet and a planet than a
+ * moon from the distance that makes all of them the minimum: 0 sun, 1 star, 2 planet (and the Today hub), 3 anything else.
+ */
+constexpr double kRankScale[4] = {2.4, 1.9, 1.3, 0.8};
+inline double MinAngleOfRank(int Rank)
+{
+	return kMinNodeAngle * kRankScale[std::min(std::max(Rank, 0), 3)];
+}
 
 /** A body of RadiusCm seen from DistanceCm, drawn no smaller than MinAngle across: its own radius when close, larger when far. */
 inline double ApparentRadius(double RadiusCm, double DistanceCm, double MinAngle)
 {
 	const double Far = std::isfinite(DistanceCm) && DistanceCm > 0.0 ? DistanceCm * MinAngle : 0.0;
 	return std::max(RadiusCm, Far);
+}
+
+/* ------------------------------------------------------------------------------------------------------------------ */
+/* Pointing at it                                                                                                       */
+/* ------------------------------------------------------------------------------------------------------------------ */
+
+/** A ray can always hit a body within this angle of its centre, though it be drawn smaller: about seven pixels. */
+constexpr double kPickAngle = 0.004;
+/** A ray this far in (of the way from the centre to the edge) clearly points at the body. */
+constexpr double kPickInside = 0.8;
+
+/** How far from the ray's closest approach to a body's centre it still hits (cm): the drawn radius, a little generous, and never less than kPickAngle. */
+inline double PickReach(double DrawnRadiusCm, double DistanceCm)
+{
+	const double Far = std::isfinite(DistanceCm) && DistanceCm > 0.0 ? DistanceCm * kPickAngle : 0.0;
+	return std::max(DrawnRadiusCm * 1.15, Far);
+}
+
+/** What is under the ray so far. */
+struct PickState
+{
+	int Index = -1;
+	double Distance = 0.0;
+	double Score = 0.0;
+	bool bInside = false;
+};
+
+/**
+ * Offers one body to the pick: the ray passes MissCm from its centre, DistanceCm away, and the body is drawn DrawnRadiusCm. A body the ray is
+ * clearly inside wins, the nearest of them (it hides the ones behind it); failing that the one the ray is nearest the centre of.
+ */
+inline void PickOffer(PickState& S, int Index, double MissCm, double DrawnRadiusCm, double DistanceCm)
+{
+	const double Reach = PickReach(DrawnRadiusCm, DistanceCm);
+	if (!(MissCm <= Reach))
+	{
+		return;
+	}
+	const double Score = Reach > 0.0 ? MissCm / Reach : 0.0;
+	const bool bInside = Score <= kPickInside;
+	bool bBetter = S.Index < 0;
+	if (!bBetter)
+	{
+		bBetter = bInside != S.bInside ? bInside : bInside ? DistanceCm < S.Distance : Score < S.Score;
+	}
+	if (bBetter)
+	{
+		S.Index = Index;
+		S.Distance = DistanceCm;
+		S.Score = Score;
+		S.bInside = bInside;
+	}
 }
 
 /* ------------------------------------------------------------------------------------------------------------------ */

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useSyncExternalStore } from 'react'
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import { CameraControls } from '@react-three/drei'
 import { EffectComposer, Bloom } from '@react-three/postprocessing'
@@ -86,9 +86,25 @@ export function BrainScene({ controller, maxDpr = 1.5, className }: BrainScenePr
     (cb) => controller.subscribe(cb),
     () => controller.bloom,
   )
+  const restBehind = useSyncExternalStore(
+    (cb) => controller.subscribe(cb),
+    () => controller.restBehind,
+  )
+  const [front, setFront] = useState(() => typeof document === 'undefined' || document.hasFocus())
+  useEffect(() => {
+    const on = () => setFront(true)
+    const off = () => setFront(false)
+    window.addEventListener('focus', on)
+    window.addEventListener('blur', off)
+    return () => {
+      window.removeEventListener('focus', on)
+      window.removeEventListener('blur', off)
+    }
+  }, [])
   return (
     <div className={className ?? 'absolute inset-0'} style={{ background: BG }}>
       <Canvas
+        frameloop={restBehind && !front ? 'never' : 'always'}
         dpr={[1, maxDpr]}
         gl={{ antialias: false, powerPreference: 'high-performance', alpha: false, stencil: false }}
         camera={{ fov: FOV, near: 1, far: DEFAULT_FAR, position: HOME_POS }}

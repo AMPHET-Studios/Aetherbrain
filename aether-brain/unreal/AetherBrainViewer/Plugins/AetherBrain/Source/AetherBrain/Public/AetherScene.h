@@ -76,11 +76,20 @@ struct AETHERBRAIN_API FAetherConnection
 
 namespace AetherScene
 {
-	/** Parses /v1/graph. False (Out unchanged) for anything malformed. */
-	AETHERBRAIN_API bool ParseGraph(const FString& Json, FAetherGraph& Out);
+	/** The most bytes of /v1/graph that are read at all: the desktop app's cut scene is some 2 MB, the most it may hold about 8. */
+	constexpr int32 MaxGraphBytes = 12 * 1024 * 1024;
 
-	/** Parses /v1/positions: the "AEP1" header, xyz per node, 6 floats per ring. False for anything malformed. */
+	/**
+	 * Parses /v1/graph. False (Out unchanged) for anything malformed or over the limits; *bOutTooBig then says whether it was over them
+	 * (a scene from a build that does not cut a big brain) and not broken. Links past the limit are dropped, not refused.
+	 */
+	AETHERBRAIN_API bool ParseGraph(const FString& Json, FAetherGraph& Out, bool* bOutTooBig = nullptr);
+
+	/** Parses /v1/positions: the "AEP1" header, xyz per node, 6 floats per ring (the first Max Rings of them are kept). False for anything malformed. */
 	AETHERBRAIN_API bool ParsePositions(const TArray<uint8>& Bytes, FAetherPositions& Out);
+
+	/** The most orbit rings a frame of positions keeps; the desktop app sends at most 400. */
+	constexpr int32 MaxPositionRings = 2000;
 
 	/** Brain space (Y up, right-handed) to Unreal space (Z up, left-handed, cm): swap Y and Z, then scale. */
 	inline FVector ToUnreal(const FVector& Brain, float Scale)

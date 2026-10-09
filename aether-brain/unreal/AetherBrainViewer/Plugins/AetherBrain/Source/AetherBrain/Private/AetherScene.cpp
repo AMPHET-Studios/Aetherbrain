@@ -20,7 +20,6 @@ namespace
 	 */
 	constexpr int32 MaxNodes = 50000;
 	constexpr int32 MaxEdgeNumbers = 100000;
-	constexpr int32 MaxRings = 2000;
 
 	EAetherKind KindOf(const FString& Kind)
 	{
@@ -41,8 +40,12 @@ namespace
 	}
 }
 
-bool AetherScene::ParseGraph(const FString& Json, FAetherGraph& Out)
+bool AetherScene::ParseGraph(const FString& Json, FAetherGraph& Out, bool* bOutTooBig)
 {
+	if (bOutTooBig)
+	{
+		*bOutTooBig = false;
+	}
 	TSharedPtr<FJsonObject> Root;
 	const TSharedRef<TJsonReader<TCHAR>> Reader = TJsonReaderFactory<TCHAR>::Create(Json);
 	if (!FJsonSerializer::Deserialize(Reader, Root) || !Root.IsValid())
@@ -57,8 +60,16 @@ bool AetherScene::ParseGraph(const FString& Json, FAetherGraph& Out)
 	{
 		return false;
 	}
-	if (!Nodes || !Edges || Nodes->Num() > MaxNodes || Edges->Num() > MaxEdgeNumbers || Edges->Num() % 2 != 0)
+	if (!Nodes || !Edges || Edges->Num() % 2 != 0)
 	{
+		return false;
+	}
+	if (Nodes->Num() > MaxNodes)
+	{
+		if (bOutTooBig)
+		{
+			*bOutTooBig = true;
+		}
 		return false;
 	}
 
@@ -99,9 +110,12 @@ bool AetherScene::ParseGraph(const FString& Json, FAetherGraph& Out)
 		G.Nodes.Add(MoveTemp(Node));
 	}
 
-	G.Edges.Reserve(Edges->Num());
-	for (const TSharedPtr<FJsonValue>& Value : *Edges)
+	// Links past the limit are not drawn (the first are the ones that matter); the rest of the scene is.
+	const int32 EdgeNumbers = FMath::Min(Edges->Num(), MaxEdgeNumbers);
+	G.Edges.Reserve(EdgeNumbers);
+	for (int32 K = 0; K < EdgeNumbers; ++K)
 	{
+		const TSharedPtr<FJsonValue>& Value = (*Edges)[K];
 		double X = -1.0;
 		if (!Value.IsValid() || !Value->TryGetNumber(X))
 		{
@@ -145,15 +159,17 @@ bool AetherScene::ParsePositions(const TArray<uint8>& Bytes, FAetherPositions& O
 	const uint32 Version = ReadU32(Bytes, 4);
 	const int64 NodeCount = ReadU32(Bytes, 8);
 	const int64 RingCount = ReadU32(Bytes, 12);
-	if (NodeCount > MaxNodes || RingCount > MaxRings)
+	if (NodeCount > MaxNodes)
 	{
 		return false;
 	}
-	const int64 FloatCount = NodeCount * 3 + RingCount * 6;
-	if (static_cast<int64>(Bytes.Num()) != PositionsHeader + FloatCount * 4)
+	// The frame must be exactly as long as it says; of its rings only the first (the biggest systems) are kept.
+	if (static_cast<int64>(Bytes.Num()) != PositionsHeader + (NodeCount * 3 + RingCount * 6) * 4)
 	{
 		return false;
 	}
+	const int64 KeptRings = FMath::Min<int64>(RingCount, MaxPositionRings);
+	const int64 FloatCount = NodeCount * 3 + KeptRings * 6;
 
 	TArray<float> F;
 	F.SetNumUninitialized(static_cast<int32>(FloatCount));
@@ -170,8 +186,8 @@ bool AetherScene::ParsePositions(const TArray<uint8>& Bytes, FAetherPositions& O
 		P.Points[I] = FVector(static_cast<double>(F[I * 3]), static_cast<double>(F[I * 3 + 1]), static_cast<double>(F[I * 3 + 2]));
 	}
 	const int32 Base = static_cast<int32>(NodeCount * 3);
-	P.Rings.SetNum(static_cast<int32>(RingCount));
-	for (int32 K = 0; K < RingCount; ++K)
+	P.Rings.SetNum(static_cast<int32>(KeptRings));
+	for (int32 K = 0; K < KeptRings; ++K)
 	{
 		const float* R = F.GetData() + Base + K * 6;
 		FAetherRing& Ring = P.Rings[K];
