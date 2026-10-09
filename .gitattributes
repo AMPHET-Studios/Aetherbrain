@@ -1,0 +1,3 @@
+# Windows batch files need CRLF line endings (a LF-only file can lose its labels).
+*.bat text eol=crlf
+aether-brain/unreal/START-HERE.txt text eol=crlf

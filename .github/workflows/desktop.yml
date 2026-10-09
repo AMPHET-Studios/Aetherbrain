@@ -3,6 +3,8 @@ name: Desktop builds
 # Builds the Aether Brain desktop app installers.
 #   - On pull requests touching the app: Windows build only, downloadable as a run artifact
 #     (installer, portable .exe and the Claude Desktop extension aether-brain-<version>.mcpb).
+#   - Every run of the Windows job also zips the Unreal version (AetherBrain-Unreal-<version>.zip: the Unreal project,
+#     PackageWindows.bat and START-HERE.txt); a release carries it next to the installers.
 #   - Manually (Actions → "Desktop builds" → Run workflow): all three platforms. Fill in the
 #     "tag" input (e.g. v0.1.0) to also create that tag on main and publish a GitHub Release
 #     with the installers attached.
@@ -88,6 +90,22 @@ jobs:
       - name: List artifacts
         shell: bash
         run: ls -la apps/desktop/release
+      # The Unreal version of Aether Brain: the Unreal project (open it in Unreal Engine 5.8, or double-click
+      # PackageWindows.bat for a standalone .exe) with the steps in START-HERE.txt. Built on every run, so a pull
+      # request shows it works; attached to the release below. Not built by CI itself: it needs the engine.
+      - name: Zip the Unreal version
+        shell: pwsh
+        run: |
+          $v = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $d = Join-Path $env:RUNNER_TEMP "AetherBrain-Unreal-$v"
+          New-Item -ItemType Directory -Force "$d/unreal", "$d/docs/img" | Out-Null
+          Copy-Item unreal/AetherBrainViewer "$d/unreal/" -Recurse
+          Copy-Item unreal/PackageWindows.bat, unreal/README.md "$d/unreal/"
+          Copy-Item unreal/START-HERE.txt $d
+          Copy-Item docs/UNREAL.md, docs/UNREAL-NIAGARA.md "$d/docs/"
+          Copy-Item docs/img/unreal-*.png "$d/docs/img/"
+          Compress-Archive -Path $d -DestinationPath "apps/desktop/release/AetherBrain-Unreal-$v.zip"
+          Get-Item "apps/desktop/release/AetherBrain-Unreal-$v.zip" | Select-Object Name, Length
       # The installers plus the Claude Desktop extension (aether-brain-<version>.mcpb, built by
       # dist:win). Only this job ships the .mcpb, so the release gets exactly one copy.
       - name: Upload run artifact
@@ -100,6 +118,7 @@ jobs:
           path: |
             aether-brain/apps/desktop/release/*.exe
             aether-brain/apps/desktop/release/*.mcpb
+            aether-brain/apps/desktop/release/AetherBrain-Unreal-*.zip
           if-no-files-found: error
           retention-days: 7
       - name: Attach to release
@@ -110,6 +129,7 @@ jobs:
           files: |
             aether-brain/apps/desktop/release/*.exe
             aether-brain/apps/desktop/release/*.mcpb
+            aether-brain/apps/desktop/release/AetherBrain-Unreal-*.zip
           generate_release_notes: true
 
   mac-linux:

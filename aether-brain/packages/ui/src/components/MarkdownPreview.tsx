@@ -20,6 +20,7 @@ import {
 } from '@aether/core'
 import { useAether } from '../store'
 import { cx } from '../util'
+import { EMBED_MAX, PREVIEW_FIRST, PREVIEW_MAX, PREVIEW_STEP, groups, previewCut } from '../preview'
 import { usePreview } from './pictures'
 
 interface Props {
@@ -37,6 +38,10 @@ interface Props {
  * link creates it. Picture targets (`![[gate.png]]`) resolve to the vault's
  * pictures like the graph does: an embed shows the picture, a click goes to
  * it, and a missing one is never a note to create.
+ *
+ * Only the first part of a long note is drawn (`PREVIEW_FIRST` characters, a part more per *Show more*, never
+ * more than `PREVIEW_MAX`; an embedded note `EMBED_MAX`): laying text out costs memory in proportion to its
+ * length, and a 16 MB imported chat took 10 GB. See `preview.ts`.
  */
 export function MarkdownPreview({ source, selfId = null, depth = 0, className }: Props) {
   const notes = useAether((s) => s.notes)
@@ -45,16 +50,28 @@ export function MarkdownPreview({ source, selfId = null, depth = 0, className }:
   const toggleTag = useAether((s) => s.toggleTag)
   const toggleTask = useAether((s) => s.toggleTask)
 
-  const resolver = useMemo(() => new LinkResolver(notes.values()), [notes, revision])
+  const resolver = useMemo(() => sharedResolver(notes, revision), [notes, revision])
+  // How much of the note is drawn: the first part, and one more per *Show more*; another note starts again.
+  const max = depth > 0 ? EMBED_MAX : PREVIEW_MAX
+  const first = depth > 0 ? EMBED_MAX : PREVIEW_FIRST
+  const [more, setMore] = useState<{ id: NoteId | null; shown: number }>({ id: selfId, shown: first })
+  let shown = more.shown
+  if (more.id !== selfId) {
+    // Another note: start at its first part (state adjusted while drawing, the way React asks for it).
+    setMore({ id: selfId, shown: first })
+    shown = first
+  }
   // Relative picture links (`![[Art/gate.png]]`, `![[../gate.png]]`) count from the note's folder.
   const folder = selfId ? (notes.get(selfId)?.meta.folder ?? folderOf(selfId)) : ''
-  const { body, fmLines } = useMemo(() => {
+  const { body, fmLines, total, drawn } = useMemo(() => {
     const split = splitFrontmatter(source)
     // Lines the frontmatter block occupies, so preview line numbers map back to the raw file.
     const fm = (source.slice(0, split.bodyOffset).match(/\n/g) ?? []).length
+    // The part that is drawn is a prefix of the note, so the lines (task ticks) are still the file's.
+    const part = previewCut(split.body, shown)
     // A paragraph with a pathological run of * or _ would freeze the renderer: same guard as the brain's parser.
-    return { body: tameDelimiters(split.body), fmLines: fm }
-  }, [source])
+    return { body: tameDelimiters(part.text), fmLines: fm, total: part.total, drawn: part.cut ? part.text.length : 0 }
+  }, [source, shown])
   const plugins = useMemo(() => {
     const pictures = picturesOf(assets)
     const resolve = (t: string): string | null => {
@@ -111,8 +128,36 @@ export function MarkdownPreview({ source, selfId = null, depth = 0, className }:
       <ReactMarkdown remarkPlugins={plugins as never} components={components}>
         {body}
       </ReactMarkdown>
+      {drawn > 0 && (
+        <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-[var(--line)] pt-2 text-[12px] text-dim" role="note">
+          <span>
+            Showing the first {groups(drawn)} of {groups(total)} characters.
+          </span>
+          {depth > 0 ? (
+            <span>Open the note to read it all.</span>
+          ) : shown < max ? (
+            <button type="button" className="hud-btn" onClick={() => setMore({ id: selfId, shown: Math.min(max, shown + PREVIEW_STEP) })}>
+              Show {groups(Math.min(PREVIEW_STEP, max - shown))} more
+            </button>
+          ) : (
+            <span>That is as much as the preview draws (more would use gigabytes of memory); the rest is in the file.</span>
+          )}
+        </div>
+      )}
     </div>
   )
+}
+
+/**
+ * One link resolver for every preview of the same notes (the open note and each note embedded in it): indexing
+ * the vault takes time and memory in proportion to its size, so a preview must not build its own.
+ */
+let resolverCache: { notes: ReadonlyMap<NoteId, ParsedNote>; revision: number; resolver: LinkResolver } | null = null
+function sharedResolver(notes: ReadonlyMap<NoteId, ParsedNote>, revision: number): LinkResolver {
+  if (!resolverCache || resolverCache.notes !== notes || resolverCache.revision !== revision) {
+    resolverCache = { notes, revision, resolver: new LinkResolver(notes.values()) }
+  }
+  return resolverCache.resolver
 }
 
 /**

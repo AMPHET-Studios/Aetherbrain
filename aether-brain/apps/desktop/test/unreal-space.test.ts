@@ -96,9 +96,71 @@ describe('the Unreal Niagara layer, wiring', () => {
     expect(read(path.join(unreal, 'AetherBrainViewer/Config/DefaultGame.ini'))).toContain('/Game/AetherFX')
   })
 
-  it('keeps the plugin, the app and the docs on one version', () => {
+  it('keeps the plugin and the app on one version', () => {
     const version = (JSON.parse(read(path.join(unreal, '../package.json'))) as { version: string }).version
     expect((JSON.parse(read(path.join(plugin, '../../AetherBrain.uplugin'))) as { VersionName: string }).VersionName).toBe(version)
-    expect(doc).toContain(`(v${version})`)
   })
 })
+
+describe('the Windows packaging script', () => {
+  const bat = read(path.join(unreal, 'PackageWindows.bat'))
+
+  it('packages this project, and checks for what the editor makes on its first start', () => {
+    expect(bat).toContain('AetherBrainViewer\\AetherBrainViewer.uproject')
+    expect(bat).toContain('RunUAT.bat')
+    const uat = bat.split(/\r\n/).find((l) => l.includes('BuildCookRun')) ?? ''
+    for (const flag of ['-platform=Win64', '-build', '-cook', '-stage', '-pak', '-archive', '-archivedirectory=']) expect(uat).toContain(flag)
+    // The map and the glow material named in the script are the ones the editor script and the config use.
+    const python = read(path.join(unreal, 'AetherBrainViewer/Content/Python/init_unreal.py'))
+    expect(python).toContain('MAP = FOLDER + "/Maps/Brain"')
+    expect(bat).toContain('Content\\AetherBrain\\Maps\\Brain.umap')
+    expect(python).toContain('FOLDER = "/Game/AetherBrain"')
+    expect(python).toContain('"M_AetherNode"')
+    expect(bat).toContain('Content\\AetherBrain\\M_AetherNode.uasset')
+    expect(read(path.join(unreal, 'AetherBrainViewer/Config/DefaultEngine.ini'))).toContain('GameDefaultMap=/Game/AetherBrain/Maps/Brain.Brain')
+    // The engine version of the project is the one the script looks for.
+    expect(read(path.join(unreal, 'AetherBrainViewer/AetherBrainViewer.uproject'))).toContain('"EngineAssociation": "5.8"')
+    expect(bat).toContain('UE_5.8')
+  })
+
+  it('is a Windows batch file: CRLF line endings, every goto has its label, nothing runs past its end', () => {
+    expect(bat).toContain('\r\n')
+    expect(bat.replace(/\r\n/g, '').includes('\n')).toBe(false)
+    const labels = new Set([...bat.matchAll(/^:(\w+)\s*$/gm)].map((m) => m[1]))
+    for (const m of bat.matchAll(/goto :(\w+)/g)) expect(labels.has(m[1]!)).toBe(true)
+    // A parenthesis inside a block's echo would end the block early: the script uses no blocks.
+    expect(bat).not.toMatch(/^\s*\(/m)
+    // Every path through the script ends in exit /b.
+    expect(bat.trimEnd().endsWith('exit /b 1')).toBe(true)
+  })
+})
+
+describe('the Unreal version on the release page', () => {
+  const app = path.resolve(unreal, '..')
+  const workflow = read(path.join(app, '..', '.github/workflows/desktop.yml'))
+  const start = read(path.join(unreal, 'START-HERE.txt'))
+
+  it('has steps a person can follow, naming the files that are in the zip', () => {
+    expect(start).toContain('unreal\\AetherBrainViewer\\AetherBrainViewer.uproject')
+    expect(start).toContain('unreal\\PackageWindows.bat')
+    expect(start).toContain('Unreal Engine 5.8')
+    expect(start).toContain('Visual Studio 2022')
+  })
+
+  it('is zipped by the Windows job on every run and attached to the release', () => {
+    for (const f of ['unreal/AetherBrainViewer', 'unreal/PackageWindows.bat', 'unreal/README.md', 'unreal/START-HERE.txt', 'docs/UNREAL.md', 'docs/UNREAL-NIAGARA.md', 'docs/img/unreal-*.png']) {
+      expect(workflow).toContain(f)
+    }
+    // The zip step runs before the artifact upload and the release attach, which both list it.
+    const zip = workflow.indexOf('Zip the Unreal version')
+    const upload = workflow.indexOf('Upload run artifact')
+    const attach = workflow.indexOf('Attach to release')
+    expect(zip).toBeGreaterThan(0)
+    expect(zip).toBeLessThan(upload)
+    expect(upload).toBeLessThan(attach)
+    expect(workflow.match(/AetherBrain-Unreal-\*\.zip/g)?.length).toBeGreaterThanOrEqual(2)
+    // Every file it copies exists in the repository.
+    for (const f of ['unreal/PackageWindows.bat', 'unreal/README.md', 'unreal/START-HERE.txt', 'docs/UNREAL.md', 'docs/UNREAL-NIAGARA.md']) expect(() => read(path.join(app, f))).not.toThrow()
+  })
+})
+

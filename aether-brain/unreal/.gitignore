@@ -1,0 +1,10 @@
+# What Unreal Engine and Visual Studio make next to the project when it is opened, built or packaged.
+AetherBrainViewer/Binaries/
+AetherBrainViewer/Intermediate/
+AetherBrainViewer/Saved/
+AetherBrainViewer/DerivedDataCache/
+AetherBrainViewer/.vs/
+AetherBrainViewer/*.sln
+AetherBrainViewer/Plugins/*/Binaries/
+AetherBrainViewer/Plugins/*/Intermediate/
+Packaged/

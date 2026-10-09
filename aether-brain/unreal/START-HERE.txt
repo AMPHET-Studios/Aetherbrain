@@ -1,0 +1,26 @@
+AETHER BRAIN - UNREAL ENGINE 5.8 VERSION
+=========================================
+
+You need (once):
+  1. Unreal Engine 5.8            (Epic Games Launcher > Unreal Engine > Library)
+  2. Visual Studio 2022           (Visual Studio Installer > "Game development with C++")
+
+Steps:
+  1. Unzip this folder somewhere short, like C:\AetherBrain-Unreal  (right-click the zip > Extract All)
+  2. Open  unreal\AetherBrainViewer\AetherBrainViewer.uproject   (double-click)
+       - It asks "build the missing modules?"  ->  Yes. First time takes a few minutes.
+       - The editor opens. It makes its own glow materials and an empty map. Nothing to click.
+  3. Press Play (the green triangle). You see a dark space and a status line at the top.
+  4. In the Aether Brain desktop app: press the  a  key, switch "Unreal companion" ON.
+       Your brain appears in Unreal. Fly: hold right mouse + WASD.
+
+Want a standalone  AetherBrainViewer.exe  (no editor needed)?
+  - Close the editor, then double-click  unreal\PackageWindows.bat
+  - 10 to 30 minutes the first time. The program ends up in  unreal\Packaged\Windows\
+
+If something fails, copy the red error text word for word and send it back.
+
+Honest status: this C++ was written without Unreal installed and has never been compiled
+in a real 5.8 editor. The first compile may show an error. That is expected; send it back
+and it gets fixed. More in docs\UNREAL.md. The optional Niagara effects (key N) need five
+assets made by hand in the editor: docs\UNREAL-NIAGARA.md.
