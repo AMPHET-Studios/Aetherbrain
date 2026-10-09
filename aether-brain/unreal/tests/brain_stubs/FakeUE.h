@@ -550,7 +550,7 @@ public:
 	virtual void EndPlay(const EEndPlayReason::Type) {}
 	virtual void Tick(float) {}
 private:
-	AActor* Owner = nullptr;
+	[[maybe_unused]] AActor* Owner = nullptr;
 };
 
 class APlayerCameraManager : public UObject
