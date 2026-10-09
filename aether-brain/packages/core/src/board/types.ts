@@ -44,6 +44,10 @@ export interface Crop {
   b: number
 }
 
+/** A note's inner margin and its line height, as multiples of its font size (shared by the estimate, the renderer and hit testing). */
+export const NOTE_PADDING_EM = 0.5
+export const NOTE_LINE_HEIGHT_EM = 1.25
+
 export const FULL_CROP: Readonly<Crop> = Object.freeze({ l: 0, t: 0, r: 1, b: 1 })
 
 export interface ItemCommon {
