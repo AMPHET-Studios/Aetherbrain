@@ -9,6 +9,7 @@ import type { Vec2 } from '@aether/core'
 import type { Ctx2D } from '../renderer'
 import type { BoardSession } from './boardSession'
 import { pointerInOf, wheelInOf } from './dom'
+import { createPixelReader } from './env'
 import { hexOfPixel } from './session'
 
 /** A finger held still this long on the canvas opens the context menu. */
@@ -98,6 +99,7 @@ export function BoardCanvas({ session, onContextMenu, onPointer, focusTarget }: 
     watchDensity()
 
     /* ---- the sampler reads what is on the screen ---- */
+    const readCanvasPixel = createPixelReader()
     session.setSurface({
       readPixel(at) {
         const dpr = window.devicePixelRatio > 0 ? window.devicePixelRatio : 1
@@ -105,7 +107,7 @@ export function BoardCanvas({ session, onContextMenu, onPointer, focusTarget }: 
         const y = Math.floor(at.y * dpr)
         if (x < 0 || y < 0 || x >= el.width || y >= el.height) return null
         try {
-          return hexOfPixel(ctx.getImageData(x, y, 1, 1).data)
+          return hexOfPixel(readCanvasPixel(el, x, y) ?? ctx.getImageData(x, y, 1, 1).data)
         } catch {
           return null
         }
@@ -218,6 +220,11 @@ export function BoardCanvas({ session, onContextMenu, onPointer, focusTarget }: 
     // The browser's own answer to a press (the focus moving to the nearest focusable box, a text selection, the middle button's
     // auto-scroll) is not wanted: it would take the focus from a note box the press has just opened. The board takes the focus itself.
     const onMouseDown = (e: MouseEvent) => e.preventDefault()
+    // Chromium on Linux pastes the primary selection when the middle button is released (a paste event, whatever is under the pointer):
+    // the middle button pans here, and a pan must not paste. Not on the whole page: a text box keeps its middle-click paste.
+    const onMouseUp = (e: MouseEvent) => {
+      if (e.button === 1) e.preventDefault()
+    }
     function onContextLost(e: Event) {
       e.preventDefault()
     }
@@ -230,6 +237,7 @@ export function BoardCanvas({ session, onContextMenu, onPointer, focusTarget }: 
     el.addEventListener('wheel', onWheel, { passive: false })
     el.addEventListener('contextmenu', onContext)
     el.addEventListener('mousedown', onMouseDown)
+    el.addEventListener('mouseup', onMouseUp)
     el.addEventListener('lostpointercapture', onLostCapture)
     window.addEventListener('blur', onWindowBlur)
     // A lost 2D context is only restored when the loss is cancelled; the board is drawn again once it is back.
@@ -245,6 +253,7 @@ export function BoardCanvas({ session, onContextMenu, onPointer, focusTarget }: 
       el.removeEventListener('wheel', onWheel)
       el.removeEventListener('contextmenu', onContext)
       el.removeEventListener('mousedown', onMouseDown)
+      el.removeEventListener('mouseup', onMouseUp)
       el.removeEventListener('lostpointercapture', onLostCapture)
       window.removeEventListener('blur', onWindowBlur)
       el.removeEventListener('contextlost', onContextLost)

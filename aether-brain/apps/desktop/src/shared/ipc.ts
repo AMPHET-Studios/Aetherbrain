@@ -478,8 +478,11 @@ export interface AetherBridge {
    */
   onBoardFlush(cb: (token: number) => void): () => void
   boardFlushed(token: number): void
-  /** The note the floating window shows was deleted, renamed away or is no longer a board: `cb(why)`. The window keeps what it has. */
-  onBoardGone(cb: (why: string) => void): () => void
+  /**
+   * The note the floating window shows was deleted, renamed away or is no longer a board: `cb(why)`. The window keeps what it has.
+   * `cb(null)`: the note reads as a board again, and the notice comes down (not sent for the one about a rename the window could not follow).
+   */
+  onBoardGone(cb: (why: string | null) => void): () => void
 
   /** Open (or focus) the Concept Forge window; asks for concept-forge.html the first time or with `pick`. */
   forgeOpen(opts?: { pick?: boolean }): Promise<ForgeStatus>

@@ -311,7 +311,9 @@ describe('format-3: the user\'s text under the board stays byte for byte, where 
     const n = parseNote({ path: 'Boards/Gate.md', content: text })
     expect(n.links.map((l) => l.to)).toEqual(['Boards/a.png', 'Boards/b.png'])
     expect(n.plain).toContain('after')
-    expect(n.plain).not.toContain('hand-written')
+    // (Round 2: the text of a note on the board is search text, without its line.)
+    expect(n.plain).toContain('hand-written, no attributes')
+    expect(n.plain).not.toMatch(/stroke|pts=|Boards\/a/)
   })
 
   it('text that touches the last item is a line the board keeps (written back right after the items); a blank line makes it the user\'s', () => {
@@ -520,13 +522,17 @@ describe('format-5 / integration-1 / integration-m5: parseNote reads a board fro
     expect(g.nodes.filter((x) => x.ghost)).toEqual([])
   })
 
-  it('keeps the section out of plain text, word count and tags, and the rest of the note in', () => {
+  it('keeps the section\'s lines out of plain text, word count and tags (only the words written on the board are search text, round 2), and the rest of the note in', () => {
     const items = [note({ text: 'Secret words [[Diary]] #private' }), pic({ caption: 'caption words' }), stroke({ points: Array.from({ length: 400 }, (_, i) => i * 1.5) })]
     const raw = boardNote(items).replace('# Gate', '# Gate\n\nProse about the gate with a #real tag and a [[Real Link]].') + '\nTail prose after the board.\n'
     const n = parseNote({ path: 'Boards/Gate.md', content: raw })
     expect(n.plain).toContain('Prose about the gate')
     expect(n.plain).toContain('Tail prose after the board')
-    expect(n.plain).not.toMatch(/Secret|caption words|\d+\.\d/)
+    // The words of a note and a caption are search text now (diff-core-m1; board-fix2-core-search.test.ts), as words only: the link in a
+    // note is no link and its tag no tag (below), and no coordinate of the stroke is in it.
+    expect(n.plain).toContain('Secret words Diary #private')
+    expect(n.plain).toContain('caption words')
+    expect(n.plain).not.toMatch(/\d+\.\d/)
     // (The intro sentence and the prose: a few dozen words. The coordinates of the stroke alone were 400 more.)
     expect(n.meta.wordCount).toBeLessThan(80)
     expect(n.inlineTags).toEqual(['real'])
@@ -546,26 +552,36 @@ describe('format-5 / integration-1 / integration-m5: parseNote reads a board fro
     expect(n.body.slice(n.links[1]!.offset).startsWith('[[Tail Link]]')).toBe(true)
   })
 
-  it('a gesture that only moves, draws or edits board items changes nothing the brain keeps of the note (links by target, plain text, word count, tags, headings) but its stamp', () => {
+  it('a gesture that only moves, draws or edits board items changes nothing the brain keeps of the note (links by target, tags, headings) but its stamp, and the words written on the board only where they change', () => {
     const items = [pic({ path: 'Boards/a.png' }), pic({ path: 'Boards/a#b.png' }), note({ text: 'some words [[X]] #y' }), stroke()]
     const first = boardNote(items)
     const doc0 = parseBoard(first).doc
-    const edits: BoardDoc[] = [
-      moveItems(doc0, [1, 3], 40, -20),
-      setProps(doc0, [3], { text: 'completely different words' }),
-      addMark(doc0, { kind: 'stroke', points: [0, 0, 5, 5, 9, 1], color: 'ff0000', width: 3 }).doc,
-      addNote(doc0, { text: 'a new note' }).doc,
+    // `words`: the gesture changes what is written on the board (round 2: the text of notes and captions is search text and counts as words).
+    const edits: { doc: BoardDoc; words: string | null }[] = [
+      { doc: moveItems(doc0, [1, 3], 40, -20), words: null },
+      { doc: setProps(doc0, [3], { text: 'completely different words' }), words: 'completely different words' },
+      { doc: addMark(doc0, { kind: 'stroke', points: [0, 0, 5, 5, 9, 1], color: 'ff0000', width: 3 }).doc, words: null },
+      { doc: addNote(doc0, { text: 'a new note' }).doc, words: 'some words X #y a new note' },
     ]
-    const keep = (raw: string): unknown => {
+    const keep = (raw: string, withWords: boolean): unknown => {
       const n = parseNote({ path: 'Boards/Gate.md', content: raw })
-      const { updated: _stamp, ...meta } = n.meta
+      const { updated: _stamp, wordCount, ...meta } = n.meta
       // (A link's offset is where it sits in the text, which moves with the length of the numbers before it: not compared.)
-      return { links: n.links.map(({ offset: _at, ...l }) => l), plain: n.plain, tags: n.inlineTags, meta, frontmatter: { ...n.frontmatter, updated: null } }
+      return {
+        links: n.links.map(({ offset: _at, ...l }) => l),
+        ...(withWords ? { plain: n.plain, wordCount } : {}),
+        tags: n.inlineTags,
+        meta,
+        frontmatter: { ...n.frontmatter, updated: null },
+      }
     }
-    for (const edited of edits) {
-      const next = serializeBoard(edited, first, LATER)
+    const wordsOf = (raw: string): string => parseNote({ path: 'Boards/Gate.md', content: raw }).plain.replace(/^.*\bBoard\b /, '')
+    expect(wordsOf(first)).toBe('some words X #y')
+    for (const edit of edits) {
+      const next = serializeBoard(edit.doc, first, LATER)
       expect(next).not.toBe(first)
-      expect(keep(next)).toEqual(keep(first))
+      expect(keep(next, edit.words === null)).toEqual(keep(first, edit.words === null))
+      if (edit.words !== null) expect(wordsOf(next)).toBe(edit.words)
     }
     // Adding or removing a picture is a change of links, and only that.
     const more = serializeBoard(addPicture(doc0, { path: 'Boards/new.png', w: 10, h: 10 }).doc, first, LATER)

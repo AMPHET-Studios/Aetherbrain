@@ -930,6 +930,13 @@ function readBoard(raw: string, warn: Warnings): BoardDoc {
   return doc
 }
 
+/** What follows the first ` » ` of the part of an item line after its kind (and a picture's path): its text; null when the line has none. */
+function textAfter(after: string): string | null {
+  const sep = after.indexOf(' » ')
+  if (sep >= 0) return after.slice(sep + 3)
+  return after.endsWith(' »') ? '' : null
+}
+
 /**
  * What the brain needs of a board note without reading its items as markdown (parseNote): the note's text with the board's own item
  * lines taken out (what the user wrote, the lines the board kept as extras and the heading stay), where each picture of the board is
@@ -940,6 +947,12 @@ export interface BoardNoteParts {
   text: string
   /** The pictures of the first BOARD_LIMITS.items items, in order: the path, the offset in `body` of the embed (or of the path of a `pic` line), and whether the path is written as it is (a `pic` line) or as wikilink text (an embed). */
   pictures: { path: string; offset: number; literal: boolean }[]
+  /**
+   * The words written on the board: the text of each of the first BOARD_LIMITS.items items that is a note or a picture with a caption
+   * (when it has any), decoded as the reader decodes it, in order. For search and the word count only: nothing here is a link or a tag,
+   * and no coordinate, attribute or item line is in it.
+   */
+  texts: string[]
   /** The offset in `body` of `offset` in `text`. */
   original(offset: number): number
 }
@@ -952,6 +965,7 @@ export function boardNoteParts(body: string): BoardNoteParts | null {
   let removed = 0
   const breaks: { at: number; by: number }[] = []
   const pictures: { path: string; offset: number; literal: boolean }[] = []
+  const texts: string[] = []
   let items = 0
   let viewSeen = false
   let fence: Fence | null = null
@@ -982,6 +996,12 @@ export function boardNoteParts(body: string): BoardNoteParts | null {
               const literal = !t.startsWith('- ![[')
               pictures.push({ path: head.path, offset: line.start + (literal ? 6 : 2), literal })
             }
+            if (items < L.items && (head.kind === 'note' || head.kind === 'pic')) {
+              // The words after the first " » " (parseItemLine reads the same place): a note's text, a picture's caption.
+              const words = textAfter(head.after)
+              const text = words === null ? '' : capText(unescapeBoardText(words))
+              if (text !== '') texts.push(text)
+            }
             items++
           }
         }
@@ -1001,6 +1021,7 @@ export function boardNoteParts(body: string): BoardNoteParts | null {
   return {
     text: pieces.join(''),
     pictures,
+    texts,
     original(offset) {
       // The last break at or before the offset: everything taken out before it has to be added back.
       let lo = 0
@@ -1222,16 +1243,41 @@ function sectionLines(doc: BoardDoc): string[] {
   const lines = ['', viewLine(doc), ...itemLines.slice(0, L.items)]
   // A loop, not push(...after): a hostile note can leave a hundred thousand extra lines, more than a call takes as arguments.
   for (let i = L.items; i < itemLines.length; i++) lines.push(itemLines[i]!)
+  // The lines the board keeps, blank lines outside a code fence or comment left out. `held`: part of a fence or comment, which the reader
+  // never takes for the board's. `remark`: a bullet of the user's that starts with the name of a kind (`- line 3 is wrong`).
+  const kept: { text: string; held: boolean; remark: boolean }[] = []
   let fence: Fence | null = null
   for (const entry of doc.extra) {
     for (const t of entry.split(/\r\n|\r|\n/)) {
+      let held = true
       if (fence) {
         if (closesFence(t, fence)) fence = null
       } else if (isBlank(t)) continue
-      else fence = opensFence(t)
-      lines.push(t)
+      else {
+        fence = opensFence(t)
+        held = fence !== null
+      }
+      kept.push({ text: t, held, remark: !held && isBoardLine(t, false) && !isBoardLine(t, true) })
     }
   }
+  let rest = 0
+  // A remark of the user's is theirs only after a blank line: touching the board's lines it is read as an item (hand-written items are
+  // taken there), and its words are lost. A blank line after the last item would put it outside the board, where the next save would
+  // write it a second time. So the lines up to the last remark go BEFORE the last item the reader takes after a blank line, behind a
+  // blank line of their own, and the reader finds them between two lines of the board, as it found them. (Not when a line among them is
+  // one the reader would take for an item there, or when there is no such item to follow: then they are written as they always were.)
+  let last = kept.length - 1
+  while (last >= 0 && !kept[last]!.remark) last--
+  if (last >= 0 && !kept.some((k, i) => i <= last && !k.remark && !k.held && isBoardLine(k.text, false))) {
+    let anchor = 1 + Math.min(itemLines.length, L.items)
+    while (anchor >= 2 && !isBoardLine(lines[anchor]!, true)) anchor--
+    if (anchor >= 2) {
+      const first = kept.findIndex((k) => k.remark)
+      lines.splice(anchor, 0, ...kept.slice(0, first).map((k) => k.text), '', ...kept.slice(first, last + 1).map((k) => k.text))
+      rest = last + 1
+    }
+  }
+  for (let i = rest; i < kept.length; i++) lines.push(kept[i]!.text)
   return lines
 }
 
@@ -1334,8 +1380,26 @@ export const GAME_FOLDERS: ReadonlySet<string> = new Set([
   'windows.old', 'wpsystem', 'modifiablewindowsapps', 'onedrivetemp', 'msdownld.tmp', 'found.000',
 ])
 
-/** Names Windows will not create as a file or folder, with or without an extension. */
-const DEVICE_NAMES = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i
+/** The device names Windows reserves: `con prn aux nul` and `com` / `lpt` with a digit (the superscript digits too, as the Windows docs list them). */
+const DEVICE_WORD = /^(?:con|prn|aux|nul|com[0-9\u00b9\u00b2\u00b3]|lpt[0-9\u00b9\u00b2\u00b3])$/i
+
+/**
+ * Where the device word of `name` ends, or -1 when the name is no device's. Windows reserves a name whose part before the FIRST dot is
+ * one of the words (case does not matter, spaces before that dot do not count): `nul`, `NUL.txt`, `com1.tar.gz` and `con .x` are all the
+ * device, not a file. A suffix at the end of the name does not free it; it has to come right after the word.
+ */
+function deviceWordEnd(name: string): number {
+  const dot = name.indexOf('.')
+  let end = dot < 0 ? name.length : dot
+  while (end > 0 && name.charCodeAt(end - 1) === 32) end--
+  // (The longest word has four characters: no need to test a long part.)
+  return end <= 4 && DEVICE_WORD.test(name.slice(0, end)) ? end : -1
+}
+
+/** Whether Windows would take `name` (a file or folder name, with or without an extension) for a device: `CON`, `nul.txt`, `lpt9.a.b`. */
+export function isDeviceName(name: string): boolean {
+  return deviceWordEnd(name) >= 0
+}
 
 /** `s` without the characters of `chars` at either end. Linear: a regex for this backtracks quadratically on a long run. */
 function trimEnds(s: string, chars: string, start = true, end = true): string {
@@ -1353,7 +1417,8 @@ const FOLDER_NAME_MAX = 120
  * The name of the folder a board keeps its pictures in: the title with `\ / : * ? " < > | # [ ]` made `-`, white space collapsed,
  * no dots, spaces or `$` in front (the vault skips such folders) and no dots or spaces behind, at most 120 characters (the note's own
  * longest name), `Board` when nothing is left. A name the vault ignores (`Library`, `Temp`, `Cache`, `Out` ... or a game library's: `Steam`, `Ubisoft` ...), a name
- * ending in `.aether-tmp` and a Windows device name get ` pictures` after them.
+ * ending in `.aether-tmp` get ` pictures` after them; a Windows device name (`CON`, `nul.txt`: see `deviceWordEnd`) gets it right after
+ * the device word (`CON pictures`, `nul pictures.txt`).
  */
 export function boardFolderName(title: string): string {
   let name = title
@@ -1362,8 +1427,11 @@ export function boardFolderName(title: string): string {
     .replace(/\s+/g, ' ')
   name = trimEnds(cutText(trimEnds(name, '.$ ', true, false), FOLDER_NAME_MAX), '. ', false, true)
   if (name === '') return 'Board'
+  // A device name gets its suffix right after the device word (`nul.txt` is `nul pictures.txt`: at the end it would still be NUL).
+  const device = deviceWordEnd(name)
+  if (device >= 0) name = `${name.slice(0, device)} pictures${name.slice(device)}`
   const bare = name.toLowerCase()
-  if (IGNORED_FOLDERS.has(bare) || GAME_FOLDERS.has(bare) || DEVICE_NAMES.test(name) || bare.endsWith('.aether-tmp')) return `${name} pictures`
+  if (IGNORED_FOLDERS.has(bare) || GAME_FOLDERS.has(bare) || bare.endsWith('.aether-tmp')) return `${name} pictures`
   return name
 }
 
@@ -1404,6 +1472,10 @@ export function boardPictureName(original: string, mimeType: string, now: Date):
   base = trimEnds(cutText(trimEnds(base, '-.$ ', true, false), 80), '-. ', false, true)
   if (base === '' || GENERIC_NAME.test(base)) {
     base = `ref ${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`
-  } else if (DEVICE_NAMES.test(base)) base += '-'
+  } else {
+    // The dash goes right after the device word, before any dot: `nul.png.png` is `nul-.png.png`; `nul.png-` would still be NUL.
+    const device = deviceWordEnd(base)
+    if (device >= 0) base = `${base.slice(0, device)}-${base.slice(device)}`
+  }
   return `${base}.${ext}`
 }

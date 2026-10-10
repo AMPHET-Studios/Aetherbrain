@@ -37,8 +37,9 @@ describe('brackets are the character the key types', () => {
   it('a bracket typed with AltGr (Ctrl+Alt on Windows) is the bare bracket', () => {
     expect(keyToCommand(key('[', 'Digit8', { ctrl: true, alt: true }), rest)).toBe('order.backward')
     expect(keyToCommand(key(']', 'Digit9', { ctrl: true, alt: true }), rest)).toBe('order.forward')
-    // AltGr arrives as Alt only on some systems: that is the opacity key, as on a US keyboard with Alt.
-    expect(keyToCommand(key('[', 'Digit5', { alt: true }), rest)).toBe('item.opacityDown')
+    // Changed with the review (diff-app-m3): a bracket typed with Alt on a key that is not the bracket key (a German Mac types `[` with
+    // Option+5) is the bare bracket; the opacity chord is Alt on the bracket key itself (below, and in 'an Option bracket on a Mac').
+    expect(keyToCommand(key('[', 'Digit5', { alt: true }), rest)).toBe('order.backward')
     // Linux reports no modifier at all.
     expect(keyToCommand(key(']', 'Digit9'), rest)).toBe('order.forward')
   })

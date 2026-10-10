@@ -144,6 +144,11 @@ const MAX_SWATCHES = 16
 const MAX_ERASE_STEPS = 512
 /** Room the arrangement of new pictures may take on top of what they measured when added (coordinates get longer digits). */
 const ARRANGE_SLACK_CHARS = 32
+/** What a picture's line takes in the note, as far as `pictureRoom` can tell before the picture has a name: a path of some 80 characters and its numbers. */
+const PICTURE_LINE_CHARS = 160
+/** Why a board takes no more pictures, as the toast words it. */
+const WHY_ITEMS = `it holds at most ${BOARD_LIMITS.items} items`
+const WHY_CHARS = `it holds at most about ${BOARD_LIMITS.noteTotal.toLocaleString('en-US')} characters of items`
 /** A copy for the system clipboard: its first line, and the most text a paste will read (twice the board's budget). */
 const COPY_HEAD = /^Aether Brain board: (\d+) items? copied\r?\n/
 const MAX_COPY_CHARS = 2 * BOARD_LIMITS.noteTotal
@@ -337,6 +342,15 @@ function clipSegment(a: Vec2, b: Vec2, r: Rect): { t0: number; t1: number } | nu
     }
   }
   return { t0, t1 }
+}
+
+/**
+ * The most characters the text box of a note may hold: the creation limit, or the length the note already has when it was opened
+ * (a longer text from a file is kept up to BOARD_LIMITS.noteCharsFile, as core's `setProps` keeps it). Editing never shortens a text
+ * by itself, and typing can make it shorter again but not longer than it was. The text box, the draft and the commit all use this.
+ */
+export function noteCap(currentText: string): number {
+  return Math.min(BOARD_LIMITS.noteCharsFile, Math.max(BOARD_LIMITS.noteChars, currentText.length))
 }
 
 function segmentDistSq(px: number, py: number, ax: number, ay: number, bx: number, by: number): number {
@@ -1288,13 +1302,21 @@ export class BoardController {
     }
     this.commit(doc, 'Add pictures', { select: ids, reason: 'pictures' })
     if (ids.length < given.length) {
-      const why = overBudget
-        ? `it holds at most about ${BOARD_LIMITS.noteTotal.toLocaleString('en-US')} characters of items`
-        : `it holds at most ${BOARD_LIMITS.items} items`
-      this.toast(`The board is full: added ${ids.length} of ${given.length} pictures (${why}).`, 'error', 'limit')
+      this.toast(`The board is full: added ${ids.length} of ${given.length} pictures (${overBudget ? WHY_CHARS : WHY_ITEMS}).`, 'error', 'limit')
     }
     this.flush()
     return ids
+  }
+
+  /**
+   * How many pictures `addPictures` can take now, judged before the pictures exist (so before they are copied anywhere): by the item
+   * limit exactly, by the character budget at an estimate of a picture's line plus the room an arrangement may take. `addPictures`
+   * stays the judge of what really fits. `why` words the limit that is met first, as the "board is full" message does.
+   */
+  pictureRoom(): { room: number; why: string } {
+    const byItems = BOARD_LIMITS.items - this.doc.items.length
+    const byChars = Math.floor((BOARD_LIMITS.noteTotal - boardChars(this.doc)) / (PICTURE_LINE_CHARS + ARRANGE_SLACK_CHARS))
+    return { room: Math.max(0, Math.min(byItems, byChars)), why: byItems <= byChars ? WHY_ITEMS : WHY_CHARS }
   }
 
   /**
@@ -1506,8 +1528,9 @@ export class BoardController {
   }
 
   /**
-   * Gives a note its text: one history step (a new note's step adds it). Text is cut to BOARD_LIMITS.noteChars; text that is empty or
-   * only white space deletes the note. Ends editing, except when the text would take the board past its character budget: that is
+   * Gives a note its text: one history step (a new note's step adds it). Text is cut to `noteCap` (BOARD_LIMITS.noteChars, or the length
+   * a longer note from a file already has: opening such a note and leaving it as it is changes nothing, no step and no save); text that
+   * is empty or only white space deletes the note. Ends editing, except when the text would take the board past its character budget: that is
    * refused with a message, and the note stays open to be shortened (shrinking a note is always allowed).
    */
   commitNoteText(id: number, text: string): void {
@@ -1521,7 +1544,7 @@ export class BoardController {
       this.flush()
       return
     }
-    const clean = cutText(String(text), BOARD_LIMITS.noteChars)
+    const clean = cutText(String(text), noteCap(note.text))
     const grown = !note.locked && clean.trim() !== '' && (pending || clean !== note.text) ? setProps(this.doc, [id], { text: clean }, this.metrics) : null
     if (grown && !this.fits(grown)) {
       this.refuseBudget()

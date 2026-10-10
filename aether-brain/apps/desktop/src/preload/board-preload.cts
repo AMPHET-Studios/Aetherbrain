@@ -4,7 +4,8 @@
  * (previews, whole pictures, new ones, open, show in the folder), the clipboard, and the save-before-close handshake. No note, vault,
  * chat, library or AI-link call exists on it. This page decodes pictures from the user's folders, so it is the page to give the least
  * (a bridge with the whole vault would turn a broken decoder into a way to read, change and delete the vault); main also refuses
- * every other channel to this window (BOARD_PAGE_CHANNELS in main/board-window.ts), for a page that sends one by hand.
+ * every other channel to this window (BOARD_PAGE_CHANNELS in main/board-window.ts), for a page that sends one by hand, and on the
+ * ones it has refuses any board but the one the window shows (`board:read`, `board:save`) and any note or folder (`vault:reveal`).
  * (CommonJS on purpose — Electron preloads run in a sandbox that loads CJS.)
  */
 import { contextBridge, ipcRenderer } from 'electron'

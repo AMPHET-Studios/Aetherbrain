@@ -12,7 +12,7 @@
  *
  * No telemetry. The renderer is sandboxed with context isolation and makes no network requests.
  */
-import { app, BrowserWindow, clipboard, dialog, ipcMain, protocol, safeStorage, shell, nativeTheme, screen, session } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, protocol, safeStorage, shell, nativeTheme, screen, session } from 'electron'
 import { promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -230,9 +230,14 @@ const pictureLedger = new PictureLedger()
 const flushGate = new FlushGate()
 /**
  * ipcMain with the sender check in front of every handler: the board window's page is answered the board's channels and no other
- * (BOARD_PAGE_CHANNELS), whatever it sends. Every channel is registered through this.
+ * (BOARD_PAGE_CHANNELS), whatever it sends, and on those only for what it may name: the board it shows (`board:read`, `board:save`),
+ * a picture or that board to show in the file manager (`vault:reveal`). Every channel is registered through this.
  */
-const ipc = guardIpc(ipcMain, (wc) => board?.isBoardPage(wc) ?? false)
+const ipc = guardIpc(
+  ipcMain,
+  (wc) => board?.isBoardPage(wc) ?? false,
+  (channel, args) => board?.pageRefusal(channel, args) ?? null,
+)
 
 /** Changes for the AI link's brain: held during a read, else applied now. */
 function toAi(changes: VaultChangeDto[]): void {
@@ -483,10 +488,14 @@ async function createFolder(p: unknown): Promise<void> {
   if (canonical) toAi([{ kind: 'addDir', path: canonical }])
 }
 
-async function reveal(p: unknown): Promise<void> {
+async function reveal(p: unknown, fromBoardPage = false): Promise<void> {
   const v = requireVault()
   const rel = String(p)
-  if (!(await v.stat(rel))) throw new Error(`Not in the vault: ${rel}`)
+  const st = await v.stat(rel)
+  if (!st) throw new Error(`Not in the vault: ${rel}`)
+  // The board window's page (its names are judged in the guard) shows a picture, a video or its board: a folder that happens to be
+  // called like a picture is none of them.
+  if (fromBoardPage && !st.isFile) throw new Error(`Not a file in the vault: ${rel}`)
   shell.showItemInFolder(v.abs(rel))
 }
 
@@ -912,7 +921,7 @@ function createForge(): ForgeHost {
 
 function createBoardWindow(): BoardWindowHost {
   return new BoardWindowHost({
-    electron: { BrowserWindow, screen, shell, dialog },
+    electron: { BrowserWindow, screen, shell, dialog, Menu },
     settings: boardSettings(settings.board),
     save: (s) => {
       settings.board = s
@@ -928,8 +937,9 @@ function createBoardWindow(): BoardWindowHost {
 }
 
 /**
- * Either window opens, closes and sets up the floating board window; its page reads and saves the one board note (only a board
- * note that is already there, see board-save.ts) and learns of the vault's pictures from here, since it is not the brain window.
+ * Either window opens, closes and sets up the floating board window; its page reads and saves the board it shows (only a board
+ * note that is already there, see board-save.ts; the guard refuses it any other path) and learns of the vault's pictures from here,
+ * since it is not the brain window.
  * The handlers are plain functions (boardHandlers): this only wires them to their channels. `board:open` is the brain window's
  * alone (the guard refuses it to the board page), and the answer to a flush is the page's.
  */
@@ -1049,7 +1059,7 @@ function registerIpc(): void {
   ipc.handle(IPC.delete, (_e, p: unknown) => deleteNote(p))
   ipc.handle(IPC.rename, (_e, a: unknown, b: unknown) => renameNote(a, b))
   ipc.handle(IPC.mkdir, (_e, p: unknown) => createFolder(p))
-  ipc.handle(IPC.reveal, (_e, p: unknown) => reveal(p))
+  ipc.handle(IPC.reveal, (e, p: unknown) => reveal(p, board?.isBoardPage(e.sender) ?? false))
   ipc.handle(IPC.assets, () => listAssets())
   ipc.handle(IPC.thumb, (_e, p: unknown, size: unknown) => within(thumbnail(p, size), THUMB_TIMEOUT, null))
   // From the thumbnail helper only: the thumbnailer ignores every other sender.

@@ -200,6 +200,11 @@ function signatureOfEvent(e: KeyIn): string | null {
     if (ctrl && alt && !e.meta) {
       ctrl = false
       alt = false
+    } else if (alt && !ctrl && e.code !== '' && e.code !== 'BracketLeft' && e.code !== 'BracketRight') {
+      // A Mac layout where Option types the bracket (German: Option+5 is `[`, Option+6 `]`) reports it with alt on a key that is not
+      // the bracket key: the character came from Option, so it is the bare bracket. On the bracket key itself (Alt+] on Windows and
+      // Linux) alt is the chord's.
+      alt = false
     }
   } else if (e.alt && (e.code === 'BracketLeft' || e.code === 'BracketRight') && isOptionGlyph(e.key)) {
     key = e.code === 'BracketLeft' ? '[' : ']'

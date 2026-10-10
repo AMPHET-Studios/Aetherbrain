@@ -6,7 +6,8 @@
  *
  * Three things main needs of this page besides the board: `board:flush` (main is about to close the window, the app, or move it
  * to another board: save what is not saved, then answer `boardFlushed`), `board:gone` (the note was deleted, renamed away or edited
- * so that it is no board: a banner that stays), and the key `w` (bring the board back to the app, as the brain window's `w` does).
+ * so that it is no board: a red banner with "Copy board text" and "Bring it back", which comes down by itself when main says the note
+ * reads as a board again), and the key `w` (bring the board back to the app, as the brain window's `w` does).
  */
 import { StrictMode, useSyncExternalStore, type ReactNode } from 'react'
 import { createRoot } from 'react-dom/client'
@@ -49,7 +50,7 @@ const toast: BoardHost['toast'] = (text, tone = 'info', action) => {
 }
 
 /* ------------------------------------------------------------------ */
-/* The note is gone: a banner that stays                              */
+/* The note is gone: a banner (until the note is a board again)       */
 /* ------------------------------------------------------------------ */
 
 let goneText: string | null = null
@@ -60,7 +61,7 @@ function setGone(why: string | null): void {
   for (const cb of goneSubs) cb()
 }
 
-function GoneBanner({ onClose }: { onClose(): void }) {
+function GoneBanner({ onClose, onCopy }: { onClose(): void; onCopy(): void }) {
   const why = useSyncExternalStore(
     (cb) => {
       goneSubs.add(cb)
@@ -72,6 +73,10 @@ function GoneBanner({ onClose }: { onClose(): void }) {
   return (
     <div className="panel pointer-events-auto absolute left-3 right-3 top-3 z-[45] flex items-center gap-3 px-3 py-2 text-[12px] text-danger" role="alert">
       <span className="break-words">{why}</span>
+      {/* Nothing is lost with the note: its text, as the window has it, goes to the clipboard to be pasted into a new note. */}
+      <button type="button" className="hud-btn shrink-0" onClick={onCopy}>
+        Copy board text
+      </button>
       <button type="button" className="hud-btn shrink-0" onClick={onClose}>
         Bring it back
       </button>
@@ -158,12 +163,29 @@ async function boot(): Promise<void> {
   // The window controls are right from the first draw when the status is known; without it they fill in a moment later.
   const status: BoardStatusDto | undefined = await bridge.boardStatus().catch(() => undefined)
   const host = createFloatingBoardHost(bridge, path, { toast, ...(status ? { status } : {}) })
+  // The banner's way out that always works: what was typed is written first (refused when the note is gone, the text still counts as the
+  // newest), then the newest text of the board goes to the clipboard.
+  const copyBoardText = async (): Promise<void> => {
+    try {
+      await getActiveBoard()?.flush()
+    } catch {
+      /* the copy goes on with what the window has */
+    }
+    const text = host.latestText()
+    if (text === null) return toast('There is no board text to copy yet', 'error')
+    try {
+      await bridge.copyText(text)
+      toast('Copied the board’s text. Paste it into a new note to keep it.', 'success')
+    } catch (err) {
+      toast(`The board’s text could not be copied: ${err instanceof Error ? err.message : String(err)}`, 'error')
+    }
+  }
   root.render(
     <StrictMode>
       <ErrorBoundary what="the board" onClose={() => void bridge.boardClose().catch(() => undefined)}>
         <div className="relative h-full w-full">
           <BoardView host={host} className="h-full w-full" />
-          <GoneBanner onClose={() => void bridge.boardClose().catch(() => undefined)} />
+          <GoneBanner onClose={() => void bridge.boardClose().catch(() => undefined)} onCopy={() => void copyBoardText()} />
           <Toasts />
         </div>
       </ErrorBoundary>

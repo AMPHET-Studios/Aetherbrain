@@ -27,8 +27,8 @@ import {
   type Vec2,
 } from '@aether/core'
 import { isMac } from '../../util'
-import type { BoardCommandId, BoardEvent, BoardHost, BoardTone, BoardUiState, ImageSlot, ImageSource, KeyIn, PointerIn } from '../api'
-import { BoardController } from '../controller'
+import { BOARD_GONE, type BoardCommandId, type BoardEvent, type BoardHost, type BoardTone, type BoardUiState, type ImageSlot, type ImageSource, type KeyIn, type PointerIn } from '../api'
+import { BoardController, noteCap } from '../controller'
 import { keyToCommand } from '../commands'
 import { DEFAULT_RETRY_MS, ImageCache, type BitmapLike, type ImageCacheOptions } from '../imageCache'
 import { createImageLoader, type CreateBitmap } from '../imageLoader'
@@ -128,6 +128,14 @@ const MAX_FED = 4096
 const EXPORT_ATTEMPTS = 3
 /** The failure of a save that is told again (a second toast with the escape hatch): this many failures in a row. */
 const STILL_FAILING = 4
+/**
+ * A flush that finds its save refused because the note changed outside waits for the reload that makes that save again: at most this
+ * long from the start of the flush (the window gives a closing page 1.5 s in all) and this many rounds.
+ */
+const FLUSH_HEAL_MS = 1000
+const FLUSH_HEAL_ROUNDS = 3
+/** What `within` answers when its promise was not there in time. */
+const TIMED_OUT = Symbol('timed out')
 /** A board is brought into view after a batch of pictures when it landed this close to, or outside, the edge of the view (fraction of the view). */
 const FIT_MARGIN = 0.02
 
@@ -197,6 +205,16 @@ export class BoardSession {
   private exporting = false
   private reloading = false
   private reloadAgain = false
+  /** The reload an outside change started, until it has ended (a flush waits for it). */
+  private reloadRun: Promise<void> | null = null
+  /** How many times the host has said that the note changed outside. */
+  private externalHeard = 0
+  /** The save that just failed was refused because the note changed outside: the reload that follows makes it again. */
+  private refusedChanged = false
+  /** ... and it was made from a text that a reload has since replaced: the next try carries the new one. */
+  private refusedOnOldText = false
+  /** The message of a first failure is waiting to see whether the reload mends it. */
+  private errorHeld = false
   /** The note changed outside while a gesture was held: judged again when the gesture ends. */
   private externalPending = false
   /** A save has carried the text of a note still being typed: when the typing ends the committed board must be written again. */
@@ -230,9 +248,17 @@ export class BoardSession {
       run: () => this.writeBoard(),
       onError: (err, first, failures) => {
         // Once per run of failures: the indicator keeps saying so, and the retry is silent. A failure that goes on is said once more,
-        // with the way out that always works: the text of the board on the clipboard.
-        if (first) this.say(`The board could not be saved: ${reasonOf(err)}. It is kept here and tried again.`, 'error', this.copyAction())
-        else if (failures === STILL_FAILING) this.say(`The board still cannot be saved: ${reasonOf(err)}. Copy its text to be safe.`, 'error', this.copyAction())
+        // with the way out that always works: the text of the board on the clipboard. A refusal because the note changed outside is
+        // made good by the reload that follows it (the board is read again and saved again): it is said only if that does not work,
+        // that is when a try made from the text the reload read is refused too (a try made from the old text is the same refusal).
+        if (this.refusedChanged && (first || (this.errorHeld && this.refusedOnOldText))) {
+          this.errorHeld = true
+          return
+        }
+        if (first || this.errorHeld) {
+          this.errorHeld = false
+          this.say(`The board could not be saved: ${reasonOf(err)}. It is kept here and tried again.`, 'error', this.copyAction())
+        } else if (failures === STILL_FAILING) this.say(`The board still cannot be saved: ${reasonOf(err)}. Copy its text to be safe.`, 'error', this.copyAction())
       },
       persistView: () => this.persistView(),
       onStatus: () => this.notify(),
@@ -598,21 +624,27 @@ export class BoardSession {
     this.invalidate()
   }
 
-  /** The note changed somewhere else. */
-  private async onExternalChange(): Promise<void> {
+  /** The note changed somewhere else. Resolves when the reload it starts (or joins) has ended. */
+  private onExternalChange(): Promise<void> {
+    this.externalHeard++
     if (this.reloading) {
       this.reloadAgain = true
-      return
+      return this.reloadRun ?? Promise.resolve()
     }
     this.reloading = true
-    try {
-      do {
-        this.reloadAgain = false
-        await this.reloadOnce()
-      } while (this.reloadAgain && this.started)
-    } finally {
-      this.reloading = false
-    }
+    const run = (async () => {
+      try {
+        do {
+          this.reloadAgain = false
+          await this.reloadOnce()
+        } while (this.reloadAgain && this.started)
+      } finally {
+        this.reloading = false
+        this.reloadRun = null
+      }
+    })()
+    this.reloadRun = run
+    return run
   }
 
   /** The controller's state changed: an outside change that waited for a gesture to end is looked at again once none is held. */
@@ -643,6 +675,8 @@ export class BoardSession {
     try {
       raw = await this.host.load()
     } catch (err) {
+      // A note the host has already said is gone is not said again here (the board stays open, and its saves say what they must).
+      if (err instanceof Error && err.name === BOARD_GONE) return
       this.say(`The board changed on disk but could not be read again: ${errorText(err)}`, 'error', this.copyAction())
       return
     }
@@ -663,8 +697,10 @@ export class BoardSession {
     this.readText = raw
     if (unsaved) {
       this.say('The board was also changed outside this window. Your unsaved changes here are kept and will replace the board part of that change.', 'info')
-      // A save that was refused because the note moved on can be made now, from the new base; it need not wait for its retry.
-      void this.saver.idle().then(() => this.saver.retryNow())
+      // A save that was refused because the note moved on can be made now, from the new base; it need not wait for its retry. The
+      // reload is not over before it has been started (a flush waits for the reload, and then for this write).
+      await this.saver.idle()
+      this.saver.retryNow()
       return
     }
     this.ctrl.replaceDoc(parseBoard(raw).doc)
@@ -700,7 +736,7 @@ export class BoardSession {
     if (st.editingNote === null || st.editingNote !== ed.id) return null
     const note = st.doc.items.find((it) => it.id === ed.id)
     if (!note || note.kind !== 'note' || note.locked) return null
-    const text = cutText(ed.get(), BOARD_LIMITS.noteChars)
+    const text = cutText(ed.get(), noteCap(note.text))
     if (text.trim() === '' || text === note.text) return null
     const doc = setProps(st.doc, [ed.id], { text }, this.env.metrics)
     // What the commit would refuse is not saved either (it stays in the box to be shortened).
@@ -726,18 +762,26 @@ export class BoardSession {
     const final = this.lastFinal
     const raw = this.serializeWith(base)
     if (draft) this.draftWritten = true
+    this.refusedChanged = false
+    this.refusedOnOldText = false
     if (raw !== this.rawBase) {
+      const heard = this.externalHeard
+      const madeFrom = this.readText
       try {
         // The text this one was made from goes with it: the host refuses it when the note is no longer that text, whatever the host
         // itself read last (a reload that landed meanwhile must not make a stale text look fresh).
         await this.host.save(raw, this.readText)
       } catch (err) {
         this.keepCopy(raw)
+        // A host that refuses because the note changed says so (the external change) in the same breath: the reload makes the save again.
+        this.refusedChanged = this.externalHeard !== heard
+        this.refusedOnOldText = this.readText !== madeFrom
         throw err
       }
       this.rawBase = raw
       this.readText = raw
     }
+    this.errorHeld = false
     clearRecovery(this.env.storage(), this.stateKey)
     // Only a finished change that nothing has followed is what the file now holds; a drag in progress is not.
     if (this.gen === gen && final) c.markSaved()
@@ -749,8 +793,43 @@ export class BoardSession {
    */
   async flush(): Promise<boolean> {
     this.commitEditing()
-    const saved = await this.saver.flush()
+    const deadline = this.env.timers.now() + FLUSH_HEAL_MS
+    const left = (): number => deadline - this.env.timers.now()
+    const saver = this.saver
+    let saved = await saver.flush()
+    // A save refused because the note changed outside is made again by the reload that follows (it reads the note, then saves from
+    // it). The page is about to go: it waits for that, a few rounds and never past the deadline, or the last changes would reach
+    // only the browser's copy. Any other failure has no reload coming and ends the flush as before.
+    for (let round = 0; round < FLUSH_HEAL_ROUNDS; round++) {
+      // The reload and its write may have finished while the flush was waiting; or nothing is coming that could mend it (no write in
+      // flight, no reload on its way, and the failure was not a refusal because the note changed).
+      saved = !saver.dirty && !saver.running && !saver.failing
+      if (saved || !(saver.running || this.reloadRun !== null || (saver.failing && this.refusedChanged))) break
+      if (this.reloadRun !== null && (await this.within(this.reloadRun, left())) === TIMED_OUT) break
+      const again = await this.within(saver.flush(), left())
+      if (again === TIMED_OUT) break
+      saved = again
+      if (saved) break
+    }
     return saved && (this.ctrl === null || this.ctrl.state.editingNote === null)
+  }
+
+  /** What `p` resolves to, or TIMED_OUT when it is not there in `ms` (a promise that rejects counts as not there). */
+  private within<T>(p: Promise<T>, ms: number): Promise<T | typeof TIMED_OUT> {
+    if (!(ms > 0)) return Promise.resolve(TIMED_OUT)
+    return new Promise((resolve) => {
+      const handle = this.env.timers.set(() => resolve(TIMED_OUT), ms)
+      p.then(
+        (v) => {
+          this.env.timers.clear(handle)
+          resolve(v)
+        },
+        () => {
+          this.env.timers.clear(handle)
+          resolve(TIMED_OUT)
+        },
+      )
+    })
   }
 
   /** Writes what is pending without ending a note being typed (the window lost the focus: the text is still being written). */
@@ -1219,6 +1298,9 @@ export class BoardSession {
    * anything else goes the way of a drop (below), and with nothing a board can take, the board's own items are pasted.
    */
   async handlePaste(t: TransferSnapshot<File>, at: Vec2 | null): Promise<void> {
+    // Asked for by a ⌘V press that is still waiting for this event. An event nobody asked for (Chromium on Linux sends an empty one
+    // when the middle button is released, and again for one that came after the wait ended) never falls back to the board's own items.
+    const asked = this.pasteTimer !== null
     this.cancelPasteWait()
     const own = this.copied !== '' && t.files.length === 0 && normalLines(t.text) === normalLines(this.copied)
     if (own && this.controller.state.canPaste) {
@@ -1227,7 +1309,7 @@ export class BoardSession {
       return
     }
     const result = await this.handleTransfer(t, at)
-    if (result === 'nothing') this.pasteOwn()
+    if (result === 'nothing' && asked) this.pasteOwn()
   }
 
   /** Items copied from any board (the text `exportCopy` made) are read back into this one; `importCopy` tells the user when it could not. */
@@ -1251,8 +1333,22 @@ export class BoardSession {
    * Picture files: their own size from the browser, their bytes into the board's folder through the host, in chunks of a few files
    * and some megabytes (a drop of forty large pictures never sits in memory whole), then all of them on the board at once.
    */
-  async addFiles(files: readonly File[], at: Vec2 | null): Promise<void> {
-    if (files.length === 0) return
+  async addFiles(all: readonly File[], at: Vec2 | null): Promise<void> {
+    if (all.length === 0) return
+    // A board that cannot take them is asked before a byte is copied into its folder: a refusal afterwards would leave the copies
+    // there, and a second try would add them again under other names.
+    const { room, why } = this.controller.pictureRoom()
+    const files = all.slice(0, room)
+    if (files.length < all.length) {
+      const pictures = (n: number) => `${n} picture${n === 1 ? '' : 's'}`
+      this.say(
+        files.length === 0
+          ? `The board is full (${why}): ${pictures(all.length)} not added, and nothing was copied.`
+          : `The board is full (${why}): adding ${files.length} of ${pictures(all.length)}; the other ${all.length - files.length} were left out and not copied.`,
+        'error',
+      )
+      if (files.length === 0) return
+    }
     this.setActivity(`Adding ${files.length} picture${files.length === 1 ? '' : 's'}…`)
     const items: { path: string; w: number; h: number }[] = []
     let unreadable = 0
@@ -1304,17 +1400,26 @@ export class BoardSession {
       if (tooLarge.length > 0) this.say(tooLargeMessage(tooLarge), 'error')
       if (unreadable > 0) this.say(`${unreadable} file${unreadable === 1 ? '' : 's'} could not be read as ${unreadable === 1 ? 'a picture' : 'pictures'}.`, 'error')
       if (refused > 0) this.say(`The vault refused ${refused} picture${refused === 1 ? '' : 's'} (a type it does not know, or over ${Math.round(MAX_FILE_BYTES / 1024 / 1024)} MB).`, 'error')
-      if (items.length > 0 && this.started) this.addAndShow(items, at)
+      if (items.length > 0 && this.started) {
+        const placed = this.addAndShow(items, at)
+        // The room was judged before the pictures had names, and the board may have changed while they were copied: the ones that did
+        // not fit are in the board's folder all the same, and the user is told so.
+        if (placed < items.length) {
+          const n = items.length - placed
+          this.say(`${n} picture${n === 1 ? ' was' : 's were'} copied into the board's folder but did not fit on the board. Add ${n === 1 ? 'it' : 'them'} with Add pictures when there is room.`, 'error')
+        }
+      }
     } finally {
       this.setActivity(null)
     }
   }
 
-  /** Puts pictures on the board and, when a batch is big enough to land off screen, brings the view to them (they are the selection). */
-  private addAndShow(items: { path: string; w: number; h: number }[], at: Vec2 | null): void {
+  /** Puts pictures on the board and, when a batch is big enough to land off screen, brings the view to them (they are the selection). Returns how many were put. */
+  private addAndShow(items: { path: string; w: number; h: number }[], at: Vec2 | null): number {
     const c = this.controller
     const ids = c.addPictures(items, at ?? undefined)
     if (ids.length >= FIT_BATCH_MIN && !this.inView(ids)) c.exec('view.fitSelection')
+    return ids.length
   }
 
   /** Whether these items lie inside the view, with a little margin. */

@@ -84,6 +84,32 @@ interface Readable2D {
   getImageData(x: number, y: number, w: number, h: number): { data: Uint8ClampedArray }
 }
 
+/**
+ * Reads one pixel of a canvas that is on screen (the sampler), through a 1 by 1 canvas of its own made for reading
+ * (`willReadFrequently`): `getImageData` on the drawing canvas itself, again and again, makes Chromium warn and, with the canvas on
+ * the GPU, stall on every read. Null where there is no canvas to make.
+ */
+export function createPixelReader(): (source: HTMLCanvasElement, x: number, y: number) => Uint8ClampedArray | null {
+  let probe: CanvasRenderingContext2D | null | undefined
+  return (source, x, y) => {
+    if (probe === undefined) {
+      try {
+        const canvas = document.createElement('canvas')
+        canvas.width = 1
+        canvas.height = 1
+        probe = canvas.getContext('2d', { willReadFrequently: true })
+      } catch {
+        probe = null
+      }
+    }
+    if (!probe) return null
+    probe.imageSmoothingEnabled = false
+    probe.clearRect(0, 0, 1, 1)
+    probe.drawImage(source, x, y, 1, 1, 0, 0, 1, 1)
+    return probe.getImageData(0, 0, 1, 1).data
+  }
+}
+
 export function browserEnv(): SessionEnv {
   return {
     timers: realTimers,

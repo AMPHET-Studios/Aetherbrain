@@ -97,7 +97,7 @@ describe('the Projects board', { timeout: 180_000 }, () => {
     expect([...s().notes.values()].filter(isProjectNote).length).toBe(ODD.length)
     s().setView('projects')
     const out = await board()
-    expect(out).toContain(`${ODD.length} boards`)
+    expect(out).toContain(`${ODD.length} projects`)
   })
 
   it('builds one link index for all the tasks of a project, never one per task', async () => {
@@ -141,7 +141,7 @@ describe('the Projects board', { timeout: 180_000 }, () => {
     expect(await board()).toBe('')
     expect(listed()).toBe(0)
     s().setView('projects')
-    expect(await board()).toContain('1 board')
+    expect(await board()).toContain('1 project')
     expect(listed()).toBe(1)
   })
 
@@ -157,7 +157,7 @@ describe('the Projects board', { timeout: 180_000 }, () => {
     const t0 = performance.now()
     const out = await board()
     const cards = (out.match(/data-project-card=/g) ?? []).length
-    expect(out).toContain('20000 boards')
+    expect(out).toContain('20000 projects')
     expect(cards).toBeGreaterThan(5)
     expect(cards).toBeLessThanOrEqual(30)
     expect((out.match(/</g) ?? []).length).toBeLessThan(5000)

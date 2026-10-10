@@ -4,8 +4,9 @@
  * Esc cancels. The session reads its text through `registerEditor`, so a press on the canvas or a command commits it first.
  */
 import { useEffect, useLayoutEffect, useRef } from 'react'
-import { BOARD_LIMITS, NOTE_LINE_HEIGHT_EM, NOTE_PADDING_EM, boardToScreen, noteBox, textColourOn, type NoteItem, type TextMetrics } from '@aether/core'
+import { NOTE_LINE_HEIGHT_EM, NOTE_PADDING_EM, boardToScreen, noteBox, textColourOn, type NoteItem, type TextMetrics } from '@aether/core'
 import type { BoardSession } from './boardSession'
+import { noteCap } from '../controller'
 import { noteFont } from '../renderer'
 import { isComposing } from './dom'
 import { useBoardState } from './useBoardSession'
@@ -87,7 +88,7 @@ function Editor({ session, metrics, placed }: { session: BoardSession; metrics: 
       ref={ta}
       aria-label="Note text"
       data-board-overlay
-      maxLength={BOARD_LIMITS.noteChars}
+      maxLength={noteCap(note.text)}
       spellCheck={false}
       rows={1}
       onInput={() => {

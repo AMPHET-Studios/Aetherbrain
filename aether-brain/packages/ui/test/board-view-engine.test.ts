@@ -688,8 +688,11 @@ describe('keys and clipboard', () => {
     expect(note.kind === 'note' ? note.text : '').toBe('something I copied elsewhere')
   })
 
-  it('an empty clipboard with nothing of the board’s own to paste says so', async () => {
+  it('an empty clipboard after a ⌘V press, with nothing of the board’s own to paste, says so', async () => {
     const r = rig(RAW)
+    // Changed with the review (live-docked-2): an empty paste event nobody asked for (a middle-button release on Linux) says nothing
+    // and pastes nothing; the ⌘V press is what asks, and the ask is what keeps this message.
+    r.session.key({ key: 'v', code: 'KeyV', down: true, shift: false, ctrl: true, alt: false, meta: false, repeat: false })
     await r.session.handlePaste({ files: [], uriList: '', html: '', text: '' }, null)
     expect(r.host.toastTexts().at(-1)).toMatch(/nothing on the clipboard/i)
   })

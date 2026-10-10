@@ -113,7 +113,8 @@ describe('main.ts registers every channel through the guard, and nothing else', 
   it('has no raw ipcMain.handle / ipcMain.on: only guardIpc(ipcMain, ...) touches ipcMain', () => {
     const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '')
     expect(code.match(/\bipcMain\b/g)).toHaveLength(2) // the import and the guard
-    expect(code).toMatch(/const ipc = guardIpc\(ipcMain, \(wc\) => board\?\.isBoardPage\(wc\) \?\? false\)/)
+    // (Deliberately widened in round 2: the guard also gets the host's refusal of what the board page may name, board-fix2-desktop-scope.test.ts.)
+    expect(code).toMatch(/const ipc = guardIpc\(\s*ipcMain,\s*\(wc\) => board\?\.isBoardPage\(wc\) \?\? false,\s*\(channel, args\) => board\?\.pageRefusal\(channel, args\) \?\? null,?\s*\)/)
     expect(code.match(/\bipc\.(handle|on)\(/g)!.length).toBeGreaterThan(60)
   })
 

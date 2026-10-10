@@ -10,13 +10,15 @@
  *   loader asks (a decode is width x height x 4 bytes, and `createImageBitmap` with a resize decodes the whole raster first);
  * - a picture is decoded once, straight to the size it is wanted at.
  * A picture the host has no preview of (it is over the host's own thumbnail cap, say) is made into the preview here, from the original,
- * so that it shows at every zoom and not only past 1024 px. A file whose header cannot be read is decoded as the engine sees fit when it
- * is small (one at a time), else it cannot be read.
+ * so that it shows at every zoom and not only past 1024 px. A file whose header cannot be read (after looking further into a JPEG or an
+ * AVIF) is decoded as the engine sees fit only when it is tiny (core's IMAGE_BLIND_DECODE_MAX_BYTES; one at a time), else it cannot be
+ * read (null, which the cache calls 'unreadable'): a flat raster compresses to a few hundred KB, so the size of a file says nothing of
+ * what it takes to decode.
  *
  * Nothing here throws: a failure is a null, or `{ failure }` when the reason is known and permanent; a bitmap made along the way is
  * closed unless it is handed over.
  */
-import { IMAGE_HEADER_BYTES, MAX_DECODE_PIXELS, readImageHeader } from '@aether/core'
+import { IMAGE_BLIND_DECODE_MAX_BYTES, MAX_DECODE_PIXELS, readBlobHeader } from '@aether/core'
 import { IMAGE_TIERS, type BoardPictureHost, type ImageFailure, type ImageTier } from './api'
 import { FULL_MAX_PIXELS, type BitmapLike, type LoadFailure, type LoadedImage } from './imageCache'
 
@@ -29,8 +31,6 @@ const FULL_PX = IMAGE_TIERS[2]
 export const MAX_LOAD_PIXELS = 150e6
 /** Pictures over this many pixels decode one at a time (the host does not make thumbnails of them either). */
 const SOLO_PIXELS = MAX_DECODE_PIXELS
-/** A file whose header cannot be read is decoded to learn what it is only when it is at most this many bytes. */
-const UNREADABLE_DECODE_MAX_BYTES = 16 * 1024 * 1024
 
 /**
  * Both decodes turn a picture the way its EXIF says, as the host's previews do, so the tiers of one picture have the same shape
@@ -70,15 +70,13 @@ function alone<T>(job: () => Promise<T>): Promise<T> {
   })
 }
 
-/** The picture's size as it is shown (upright), from the first bytes of the file; null when the header is not there or not understood. */
+/**
+ * The picture's size as it is shown (upright), from the first bytes of the file (a JPEG's frame header behind long COM or APP segments is
+ * looked for in the first 2 MiB); null when the header is not there or not understood.
+ */
 async function headerSize(blob: Blob): Promise<{ w: number; h: number } | null> {
-  try {
-    const head = new Uint8Array(await blob.slice(0, IMAGE_HEADER_BYTES).arrayBuffer())
-    const header = readImageHeader(head)
-    return header ? { w: header.shownWidth, h: header.shownHeight } : null
-  } catch {
-    return null
-  }
+  const header = await readBlobHeader(blob)
+  return header ? { w: header.shownWidth, h: header.shownHeight } : null
 }
 
 /** The reason a host gave for a refusal (a rejection carrying `reason`), when it is one we know. */
@@ -147,7 +145,9 @@ export function createImageLoader(
     const blob: Blob = got
     const size = await headerSize(blob)
     if (!size) {
-      if (blob.size > UNREADABLE_DECODE_MAX_BYTES) return null
+      // No header to judge by: what a decode would take is not known (a flat JPEG of 156 megapixels is 0.6 MB), so only a tiny file is
+      // decoded to see; a bigger one is a file the board cannot use (cut short, or not made the way its kind says).
+      if (blob.size > IMAGE_BLIND_DECODE_MAX_BYTES) return null
       return alone(() => decodeBlind(blob, limit, area))
     }
     if (size.w * size.h > MAX_LOAD_PIXELS) return { failure: 'too-large', natural: size }

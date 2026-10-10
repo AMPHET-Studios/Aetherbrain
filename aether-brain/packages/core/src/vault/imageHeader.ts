@@ -1,7 +1,9 @@
 /**
  * What a picture's first bytes say about it, as pure functions of the bytes: its kind (PNG, JPEG, GIF, WebP, BMP, AVIF), the pixel size its
  * header claims and whether it is shown turned a quarter (EXIF orientation 5 to 8, an AVIF `irot`). No decoding: a board asks this of the
- * first 256 KB of a file BEFORE it lets the browser decode it, because a few KB of PNG can claim a 30,000 x 30,000 canvas (3.6 GB).
+ * first 256 KB of a file (a JPEG or AVIF whose header is not there: the first 2 MiB, `readBlobHeader`) BEFORE it lets the browser decode
+ * it, because a few KB of PNG can claim a 30,000 x 30,000 canvas (3.6 GB). A file whose header cannot be found is refused, not decoded to
+ * see what it is (only a file of at most IMAGE_BLIND_DECODE_MAX_BYTES still is).
  * The same logic lives in apps/desktop/src/main/assets.ts (main cannot share the renderer's bundle); apps/desktop/test/image-header.test.ts
  * keeps the two in agreement.
  */
@@ -10,6 +12,18 @@
 export const MAX_DECODE_PIXELS = 64_000_000
 /** How much of a file is enough to read its header (a JPEG's frame header can sit behind a long EXIF or ICC segment). */
 export const IMAGE_HEADER_BYTES = 256 * 1024
+/**
+ * How far into a JPEG or AVIF `readBlobHeader` looks when the first IMAGE_HEADER_BYTES hold no header (long COM, APP or ICC segments
+ * push the frame header back; each JPEG segment is at most 64 KB, so this is thirty-odd of them).
+ */
+export const IMAGE_HEADER_MAX_BYTES = 2 * 1024 * 1024
+/**
+ * A file whose header cannot be read (after `readBlobHeader`) is decoded blind, to learn what it is, only when it is at most this big
+ * (an icon, a few-pixel picture): what a decode takes is not known, and a flat raster compresses to a few hundred KB (a JPEG of
+ * 12,504 x 12,504 pixels is 0.6 MB, two bits a block). A JPEG of this size, whose header is the one that can be missing, holds under
+ * ten megapixels.
+ */
+export const IMAGE_BLIND_DECODE_MAX_BYTES = 16 * 1024
 
 export type ImageKind = 'png' | 'jpeg' | 'gif' | 'webp' | 'bmp' | 'avif'
 
@@ -113,16 +127,28 @@ function webpSize(b: Uint8Array): { width: number; height: number } | null {
 /**
  * Calls `visit(marker, at, len)` for each JPEG segment with a length (`at`:
  * its 0xFF, `len`: its length field) up to the start of scan, until `visit`
- * returns true. Stops at anything that is not a marker.
+ * returns true. Reads the bytes between segments as the decoder does (libjpeg
+ * skips whatever is not a marker: padding after an EXIF segment, a stray
+ * byte), so that the frame header the decoder will use is the one found here.
  */
 function jpegSegments(b: Uint8Array, visit: (marker: number, at: number, len: number) => boolean): void {
   let i = 2
   while (i + 8 < b.length) {
-    if (b[i] !== 0xff) return
+    if (b[i] !== 0xff) {
+      // Not a marker: skipped up to the next 0xFF, as libjpeg's next_marker does.
+      do i++
+      while (i < b.length && b[i] !== 0xff)
+      continue
+    }
     const m = b[i + 1] ?? 0
     if (m === 0xff) {
       // Fill byte before a marker.
       i++
+      continue
+    }
+    if (m === 0) {
+      // A stuffed zero (0xFF 0x00) is no marker either.
+      i += 2
       continue
     }
     if (m === 0x01 || (m >= 0xd0 && m <= 0xd8)) {
@@ -291,4 +317,29 @@ export function readImageHeader(bytes: Uint8Array): ImageHeader | null {
   if (!kind || !size) return null
   const sideways = turnsSideways(bytes)
   return { kind, width: size.width, height: size.height, shownWidth: sideways ? size.height : size.width, shownHeight: sideways ? size.width : size.height }
+}
+
+/** What `readBlobHeader` needs of a Blob (a File is one): its size and a slice that can be read as bytes. */
+export interface HeaderSource {
+  readonly size: number
+  slice(start?: number, end?: number): { arrayBuffer(): Promise<ArrayBuffer> }
+}
+
+/**
+ * The header of a picture held as a Blob, or null when it has none that can be read: the first IMAGE_HEADER_BYTES, and, for a JPEG or
+ * an AVIF whose frame header or `ispe` box is not in them (long COM, APP or ICC segments, a box in front), the first
+ * IMAGE_HEADER_MAX_BYTES. Nothing is decoded. A null for a file bigger than IMAGE_BLIND_DECODE_MAX_BYTES is a file to refuse, not to
+ * decode "to see": a flat 12,504 x 12,504 JPEG is 0.6 MB and decodes to 625 MB. Never throws.
+ */
+export async function readBlobHeader(blob: HeaderSource): Promise<ImageHeader | null> {
+  try {
+    const head = new Uint8Array(await blob.slice(0, IMAGE_HEADER_BYTES).arrayBuffer())
+    const header = readImageHeader(head)
+    if (header || blob.size <= head.length) return header
+    const kind = imageKindOf(head)
+    if (kind !== 'jpeg' && kind !== 'avif') return null
+    return readImageHeader(new Uint8Array(await blob.slice(0, IMAGE_HEADER_MAX_BYTES).arrayBuffer()))
+  } catch {
+    return null
+  }
 }

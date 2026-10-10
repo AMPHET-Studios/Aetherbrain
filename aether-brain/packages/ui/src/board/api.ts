@@ -62,6 +62,12 @@ export interface BoardWindowHost {
 
 export type BoardTone = 'info' | 'success' | 'error'
 
+/**
+ * The `name` of the error a host's `load()` rejects with for a note that is gone from the vault after the board was open, when the
+ * host has already said so (the Boards view's notice): the session reloading the board does not say it a second time.
+ */
+export const BOARD_GONE = 'BoardGoneError'
+
 export interface BoardHost {
   /** The board's note: a vault path ending in .md. */
   readonly path: string

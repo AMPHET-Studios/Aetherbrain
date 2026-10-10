@@ -185,6 +185,14 @@ export const COVERING_VIEWS: ReadonlySet<View> = new Set<View>(['projects', 'rev
 export const FULL_PANEL_VIEWS: ReadonlySet<View> = new Set<View>(['projects', 'boards'])
 /** Previews read at once to learn the shapes of pictures going onto a board that is not open. */
 const ASPECT_PARALLEL = 4
+/**
+ * The desktop adapter's `readAssetChecked` (renderer/vault/electron.ts): the picture, or why there is none. Not on the core
+ * `VaultAdapter` (the web and memory vaults have no such verdict), so it is looked for on the adapter at the one place that reads whole
+ * pictures for a board.
+ */
+type CheckedAssetReader = {
+  readAssetChecked?(path: string): Promise<{ blob: Blob } | { blob: null; reason: 'missing' | 'too-large' | 'unreadable'; detail: string }>
+}
 /** What the vault says when it will not take pictures in a folder (the desktop's exclude list, an ignored folder name). */
 const OUT_OF_VAULT = /excluded from the vault|skipped by the brain/i
 /** Numbered names (` 2` … ` 1000`) tried for a new note or picture before giving up. */
@@ -722,9 +730,10 @@ export interface AetherState {
   boardFolderOf(boardPath: string): string
   /**
    * The board note's text as it is on disk now (a pending editor draft is saved first, changes the watcher has not reported yet are
-   * applied), or null with a toast when it is not a board or is gone. The docked host's `load`.
+   * applied), or null with a toast when it is not a board or is gone. `quiet` (a reload of a board that is already open, whose view
+   * says what became of it): null without that toast. The docked host's `load`.
    */
-  readBoard(path: string): Promise<string | null>
+  readBoard(path: string, opts?: { quiet?: boolean }): Promise<string | null>
   /**
    * Write a board note. `expected` is the text the board was read from (or last saved as): when the file now holds anything else the
    * save is refused with a `BoardChangedOutsideError` and nothing is written; null skips that check. Rejects with a readable message
@@ -732,7 +741,12 @@ export interface AetherState {
    * file on disk and runs after any other rewrite of the note. The docked host's `save`; it never toasts (the view does).
    */
   saveBoard(path: string, text: string, expected: string | null): Promise<void>
-  /** A picture of the vault whole (at most 64 MB), for the board at full size; null when it cannot be read. Never rejects. */
+  /**
+   * A picture of the vault whole (at most 64 MB), for the board at full size; null when it cannot be read. An adapter that says why
+   * there is none (the desktop's: 'missing', 'too-large' for a file over 64 MB or a header that claims over 150 megapixels,
+   * 'unreadable') makes this reject with an Error carrying that `reason`, which the picture cache keeps for the placeholder; any other
+   * adapter (web, memory), and a failed read, give null.
+   */
   readPicture(path: string): Promise<Blob | null>
   /**
    * Save pictures into a board's own folder, create-only, one graph rebuild for the batch, nothing selected and no success toast.
@@ -1447,14 +1461,15 @@ export const useAether = create<AetherState>()((set, get) => {
    * applied first, so a rewrite never starts from a stale copy and erases
    * it. null (toasted as "Could not <what>") when the note or its file is
    * gone: an edit queued behind a rename or a delete of the note (the caller
-   * still showed the old id) says so instead of vanishing.
+   * still showed the old id) says so instead of vanishing. `quiet`: for a
+   * caller that tells the user itself, null and no toast.
    */
-  const freshNote = async (id: NoteId, what: string): Promise<ParsedNote | null> => {
+  const freshNote = async (id: NoteId, what: string, quiet = false): Promise<ParsedNote | null> => {
     const { adapter } = get()
     const note = get().notes.get(id)
     if (!adapter) return null
     if (!note) {
-      get().toast(`Could not ${what}: the note was moved or deleted`, 'error')
+      if (!quiet) get().toast(`Could not ${what}: the note was moved or deleted`, 'error')
       return null
     }
     let disk: string | null
@@ -1464,7 +1479,7 @@ export const useAether = create<AetherState>()((set, get) => {
       disk = null
     }
     if (disk === null) {
-      get().toast(`Could not ${what}: ${note.meta.path} is no longer on disk`, 'error')
+      if (!quiet) get().toast(`Could not ${what}: ${note.meta.path} is no longer on disk`, 'error')
       return null
     }
     if (disk !== note.raw) {
@@ -3143,18 +3158,19 @@ export const useAether = create<AetherState>()((set, get) => {
       return boardFolderOfPath(boardPath)
     },
 
-    async readBoard(path) {
+    async readBoard(path, opts) {
+      const quiet = opts?.quiet === true
       const id = existingId(idFromPath(path))
       if (id === null || isVirtualId(id)) {
-        get().toast(`Could not open the board: ${path} is not in the vault`, 'error')
+        if (!quiet) get().toast(`Could not open the board: ${path} is not in the vault`, 'error')
         return null
       }
       return exclusive(id, async () => {
         if (!(await flushDraft(id, 'open the board'))) return null
-        const note = await freshNote(id, 'open the board')
+        const note = await freshNote(id, 'open the board', quiet)
         if (!note) return null
         if (!isBoard(note)) {
-          get().toast(`${note.meta.title} is not a board (its frontmatter has no type: board)`, 'error')
+          if (!quiet) get().toast(`${note.meta.title} is not a board (its frontmatter has no type: board)`, 'error')
           return null
         }
         return note.raw
@@ -3194,6 +3210,18 @@ export const useAether = create<AetherState>()((set, get) => {
     async readPicture(path) {
       const { adapter } = get()
       if (!adapter?.readAsset) return null
+      // The desktop adapter says why there is no picture: a verdict about the file ('too-large') is not "can't be read".
+      const checked = adapter as typeof adapter & CheckedAssetReader
+      if (checked.readAssetChecked && isImagePath(path)) {
+        let res: Awaited<ReturnType<NonNullable<CheckedAssetReader['readAssetChecked']>>>
+        try {
+          res = await checked.readAssetChecked(path)
+        } catch {
+          return null
+        }
+        if (res.blob !== null) return res.blob
+        throw Object.assign(new Error(res.detail), { reason: res.reason })
+      }
       try {
         return await adapter.readAsset(path)
       } catch {

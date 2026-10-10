@@ -163,7 +163,7 @@ describe('every text the board draws has its own cap', () => {
     s().setView('projects')
     s().selectProject(LONG_PATH)
     const out = await board()
-    expect(out).toContain('2 boards')
+    expect(out).toContain('2 projects')
     // The selected project.
     expect(longestRun(out, 'T')).toBeLessThanOrEqual(200)
     const path = /<div class="mt-0\.5 font-mono text-\[10\.5px\] text-faint">([^<]*)<\/div>/.exec(out)

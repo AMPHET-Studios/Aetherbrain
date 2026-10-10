@@ -436,7 +436,7 @@ function ProjectsBoard({ drafts }: { drafts: Drafts }) {
           <div className="flex items-center gap-2 border-b border-[var(--line)] px-4 py-2.5">
             <span className="text-projects">◆</span>
             <span className="text-[13px] font-semibold text-white">Projects</span>
-            <span className="text-[11.5px] text-faint">{plural(rows.length, 'board')}</span>
+            <span className="text-[11.5px] text-faint">{plural(rows.length, 'project')}</span>
             <span className="flex-1" />
             <button type="button" className="hud-btn" onClick={() => setCreating(true)} disabled={readOnly} title="New project (⇧N)">
               + New

@@ -2,9 +2,10 @@
  * The reference board's floating window: one window, opened on a board note, that stays on top of the user's painting program, can
  * be dimmed (Windows, macOS), and remembers where it was. It shows `board.html` (the board view only) with a preload of its own
  * (board-preload.cts: the board calls, the pictures, nothing else) in the default session as the brain window, so it has the brain
- * window's network block and permission refusals. It never opens a vault: it reads and saves the one board note through `board:read`
- * / `board:save` (see board-save.ts) and its pictures through the picture calls; main answers it no other channel (BOARD_PAGE_CHANNELS,
- * guardIpc).
+ * window's network block and permission refusals. It never opens a vault: it reads and saves the board it shows, and only that one,
+ * through `board:read` / `board:save` (see board-save.ts; main refuses the page any other path, `pageRefusal`) and its pictures through
+ * the picture calls; main answers it no other channel (BOARD_PAGE_CHANNELS, guardIpc). It has a menu of its own with two items and no
+ * browser chords (reload, zoom, DevTools, full screen): a painting program's window is not a browser.
  *
  * The window belongs to the brain window: it closes with it, and tells it (`board:closed`, with the board's path) when it closes
  * or moves on to another board, so the docked view takes the board back. Both windows hear `board:state` whenever the window
@@ -17,12 +18,12 @@
  * No electron import at runtime (types only), like ForgeHost and Thumbnailer: main.ts hands in the Electron modules, and the checks
  * (settings, bounds, options, navigation) are pure functions.
  */
-import type { BrowserWindow, BrowserWindowConstructorOptions, Dialog, Display, Screen, Shell, WebContents } from 'electron'
+import type { BrowserWindow, BrowserWindowConstructorOptions, Dialog, Display, Menu, MenuItemConstructorOptions, Screen, Shell, WebContents } from 'electron'
 import { IPC, type AssetListDto, type BoardConfigureDto, type BoardSaveResult, type BoardStatusDto, type VaultAssetDto, type VaultChangeDto } from '../shared/ipc.js'
-import { boardNoteVerdict, checkBoard, readBoard, saveBoard, type BoardVault } from './board-save.js'
+import { MAX_BOARD_TEXT, boardNoteVerdict, checkBoard, readBoard, saveBoard, type BoardVault } from './board-save.js'
 import { BOARD_WINDOW_NAME, CRASH_WINDOW_MS, crashMessage, shouldReload } from './crash.js'
 import { forgeNavigation } from './forge.js'
-import { isImageName } from './fsvault.js'
+import { isImageName, isMediaName } from './fsvault.js'
 
 export const BOARD_TITLE = 'Aether Brain — Board'
 /** Smallest window: a board you cannot see is no board (at 320 x 240 the toolbar wrapped to three rows and left 72 px of canvas). */
@@ -239,6 +240,28 @@ export function cleanConfigure(raw: unknown, platform: NodeJS.Platform): BoardCo
   return out
 }
 
+/**
+ * The window's own menu (Windows and Linux; on macOS the application menu serves every window): Close with Ctrl+W, which goes through
+ * the close handshake like any close, and the Edit roles (a note box undoes, cuts, copies and pastes). Nothing else: Electron's default
+ * menu carries Reload (Ctrl+R, Ctrl+Shift+R), Toggle Developer Tools (Ctrl+Shift+I), Full Screen (F11) and the page zoom (Ctrl +, Ctrl -),
+ * which in a small always-on-top window over a painting program reload the board under the user's hands, zoom the whole page, or
+ * cover the screen. The board has its own keys for its own zoom (`+`, `-`, `1`).
+ */
+export function boardMenuTemplate(close: () => void): MenuItemConstructorOptions[] {
+  return [
+    { label: 'Window', submenu: [{ label: 'Close', accelerator: 'CmdOrCtrl+W', click: close }] },
+    {
+      label: 'Edit',
+      submenu: [{ role: 'undo' }, { role: 'redo' }, { type: 'separator' }, { role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' }],
+    },
+  ]
+}
+
+/** A key press that would zoom the page (Ctrl or Cmd with +, -, = or 0): the page is never zoomed, it draws its own board at its own scale. */
+export function isPageZoomChord(input: { type?: string; key?: string; control?: boolean; meta?: boolean; alt?: boolean }): boolean {
+  return input.type === 'keyDown' && (input.control === true || input.meta === true) && input.alt !== true && ['+', '-', '=', '_', '0'].includes(input.key ?? '')
+}
+
 /* ------------------------------------------------------------------ */
 /* Who may call what                                                  */
 /* ------------------------------------------------------------------ */
@@ -249,7 +272,8 @@ export function cleanConfigure(raw: unknown, platform: NodeJS.Platform): BoardCo
  * Everything else (the vault's notes, folders and roots, the chat, the librarian, the AI link, the Forge, opening another board)
  * is refused to that window whatever its preload exposes: a page that was taken over by a picture that breaks the decoder
  * can still send any channel name by hand, and this list is what stops it. board-preload.cts exposes exactly these (a test pins
- * the two lists together).
+ * the two lists together). The list says which calls; `BoardWindowHost.pageRefusal` says what they may name (the board the window
+ * shows for `board:read` and `board:save`, a picture or that board for `vault:reveal`).
  */
 export const BOARD_PAGE_CHANNELS: ReadonlySet<string> = new Set<string>([
   IPC.boardClose,
@@ -281,20 +305,30 @@ export interface IpcLike {
 
 /**
  * `ipcMain` with the check in front of every handler: a message from the board window's page (`isBoardPage`) on a channel outside
- * BOARD_PAGE_CHANNELS is refused (a `handle` call rejects with the reason, a `send` is dropped) before the handler runs. main.ts
- * registers every channel through this and through nothing else.
+ * BOARD_PAGE_CHANNELS is refused (a `handle` call rejects with the reason, a `send` is dropped) before the handler runs. So is one
+ * on a channel inside it whose arguments `refuse` (BoardWindowHost.pageRefusal) turns down: it answers the reason, or null. Only the
+ * board window's page is judged; every other sender keeps everything. main.ts registers every channel through this and through
+ * nothing else.
  */
-export function guardIpc(ipc: IpcLike, isBoardPage: (sender: WebContents) => boolean): IpcLike {
+export function guardIpc(
+  ipc: IpcLike,
+  isBoardPage: (sender: WebContents) => boolean,
+  refuse?: (channel: string, args: readonly unknown[]) => string | null,
+): IpcLike {
   return {
     handle(channel, listener) {
       ipc.handle(channel, (e, ...args) => {
-        if (!channelAllowed(isBoardPage(e.sender), channel)) throw new Error(`The board window may not use ${channel}`)
+        const page = isBoardPage(e.sender)
+        if (!channelAllowed(page, channel)) throw new Error(`The board window may not use ${channel}`)
+        const why = page ? (refuse?.(channel, args) ?? null) : null
+        if (why !== null) throw new Error(why)
         return listener(e, ...args)
       })
     },
     on(channel, listener) {
       ipc.on(channel, (e, ...args) => {
-        if (channelAllowed(isBoardPage(e.sender), channel)) listener(e, ...args)
+        const page = isBoardPage(e.sender)
+        if (channelAllowed(page, channel) && !(page && (refuse?.(channel, args) ?? null) !== null)) listener(e, ...args)
       })
     },
   }
@@ -561,6 +595,8 @@ export interface BoardElectron {
   screen: Pick<Screen, 'getAllDisplays' | 'getPrimaryDisplay'>
   shell: Pick<Shell, 'openExternal'>
   dialog: Pick<Dialog, 'showMessageBox'>
+  /** Makes the window's own menu (Windows, Linux); without it the window keeps Electron's default one. */
+  Menu?: Pick<typeof Menu, 'buildFromTemplate'>
 }
 
 export interface BoardHostOptions {
@@ -602,6 +638,14 @@ export class BoardWindowHost {
   private pageIds = new Set<number>()
   /** The window shows over full-screen apps (macOS: setVisibleOnAllWorkspaces is set only when this changes, it hides the window for a moment). */
   private overFullScreen = false
+  /**
+   * The banner the page shows, as far as main knows it: a notice `forward` raised because the note is gone or no longer reads as a board
+   * ('note': it is taken back when the note reads as a board again), or the one for a rename the window could not follow ('lost': it
+   * stays, the page shows a path that is no longer the board's). The page's banner is lost with the page, so a new board resets it.
+   */
+  private notice: 'note' | 'lost' | null = null
+  /** The window whose close is under way (the handshake holds it while its page saves): a board opened meanwhile waits for it to go. */
+  private closing: BrowserWindow | null = null
 
   constructor(private opts: BoardHostOptions) {
     this.settings = boardSettings(opts.settings)
@@ -613,6 +657,33 @@ export class BoardWindowHost {
   /** Whether `wc` is the page of a board window (main.ts judges every message against it). */
   isBoardPage(wc: { id: number }): boolean {
     return this.pageIds.has(wc.id)
+  }
+
+  /**
+   * Why a call from the board window's page, on a channel it may use, must be refused for what it names, or null when it may go on.
+   * The page reads and saves the board the window shows and no other board note of the vault (`board:read`, `board:save`), and shows a
+   * picture or a video, or that board, in the file manager (`vault:reveal`), never a note or a folder: a page that a broken decoder
+   * took over would otherwise read and overwrite every board of the vault and learn which notes and folders exist. guardIpc applies
+   * it to the board page's messages; the brain window is not judged (it has the whole vault already).
+   */
+  pageRefusal(channel: string, args: readonly unknown[]): string | null {
+    const first = args[0]
+    switch (channel) {
+      case IPC.boardRead:
+      case IPC.boardSave:
+        return this.showsPath(first) ? null : 'The board window reads and saves only the board it shows'
+      case IPC.reveal:
+        return this.showsPath(first) || (typeof first === 'string' && isMediaName(first.slice(first.lastIndexOf('/') + 1)))
+          ? null
+          : 'The board window can show only pictures, videos and its own board in the file manager'
+      default:
+        return null
+    }
+  }
+
+  /** Whether `path` is the vault path of the note the window shows (the platform's way of comparing: not case-blind on Linux). */
+  showsPath(path: unknown): boolean {
+    return typeof path === 'string' && this.isShown(path)
   }
 
   status(): BoardStatusDto {
@@ -682,21 +753,39 @@ export class BoardWindowHost {
     const w = this.live()
     if (!w || !this.isShown(from)) return
     this.shown = to
+    // The page is loaded again on the new name, and a banner it had goes with it.
+    this.notice = null
     try {
       await this.load(w, to)
     } catch {
+      this.notice = 'lost'
       this.tellGone(w, `The note was renamed to ${to}, and the window could not follow it. Close this window and open the board again.`)
       return
     }
     this.broadcast()
   }
 
-  private tellGone(w: BrowserWindow, why: string): void {
+  /** `board:gone` to the page: the banner's text, or null to take it down. */
+  private tellGone(w: BrowserWindow, why: string | null): void {
     try {
       if (!w.isDestroyed()) w.webContents.send(IPC.boardGone, why)
     } catch {
       /* the board window went away mid-send */
     }
+  }
+
+  /** The note is gone or is no board: the banner says so (and keeps the rename notice, which says more). */
+  private raiseNotice(w: BrowserWindow, why: string): void {
+    if (this.notice === 'lost') return
+    this.notice = 'note'
+    this.tellGone(w, why)
+  }
+
+  /** The note reads as a board again: the banner `raiseNotice` put up comes down. Sent only when there is one. */
+  private clearNotice(w: BrowserWindow): void {
+    if (this.notice !== 'note') return
+    this.notice = null
+    this.tellGone(w, null)
   }
 
   /** `board:configure`: new settings (from either window), applied to the window if it is open and remembered. Returns the status. */
@@ -736,10 +825,15 @@ export class BoardWindowHost {
       for (const c of changes) {
         if (c.kind === 'addDir' || c.kind === 'unlinkDir' || !same(c.path)) continue
         out.push(c)
-        // The note is gone, or is no longer one the window could save to: say so for good (a toast of a few seconds is not enough).
-        if (c.kind === 'unlink') this.tellGone(w, 'The note of this board was deleted or moved away, so nothing done in this window is saved any more. Bring the board back to leave it.')
-        else if (c.content !== undefined && boardNoteVerdict(c.content) !== 'yes') {
-          this.tellGone(w, 'This note was edited so that it no longer reads as a board (type: board in its frontmatter), so the window can no longer save to it.')
+        // The note is gone, or is no longer one the window could save to: say so (a toast of a few seconds is not enough), and take it
+        // back when the note is a board again (a sync tool or an editor that writes in place, a delete and a re-create, a draft typed
+        // through `type: boa`). In order, so that a delete and its re-create in one batch end with no banner. A note over the window's
+        // limit is no note it can save to, so it does not take the banner down.
+        if (c.kind === 'unlink') this.raiseNotice(w, 'The note of this board was deleted or moved away, so nothing done in this window is saved any more. Bring the board back to leave it.')
+        else if (c.content !== undefined) {
+          if (boardNoteVerdict(c.content) !== 'yes') {
+            this.raiseNotice(w, 'This note was edited so that it no longer reads as a board (type: board in its frontmatter), so the window can no longer save to it.')
+          } else if (c.content.length <= MAX_BOARD_TEXT) this.clearNotice(w)
         }
       }
     }
@@ -774,6 +868,9 @@ export class BoardWindowHost {
 
   private async show(path: string): Promise<BoardStatusDto> {
     this.hookBrain()
+    // A window on its way out (its page is saving what it has) is not reused: loading a page into it fails with a Chromium error,
+    // so the board waits for the window to go and gets a new one.
+    await this.untilClosed()
     let w = this.live()
     if (!w) {
       w = this.createWindow()
@@ -793,6 +890,7 @@ export class BoardWindowHost {
     if (previous !== null) await this.gate.ask(w.webContents)
     if (w.isDestroyed()) throw new Error('The board window was closed')
     this.shown = path
+    this.notice = null
     if (previous !== null) this.toBrain(IPC.boardClosed, previous)
     try {
       await this.load(w, path)
@@ -803,6 +901,23 @@ export class BoardWindowHost {
     }
     this.broadcast()
     return this.status()
+  }
+
+  /** Resolves once the window whose close is under way is gone; a close that something kept from happening is given up on after twice the flush wait. */
+  private async untilClosed(): Promise<void> {
+    const w = this.closing
+    if (!w || w.isDestroyed()) return
+    await new Promise<void>((resolve) => {
+      const done = (): void => {
+        clearTimeout(timer)
+        w.removeListener('closed', done)
+        resolve()
+      }
+      const timer = setTimeout(done, FLUSH_WAIT_MS * 2)
+      w.on('closed', done)
+    })
+    // Still there: the close did not go through, and the window is as it was.
+    if (this.closing === w && !w.isDestroyed()) this.closing = null
   }
 
   private async load(w: BrowserWindow, path: string): Promise<void> {
@@ -831,6 +946,7 @@ export class BoardWindowHost {
     const pageId = wc.id
     this.pageIds.add(pageId)
     wc.once('destroyed', () => this.pageIds.delete(pageId))
+    this.lockBrowserChords(w)
     // The page has no links and opens nothing: a window it asks for is denied, and no address goes to the browser.
     wc.setWindowOpenHandler(() => ({ action: 'deny' }))
     // The window never needs to leave its page: any navigation away is stopped, and one that got through (about:blank, set by
@@ -875,11 +991,13 @@ export class BoardWindowHost {
     w.on('resize', () => this.scheduleSave())
     // Where the window was is remembered on every close event; the first close is held until the page has saved (FlushGate).
     this.gate.guardClose(w, () => {
+      this.closing = w
       this.captureBounds(w)
       this.persist()
     })
     w.on('closed', () => {
       clearTimeout(revealTimer)
+      if (this.closing === w) this.closing = null
       if (this.win !== w) return
       const path = this.shown
       this.win = null
@@ -888,6 +1006,40 @@ export class BoardWindowHost {
       this.broadcast()
     })
     return w
+  }
+
+  /**
+   * The window is not a browser: its own menu (Windows, Linux; macOS has the application menu) in place of Electron's default one, and
+   * a page that stays at 100% (no zoom chord, no wheel or pinch zoom; a zoom carried over from the brain window's page is put back).
+   */
+  private lockBrowserChords(w: BrowserWindow): void {
+    const { Menu } = this.opts.electron
+    if (this.platform !== 'darwin' && Menu && typeof w.setMenu === 'function') {
+      try {
+        w.setMenu(Menu.buildFromTemplate(boardMenuTemplate(() => w.close())))
+      } catch {
+        /* a menu that cannot be made leaves the default one */
+      }
+    }
+    const wc = w.webContents
+    const reset = (): void => {
+      try {
+        if (!wc.isDestroyed() && wc.getZoomFactor() !== 1) wc.setZoomFactor(1)
+      } catch {
+        /* a page that is gone, or a webContents without zoom */
+      }
+    }
+    try {
+      void Promise.resolve(wc.setVisualZoomLevelLimits(1, 1)).catch(() => undefined)
+    } catch {
+      /* the same */
+    }
+    wc.on('zoom-changed', reset)
+    wc.on('did-finish-load', reset)
+    // macOS keeps the application menu, whose zoom items would reach this window: the chord is stopped before the menu sees it.
+    wc.on('before-input-event', (e, input) => {
+      if (isPageZoomChord(input)) e.preventDefault()
+    })
   }
 
   private applyOnTop(w: BrowserWindow): void {

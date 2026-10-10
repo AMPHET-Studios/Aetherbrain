@@ -214,6 +214,10 @@ export function parseNote(file: VaultFile): ParsedNote {
     for (let i = 0; i < textChunks.length; i++) textChunks[i] = back(textChunks[i]!)
   }
 
+  // The words written on a board (its notes, its captions) are search text and count as words, though they were taken out of the
+  // markdown: they are not text nodes, so none of them becomes a link or a tag, and no coordinate or attribute is among them.
+  if (board) for (const words of board.texts) textChunks.push(words)
+
   // The pictures of a board, from its lines (an embed is a link like any other; a `pic` line names a picture whose path cannot be
   // written as a wikilink, so its link is marked to be read as the path it is). Merged in by position.
   if (board && board.pictures.length > 0) {

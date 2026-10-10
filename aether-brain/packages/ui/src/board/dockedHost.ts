@@ -8,7 +8,9 @@
  * anything else (and not the very text to be written) it is refused with `BoardChangedOutsideError` ("changed outside") and the
  * external-change callbacks are told, so the view reloads or warns; the host then refuses every save until `load()` reads the note
  * again, so a view that keeps trying cannot overwrite a newer edit, and every refusal asks for that reload once more (a reload that
- * failed because the note was edited into something that is no board can succeed once the note is put right). The store's own report of
+ * failed because the note was edited into something that is no board can succeed once the note is put right). A refusal of a save
+ * that began before the last reload ended is about a text the view has already replaced: it asks for the reload but does not set the
+ * flag again (it would block the save the view makes from the new text). The store's own report of
  * a write (it applies every write as an outside change) is told apart from somebody else's by the texts this host read or wrote: it
  * keeps the last few, like the floating window's host.
  *
@@ -18,7 +20,7 @@ import { basenameOf, idFromPath, isImagePath, parseBoard, type VaultAsset } from
 import { copyText } from '../components/pictures'
 import { useAether } from '../store'
 import { getBoardWindowControl, type BoardWindowControl } from './active'
-import type { BoardHost, BoardWindowHost } from './api'
+import { BOARD_GONE, type BoardHost, type BoardWindowHost } from './api'
 import { BoardChangedOutsideError } from './boardRegistry'
 
 export { BoardChangedOutsideError } from './boardRegistry'
@@ -41,6 +43,8 @@ export function createDockedBoardHost(path: string): DockedBoardHost {
   let lastKnown: string | null = null
   /** A save found the note changed: refused until the note is read again. */
   let stale = false
+  /** How many reads have ended: a refusal of a save that was called before the latest one is about a text that has been replaced. */
+  let loads = 0
   /** The last few texts read or written, newest last. */
   const echoes: string[] = []
   const remember = (text: string): void => {
@@ -56,7 +60,7 @@ export function createDockedBoardHost(path: string): DockedBoardHost {
   /** Saves run one after the other. */
   let writing: Promise<unknown> = Promise.resolve()
 
-  async function write(raw: string, expectedBase?: string): Promise<void> {
+  async function write(raw: string, expectedBase: string | undefined, loadsAtCall: number): Promise<void> {
     if (stale) {
       // Still not read again: ask again (the view may have given up on a reload that could not read the note).
       changedOutside()
@@ -68,7 +72,7 @@ export function createDockedBoardHost(path: string): DockedBoardHost {
       await store().saveBoard(path, raw, expectedBase ?? lastKnown)
     } catch (err) {
       if (err instanceof BoardChangedOutsideError) {
-        stale = true
+        if (loads === loadsAtCall) stale = true
         changedOutside()
       }
       throw err
@@ -158,16 +162,25 @@ export function createDockedBoardHost(path: string): DockedBoardHost {
       return `${store().adapter?.location ?? ''}\n${path}`
     },
     async load() {
+      // A board that was open and whose note has gone: the Boards view has said so, and the store would say it again (a toast of its
+      // own). The session is told by the error's name and keeps quiet; its saves say what they must.
+      if (lastKnown !== null && !store().notes.has(id)) {
+        const gone = new Error('The note of this board is gone from the vault')
+        gone.name = BOARD_GONE
+        throw gone
+      }
       const text = await store().readBoard(path)
       if (text === null) throw new Error('This note is not a board, is gone, or could not be read')
       lastKnown = text
       stale = false
+      loads++
       remember(text)
       title = parseBoard(text).doc.title.trim() || store().notes.get(id)?.meta.title || fileTitle
       return text
     },
     save(raw, expectedBase) {
-      const run = writing.then(() => write(raw, expectedBase))
+      const loadsAtCall = loads
+      const run = writing.then(() => write(raw, expectedBase, loadsAtCall))
       writing = run.catch(() => undefined)
       return run
     },

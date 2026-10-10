@@ -1072,7 +1072,8 @@ describe('what a board note does to the brain: imported text stays inert', () =>
     const board = parseNote({ path: 'Boards/Hostile.md', content: raw })
     expect(board.links.map((l) => [l.kind, l.to])).toEqual(everyPicture.map((p) => ['embed', p]))
     expect(board.inlineTags).toEqual([])
-    expect(board.plain).not.toContain('Secret')
+    // (The words on the board are search text since round 2 - `[[Secret]]` is the word "Secret" there; it is no link, as just checked.)
+    expect(board.plain).toContain('Secret')
     // As a plain note, they go through the real markdown parser: only the embeds the board wrote are links, and nothing else.
     const n = parseNote({ path: 'Boards/Hostile.md', content: plain(raw) })
     expect(n.links.map((l) => [l.kind, l.to])).toEqual(embedded.map((p) => ['embed', p]))
@@ -1213,7 +1214,8 @@ describe('boardFolderName', () => {
   it('also keeps out of the way of Windows device names and the temp suffix of the vault', () => {
     expect(boardFolderName('CON')).toBe('CON pictures')
     expect(boardFolderName('lpt1')).toBe('lpt1 pictures')
-    expect(boardFolderName('nul.txt')).toBe('nul.txt pictures')
+    // (Round 2: the suffix goes right after the device word - at the end of `nul.txt` the name would still be NUL.)
+    expect(boardFolderName('nul.txt')).toBe('nul pictures.txt')
     expect(boardFolderName('console')).toBe('console')
     expect(boardFolderName('x.aether-tmp')).toBe('x.aether-tmp pictures')
   })

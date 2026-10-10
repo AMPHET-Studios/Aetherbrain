@@ -18,6 +18,9 @@ export class FakePage extends EventEmitter {
   /** A loaded page (the handshake only waits for one). */
   loading = false
   reloads = 0
+  /** The page zoom (Electron: 1 is 100%), and the pinch limits last asked for. */
+  zoom = 1
+  zoomLimits: [number, number] | null = null
   openHandler: ((d: { url: string }) => { action: string }) | null = null
   /** What the page does when main asks it to save: called with the token. Default: nothing (a page that never answers). */
   onFlush: ((token: number) => void) | null = null
@@ -30,6 +33,16 @@ export class FakePage extends EventEmitter {
   }
   reload(): void {
     this.reloads++
+  }
+  getZoomFactor(): number {
+    return this.zoom
+  }
+  setZoomFactor(f: number): void {
+    this.zoom = f
+  }
+  setVisualZoomLevelLimits(min: number, max: number): Promise<void> {
+    this.zoomLimits = [min, max]
+    return Promise.resolve()
   }
   isDestroyed(): boolean {
     return this.destroyed
@@ -57,6 +70,8 @@ export class FakeWin extends EventEmitter {
   onTop: [boolean, string | undefined][] = []
   allWorkspaces: [boolean, unknown][] = []
   loadError: (Error & { code?: string }) | null = null
+  /** What `setMenu` was given (Electron: the window's own menu, Windows and Linux). */
+  menus: unknown[] = []
   constructor(readonly options: Record<string, unknown> = {}) {
     super()
   }
@@ -71,6 +86,9 @@ export class FakeWin extends EventEmitter {
   }
   restore(): void {}
   focus(): void {}
+  setMenu(menu: unknown): void {
+    this.menus.push(menu)
+  }
   show(): void {
     this.visible = true
   }
@@ -129,7 +147,7 @@ export interface Rig {
 }
 
 /** A host over fake windows. `answer`: how the board page behaves when asked to save (default: it answers at once). */
-export function rig(opts: { platform?: NodeJS.Platform; answer?: number | null; devUrl?: string | null; settings?: Partial<BoardSettings> } = {}): Rig {
+export function rig(opts: { platform?: NodeJS.Platform; answer?: number | null; devUrl?: string | null; settings?: Partial<BoardSettings>; menu?: boolean } = {}): Rig {
   FakeWin.made = []
   const brain = new FakeWin()
   const gate = new FlushGate()
@@ -153,6 +171,8 @@ export function rig(opts: { platform?: NodeJS.Platform; answer?: number | null; 
     screen: { getAllDisplays: () => [display], getPrimaryDisplay: () => display },
     shell,
     dialog,
+    // Electron's Menu in miniature: the menu is the template it was built from.
+    ...(opts.menu === false ? {} : { Menu: { buildFromTemplate: (template: unknown) => ({ template }) } }),
   } as unknown as BoardElectron
   const host = new BoardWindowHost({
     electron,

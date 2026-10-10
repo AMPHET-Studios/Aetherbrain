@@ -87,9 +87,13 @@ Reference board. Open it from the Boards view (8). Everything under "Board" is r
 
 Rules:
 
-- Only the lines under the first `## Board` heading (outside code fences) up to the next heading of level 1 or 2 belong to the board.
+- The board is the first `## Board` heading (outside code fences and comments) and the lines from there to its **last item line**, plus
+  the lines that follow that one with no blank line in between; a heading of level 1 or 2 ends the search, but the span does not run
+  on to it: a blank line after the last item starts the user's text. After a blank line a bullet counts as an item only when it looks
+  like one the board writes (`writtenLike`: attributes, text after ` » `, a picture file), so `- note the colours` stays the user's.
   `serializeBoard(doc, raw)` rewrites exactly that span (adding the heading at the end when missing) and returns everything else
-  byte for byte; frontmatter is patched with the existing in-place helpers (`title`, `type`, `updated`).
+  byte for byte, the text after the last item line included; frontmatter is patched with the existing in-place helpers (`title`,
+  `type`, `updated`).
 - One item per list line, back to front. First token after `- ` is the kind: `view`, an embed `![[path]]`, `pic` (a picture whose
   path cannot be embedded), `note`, `stroke`, `line`, `rect`, `ellipse`. Then `key=value` pairs separated by single spaces and bare
   flags (`gray`, `lock`, `arrow`). Numbers are written with at most 2 decimals (crop edges and mark widths with 3, the zoom with 4), trimmed. Colours are 6 hex digits
@@ -103,13 +107,24 @@ Rules:
   space; no `&...;` character reference; no web address or e-mail address (what a markdown parser turns into its own link); none
   of `*`/`_`/`~` that could pair into emphasis; otherwise as `pic path` with the path escaped and no graph link. Paths are the vault's own picture paths. A picture that is missing from the vault keeps
   its line and its place, and is drawn as a placeholder.
-- Lines under `## Board` the reader does not understand (a hand-written remark, an item kind of a newer version) go to `doc.extra`
-  and are written back after the items; an attribute it does not know on a line it does is kept on the item (`unknown`) and written
-  back as it was, with a warning. A bad number on a known line is ignored for that attribute with a warning, never the line: the
-  default is used, and the next save writes the default in its place.
-- Everything outside the board's span (the frontmatter apart from the patched keys, the text above, the text below up to the end of
-  the note) is returned byte for byte.
-- Limits (`BOARD_LIMITS`): 1,500 items, 4,000 characters per note, 3,000 points per stroke, and a **size budget** of 500,000 characters
+- **A save rewrites every line of the span** from the model (`itemLine`): known attributes in a fixed order, numbers cut to their
+  decimals, a note always with `r=` and `fill=`, a rect or ellipse with no fill gaining an empty `fill=`, groups counted again from 1.
+  Hand-written lines therefore change on the first save; saving an unchanged board in that form gives `raw` back.
+- Lines inside the span that the reader does not understand (a hand-written remark, an item kind of a newer version) and any prose
+  between the heading and the first item or between items go to `doc.extra` (a warning for a `- ` line it cannot read, none for
+  prose and none for a to-do line) and are written back **right after the last item, in order, without their blank lines**: they are kept, but not in
+  place. An attribute or flag it does not know on a line it does is kept on the item (`unknown`, at most 8 a line) and written after
+  the known ones (before `pts=` on a stroke), with a warning when read, but only when it is a plain name with a plain value
+  (`KEPT_TOKEN`: a name `[A-Za-z][A-Za-z0-9-]{0,31}`, a value `[A-Za-z0-9.,:+-]{0,64}`); a token with any other character (`source=my_file`,
+  `ref=a/b`: what a markdown parser would read as a link, tag, emphasis or html) is dropped with a warning. A bad number on a known
+  line is ignored for that attribute with a warning, never the line: the default is used, and the next save writes the default in
+  its place.
+- Everything outside the board's span (the frontmatter apart from the patched keys, the text above, the text after the board's last
+  item line up to the end of the note) is returned byte for byte.
+- Limits (`BOARD_LIMITS`): 1,500 items, 4,000 characters per note and 3,000 points per stroke that a user can make (a file may hold a
+  note of up to 100,000 characters and a stroke of 50,000 points: `noteCharsFile`, `strokePointsFile`; a longer note from a file is
+  kept whole and never cut by editing it, `noteCap` in `controller.ts`: the text box takes at most that many characters, a commit of
+  the unchanged text changes nothing), and a **size budget** of 500,000 characters
   for the board's items, measured by `boardChars(doc)` / `itemChars(item)` (a cached count per item, within a few characters of what
   `serializeBoard` writes, no serialising per pointer move). Reading a board over a limit keeps the first items and warns. The budget is
   enforced **when the board grows**: any operation that would make `boardChars(next)` exceed it AND exceed `boardChars(current)` is
@@ -125,8 +140,9 @@ Saving costs a re-parse of the note and a graph rebuild on the main thread. `par
 the board's own line scan, 6 to 7 ms for a 1,500-picture or a 300-stroke board against 215 to 290 ms through the markdown parser, and
 none of their text becomes links, tags or search text; the picture embeds are still the note's links), so what is left of a save in a
 big vault is the graph rebuild (a save of a 242 KB board in a vault of 5,000 notes measured about 80 ms on a loaded test machine). The view saves **at most once per second while changing and
-once at the end of a gesture**, never per pointer move, and not at all for a pan or zoom alone (the view goes to `localStorage` per
-board and vault and is written into the file with the next real change).
+once at the end of a gesture** (one that ends within `FINAL_BURST_MS` = 250 ms of the previous final change rides the throttle and
+lands within the second; a close, blur, hide, dock or quit flushes), never per pointer move, and not at all for a pan or zoom alone
+(the view goes to `localStorage` under the host's `stateKey` and is written into the file with the next real change).
 
 ## Core (`packages/core/src/board/`)
 
@@ -166,7 +182,9 @@ Pure TypeScript, no DOM. Exported from `@aether/core`.
   history?, viewport? })`; `state: BoardUiState`; `subscribe(cb)`; `onChange(cb(doc, why: { reason, final, viewOnly }))` (for saving:
   `final` is true at the end of a gesture, false while a drag runs, `viewOnly` for a pan or zoom); `onEvent(cb(BoardEvent))` (toasts,
   sampler requests, palette requests, commands only the shell can carry out); `setViewport(w, h)`, `setView(view)`, `replaceDoc(doc, {
-  view? })` (an outside change: keeps the history and, where the ids line up, the selection; counts as saved), `markSaved()`,
+  view? })` (an outside change: a board that holds the same work changes nothing; any other **starts the history again from it**, a
+  barrier, so an undo cannot take back what another program wrote; keeps the camera and the selection of items that are exactly what
+  they were; counts as saved), `markSaved()`,
   `setStyle(patch)`, `pointerDown/Move/Up/Cancel(e: PointerIn)`, `pointerLeave()`, `blur()`, `wheel(e: WheelIn)`, `key(e: KeyIn):
   boolean` (true when consumed), `exec(id, arg?)`, `addPictures(items: { path, w, h }[], at?)`, `setNaturalSize(path, w, h)`,
   `naturalSize(path)`, `addNoteAt(p)`, `editNote(id)`, `commitNoteText(id, text)`, `cancelNoteEdit()`, `sampleAt(p, hex | null)`,
@@ -210,7 +228,9 @@ Pure TypeScript, no DOM. Exported from `@aether/core`.
 - `BoardsView.tsx`: the Boards view. A wrapper that renders nothing while the view is closed; the list of boards (cards in pages of 24, a
   collage of up to 4 pictures per card loaded only while the card is in view, a search box, a *New board* tile, an empty state); and an
   open board: a breadcrumb over `<BoardView host={createDockedBoardHost(path)} />` inside an `ErrorBoundary`, or, while the floating window
-  has that board, a card with *Bring it back* and the window's on-top and opacity state. It registers the active board's `flush` with the
+  has that board, a card with *Bring it back* and the window's on-top and opacity state. The card belongs to the open board only: the
+  list draws every board the same (a ⧉ pop-out button on its card) whether the window has it or not, so a pop-out from the list shows
+  nothing in the app until that board is opened. It registers the active board's `flush` with the
   window control (`setFlush`) so that popping out waits for the pending save (a `false` answer, a save that could not be made, stops the
   pop-out). *Built as:* a board whose note disappears (deleted or moved by a sync tool or git) is **not** closed: the view keeps it
   open with the title and path the note had, a notice (`role="status"`) and one toast, its saves are refused (the session offers *Copy
@@ -223,11 +243,11 @@ Pure TypeScript, no DOM. Exported from `@aether/core`.
 
 | `BoardHost` | Docked |
 | --- | --- |
-| `load()` | `store.readBoard(path)`: the file as it is on disk (a pending editor draft is saved first, a change the watcher has not reported is applied). Resets "changed outside". |
+| `load()` | `store.readBoard(path, opts?)`: the file as it is on disk (a pending editor draft is saved first, a change the watcher has not reported is applied). Resets "changed outside". `readBoard` toasts "Could not open the board: …" when the note is not in the vault, is gone from the disk or is no board; `{ quiet: true }` leaves those toasts out, for a reload of a board that is already open (its view has said what became of it; the host answers a note that has gone since it was read with an error named `BOARD_GONE`, which the session does not say again). |
 | `save(raw, expectedBase?)` | `store.saveBoard(path, raw, expectedBase ?? lastKnown)`: runs in the note's exclusive queue; `expectedBase` is the text `raw` was made from, so a reload that landed in between cannot make a stale text look fresh. Refuses with `BoardChangedOutsideError` (message contains "changed outside") when the file holds neither that text nor `raw`; the host then refuses every save until `load()` reads the note again, and **every refusal tells the external-change callbacks again** (a reload that failed because the note was edited into a non-board can succeed once it is put right). Also refuses when the editor holds unsaved edits of the note, the vault is read-only, the note is gone, `raw` is not a board, or (when nothing was expected) the note on disk is not a board. Saves are serialised. Never toasts (the view does). |
-| `stateKey` | the vault's location and the path: what the browser's memory of the board (its camera, the copy of an unsaved board) is kept under, so a board of the same path in another vault is another board. |
+| `stateKey` | the vault's location and the path: what the app's memory of the board (its camera, the copy of an unsaved board) is kept under, so a board of the same path in another vault is another board. The docked host only: the floating host has none, so the session falls back to the note's path, and the window's camera and copy are kept per path (not per vault) and apart from the docked view's. |
 | `onExternalChange(cb)` | follows the store's copy of the note; ignores the last 4 texts it read or wrote (its own saves, and a slow watcher's late echo of them); a deleted note is reported too. Listens only while somebody is subscribed. |
-| `pictures.preview` / `original` | `store.preview(path, px)` / `store.readPicture(path)` (`VaultAdapter.readAsset`) |
+| `pictures.preview` / `original` | `store.preview(path, px)` / `store.readPicture(path)`: the whole picture (`VaultAdapter.readAsset`), or, on an adapter that has `readAssetChecked` (the desktop's), a rejection carrying `reason` (`'missing'`, `'too-large'` for a file over 64 MiB or a header that claims over 150 megapixels, `'unreadable'`), which the picture cache keeps so the placeholder says *too large to show* rather than *can't be read*; the web and memory adapters give a picture or null. |
 | `pictures.add(files)` | `store.importBoardPictures(path, files)`: create-only into `boardFolderOf(path)`, one graph rebuild for the batch, nothing selected, no success toast, one answer per file (`null`: refused or failed); a folder the vault refuses (`excluded from the vault`) is replaced by `<folder> pictures` from then on. |
 | `pictures.list()` / `exists(p)` | pictures of `store.assets` (videos left out) / `assets.has(p)` |
 | `pictures.open` / `reveal` / `showInBrain` | `store.openImage` / `store.reveal` (present only where the vault can) / `store.showPicture` (leaves the view, selects the picture's node, flies there) |
@@ -269,13 +289,17 @@ enough is selected; the window rows are registered by the desktop app, so no tit
   supportsOpacity }`, `board:configure({ alwaysOnTop?, opacity? })` (applies to the board window; callable from either window),
   `board:save(path, text, expectedBase?)` (see below), `board:read`, `board:assets`, the close handshake `board:flush` (main to page, with a
   token) / `board:flushed` (page to main), events `board:state` (to both windows) and `board:closed(path)` (to the brain window).
-  `board:save` accepts only a vault `.md` path whose current file (or empty) is a board note (`type: board` in the first 4 KB),
-  text ≤ 1,000,000 characters (`MAX_BOARD_TEXT`), compares the note with `expectedBase` and writes in one call (no read-then-write gap
+  `board:save` accepts only a vault `.md` path that is an existing, plain (not a link) file whose head already says `type: board`
+  (a missing, empty or ordinary note is refused: it never creates a note and never turns one into a board), and a new text that is
+  itself a board note of at most 1,000,000 characters (`MAX_BOARD_TEXT`); it compares the note with `expectedBase` and writes in one call (no read-then-write gap
   between the window and main), with `FsVault.write` and **without** `noteSelfWrite`. `board:open` refuses a note over the cap up front
   with a message, so a window is never opened on a board it cannot read. A window's close (and a move to another board, a vault
   switch, quitting) is held while its page is asked to write what it has not written (`FlushGate`, 1.5 s at most). The window's page
-  may use only `BOARD_PAGE_CHANNELS`; main refuses every other channel from it.
-- **`src/renderer/board.html` + `board.tsx`**: mounts `BoardView` with the floating host (reads `?path=`; loads with `readFile`,
+  may use only `BOARD_PAGE_CHANNELS`; main refuses every other channel from it, and on the ones it has it refuses what names another
+  board or note: `board:read` and `board:save` only for the path the window shows (`BoardWindowHost.pageRefusal`, applied by `guardIpc`
+  to the board page's messages alone; the brain window is not judged), `vault:reveal` only for a picture, a video or that board.
+  The window has a menu of its own on Windows and Linux (Close, Edit) and no zoom chord, reload, full screen or DevTools shortcut.
+- **`src/renderer/board.html` + `board.tsx`**: mounts `BoardView` with the floating host (reads `?path=`; loads with `board:read`,
   saves with `board:save`; pictures through `thumbnail`, `readAsset`, `createAsset` into the board folder, `listAssets`). Vite
   builds two inputs (`index`, `board`); the CSP meta (with the `%VITE_CSP_*%` placeholders) is repeated. Never calls `boot()` /
   `openVault` / `listFiles`.
@@ -325,6 +349,17 @@ enough is selected; the window rows are registered by the desktop app, so no tit
   videos on a board), `board-fix-integration-host` (a save judged against its own base text, a repeated refusal asks for the reload
   again), `board-fix-integration-statekey` (the camera per vault), `packages/graph/test/board-fix-integration-covered` (the scene's frame
   rule and the controller's switch).
+- **Round 2 (node, second review):** `board-fix2-integration-store` (`readPicture` rejects with the desktop adapter's reason and the docked
+  host with a real picture cache gives *too large to show* once and keeps it; `readBoard` with `quiet`), `board-fix2-integration-docs` (the
+  sentences of the guide, the design, the spec and CLAUDE.md about saving, the board's span, the limits, the pop-out card, the page's scope
+  and the window's menu, each pinned to the code it describes, the old sentence pinned absent; the spec's NoteType and the demo vault's
+  note count against the code), `board-fix2-core-*` (the header reader past 256 KB, Windows device names, the user's remarks between
+  items, the words on a board as search text), `board-fix2-ui-*` (a note over the creation limit that is never cut by editing, a drop onto
+  a full board that copies nothing, a save and a reload that cross, the close that waits for the reload that heals a refused save, a paste
+  event nobody asked for, a Mac Option bracket; in Chromium the long note's text box, the middle button, the sampler's canvas),
+  `board-fix2-core-loader` (the 150-megapixel gate in the loader and in Chromium with real flat JPEGs) and
+  `apps/desktop/test/board-fix2-desktop-*` (the page may name only the board it shows, the banner that comes down by itself, the window's
+  menu and its fixed zoom, a board opened while the window holds its close).
 - **Chromium (local, skipped without a browser):** `board-fix-integration-chromium` mounts the whole app on software GL with the compiled
   stylesheet and counts WebGL draw calls: none behind the Boards view and the Projects board, drawing again when they close, still
   drawing behind review and capture; the panels over a paused scene are solid; Shift+Enter in the palette steps out of the Boards view;

@@ -31,8 +31,11 @@ export interface FloatingBoardOptions {
   status?: BoardStatusDto
 }
 
-/** The host, and the way to let go of its subscriptions. */
-export type FloatingBoardHost = BoardHost & { dispose(): void }
+/**
+ * The host, and the way to let go of its subscriptions. `latestText` is the newest text of the note this window read or tried to write
+ * (null before the first read): what "Copy board text" copies when the note is gone and cannot take a save.
+ */
+export type FloatingBoardHost = BoardHost & { dispose(): void; latestText(): string | null }
 
 const errorText = (err: unknown): string => (err instanceof Error ? err.message : String(err))
 const nameOf = (p: string): string => p.slice(p.lastIndexOf('/') + 1)
@@ -77,6 +80,8 @@ export function createFloatingBoardHost(bridge: BoardBridge, path: string, opts:
 
   /** The note as this window last read or wrote it: a read that differs is somebody else's edit. */
   let lastKnown: string | null = null
+  /** The newest text this window read or tried to write, a refused try included (see `latestText`). */
+  let latest: string | null = null
   /**
    * The last few texts this window read or wrote, newest last. The watcher reports each save a moment after it (and a slow report
    * can arrive after the next save has begun), so a change carrying one of these is our own echo, not somebody else's edit. Bounded:
@@ -104,6 +109,7 @@ export function createFloatingBoardHost(bridge: BoardBridge, path: string, opts:
   async function write(raw: string, expectedBase?: string): Promise<void> {
     // Before the call: the watcher may report the write before the answer to it gets back here.
     remember(raw)
+    latest = raw
     const res = await bridge.boardSave(path, raw, expectedBase ?? lastKnown ?? undefined)
     if (!res.ok) {
       // Refused, so nothing of it is on disk: it is no echo of ours.
@@ -279,6 +285,7 @@ export function createFloatingBoardHost(bridge: BoardBridge, path: string, opts:
       })
       if (text === null) throw new Error('This note is gone, or is no longer a board (type: board in its frontmatter)')
       lastKnown = text
+      latest = text
       remember(text)
       title = parseBoard(text).doc.title.trim() || title
       return text
@@ -343,6 +350,7 @@ export function createFloatingBoardHost(bridge: BoardBridge, path: string, opts:
     toast,
     copyText: (text) => bridge.copyText(text),
     window: controls,
+    latestText: () => latest,
     dispose() {
       offChanges()
       offState()
