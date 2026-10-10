@@ -49,8 +49,7 @@ import {
 import { THUMB_IPC, Thumbnailer, VIDEO_SCHEME } from './thumbnailer.js'
 import { AiLinkHost, aiSettings, cleanPatch, type AiLinkSettings, type LinkVault } from './ai-link.js'
 import { ForgeHost, forgeSettings, type ForgeSettings } from './forge.js'
-import { BoardWindowHost, PictureLedger, boardSettings, cleanBoardPath, type BoardSettings } from './board-window.js'
-import { checkBoard, readBoard, saveBoard } from './board-save.js'
+import { BoardWindowHost, PictureLedger, boardHandlers, boardSettings, type BoardSettings } from './board-window.js'
 import { readAssetBytes } from './read-asset.js'
 import { CompanionHost, companionSettings, type CompanionSettings } from './companion.js'
 import { ChatHost, chatSettings, type ChatSettingsStored } from './chat-host.js'
@@ -301,6 +300,9 @@ async function openVault(input: string[]): Promise<VaultInfo> {
     )
   }
   const next = new FsVault(ok, { exclude: settings.exclude ?? [], hidden: settings.hidden ?? [], keep: settings.keep ?? [] })
+  // A floating board belongs to the vault it was opened in: another set of roots changes every vault path (a second root puts a
+  // mount in front of them), so its page would read and save paths that are no longer the board's. Folder rules do not (same roots).
+  if (!vault || vault.roots.length !== ok.length || vault.roots.some((r, i) => rootKey(r.abs) !== rootKey(ok[i]!))) board?.close()
   generation++
   watcher?.stop()
   watcher = null
@@ -591,16 +593,6 @@ async function openAsset(p: unknown): Promise<void> {
   if (isVideoName(path.basename(abs)) && !videoKindOf(await readHead(abs, VIDEO_HEAD_BYTES))) throw new Error(`Not a video: ${rel}`)
   const err = await shell.openPath(abs)
   if (err) throw new Error(`Could not open ${rel}: ${err}`)
-}
-
-/**
- * Every picture of the vault as it is now: the last scan's list with what changed since, for the floating board window (`listAssets`
- * is the scan's snapshot, and a picture dropped into a board a minute ago would be drawn there as a missing one). No stat: the
- * board needs names, and the list can be 200,000 long.
- */
-function boardAssets(): AssetListDto {
-  const scan = vault?.lastScan
-  return { assets: pictureLedger.list(scan?.assets ?? []), truncated: (scan?.assetsTruncated ?? false) || pictureLedger.overflowed }
 }
 
 /** OS folder picker; null when cancelled. */
@@ -912,20 +904,17 @@ function createBoardWindow(): BoardWindowHost {
 /**
  * Either window opens, closes and sets up the floating board window; its page reads and saves the one board note (only a board
  * note that is already there, see board-save.ts) and learns of the vault's pictures from here, since it is not the brain window.
+ * The handlers are plain functions (boardHandlers): this only wires them to their channels.
  */
 function registerBoardIpc(host: BoardWindowHost): void {
-  ipcMain.handle(IPC.boardOpen, async (_e, p: unknown) => {
-    const rel = cleanBoardPath(p)
-    const found = await checkBoard(rel, vault)
-    if (!found.ok) throw new Error(found.reason)
-    return host.open(rel)
-  })
-  ipcMain.handle(IPC.boardClose, () => host.close())
-  ipcMain.handle(IPC.boardStatus, () => host.status())
-  ipcMain.handle(IPC.boardConfigure, (_e, patch: unknown) => host.configure(patch))
-  ipcMain.handle(IPC.boardSave, (_e, p: unknown, text: unknown) => saveBoard({ path: p, text }, vault))
-  ipcMain.handle(IPC.boardRead, (_e, p: unknown) => readBoard(p, vault))
-  ipcMain.handle(IPC.boardAssets, () => boardAssets())
+  const h = boardHandlers({ host, vault: () => vault, scan: () => vault?.lastScan ?? null, ledger: pictureLedger })
+  ipcMain.handle(IPC.boardOpen, (_e, p: unknown) => h.open(p))
+  ipcMain.handle(IPC.boardClose, () => h.close())
+  ipcMain.handle(IPC.boardStatus, () => h.status())
+  ipcMain.handle(IPC.boardConfigure, (_e, patch: unknown) => h.configure(patch))
+  ipcMain.handle(IPC.boardSave, (_e, p: unknown, text: unknown) => h.save(p, text))
+  ipcMain.handle(IPC.boardRead, (_e, p: unknown) => h.read(p))
+  ipcMain.handle(IPC.boardAssets, () => h.assets())
 }
 
 /**

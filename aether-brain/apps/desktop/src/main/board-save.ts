@@ -33,12 +33,23 @@ const FM_OPEN = /^﻿?---[ \t]*\r?\n/
 const FM_CLOSE = /\r?\n(?:---|\.\.\.)[ \t]*(?:\r?\n|$)/
 const FM_CLOSE_EMPTY = /^(?:---|\.\.\.)[ \t]*(?:\r?\n|$)/
 const TYPE_LINE = /^type:/
-const TYPE_BOARD = /^type:[ \t]*(?:board|"board"|'board')[ \t]*(?:#.*)?$/
+// YAML wants a space after the colon and one before a comment: `type:board` is a key of its own and `board#x` a different word, neither of
+// which core's `isBoardNote` reads as a board.
+const TYPE_BOARD = /^type:[ \t]+(?:board|"board"|'board')(?:[ \t]+#.*)?[ \t]*$/
+
+/** The key of a top-level `key: value` line (column 0, not a comment, list item or flow), or null. */
+function topLevelKey(line: string): string | null {
+  const m = /^([^\s#\-?:{}[\],&*!|>'"%@`][^:]*?|"[^"]*"|'[^']*')[ \t]*:(?:[ \t]|$)/.exec(line)
+  return m ? m[1]!.replace(/^["']|["']$/g, '') : null
+}
 
 /**
  * Whether the head of a note is a frontmatter block with `type: board` at its top level: a `---` line first (a byte-order mark may
  * come before it), a closing `---` line, and exactly one `type:` key at column 0 whose value is board (plain or quoted, a trailing
- * comment allowed). A block that is not closed within the head, a nested or repeated `type` and `Board` are not.
+ * comment allowed). A block that is not closed within the head, a nested or repeated `type` and `Board` are not; neither is a block
+ * that repeats any other key, which YAML refuses as a whole (core then reads the note as an ordinary one, and so does this).
+ * Main cannot run core's YAML parser, so this is a check of lines: it may say no where core says yes (a flow mapping, a tag on
+ * the value), and it is tested never to say yes where core says no for a block core can read.
  */
 export function isBoardHead(head: string): boolean {
   const open = FM_OPEN.exec(head)
@@ -46,13 +57,29 @@ export function isBoardHead(head: string): boolean {
   const rest = head.slice(open[0].length)
   const close = FM_CLOSE_EMPTY.exec(rest) ?? FM_CLOSE.exec(rest)
   if (!close) return false
-  const types = rest
+  const lines = rest
     .slice(0, close.index)
     .split('\n')
     .map((l) => l.replace(/\r$/, ''))
-    .filter((l) => TYPE_LINE.test(l))
-  // YAML refuses a repeated key, which makes the whole block unreadable (and the note no board).
+  const keys = new Set<string>()
+  for (const line of lines) {
+    const key = topLevelKey(line)
+    if (key === null) continue
+    if (keys.has(key)) return false
+    keys.add(key)
+  }
+  const types = lines.filter((l) => TYPE_LINE.test(l))
   return types.length === 1 && TYPE_BOARD.test(types[0]!)
+}
+
+/**
+ * The first BOARD_HEAD_BYTES bytes of `text` as they would be on disk (UTF-8), decoded: what `inspect` reads from the file. A save is
+ * judged by the same head the next read will see, so a long non-ASCII title cannot push the closing `---` out of the window the
+ * check looks at after the write (the note would then save fine and never open again).
+ */
+function headOf(text: string): string {
+  // At most 4,096 characters can matter, whatever they weigh in bytes.
+  return new TextDecoder().decode(new TextEncoder().encode(text.slice(0, BOARD_HEAD_BYTES)).subarray(0, BOARD_HEAD_BYTES))
 }
 
 /** A path as a short line for a message. */
@@ -105,7 +132,7 @@ export async function validateBoardSave(dto: { path: unknown; text: unknown }, v
   if (typeof dto.text !== 'string') return { ok: false, reason: 'The board text must be text' }
   if (dto.text.length > MAX_BOARD_TEXT) return { ok: false, reason: `The board is longer than ${MAX_BOARD_TEXT.toLocaleString('en-US')} characters` }
   // A page that lost the frontmatter would leave a note nobody can open as a board again.
-  if (!isBoardHead(dto.text.slice(0, BOARD_HEAD_BYTES))) return { ok: false, reason: 'The text is not a board note (type: board is missing from its frontmatter)' }
+  if (!isBoardHead(headOf(dto.text))) return { ok: false, reason: 'The text is not a board note (type: board is missing from its frontmatter)' }
   return { ok: true }
 }
 

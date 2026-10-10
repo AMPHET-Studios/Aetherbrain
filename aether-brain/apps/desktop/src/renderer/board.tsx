@@ -5,7 +5,11 @@
  */
 import { StrictMode, useSyncExternalStore, type ReactNode } from 'react'
 import { createRoot } from 'react-dom/client'
-import { BoardView, ErrorBoundary, type BoardHost, type BoardTone } from '@aether/ui'
+// The pieces themselves, not '@aether/ui': its index is the whole brain (store, 3D scene, editor), and importing it would load and
+// keep ~2 MB of script in a window that sits over the user's painting program and only ever draws a board.
+import { BoardView } from '../../../../packages/ui/src/board/BoardView'
+import type { BoardHost, BoardTone } from '../../../../packages/ui/src/board/api'
+import { ErrorBoundary } from '../../../../packages/ui/src/components/ErrorBoundary'
 import '@aether/ui/styles.css'
 import type { BoardStatusDto } from '../shared/ipc'
 import { createFloatingBoardHost } from './board-host'

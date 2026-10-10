@@ -13,8 +13,9 @@
  * (settings, bounds, options, navigation) are pure functions.
  */
 import type { BrowserWindow, BrowserWindowConstructorOptions, Dialog, Screen, Shell, WebContents } from 'electron'
-import { IPC, type BoardConfigureDto, type BoardStatusDto, type VaultAssetDto, type VaultChangeDto } from '../shared/ipc.js'
-import { crashMessage, shouldReload } from './crash.js'
+import { IPC, type AssetListDto, type BoardConfigureDto, type BoardSaveResult, type BoardStatusDto, type VaultAssetDto, type VaultChangeDto } from '../shared/ipc.js'
+import { checkBoard, readBoard, saveBoard, type BoardVault } from './board-save.js'
+import { CRASH_WINDOW_MS, crashMessage, shouldReload } from './crash.js'
 import { forgeNavigation } from './forge.js'
 import { isImageName } from './fsvault.js'
 
@@ -295,6 +296,61 @@ export function pictureChanges(changes: readonly VaultChangeDto[]): VaultChangeD
 }
 
 /* ------------------------------------------------------------------ */
+/* IPC handlers                                                       */
+/* ------------------------------------------------------------------ */
+
+/** What the board's IPC handlers need of the app (main.ts hands in its vault, last scan and ledger; tests hand in fakes). */
+export interface BoardIpcContext {
+  host: Pick<BoardWindowHost, 'open' | 'close' | 'status' | 'configure'>
+  /** The open vault, or null before one is opened. */
+  vault(): BoardVault | null
+  /** The pictures of the last scan (names only), or null before one. */
+  scan(): { assets: readonly { path: string }[]; assetsTruncated: boolean } | null
+  ledger: PictureLedger
+  platform?: NodeJS.Platform
+}
+
+/** The handler behind each `board:*` channel. Every argument arrives as `unknown`: it came over IPC and is checked here. */
+export interface BoardHandlers {
+  open(path: unknown): Promise<BoardStatusDto>
+  close(): void
+  status(): BoardStatusDto
+  configure(patch: unknown): BoardStatusDto
+  save(path: unknown, text: unknown): Promise<BoardSaveResult>
+  read(path: unknown): Promise<string | null>
+  assets(): AssetListDto
+}
+
+/**
+ * The handlers of `board:open`, `:close`, `:status`, `:configure`, `:save`, `:read` and `:assets`, as plain functions (main.ts only
+ * wires them to the channels, so what they accept is tested without Electron). They are given no file watcher on purpose: a save
+ * must be reported by it like any outside edit, and nothing here can tell it otherwise. The floating page has the whole bridge but
+ * writes one thing, an existing board note (board-save.ts); it opens boards, never notes.
+ */
+export function boardHandlers(ctx: BoardIpcContext): BoardHandlers {
+  return {
+    async open(raw) {
+      const path = cleanBoardPath(raw)
+      // The window is made only for a board note that is there: it would otherwise be an empty page with a path.
+      const found = await checkBoard(path, ctx.vault())
+      if (!found.ok) throw new Error(found.reason)
+      return ctx.host.open(path)
+    },
+    close: () => ctx.host.close(),
+    status: () => ctx.host.status(),
+    configure: (patch) => ctx.host.configure(patch),
+    save: (path, text) => saveBoard({ path, text }, ctx.vault()),
+    read: (path) => readBoard(path, ctx.vault()),
+    // The last scan's list plus what changed since: `listAssets` is the scan's snapshot, and a picture dropped into a board a minute
+    // ago would be drawn in the window as a missing one. No stat: the board needs names, and the list can be 200,000 long.
+    assets() {
+      const scan = ctx.scan()
+      return { assets: ctx.ledger.list(scan?.assets ?? []), truncated: (scan?.assetsTruncated ?? false) || ctx.ledger.overflowed }
+    },
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* Host                                                               */
 /* ------------------------------------------------------------------ */
 
@@ -499,6 +555,8 @@ export class BoardWindowHost {
     wc.on('render-process-gone', (_e, details) => {
       if (details.reason === 'clean-exit') return
       const now = Date.now()
+      // Only the recent ones count (and are kept): a window that dies once a day does not pile up a list.
+      this.crashes = this.crashes.filter((t) => now - t < CRASH_WINDOW_MS)
       this.crashes.push(now)
       const reload = shouldReload(this.crashes, now)
       if (reload) wc.reload()
