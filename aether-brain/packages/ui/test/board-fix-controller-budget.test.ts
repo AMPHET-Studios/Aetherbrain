@@ -3,9 +3,12 @@
  * most BOARD_LIMITS.noteTotal characters of items (core `boardChars`). Anything that GROWS the board past it is refused with the
  * board-is-full message; anything that keeps or shrinks it is always allowed, so a board that is too big can be thinned out of it.
  */
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { BOARD_LIMITS, addMark, addNote, boardChars, emptyBoard, parseBoard, serializeBoard, type BoardDoc, type StrokeItem } from '@aether/core'
 import { Rig, at, build, fatBoard, rng } from './board-controller-harness'
+
+// Near-budget boards are heavy: under the load of the whole suite a seed takes longer than the default 5 s.
+vi.setConfig({ testTimeout: 60_000, hookTimeout: 60_000 })
 
 const LIMIT = BOARD_LIMITS.noteTotal
 

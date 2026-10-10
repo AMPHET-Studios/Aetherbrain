@@ -643,7 +643,7 @@ export class BoardSession {
     try {
       raw = await this.host.load()
     } catch (err) {
-      this.say(`The board changed on disk but could not be read again: ${errorText(err)}`, 'error')
+      this.say(`The board changed on disk but could not be read again: ${errorText(err)}`, 'error', this.copyAction())
       return
     }
     if (!this.started || !this.ctrl) return
