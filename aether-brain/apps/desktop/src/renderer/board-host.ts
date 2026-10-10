@@ -283,7 +283,12 @@ export function createFloatingBoardHost(bridge: BoardBridge, path: string, opts:
       const text = await bridge.boardRead(path).catch((err: unknown) => {
         throw new Error(errorText(err))
       })
-      if (text === null) throw new Error('This note is gone, or is no longer a board (type: board in its frontmatter)')
+      if (text === null) {
+        // Named so that the session, which the banner has already told, does not add a second message of its own (@aether/ui BOARD_GONE).
+        const gone = new Error('This note is gone, or is no longer a board (type: board in its frontmatter)')
+        gone.name = 'BoardGoneError'
+        throw gone
+      }
       lastKnown = text
       latest = text
       remember(text)

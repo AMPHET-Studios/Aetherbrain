@@ -3,7 +3,7 @@
  * storage the session asks for. The only file of the view that touches `document`, `createImageBitmap` and `localStorage`, so the
  * rest runs in node. Every function is safe where the browser is missing (a server render, a test): it answers "nothing".
  */
-import { IMAGE_HEADER_BYTES, estimateTextMetrics, readImageHeader, type TextMetrics } from '@aether/core'
+import { IMAGE_BLIND_DECODE_MAX_BYTES, estimateTextMetrics, readBlobHeader, type TextMetrics } from '@aether/core'
 import type { BitmapLike } from '../imageCache'
 import { canvasTextMetrics, type ExportCanvas } from '../renderer'
 import { realTimers } from './session'
@@ -34,7 +34,6 @@ function makeCanvas(w: number, h: number): ExportCanvas {
 }
 
 /** A picture whose header cannot be read is decoded to learn its size only when its file is this small. */
-const FALLBACK_DECODE_MAX_BYTES = 4 * 1024 * 1024
 /** Decodes that may run at once (a decode takes width x height x 4 bytes; the header read takes none). */
 const FALLBACK_DECODES = 2
 
@@ -57,15 +56,12 @@ async function withDecodeSlot<T>(job: () => Promise<T>): Promise<T> {
  * whose header cannot be read is decoded only when it is small and two at a time; a larger one is no picture the board can use.
  */
 export async function pictureSize(blob: Blob): Promise<{ w: number; h: number } | null> {
-  try {
-    const head = new Uint8Array(await blob.slice(0, IMAGE_HEADER_BYTES).arrayBuffer())
-    const header = readImageHeader(head)
-    if (header) return { w: header.shownWidth, h: header.shownHeight }
-  } catch {
-    /* a blob that cannot be read has no size to give */
-    return null
-  }
-  if (blob.size > FALLBACK_DECODE_MAX_BYTES || typeof createImageBitmap !== 'function') return null
+  // The first 256 KB, and for a JPEG or AVIF with long metadata in front the first 2 MiB; nothing is decoded.
+  const header = await readBlobHeader(blob)
+  if (header) return { w: header.shownWidth, h: header.shownHeight }
+  // No header could be read: a file bigger than a few KB is no picture the board can use (a flat 12,504 x 12,504 JPEG is 0.6 MB and
+  // decodes to 625 MB), only a tiny one is decoded to see what it is.
+  if (blob.size > IMAGE_BLIND_DECODE_MAX_BYTES || typeof createImageBitmap !== 'function') return null
   return withDecodeSlot(async () => {
     try {
       // Upright, as the picture cache decodes it, so that a phone photo's shape is the one it is drawn with.

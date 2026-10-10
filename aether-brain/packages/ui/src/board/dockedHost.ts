@@ -169,7 +169,8 @@ export function createDockedBoardHost(path: string): DockedBoardHost {
         gone.name = BOARD_GONE
         throw gone
       }
-      const text = await store().readBoard(path)
+      // A reload of a board that was open raises no 'Could not open the board' toast of its own: the session says what it must.
+      const text = await store().readBoard(path, { quiet: lastKnown !== null })
       if (text === null) throw new Error('This note is not a board, is gone, or could not be read')
       lastKnown = text
       stale = false

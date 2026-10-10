@@ -16,6 +16,7 @@ import {
   fitView,
   folderOf,
   isBoardNote,
+  isDeviceName,
   itemsBounds,
   moveItems,
   parseBoard,
@@ -79,7 +80,8 @@ export function boardStem(title: string): string {
   const stem = slugifyTitle(title.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' '))
     .replace(/^[.\s]+/, '')
     .replace(/[.\s]+$/, '')
-  return stem === '' ? DEFAULT_BOARD_TITLE : stem
+  // Windows takes CON, NUL, COM1 ... (also CON.x) for a device, whatever the folder: such a name gets an underscore in front.
+  return stem === '' ? DEFAULT_BOARD_TITLE : isDeviceName(stem) ? `_${stem}` : stem
 }
 
 /**
