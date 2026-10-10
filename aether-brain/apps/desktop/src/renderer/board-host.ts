@@ -14,6 +14,8 @@ import type { AetherBridge, BoardStatusDto, VaultChangeDto } from '../shared/ipc
 export const PICTURE_CHANGE_MS = 150
 /** Most numbered names tried for a picture whose name is taken (`name 2`, `name 3` ... `name 99`). */
 export const MAX_NAME_TRIES = 99
+/** How many of its own texts the window remembers to tell the watcher's echo of a save from somebody else's edit. */
+export const ECHO_TEXTS = 4
 
 export interface FloatingBoardOptions {
   /** Shows a toast in the window (the page draws it). */
@@ -62,14 +64,26 @@ export function createFloatingBoardHost(bridge: AetherBridge, path: string, opts
   const caseSensitive = bridge.platform === 'linux'
   const key = (p: string): string => (caseSensitive ? p : p.toLowerCase())
   const folder = boardFolderOfPath(path)
+  /** Where new pictures go: the board's own folder, or `<name> pictures` once the vault has refused the first as excluded. */
+  let pictureFolder = folder
   let title = nameOf(path).replace(/\.md$/i, '')
 
   /* ---- the note ---- */
 
   /** The note as this window last read or wrote it: a read that differs is somebody else's edit. */
   let lastKnown: string | null = null
-  /** The text a save is writing right now (its echo from the watcher is ours). */
-  let inflight: string | null = null
+  /**
+   * The last few texts this window read or wrote, newest last. The watcher reports each save a moment after it (and a slow report
+   * can arrive after the next save has begun), so a change carrying one of these is our own echo, not somebody else's edit. Bounded:
+   * a note is at most 400,000 characters.
+   */
+  const echoes: string[] = []
+  const remember = (text: string): void => {
+    const at = echoes.indexOf(text)
+    if (at >= 0) echoes.splice(at, 1)
+    echoes.push(text)
+    if (echoes.length > ECHO_TEXTS) echoes.shift()
+  }
   /** Saves run one after the other. */
   let writing: Promise<unknown> = Promise.resolve()
   const externalSubs = new Set<() => void>()
@@ -86,14 +100,11 @@ export function createFloatingBoardHost(bridge: AetherBridge, path: string, opts
       changedOutside()
       throw new Error('The board was changed outside this window: it has been left as it is. Reload to see the change.')
     }
-    inflight = raw
-    try {
-      const res = await bridge.boardSave(path, raw)
-      if (!res.ok) throw new Error(res.reason)
-      lastKnown = raw
-    } finally {
-      inflight = null
-    }
+    // Before the call: the watcher may report the write before the answer to it gets back here.
+    remember(raw)
+    const res = await bridge.boardSave(path, raw)
+    if (!res.ok) throw new Error(res.reason)
+    lastKnown = raw
   }
 
   /* ---- pictures ---- */
@@ -157,7 +168,7 @@ export function createFloatingBoardHost(bridge: AetherBridge, path: string, opts
     for (const c of changes) {
       if (c.kind === 'addDir' || c.kind === 'unlinkDir') continue
       if (key(c.path) === key(path)) {
-        if (c.kind === 'unlink' || (c.content !== undefined && c.content !== lastKnown && c.content !== inflight)) changedOutside()
+        if (c.kind === 'unlink' || (c.content !== undefined && c.content !== lastKnown && !echoes.includes(c.content))) changedOutside()
         continue
       }
       if (!isImagePath(c.path)) continue
@@ -171,13 +182,20 @@ export function createFloatingBoardHost(bridge: AetherBridge, path: string, opts
   async function addOne(file: { name: string; data: Uint8Array }): Promise<string | null> {
     const base = boardPictureName(file.name, sniffMime(file.data), now())
     for (let n = 1; n <= MAX_NAME_TRIES; n++) {
-      const target = `${folder}/${numberedName(base, n)}`
+      const target = `${pictureFolder}/${numberedName(base, n)}`
       if (assets?.has(key(target))) continue
       try {
         await bridge.createAsset(target, file.data)
       } catch (err) {
-        // A name the list did not know was taken (a picture added since): the next number. Anything else is a refusal.
-        if (/EEXIST/.test(errorText(err))) continue
+        const why = errorText(err)
+        // A name the list did not know was taken (a picture added since): the next number.
+        if (/EEXIST/.test(why)) continue
+        // The folder is one the user leaves out of the vault (a name in their exclude list): once, move to a folder beside it.
+        if (pictureFolder === folder && /excluded from the vault/i.test(why)) {
+          pictureFolder = `${folder} pictures`
+          n = 0
+          continue
+        }
         return null
       }
       if (assets) {
@@ -234,6 +252,7 @@ export function createFloatingBoardHost(bridge: AetherBridge, path: string, opts
       const text = await bridge.boardRead(path)
       if (text === null) throw new Error('This note is not a board, is gone, or is too long to open in the board window')
       lastKnown = text
+      remember(text)
       title = parseBoard(text).doc.title.trim() || title
       return text
     },

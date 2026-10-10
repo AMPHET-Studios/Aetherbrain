@@ -6,6 +6,7 @@
  * What the docked view uses (it is wired to these by the view's author; every one is a no-op or `false` outside the desktop app):
  *   - boardPopOutAvailable()        true in the desktop app (the Electron bridge is there): show the pop-out button, or not.
  *   - useBoardWindow()              React hook: the window's state, a BoardStatusDto { open, path, alwaysOnTop, opacity, supportsOpacity }.
+ *   - boardWindowState()            the same state, outside React (a closed, on-top, opaque window until main has spoken).
  *   - useBoardOut(path)             React hook: true while the window shows the board at `path` (draw the placeholder, not the board).
  *   - onBoardReturned(cb)           cb(path) when the window stops showing a board (closed, or moved on to another): reload that note,
  *                                   the window may have saved it since the docked view read it.
@@ -13,16 +14,20 @@
  *   - setBoardFlush(fn)             the docked view says how to save its pending change; pop-out awaits it (and stops if it fails), so
  *                                   the window opens on the latest text and the two never hold different boards.
  *
- * The palette acts on the board open in the docked view, `store.boardPath` (read defensively: it is the store's to add).
+ * The palette acts on the board open in the docked view, `store.boardPath` (read defensively: it is the store's to add): "Board: Pop out
+ * to its own window", "Board: Bring the board back from its window" (both also on the key `w`), "Board: Always on top" and "Board:
+ * Window opacity…" (Windows and macOS only). Commands and key exist only when the Electron bridge does.
+ *
+ * `Board: Window opacity…` draws its own small dialog (below) instead of going through `store.requestForm`: that is a closed union
+ * ('project' | 'note' | 'folder') whose consumers are the inspector and the Projects board, and any form request makes the store leave
+ * the Projects view.
  */
 import { useSyncExternalStore } from 'react'
-import { registerCommands, registerHelpRows, registerKey, useAether, type FormRequest } from '@aether/ui'
+import { registerCommands, registerHelpRows, registerKey, useAether } from '@aether/ui'
 import type { BoardStatusDto } from '../shared/ipc'
 import { errorText, samePath } from './panels'
 import { ElectronVaultAdapter } from './vault/electron'
 
-/** The form `Board: Window opacity…` asks the store for. `FormRequest` is the store's closed union, so this file owns the dialog too. */
-export const OPACITY_FORM = 'board-opacity'
 /** The dimmest the window goes, in percent (main clamps to the same 0.2: below it the window cannot be found again). */
 export const OPACITY_MIN_PERCENT = 20
 
@@ -66,7 +71,7 @@ export function boardWindowState(): BoardStatusDto {
 }
 
 export function useBoardWindow(): BoardStatusDto {
-  return useSyncExternalStore(subscribe, boardWindowState)
+  return useSyncExternalStore(subscribe, boardWindowState, boardWindowState)
 }
 
 const platform = bridge?.platform ?? ''
@@ -173,9 +178,6 @@ let form: { root: HTMLElement; input: HTMLInputElement } | null = null
 function closeForm(): void {
   form?.root.remove()
   form = null
-  // Only this form's own request is cleared: another one may have taken its place.
-  const s = useAether.getState()
-  if ((s.formRequest as string | null) === OPACITY_FORM) s.requestForm(null)
 }
 
 /** A small dialog over the app asking for a percentage; Enter applies, Esc and a click outside cancel. */
@@ -250,13 +252,16 @@ function toggleWindow(): void {
 if (bridge) {
   bridge.onBoardState(setStatus)
   bridge.onBoardClosed((path) => {
-    for (const cb of [...returned]) cb(path)
+    // One view's failure must not keep the others from taking their board back.
+    for (const cb of [...returned]) {
+      try {
+        cb(path)
+      } catch (err) {
+        console.warn('[aether] board returned handler failed', err)
+      }
+    }
   })
   bridge.boardStatus().then(setStatus, () => undefined)
-  // `Board: Window opacity…` asks the store for a form; this file draws it.
-  useAether.subscribe((st, prev) => {
-    if ((st.formRequest as string | null) === OPACITY_FORM && (prev.formRequest as string | null) !== OPACITY_FORM) openForm()
-  })
   registerKey('w', toggleWindow)
   registerCommands([
     {
@@ -296,7 +301,7 @@ if (bridge) {
       group: 'view',
       // Linux compositors may ignore it, so main does not offer it there.
       when: () => status.supportsOpacity,
-      run: (s) => s.requestForm(OPACITY_FORM as unknown as FormRequest),
+      run: () => openForm(),
     },
   ])
   registerHelpRows('Desktop', [['w', 'Board: pop the open board out into its own window, or bring it back']])

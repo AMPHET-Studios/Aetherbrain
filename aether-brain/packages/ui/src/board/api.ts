@@ -160,11 +160,53 @@ export interface BoardUiState {
   cursor: string
   canUndo: boolean
   canRedo: boolean
+  /** What an undo or a redo would take back or apply again ("Move", "Draw" ...), for a menu; null when there is nothing or no label. */
+  undoLabel: string | null
+  redoLabel: string | null
   /** The board has changed since it was loaded or last saved. */
   dirty: boolean
   /** A pan or zoom in progress (the renderer may draw coarser pictures while it lasts). */
   moving: boolean
+  /** What new marks and notes are made with, and what the toolbar's colour, width and size controls show. */
+  style: BoardStyle
+  /** The controller's own clipboard holds items (the paste command has something to paste). */
+  canPaste: boolean
 }
+
+/**
+ * What the next pen stroke, line, rectangle, ellipse and note are made with. Widths and sizes are CSS pixels as the toolbar shows them:
+ * a mark made at zoom z is stored at `px / z` board units, so it looks the same however far the board is zoomed. Changing the style
+ * with the select tool active also restyles the selected items that have the property (one undo step).
+ */
+export interface BoardStyle {
+  /** Stroke, line, rectangle and ellipse colour: 6 hex digits, no #. */
+  color: string
+  /** Line width in CSS pixels. */
+  width: number
+  /** Rectangle and ellipse fill, or '' for an outline only. */
+  fill: string
+  /** Note font size in CSS pixels. */
+  noteSize: number
+  /** Note text colour, or '' for the one that reads on the board's background. */
+  noteColor: string
+  /** Note background, or '' for none. */
+  noteFill: string
+  /** Lines get an arrow head. */
+  arrow: boolean
+}
+
+/** What the controller tells the shell, besides its state: a message, a question only the shell can answer, a job only the shell can do. */
+export type BoardEvent =
+  /** `code` names the reason where a caller wants to react to it: 'locked' (a locked item refused a change), 'limit' (the board is full), 'select' (the command needs a selection of another kind). */
+  | { type: 'toast'; text: string; tone: BoardTone; code?: 'locked' | 'limit' | 'select' }
+  /** Sampler: read the canvas pixel at `at` (CSS pixels) and answer with `controller.sampleAt(at, hex)`. */
+  | { type: 'sample-request'; at: Vec2 }
+  /** Sampler: the user clicked; `hex` is the colour under the pointer (6 digits, no #). The shell copies it and says so. */
+  | { type: 'sample-commit'; hex: string }
+  /** Extract a palette from these pictures; answer with `controller.addSwatches(colours, near)`; `near` (board units) is a good place for the swatches. */
+  | { type: 'palette-request'; ids: number[]; near: Vec2 }
+  /** A command only the shell can carry out (it has the host): `ids` and `paths` are the selected items and the distinct paths of the selected pictures. */
+  | { type: 'command'; id: BoardCommandId; ids: number[]; paths: string[] }
 
 /* ----------------------------------------------------------- commands ---- */
 
@@ -184,7 +226,7 @@ export type BoardCommandId =
   | 'transform.flipH' | 'transform.flipV' | 'transform.rotateCw' | 'transform.rotateCcw' | 'transform.resetRotation'
   | 'transform.resetScale' | 'transform.resetCrop' | 'transform.resetAll'
   // arrange
-  | 'arrange.optimal' | 'arrange.row' | 'arrange.column' | 'arrange.grid' | 'arrange.stack'
+  | 'arrange.menu' | 'arrange.optimal' | 'arrange.row' | 'arrange.column' | 'arrange.grid' | 'arrange.stack'
   | 'sort.name' | 'sort.added' | 'sort.size' | 'sort.shuffle'
   | 'align.left' | 'align.right' | 'align.top' | 'align.bottom' | 'align.centerH' | 'align.centerV'
   | 'distribute.h' | 'distribute.v'

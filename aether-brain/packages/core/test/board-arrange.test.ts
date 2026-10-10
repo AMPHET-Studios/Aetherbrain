@@ -261,6 +261,19 @@ describe('sortOrder', () => {
     expect(sortOrder(mixed, [1, 2, 3, 4], 'name')).toEqual([3, 2, 4, 1])
   })
 
+  it("'name' puts numbers in order of value however the board lists them: a pair compares the same both ways, and zeros in front are no number", () => {
+    const digits = ['007', '7', '08', '1', '9', '100', '0', '00', '12', '012', '112', '10', '010']
+    const r = rng(8)
+    for (let t = 0; t < 120; t++) {
+      const order = digits.map((d) => ({ d, k: r() })).sort((a, b) => a.k - b.k).map((e) => e.d)
+      const doc = docOf(...order.map((d, i) => pic(i + 1, { path: `img${d}.png` })))
+      const got = sortOrder(doc, doc.items.map((i) => i.id), 'name').map((id) => order[id - 1]!)
+      // the sort is stable, so equal values (007 and 7) stay in the board's order
+      const want = order.slice().sort((p, q) => parseInt(p, 10) - parseInt(q, 10))
+      expect(got, order.join(' ')).toEqual(want)
+    }
+  })
+
   it("'name' sorts notes by their text with the pictures, ties and marks last in board order", () => {
     const doc = docOf(
       note(1, { text: 'Zed' }),
@@ -520,8 +533,13 @@ describe('arrange: shapes', () => {
     close(gapOf({ gap: -30 }), 0)
     const col = arrange(doc, [1, 2, 3], 'column', { metrics: M, gap: 7 })
     close(boundsOf(col, 2).y - (boundsOf(col, 1).y + boundsOf(col, 1).h), 7)
+    // Grid of 2 columns: row 0 holds 1 (100 x 50) and 2 (60 x 40), row 1 holds 3 (80 x 80). Columns are 100 and 60 wide, row 0 is 50 tall.
     const grid = arrange(doc, [1, 2, 3], 'grid', { metrics: M, gap: 7, columns: 2 })
-    close(boundsOf(grid, 3).y - (boundsOf(grid, 2).y + boundsOf(grid, 2).h), 7 + 0)
+    // 1 and 2 fill their cells across, 1 and 3 their row's height, so the cell gap is the gap
+    close(boundsOf(grid, 2).x - (boundsOf(grid, 1).x + boundsOf(grid, 1).w), 7)
+    close(boundsOf(grid, 3).y - (boundsOf(grid, 1).y + boundsOf(grid, 1).h), 7)
+    // 2 is 10 shorter than its row and sits in the middle of its cell: 5 of air under it besides the gap
+    close(boundsOf(grid, 3).y - (boundsOf(grid, 2).y + boundsOf(grid, 2).h), 7 + 5)
   })
 
   it('uses the board order for "current" however the ids are listed', () => {
@@ -584,11 +602,37 @@ describe('arrange: grid columns', () => {
     }
   })
 
-  it('considers the units sizes, not just their number: wide pictures take fewer columns', () => {
+  it("considers the units' sizes, not just their number: wide pictures take fewer columns, tall ones more", () => {
+    const ids = (d: BoardDoc): number[] => d.items.map((i) => i.id)
+    // Twelve alike, so a rule that only counted them would give the same columns for both (3 or 4 for a square)
+    const wide = docOf(...Array.from({ length: 12 }, (_, i) => pic(i + 1, { x: i * 5, w: 400, h: 100 })))
+    // 400 x 100 cells: 2 across, 6 down is 800 x 600 (shape 1.33); 1 across is 400 x 1200 and 3 across 1200 x 400, both far off 1
+    expect(shape(arrange(wide, ids(wide), 'grid', { metrics: M, gap: 0, aspect: 1 }))).toEqual({ rows: 6, cols: 2 })
+    const tall = docOf(...Array.from({ length: 12 }, (_, i) => pic(i + 1, { x: i * 5, w: 100, h: 400 })))
+    // 8 across, 2 down (the second row short) is 800 x 800, exactly square; 7 across is 700 x 800
+    expect(shape(arrange(tall, ids(tall), 'grid', { metrics: M, gap: 0, aspect: 1 }))).toEqual({ rows: 2, cols: 8 })
+  })
+
+  it('takes the one that needs less room when two counts come out equally near the wanted shape', () => {
+    // 400x200, 50x50, 50x200, 400x50 for a shape of 2. Two across: columns 400 + 400, rows 200 + 200 = 800 x 400. Three across: columns
+    // 400 + 50 + 50, rows 200 + 50 = 500 x 250. Both are exactly 2 to 1, and the second takes 125,000 where the first takes 320,000.
+    const mixed = docOf(pic(1, { w: 400, h: 200 }), pic(2, { x: 10, w: 50, h: 50 }), pic(3, { x: 20, w: 50, h: 200 }), pic(4, { x: 30, w: 400, h: 50 }))
+    expect(shape(arrange(mixed, [1, 2, 3, 4], 'grid', { metrics: M, gap: 0, aspect: 2 }))).toEqual({ rows: 2, cols: 3 })
+  })
+
+  it('aims for a shape of 1.6 when it is not told one, and for what it is told otherwise', () => {
+    // Three pictures 179 x 200: two across is 358 x 400 (0.895 to 1), three across 537 x 200 (2.685 to 1). 1.6 is nearer the second on a
+    // log scale (0.52 against 0.58); 1.5 is nearer the first (0.52 against 0.58).
+    const three = docOf(...Array.from({ length: 3 }, (_, i) => pic(i + 1, { x: i * 10, w: 179, h: 200 })))
+    expect(shape(arrange(three, [1, 2, 3], 'grid', { metrics: M, gap: 0 }))).toEqual({ rows: 1, cols: 3 })
+    expect(shape(arrange(three, [1, 2, 3], 'grid', { metrics: M, gap: 0, aspect: 1.6 }))).toEqual({ rows: 1, cols: 3 })
+    expect(shape(arrange(three, [1, 2, 3], 'grid', { metrics: M, gap: 0, aspect: 1.5 }))).toEqual({ rows: 2, cols: 2 })
+  })
+
+  it('takes the fewer columns when two counts come out equally near the wanted shape', () => {
+    // 400 x 100 pictures, eight of them: 1 across is 400 x 800 and 2 across is 800 x 400, both a factor 2 from a square
     const wide = docOf(...Array.from({ length: 8 }, (_, i) => pic(i + 1, { x: i * 5, w: 400, h: 100 })))
-    const out = arrange(wide, wide.items.map((i) => i.id), 'grid', { metrics: M, gap: 0, aspect: 1 })
-    // 400 x 100 cells: 2 across, 4 down is 800 x 400; 1 across is 400 x 800; 3 across 1200 x 300
-    expect(shape(out)).toEqual({ rows: 4, cols: 2 })
+    expect(shape(arrange(wide, wide.items.map((i) => i.id), 'grid', { metrics: M, gap: 0, aspect: 1 }))).toEqual({ rows: 8, cols: 1 })
   })
 })
 
@@ -856,26 +900,141 @@ describe('arrange: properties over random boards', () => {
 })
 
 describe('arrange: size of the job', () => {
-  it('arranges a full board of 1,500 items in every mode without a pause', () => {
+  /** The board with `items` behind a proxy that counts every item read by index: the cost of a pass over the board, whatever the clock says. */
+  function counted(doc: BoardDoc): { doc: BoardDoc; reads: () => number } {
+    let reads = 0
+    const items = new Proxy(doc.items, {
+      get(target, prop, receiver) {
+        if (typeof prop === 'string' && /^\d+$/.test(prop)) reads++
+        return Reflect.get(target, prop, receiver) as unknown
+      },
+    })
+    return { doc: { ...doc, items }, reads: () => reads }
+  }
+  const full = (): { doc: BoardDoc; ids: number[] } => {
     const r = rng(77)
     const doc = docOf(...Array.from({ length: 1500 }, (_, i) => (i % 5 === 0 ? randNote(r, i + 1) : randPic(r, i + 1))))
-    const ids = doc.items.map((i) => i.id)
+    return { doc, ids: doc.items.map((i) => i.id) }
+  }
+
+  it('arranges a full board of 1,500 items in every mode, with no overlap and without a pause', () => {
+    const { doc, ids } = full()
     for (const mode of MODES) {
       const t = Date.now()
       const out = arrange(doc, ids, mode, { metrics: M, order: 'size' })
-      expect(Date.now() - t, mode).toBeLessThan(4000)
+      expect(Date.now() - t, mode).toBeLessThan(3000)
       expect(out.items.length).toBe(1500)
       expect(allFinite(out)).toBe(true)
       if (NO_OVERLAP.includes(mode)) {
         const rects = unitsOf(out, ids).map((u) => u.rect)
         const sorted = rects.slice().sort((a, b) => a.x - b.x)
-        // sweep by x: a neighbour closer than the widest rect could overlap
+        // Sweep by x: only neighbours that overlap in x can overlap. A column makes them all so, which is a million pairs: take the
+        // worst separation and ask once.
+        let worst = Infinity
         for (let i = 0; i < sorted.length; i++) {
           for (let j = i + 1; j < sorted.length && sorted[j]!.x < sorted[i]!.x + sorted[i]!.w; j++) {
-            expect(separation(sorted[i]!, sorted[j]!), `${mode} ${i}/${j}`).toBeGreaterThanOrEqual(16 - 1e-6)
+            worst = Math.min(worst, separation(sorted[i]!, sorted[j]!))
           }
         }
+        expect(worst, mode).toBeGreaterThanOrEqual(16 - 1e-6)
       }
+    }
+  })
+
+  it('reads each item a few times, not once per unit: the cost grows with the board, not with its square', () => {
+    const { doc, ids } = full()
+    // Linear is a few dozen passes at most (1,500 each); a pass over the board per unit would be 1,500 passes.
+    const budget = 40 * 1500
+    for (const mode of MODES) {
+      const c = counted(doc)
+      arrange(c.doc, ids, mode, { metrics: M, order: 'name' })
+      expect(c.reads(), mode).toBeLessThan(budget)
+    }
+    for (const edge of ['left', 'centerV'] as const) {
+      const c = counted(doc)
+      align(c.doc, ids, edge, M)
+      expect(c.reads(), edge).toBeLessThan(budget)
+    }
+    const d = counted(doc)
+    distribute(d.doc, ids, 'h', M)
+    expect(d.reads(), 'distribute').toBeLessThan(budget)
+    const pics = doc.items.filter((i) => i.kind === 'picture').map((i) => i.id)
+    for (const mode of ['width', 'size'] as const) {
+      const n = counted(doc)
+      normalize(n.doc, pics, mode, { metrics: M })
+      expect(n.reads(), mode).toBeLessThan(budget)
+    }
+  })
+
+  it("'optimal' still finds the shape on a board of a few giants and a thousand specks, where the row fills are too many to try one by one", () => {
+    const r = rng(5)
+    const giants = Array.from({ length: 30 }, (_, i) => pic(i + 1, { w: 30000 + r() * 9000, h: 30000 + r() * 9000 }))
+    const specks = Array.from({ length: 1470 }, (_, i) => pic(31 + i, { w: 8 + r() * 3, h: 8 + r() * 3 }))
+    // interleaved, so the rows are mixed whichever way they fill
+    const items: BoardItem[] = []
+    for (let i = 0; i < 1500; i++) items.push(i % 50 === 0 ? giants[i / 50]! : specks[i - Math.floor(i / 50) - 1]!)
+    const doc = docOf(...items.map((it, i) => ({ ...it, id: i + 1 })))
+    const gap = 16
+    const aspect = 1.6
+    const sizes = doc.items.map((it) => itemSize(it, M))
+    const used = sizes.reduce((a, s) => a + s.w * s.h, 0)
+    const score = (w: number, h: number): number => Math.abs(Math.log(w / h / aspect)) + Math.max(0, 1 - used / (w * h))
+    // Independent search: a greedy fill at 4,000 widths spread over everything from the widest picture to one single row.
+    let best = Infinity
+    const widest = Math.max(...sizes.map((s) => s.w))
+    const total = sizes.reduce((a, s) => a + s.w + gap, 0)
+    for (let k = 0; k <= 4000; k++) {
+      const limit = widest + (total - widest) * (k / 4000) ** 2
+      let rowW = 0
+      let rowH = 0
+      let width = 0
+      let height = 0
+      sizes.forEach((s, i) => {
+        if (i > 0 && rowW + gap + s.w <= limit) {
+          rowW += gap + s.w
+          rowH = Math.max(rowH, s.h)
+        } else {
+          if (i > 0) {
+            width = Math.max(width, rowW)
+            height += rowH + gap
+          }
+          rowW = s.w
+          rowH = s.h
+        }
+      })
+      width = Math.max(width, rowW)
+      height += rowH
+      best = Math.min(best, score(width, height))
+    }
+    const out = arrange(doc, doc.items.map((i) => i.id), 'optimal', { metrics: M, gap, aspect })
+    const box = unionRect(out.items.map((i) => itemBounds(i, M)))
+    expect(score(box.w, box.h)).toBeLessThanOrEqual(best + 0.02)
+    // and it is a layout, not a long strip: nearer the wanted shape than a row of 20 times it
+    expect(box.w / box.h).toBeLessThan(aspect * 3)
+    expect(box.w / box.h).toBeGreaterThan(aspect / 3)
+  })
+
+  it('keeps every item inside the board even when the layout is wider than the board can be', () => {
+    // 80 pictures of the largest size in a row would be 3.2 million wide; the board's coordinates stop at a million either way
+    const doc = docOf(...Array.from({ length: 80 }, (_, i) => pic(i + 1, { x: i * 10, w: 40000, h: 40000 })))
+    const ids = doc.items.map((i) => i.id)
+    for (const mode of ['row', 'column', 'grid', 'optimal'] as const) {
+      const out = arrange(doc, ids, mode, { metrics: M, columns: 80 })
+      for (const it of out.items) {
+        const c = itemCentre(it)
+        expect(Math.abs(c.x), mode).toBeLessThanOrEqual(1_000_000)
+        expect(Math.abs(c.y), mode).toBeLessThanOrEqual(1_000_000)
+      }
+    }
+  })
+
+  it('leaves an item whose numbers have gone bad where it is and lays out the others', () => {
+    const doc = deepFreeze(docOf(pic(1, { x: 0 }), pic(2, { x: NaN }), pic(3, { x: 500 }), pic(4, { y: Infinity, x: 900 })))
+    for (const mode of MODES) {
+      const out = arrange(doc, [1, 2, 3, 4], mode, { metrics: M })
+      expect(out.items[1], mode).toBe(doc.items[1])
+      expect(out.items[3], mode).toBe(doc.items[3])
+      expect(allFinite([out.items[0], out.items[2]]), mode).toBe(true)
     }
   })
 })
@@ -1041,8 +1200,11 @@ describe('distribute', () => {
     )
     const out = distribute(doc, [1, 2, 3, 4, 5], 'h', M)
     expect(out.items[3]).toBe(doc.items[3])
-    // units: 1 [-50,50], group [150,310], 5 [950,1050]: gap (1100 - 100 - 160 - 100) / 2 = 370 -> group left at 420
-    close(boundsOf(out, 2).x, 420)
+    // units: 1 [-50,50], the group [150,280] (picture 2 spans 150..250, picture 3 240..280, so 130 wide), 5 [950,1050];
+    // the locked 4 is not a unit. Gap (1100 - 100 - 130 - 100) / 2 = 385 -> the group's left edge at 50 + 385 = 435
+    close(boundsOf(out, 2).x, 435)
+    close(boundsOf(out, 3).x + boundsOf(out, 3).w, 435 + 130)
+    close(boundsOf(out, 5).x - (boundsOf(out, 3).x + boundsOf(out, 3).w), 385)
     close(itemCentre(byId(out, 3)).x - itemCentre(byId(out, 2)).x, 60)
     close(itemCentre(byId(out, 3)).y - itemCentre(byId(out, 2)).y, 60)
   })

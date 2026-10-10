@@ -42,8 +42,13 @@ const DEFAULT_ASPECT = 1.6
 const NOISE = 1e-9
 /** The tiniest size the packer divides by. */
 const TINY = 1e-9
-/** How many row widths 'optimal' tries at most (each is one pass over the units). */
-const MAX_PACKS = 4000
+/**
+ * How many different fills 'optimal' steps through exactly (each is one pass over the units). A board of a few units never gets near
+ * it; one whose units differ a lot in size can have tens of thousands of fills between the narrowest and the widest row worth trying.
+ */
+const EXACT_PACKS = 2500
+/** When the exact steps run out before the window of row widths is covered, this many widths, evenly spread on a log scale, cover it. */
+const SWEEP_PACKS = 1000
 /** How much of a note's or a name's start the name order looks at. */
 const SORT_KEY_CHARS = 200
 
@@ -239,10 +244,51 @@ function orderUnits(doc: BoardDoc, units: Unit[], order: ArrangeOrder, seed: num
     .map((e) => e.u)
 }
 
-/** Moves `unit` by (dx, dy), dropping moves that are only rounding noise. */
-function shift(doc: BoardDoc, unit: Unit, dx: number, dy: number, scale: number): BoardDoc {
+/**
+ * Runs an operation of ops.ts on each of several sets of items, in one pass over the board. Those operations look at every item of
+ * the doc they are given to find the ones they were asked about, so handing each job a doc of just its own items keeps arranging a full
+ * board linear: a call per unit on the whole board was 1,500 x 1,500 item visits. The jobs must not share items. A job that returns the
+ * doc it was given changes nothing.
+ */
+function onParts(doc: BoardDoc, jobs: readonly { ids: readonly number[]; run: (part: BoardDoc) => BoardDoc }[]): BoardDoc {
+  if (jobs.length === 0) return doc
+  const slot = new Map<number, number>()
+  doc.items.forEach((it, i) => slot.set(it.id, i))
+  let items: BoardItem[] | null = null
+  for (const job of jobs) {
+    const at = job.ids.map((id) => slot.get(id)).filter((i): i is number => i !== undefined)
+    const part: BoardDoc = { ...doc, items: at.map((i) => doc.items[i]!) }
+    const done = job.run(part)
+    if (done === part) continue
+    items ??= doc.items.slice()
+    done.items.forEach((it, k) => {
+      items![at[k]!] = it
+    })
+  }
+  return items ? { ...doc, items } : doc
+}
+
+/** A unit and how far it is to move. */
+interface Move {
+  unit: Unit
+  dx: number
+  dy: number
+}
+
+/**
+ * Moves every unit by its own offset. An offset smaller than rounding noise (relative to `scale`, the size of the coordinates
+ * involved) is no move, so arranging what is already arranged changes nothing, not even the last digits. moveItems keeps the
+ * results inside the board's coordinate range.
+ */
+function moveUnits(doc: BoardDoc, moves: readonly Move[], scale: number): BoardDoc {
   const eps = NOISE * Math.max(1, scale)
-  return moveItems(doc, unit.ids, Math.abs(dx) < eps ? 0 : dx, Math.abs(dy) < eps ? 0 : dy)
+  const jobs: { ids: readonly number[]; run: (part: BoardDoc) => BoardDoc }[] = []
+  for (const m of moves) {
+    const dx = Math.abs(m.dx) < eps ? 0 : m.dx
+    const dy = Math.abs(m.dy) < eps ? 0 : m.dy
+    if (dx !== 0 || dy !== 0) jobs.push({ ids: m.unit.ids, run: (part) => moveItems(part, m.unit.ids, dx, dy) })
+  }
+  return onParts(doc, jobs)
 }
 
 /* -------------------------------------------------------------- layouts --- */
@@ -374,26 +420,28 @@ function packRows(sizes: readonly Size[], gap: number, limit: number): Pack {
 
 /**
  * Justified rows in the given order: units keep their sizes, a row is filled until the next unit would not fit under a limit, rows are
- * centred on one vertical line and the units of a row on one horizontal line. The limit is the knob: every different fill from a
- * row width a quarter to four times the width a square-ish layout of that much area would have is tried (each is the fill at the
- * widest row it makes, found by stepping from one change of fill to the next), and the layout is kept whose shape is closest to
- * `aspect` (log scale) with the least empty space inside its rectangle (the two errors are added, so a perfectly full layout a little
- * off the shape beats a ragged one right on it).
+ * centred on one vertical line and the units of a row on one horizontal line. The limit is the knob: the fills from a row width a
+ * quarter to four times the width a square-ish layout of that much area would have are tried, and the layout is kept whose shape is
+ * closest to `aspect` (log scale) with the least empty space inside its rectangle (the two errors are added, so a perfectly full
+ * layout a little off the shape beats a ragged one right on it). Every different fill is tried, by stepping from one change of fill to
+ * the next, as long as there are not too many; past that the window is swept at evenly spread widths, which is a fine grid on a
+ * board where the exact steps would be too many to try.
  */
 function optimalLayout(sizes: readonly Size[], gap: number, aspect: number): Vec2[] {
   let area = 0
   let used = 0
-  let narrowest = 0
+  // The widest unit: no row is narrower, since a unit wider than the limit takes a row to itself.
+  let widestUnit = 0
   let widest = 0
   sizes.forEach((s, i) => {
     area += (s.w + gap) * (s.h + gap)
     used += s.w * s.h
-    if (s.w > narrowest) narrowest = s.w
+    if (s.w > widestUnit) widestUnit = s.w
     // Summed the way packRows sums a row, so a limit of `widest` really holds everything in one row.
     widest = i === 0 ? s.w : widest + gap + s.w
   })
   const ideal = Math.sqrt(area * aspect)
-  const clampW = (w: number): number => Math.min(Math.max(w, narrowest), widest)
+  const clampW = (w: number): number => Math.min(Math.max(w, widestUnit), widest)
   const lo = clampW(ideal / 4)
   const hi = clampW(ideal * 4)
 
@@ -407,13 +455,23 @@ function optimalLayout(sizes: readonly Size[], gap: number, aspect: number): Vec
       kept.score = score
     }
   }
-  consider(packRows(sizes, gap, narrowest))
+  consider(packRows(sizes, gap, widestUnit))
   let limit = lo
-  for (let k = 0; k < MAX_PACKS; k++) {
+  let covered = false
+  for (let k = 0; k < EXACT_PACKS; k++) {
     const p = packRows(sizes, gap, limit)
     consider(p)
-    if (!(p.next <= hi)) break
+    if (!(p.next <= hi)) {
+      covered = true
+      break
+    }
     limit = p.next
+  }
+  if (!covered && hi > lo) {
+    for (let k = 1; k <= SWEEP_PACKS; k++) {
+      const t = k / SWEEP_PACKS
+      consider(packRows(sizes, gap, lo > 0 ? lo * (hi / lo) ** t : lo + (hi - lo) * t))
+    }
   }
   consider(packRows(sizes, gap, widest))
 
@@ -454,13 +512,14 @@ function place(doc: BoardDoc, units: readonly Unit[], sizes: readonly Size[], ce
   })
   const lx = (x0 + x1) / 2
   const ly = (y0 + y1) / 2
-  let out = doc
-  units.forEach((u, i) => {
+  let scale = 0
+  const moves = units.map((u, i): Move => {
     const now = centreOf(u.rect)
     const to = { x: middle.x + centres[i]!.x - lx, y: middle.y + centres[i]!.y - ly }
-    out = shift(out, u, to.x - now.x, to.y - now.y, Math.max(Math.abs(to.x), Math.abs(to.y)))
+    scale = Math.max(scale, Math.abs(to.x), Math.abs(to.y))
+    return { unit: u, dx: to.x - now.x, dy: to.y - now.y }
   })
-  return out
+  return moveUnits(doc, moves, scale)
 }
 
 /** The doc with the arranged items' places in the drawing order handed out again so that the units run back to front in `units` order. */
@@ -543,7 +602,7 @@ export function align(doc: BoardDoc, ids: readonly number[], edge: AlignEdge, me
   const units = buildUnits(doc, ids, metrics)
   if (units.length < 2) return doc
   const r = unionRect(units)
-  let out = doc
+  const moves: Move[] = []
   for (const u of units) {
     const b = u.rect
     let dx = 0
@@ -570,9 +629,9 @@ export function align(doc: BoardDoc, ids: readonly number[], edge: AlignEdge, me
       default:
         return doc
     }
-    out = shift(out, u, dx, dy, Math.max(Math.abs(r.x), Math.abs(r.y), Math.abs(r.x + r.w), Math.abs(r.y + r.h)))
+    moves.push({ unit: u, dx, dy })
   }
-  return out
+  return moveUnits(doc, moves, Math.max(Math.abs(r.x), Math.abs(r.y), Math.abs(r.x + r.w), Math.abs(r.y + r.h)))
 }
 
 /**
@@ -593,14 +652,16 @@ export function distribute(doc: BoardDoc, ids: readonly number[], axis: 'h' | 'v
   const span = start(last) + extent(last) - start(first)
   const gap = (span - sum(sorted.map(extent))) / (sorted.length - 1)
   let at = start(first) + extent(first) + gap
-  let out = doc
+  let scale = Math.max(Math.abs(start(first)), Math.abs(start(last) + extent(last)))
+  const moves: Move[] = []
   for (let i = 1; i < sorted.length - 1; i++) {
     const u = sorted[i]!
     const d = at - start(u)
-    out = shift(out, u, h ? d : 0, h ? 0 : d, Math.max(Math.abs(at), Math.abs(start(u))))
+    scale = Math.max(scale, Math.abs(at), Math.abs(start(u)))
+    moves.push({ unit: u, dx: h ? d : 0, dy: h ? 0 : d })
     at += extent(u) + gap
   }
-  return out
+  return moveUnits(doc, moves, scale)
 }
 
 /* ------------------------------------------------------------ normalize --- */
@@ -625,16 +686,22 @@ export function normalize(
   const set = new Set(ids)
   const pictures = doc.items.filter((it): it is PictureItem => it.kind === 'picture' && set.has(it.id) && !it.locked)
   const given = opts.target !== undefined && Number.isFinite(opts.target) && opts.target > 0 ? opts.target : undefined
-  let out = doc
+  /** Each picture to its new whole width, about its own centre (resizePicture holds it within the picture limits). */
+  const resizeAll = (wanted: readonly { p: PictureItem; w: number }[]): BoardDoc =>
+    onParts(
+      doc,
+      wanted.map(({ p, w }) => ({ ids: [p.id], run: (part: BoardDoc) => resizePicture(part, p.id, w) })),
+    )
 
   if (mode === 'scale') {
     const factor = given ?? 1
+    const wanted: { p: PictureItem; w: number }[] = []
     for (const p of pictures) {
       const nat = opts.natural?.(p.path)
       if (!nat || !Number.isFinite(nat.w) || !(nat.w > 0)) continue
-      out = resizePicture(out, p.id, nat.w * factor)
+      wanted.push({ p, w: nat.w * factor })
     }
-    return out
+    return resizeAll(wanted)
   }
 
   const shown = pictures
@@ -643,10 +710,11 @@ export function normalize(
   if (shown.length === 0) return doc
   const measure = (s: Size): number => (mode === 'width' ? s.w : mode === 'height' ? s.h : s.w * s.h)
   const target = given ?? sum(shown.map(({ s }) => measure(s))) / shown.length
-  for (const { p, s } of shown) {
-    // Area grows with the square of the side, so the side scales by the square root.
-    const factor = mode === 'size' ? Math.sqrt(target / measure(s)) : target / measure(s)
-    out = resizePicture(out, p.id, p.w * factor)
-  }
-  return out
+  return resizeAll(
+    shown.map(({ p, s }) => {
+      // Area grows with the square of the side, so the side scales by the square root.
+      const factor = mode === 'size' ? Math.sqrt(target / measure(s)) : target / measure(s)
+      return { p, w: p.w * factor }
+    }),
+  )
 }

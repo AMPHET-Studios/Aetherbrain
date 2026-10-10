@@ -12,7 +12,7 @@
  * No electron import at runtime (types only), like ForgeHost and Thumbnailer: main.ts hands in the Electron modules, and the checks
  * (settings, bounds, options, navigation) are pure functions.
  */
-import type { BrowserWindow, BrowserWindowConstructorOptions, Dialog, Screen, Shell, WebContents } from 'electron'
+import type { BrowserWindow, BrowserWindowConstructorOptions, Dialog, Display, Screen, Shell, WebContents } from 'electron'
 import { IPC, type AssetListDto, type BoardConfigureDto, type BoardSaveResult, type BoardStatusDto, type VaultAssetDto, type VaultChangeDto } from '../shared/ipc.js'
 import { checkBoard, readBoard, saveBoard, type BoardVault } from './board-save.js'
 import { CRASH_WINDOW_MS, crashMessage, shouldReload } from './crash.js'
@@ -181,8 +181,9 @@ export function boardWindowOptions(
 
 /** The work areas of the displays, the primary first. */
 export function workAreasOf(screen: Pick<Screen, 'getAllDisplays' | 'getPrimaryDisplay'>): Area[] {
-  const primary = screen.getPrimaryDisplay()
-  return [primary, ...screen.getAllDisplays().filter((d) => d.id !== primary.id)].map((d) => ({ ...d.workArea }))
+  // A session with no monitor attached may have no primary display to name; the bounds then stay as saved (clampBoardBounds).
+  const primary = screen.getPrimaryDisplay() as Display | undefined
+  return [primary, ...screen.getAllDisplays().filter((d) => d.id !== primary?.id)].flatMap((d) => (d?.workArea ? [{ ...d.workArea }] : []))
 }
 
 /** The page in the dev server: `<dev server>/board.html?path=<board path>`. */
@@ -199,7 +200,11 @@ export function boardPageUrl(devUrl: string, boardPath: string): string {
 export function boardNavigationAllowed(url: string, page: { devUrl: string | null | undefined; file: string }): boolean {
   if (page.devUrl) {
     try {
-      return new URL(url).origin === new URL(page.devUrl).origin
+      const target = new URL(url)
+      const dev = new URL(page.devUrl)
+      // Same scheme as well as same origin: `blob:http://localhost:5174/..` carries the dev server's origin and is not its page, and
+      // an opaque origin ("null": file:, data:) equals every other opaque origin.
+      return dev.origin !== 'null' && target.protocol === dev.protocol && target.origin === dev.origin
     } catch {
       return false
     }
@@ -307,7 +312,6 @@ export interface BoardIpcContext {
   /** The pictures of the last scan (names only), or null before one. */
   scan(): { assets: readonly { path: string }[]; assetsTruncated: boolean } | null
   ledger: PictureLedger
-  platform?: NodeJS.Platform
 }
 
 /** The handler behind each `board:*` channel. Every argument arrives as `unknown`: it came over IPC and is checked here. */

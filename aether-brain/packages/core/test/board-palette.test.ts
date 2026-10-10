@@ -97,6 +97,13 @@ describe('luminance', () => {
     // a plain average of the channels would say 0.5 for mid grey
     expect(luminance('808080')).toBeLessThan(0.25)
   })
+  it('uses the straight part of the curve for the darkest greys, where a plain power would be 3 times too bright', () => {
+    // 1/255 and 5/255 are well under the knee: s / 12.92. The power curve gives 9.84e-4 and 1.73e-3 there.
+    expect(luminance('010101')).toBeCloseTo(3.03527e-4, 7)
+    expect(luminance('050505')).toBeCloseTo(1.517635e-3, 7)
+    // 11/255 is just over the knee, where both pieces meet
+    expect(luminance('0b0b0b')).toBeCloseTo(3.346536e-3, 7)
+  })
   it('grows with the grey level and stays in 0..1', () => {
     let last = -1
     for (let v = 0; v < 256; v++) {
@@ -188,6 +195,81 @@ describe('dominantColours', () => {
   it('cuts the widest channel: a ramp in green is cut in green, not in red', () => {
     const ramp = pixels(Array.from({ length: 256 }, (_, i): Px => [10, i, 10]))
     expect(dominantColours(ramp, 2)).toEqual(['0a400a', '0ac00a'])
+  })
+  it('cuts the widest channel even when the others vary a little, whichever channel it is', () => {
+    // A ramp of 256 values along one channel and a 0 / 4 flicker in another (mean 1 over any 128 in a row). Cut on the ramp the halves
+    // are its lower and upper 128 (means 63.5 -> 64 and 191.5 -> 192); cut on the flickering channel they would be something else.
+    const ramp = (i: number, which: 0 | 1 | 2): Px => {
+      const flicker = i % 4 === 0 ? 4 : 0
+      const other = which === 0 ? 1 : 0
+      const p: [number, number, number] = [0, 0, 0]
+      p[which] = i
+      p[other] = flicker
+      return p
+    }
+    for (const [which, expected] of [
+      [0, ['400100', 'c00100']],
+      [1, ['014000', '01c000']],
+      [2, ['010040', '0100c0']],
+    ] as const) {
+      const img = pixels(Array.from({ length: 256 }, (_, i) => ramp(i, which)))
+      expect(dominantColours(img, 2), `channel ${which}`).toEqual(expected)
+    }
+  })
+  it('cuts next the box with the most pixels times spread: neither a wide thin box nor a narrow crowded one on its own', () => {
+    const reds = (list: [number, number][]): Uint8ClampedArray => pixels(list.flatMap(([r, n]) => flat(n, [r, 0, 0])))
+    // After the first cut: {0, 20} holds 600 pixels over a spread of 20 (12,000), {100, 255} holds 2 over 155 (310). The crowded box is cut.
+    expect(dominantColours(reds([[0, 300], [20, 300], [100, 1], [255, 1]]), 3)).toEqual(['000000', '140000', 'b20000'])
+    // {0, 1} holds 600 over 1 (600), {100, 200} holds 400 over 100 (40,000). Now the wide box is cut.
+    expect(dominantColours(reds([[0, 300], [1, 300], [100, 200], [200, 200]]), 3)).toEqual(['010000', '640000', 'c80000'])
+  })
+  it('cuts the same way whatever order the pixels come in, also when colours tie on the channel it cuts', () => {
+    // Red is the widest channel and three colours share its top value: which of them lands in the lower half must come from the colours, not from the order seen.
+    const a = pixels([[0, 0, 0], [255, 0, 0], [255, 100, 0], [255, 200, 0]])
+    const b = pixels([[0, 0, 0], [255, 200, 0], [255, 100, 0], [255, 0, 0]])
+    expect(dominantColours(a, 2)).toEqual(['800000', 'ff9600'])
+    expect(dominantColours(b, 2)).toEqual(['800000', 'ff9600'])
+    const r = rng(23)
+    for (let t = 0; t < 200; t++) {
+      const spread = 2 + (t % 3)
+      const list: Px[] = Array.from({ length: 3 + Math.floor(r() * 30) }, () => [Math.floor(r() * spread), Math.floor(r() * spread), Math.floor(r() * spread)])
+      const shuffled = list.slice()
+      for (let i = shuffled.length - 1; i > 0; i--) {
+        const j = Math.floor(r() * (i + 1))
+        ;[shuffled[i], shuffled[j]] = [shuffled[j]!, shuffled[i]!]
+      }
+      const count = 2 + Math.floor(r() * 5)
+      expect(dominantColours(pixels(shuffled), count), JSON.stringify(list)).toEqual(dominantColours(pixels(list), count))
+    }
+  })
+  it('keeps the colours asked for apart when two cuts come out the same colour once rounded', () => {
+    // Nine pixels of three colours one step apart: the first cut's halves both average to 010101. Asking for 2 must still give 2.
+    const three = pixels([...flat(3, [0, 0, 1]), ...flat(3, [1, 1, 1]), ...flat(3, [1, 1, 0])])
+    const out = dominantColours(three, 2)
+    expect(out).toHaveLength(2)
+    expect(new Set(out).size).toBe(2)
+    // Six colours, 13 pixels; five of the six asked for
+    const six = pixels([...flat(1, [1, 1, 0]), ...flat(2, [0, 0, 1]), ...flat(3, [0, 0, 0]), ...flat(1, [0, 1, 1]), ...flat(4, [0, 1, 0]), ...flat(2, [1, 1, 1])])
+    const five = dominantColours(six, 5)
+    expect(five).toHaveLength(5)
+    expect(new Set(five).size).toBe(5)
+  })
+  it('gives min(count, distinct) different colours for images of a handful of nearly equal colours (random)', () => {
+    const r = rng(17)
+    for (let t = 0; t < 600; t++) {
+      const spread = 2 + (t % 2)
+      const k = 2 + Math.floor(r() * 6)
+      const list: Px[] = []
+      for (let c = 0; c < k; c++) {
+        const col: Px = [Math.floor(r() * spread), Math.floor(r() * spread), Math.floor(r() * spread)]
+        for (let n = 1 + Math.floor(r() * 4); n > 0; n--) list.push(col)
+      }
+      const distinct = new Set(list.map((p) => rgbToHex(p[0], p[1], p[2]))).size
+      const count = 2 + Math.floor(r() * 5)
+      const out = dominantColours(pixels(list), count)
+      expect(out.length, JSON.stringify(list)).toBe(Math.min(count, distinct))
+      expect(new Set(out).size).toBe(out.length)
+    }
   })
   it('cuts where the pixels are, not in the middle of the range: a big flat colour is told from a thin gradient', () => {
     const img = pixels([...flat(900, [10, 10, 10]), ...Array.from({ length: 100 }, (_, i): Px => [200 + (i % 50), 0, 0])])
@@ -337,6 +419,13 @@ describe('averageColour', () => {
     expect(averageColour(img, 5, 5, 2.5, 2.5, 1.5)).toBe('141400')
     // off-centre, about pixel (1, 2): itself, (0, 2), (2, 2), (1, 1), (1, 3): x mean 10, y mean 20
     expect(averageColour(img, 5, 5, 1.5, 2.5, 1)).toBe('0a1400')
+  })
+  it('takes a pixel exactly a radius away, and not one a hair further', () => {
+    // red 10, 20, 40, 80, 160 along a row; about the centre of the middle pixel, radius 1 reaches the two next to it (centres 1.0 away)
+    const row = pixels([[10, 0, 0], [20, 0, 0], [40, 0, 0], [80, 0, 0], [160, 0, 0]])
+    expect(averageColour(row, 5, 1, 2.5, 0.5, 1)).toBe('2f0000') // (20 + 40 + 80) / 3 = 46.67
+    expect(averageColour(row, 5, 1, 2.5, 0.5, 0.999)).toBe('280000') // the middle pixel alone
+    expect(averageColour(row, 5, 1, 2.5, 0.5, 2)).toBe('3e0000') // all five: 310 / 5 = 62
   })
   it('weights every pixel in reach equally (a radius of 2 over a gradient)', () => {
     const img = grid(9, 1)

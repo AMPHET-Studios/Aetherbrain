@@ -27,12 +27,36 @@ describe('isBoardHead', () => {
     expect(isBoardHead(fm('title: x', 'type: board', 'tags: [a]'))).toBe(true)
     expect(isBoardHead(fm('type: "board"'))).toBe(true)
     expect(isBoardHead(fm("type: 'board'"))).toBe(true)
+    expect(isBoardHead(fm('"type": board'))).toBe(true)
+    expect(isBoardHead(fm('type : board'))).toBe(true)
     expect(isBoardHead(fm('type:   board   '))).toBe(true)
     expect(isBoardHead(fm('type: board # the kind of note'))).toBe(true)
     expect(isBoardHead('---\r\ntitle: x\r\ntype: board\r\n---\r\n# Body')).toBe(true)
     expect(isBoardHead('﻿' + fm('type: board'))).toBe(true)
     expect(isBoardHead('---\ntype: board\n...\nbody')).toBe(true)
     expect(isBoardHead('---\ntype: board\n---')).toBe(true)
+  })
+
+  it('accepts the frontmatter other tools write around the type: lists, quotes, comments, block text', () => {
+    const ok: Record<string, string> = {
+      'a flow list of words and quotes': fm('tags: [ref, "two words", \'x\']', 'type: board'),
+      'a trailing comma and an empty list': fm('a: [x, y,]', 'b: []', 'type: board'),
+      'an indented block list': fm('type: board', 'tags:', '  - ref', '  - "gate art"', '  - 2026-10-09', 'status: active'),
+      'a block list at the key column': fm('tags:', '- ref', '- gate', 'type: board'),
+      'an empty item and a commented one': fm('tags:', '  -', '  - a # why', '  # a remark', '  - b', 'type: board'),
+      'a block scalar with lines that look like keys': fm('summary: |', '  type: note', '  tags: [x]', '', '  more', 'type: board'),
+      'a folded scalar before the type': fm('summary: >-', '    one', '    two', 'type: board'),
+      'comments and blank lines everywhere': fm('# the gate board', '', 'title: Gate  # name', '', 'type: board', '#', 'created: 2026-10-09'),
+      'dates, numbers, urls, paths and colons without a space': fm('created: 2026-10-09', 'n: -3.5', 'url: https://example.com/a?b=c#d', 'dir: C:\\Art\\Gate', 'at: 10:30', 'type: board'),
+      'a quoted value with every escape': fm('t: "tab\\t quote\\" back\\\\ nl\\n \\x41 \\u00e9"', "s: 'it''s'", 'type: board'),
+      'a quoted key': fm('"my key": 1', "'other': 2", 'type: board'),
+      'unicode': fm('title: 日本語 board 🎨', 'type: board'),
+      'a value that has brackets and commas in the middle of a plain scalar': fm('title: Hello, [world] {x}', 'type: board'),
+    }
+    for (const [what, head] of Object.entries(ok)) {
+      expect(isBoardNote(head), `core: ${what}`).toBe(true)
+      expect(isBoardHead(head), what).toBe(true)
+    }
   })
 
   it('refuses everything else', () => {
@@ -45,63 +69,176 @@ describe('isBoardHead', () => {
       'a capital': fm('type: Board'),
       'a longer word': fm('type: boards'),
       'a hyphenated word': fm('type: board-ish'),
+      'an escape spelled out (not read)': fm('type: "bo\\x61rd"'),
       'an indented (nested) type': fm('meta:', '  type: board'),
       'a repeated type (YAML refuses the block)': fm('type: board', 'type: board'),
       'a type of a note that is also something else': fm('type: board', 'type: project'),
+      'the same key spelled plain and quoted': fm('type: board', '"type": board'),
       'any other repeated key (the block is unreadable as a whole)': fm('title: A', 'type: board', 'title: B'),
       'a repeated quoted key': fm('type: board', '"tags": [a]', 'tags: [b]'),
       'no space after the colon (a key of its own)': fm('type:board'),
       'a # glued to the word (a different word)': fm('type: board#x'),
       'a quote with trailing junk': fm('type: "board" x'),
       'a list': fm('type: [board]'),
+      'a block list under the type': fm('type:', '  - board'),
       'an empty value': fm('type:'),
+      'a block scalar': fm('type: |', '  board'),
       'a comment line': fm('# type: board'),
       'the key in the body': '---\ntitle: x\n---\ntype: board\n',
+      'the key in a block scalar': fm('x: |', '  type: board'),
       'empty text': '',
     }
     for (const [what, head] of Object.entries(no)) expect(isBoardHead(head), what).toBe(false)
   })
 
-  it('never says yes where core says no, over thousands of odd frontmatters, and agrees on the ordinary ones', () => {
-    // A small deterministic generator (mulberry32): the same blocks on every run.
-    let seed = 0x9e3779b9
-    const rand = (): number => {
+  it('refuses a block where YAML would read the type line as part of something else, or refuse the block (core says no to each)', () => {
+    // Every one of these has a column-0 `type: board` line that a reader of single lines would take, and a YAML reader does not.
+    const no: Record<string, string> = {
+      'a double quote left open over the line': fm('notes: "a', 'type: board', 'z: b"'),
+      'a single quote left open over the line': fm("notes: 'a", 'type: board', "z: b'"),
+      'a quote left open to the end': fm('key: "unclosed', 'type: board'),
+      'a list left open': fm('x: [a,', 'type: board', ']'),
+      'a flow mapping left open': fm('x: {a: 1,', 'type: board', '}'),
+      'a directive': fm('%YAML 1.2', 'type: board'),
+      'a sequence and then a mapping': fm('- a', 'type: board'),
+      'a mapping and then a sequence': fm('type: board', '- a'),
+      'a mapping with a stray indented key': fm('type: board', '  extra: 1'),
+      'a plain scalar continued on the next line': fm('type: board', '  - a'),
+      'a document start with text': fm('--- a', 'type: board'),
+      'a bare carriage return inside a line': fm('title: x\rtype: other', 'type: board'),
+      'a bare carriage return in a key': fm('a\rb: c', 'type: board'),
+      'a bare carriage return that hides a second type in a comment': fm('# a remark\rtype: note', 'type: board'),
+      'an invalid escape': fm('q: "\\q"', 'type: board'),
+      'a short unicode escape': fm('q: "\\u12"', 'type: board'),
+      'list items first': fm('  - a', 'type: board'),
+      'a colon and a space inside a plain value': fm('a: b: c', 'type: board'),
+      'an alias': fm('x: *a', 'type: board'),
+      'a dash and a space where a word should be': fm('x: - a', 'type: board'),
+      'a quoted scalar with a word after it': fm('x: "a" b', 'type: board'),
+      'a block scalar header with junk': fm('x: |abc', 'type: board'),
+      'a block scalar whose text is less indented than its first line': fm('x: |', '    deep', '  shallow', 'type: board'),
+      'an empty line of spaces longer than the text of a block scalar': fm('x: |', '      ', '  text', 'type: board'),
+      'a tab where an indent should be': fm('tags:', '\t- a', 'type: board'),
+      'a tab at the start of a line': fm('\ttitle: x', 'type: board'),
+      'a control character': fm('title: a\u0001b', 'type: board'),
+    }
+    for (const [what, head] of Object.entries(no)) {
+      expect(isBoardNote(head), `core: ${what}`).toBe(false)
+      expect(isBoardHead(head), what).toBe(false)
+    }
+  })
+
+  it('refuses what core reads leniently as a board but a line-by-line reader cannot follow: stricter, never looser', () => {
+    const fm = (...lines: string[]): string => `---\n${lines.join('\n')}\n---\n# Body\n`
+    const lenient: Record<string, string> = {
+      'an escape past the last code point': fm('q: "\\U00110000"', 'type: board'),
+      'a merge key': fm('<<: x', 'type: board'),
+      'a nested mapping': fm('meta:', '  a: 1', 'type: board'),
+      'a mapping inside a list item': fm('tags:', '  - a: 1', 'type: board'),
+      'list items in two columns': fm('tags:', '  - a', '   - b', 'type: board'),
+      'a list item under a key that has a value': fm('tags: x', '  - a', 'type: board'),
+      'an anchor': fm('x: &a b', 'type: board'),
+      'a tag': fm('x: !!str y', 'type: board'),
+      'a key that is a question mark': fm('? a', 'type: board'),
+      'a next-line character': fm('title: a\u0085b', 'type: board'),
+      'a line separator': fm('title: a\u2028b', 'type: board'),
+      'a key over the length YAML allows an implicit key': fm(`${'k'.repeat(600)}: v`, 'type: board'),
+      'a block indented as a whole': '---\n  type: board\n---\n# Body\n',
+      'an indented block with a title': '---\n  title: Gate\n  type: board\n---\n',
+      'a flow mapping': '---\n{type: board}\n---\n',
+      'a tag on the type': '---\ntype: !!str board\n---\n',
+      'a plain scalar continued on the next line': fm('title: one', '  two', 'type: board'),
+    }
+    for (const [what, head] of Object.entries(lenient)) {
+      expect(isBoardNote(head), `core: ${what}`).toBe(true)
+      expect(isBoardHead(head), what).toBe(false)
+    }
+  })
+
+  it('accepts every board note core writes, whatever the title (the window must open the boards the app makes)', () => {
+    const titles = [
+      'Gate', 'x'.repeat(300), 'a: b', 'a # b', 'He said "hi"', "it's", '- dash', '[x]', '{y}', 'line\nbreak', '  lead', 'trail  ', '', 'null', '~', 'true', '123', '1e3',
+      '0x1F', '#tag', '!bang', '&amp', '*star', '%pct', '@at', '`tick`', '|pipe', '>fold', '?query', ':colon', 'ends:', 'a\u0001b', 'tab\there', '日本語 🎨', 'é', 'a b',
+      'a\u0085b', '﻿bom', '---', '...', 'type: note', '\\back\\slash', '"quoted"', "'single'", 'multi word title '.repeat(20),
+    ]
+    for (const title of titles) {
+      const fresh = newBoardNote(title, NOW)
+      expect(isBoardHead(fresh), JSON.stringify(title)).toBe(true)
+      // After the board view saved it (title, type and updated patched in place), and after a rename.
+      const doc = parseBoard(fresh).doc
+      const saved = serializeBoard(addNote(doc, { text: 'x' }).doc, fresh, new Date('2026-12-31T12:00:00Z'))
+      expect(isBoardHead(saved), `saved ${JSON.stringify(title)}`).toBe(true)
+      expect(isBoardNote(saved)).toBe(true)
+      const renamed = serializeBoard({ ...doc, title: `${title} 2` }, saved, NOW)
+      expect(isBoardHead(renamed), `renamed ${JSON.stringify(title)}`).toBe(true)
+    }
+  })
+
+  /** A small deterministic generator (mulberry32): the same blocks on every run. */
+  const generator = (seed0: number): (() => number) => {
+    let seed = seed0
+    return () => {
       seed = (seed + 0x6d2b79f5) | 0
       let t = Math.imul(seed ^ (seed >>> 15), 1 | seed)
       t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
       return ((t ^ (t >>> 14)) >>> 0) / 4294967296
     }
+  }
+
+  it('never says yes where core says no, over thousands of hostile frontmatters (the ones core cannot read at all included)', () => {
+    const rand = generator(0x9e3779b9)
     const pool = [
       'title: Gate', 'type: board', 'type: board # c', 'type: board #c', 'type: "board"', "type: 'board'", 'type:board', 'type: board#x', 'type: Board',
       'type: boards', '  type: board', 'type:  board  ', 'type:\tboard', 'type: [board]', 'type: !!str board', 'type: &a board', 'tags: [a, b]',
       'x: |', 'x: >-', 'notes: "a', 'type: board"', '# type: board', 'type: ', 'type: ~', 'type: null', '', ' ', '---', '...', 'type: board\r',
       '- type: board', '{type: board}', 'type: "board', "type: 'board'x", 'type: board \t', 'key: value', '? type', ': board', 'type: |\n  board',
       'title: Other', '"type": board', 'status: active',
+      // Shapes that swallow or change the lines around them.
+      'z: b"', "notes: 'a", "z: b'", 'x: [a,', 'y]', ']', 'x: {a: 1,', '}', 'type: board  extra', '  extra: 1', '  - a', '- a', '-', 'x: &a b', 'x: *a',
+      'x: !!str y', '%YAML 1.2', '--- a', '--- ', 'key: "unclosed', 'k: |', '  text', '   more', ' less', 'k: >-', '? a', '<<: x', 'a: b: c', 'a: b #c',
+      'a:\t b', 'q: "esc\\q"', 'q: "\\x41"', 'q: "\\U00110000"', 'q: "\\u12"', 'q: "\\', 'tab:\t', '\tindented', 'ctl: \u0001', 'nel: \u0085',
+      'ls: \u2028', 'cr: a\rb', 'tags:', '  - a', '  - "b"', '- b', 'meta:', '  type: board', '  a: 1', "s: 'it''s'", 'long: ' + 'y'.repeat(100),
+      `${'k'.repeat(600)}: v`, 'a: [x, "]", y]', 'a: ["x', 'a: [x] y', 'a: [x]#y', 'a: [x] #y', 'a: [,]', 'a: [a,,b]', 'a: [{x}]', 'a: [[x]]', 'a: [- x]',
+      'a\rb: c', '# remark\rtype: note', 'k: "x\ry"', 'k: x\r', 'k:\r', '\ufeffkey: v', 'k: \ufeff', 'x: |\r', 'type: board\u2028', 'type: board\u0085',
     ]
-    // Core gives up on a block whose YAML does not parse (it reads as no frontmatter at all): nothing to compare against there.
-    const unreadable = (head: string): boolean => {
-      const split = splitFrontmatter(head)
-      return split.hasFrontmatter && Object.keys(split.frontmatter).length === 0 && head.slice(0, split.bodyOffset).split(/\r?\n/).slice(1).some((l) => !/^\s*(#.*|---|\.\.\.)?$/.test(l))
-    }
     let readable = 0
     let boards = 0
-    for (let i = 0; i < 5000; i++) {
-      const lines = Array.from({ length: 1 + Math.floor(rand() * 5) }, () => pool[Math.floor(rand() * pool.length)]!)
+    for (let i = 0; i < 20_000; i++) {
+      const lines = Array.from({ length: 1 + Math.floor(rand() * 6) }, () => pool[Math.floor(rand() * pool.length)]!)
       const eol = rand() < 0.2 ? '\r\n' : '\n'
       const head = `${rand() < 0.1 ? '\uFEFF' : ''}---${eol}${lines.join(eol)}${eol}---${eol}# Body${eol}`
-      if (unreadable(head)) continue
-      readable++
       const ours = isBoardHead(head)
       const core = isBoardNote(head)
       // The dangerous direction: the floating window would edit a note the brain does not call a board.
       expect(ours && !core, JSON.stringify(head)).toBe(false)
       if (core) boards++
-      // Stricter than core is allowed only for the spellings a line check cannot follow: a tag or an anchor on the value, a quoted
-      // key, a block written as one flow mapping.
-      if (core && !ours) expect(head, 'a board this check misses').toMatch(/type: (!!|&)|"type"|'type'|\{/)
+      if (ours) readable++
     }
-    expect(readable).toBeGreaterThan(1000)
-    expect(boards).toBeGreaterThan(300)
+    // Not vacuous: plenty of the heads are boards to both, and plenty are boards to core and refused here.
+    expect(readable).toBeGreaterThan(300)
+    expect(boards).toBeGreaterThan(readable)
+  })
+
+  it('agrees with core on every ordinary frontmatter, written the way tools write them', () => {
+    const rand = generator(0x51ed270b)
+    const other = ['title: Gate', 'status: active', 'created: "2026-10-09"', 'updated: 2026-10-09', 'area: Projects', 'aliases: [Gate ref, "The gate"]', "source: 'https://x.y/z'"]
+    const lists: string[][] = [['tags: [a, b]'], ['tags:', '  - ref', '  - gate'], ['tags:', '- ref'], ['tags: []'], ['cssclasses:', '  -'], ['n: |', '  type: note', '  text']]
+    const types = ['type: board', 'type: "board"', "type: 'board'", 'type: board  # kind', 'type: note', 'type: Board', 'type: project', 'type: boards', 'type: [board]']
+    let yes = 0
+    for (let i = 0; i < 3000; i++) {
+      const parts: string[][] = []
+      for (const l of other) if (rand() < 0.4) parts.push([l])
+      for (const l of lists) if (rand() < 0.3) parts.push(l)
+      const typeLine = types[Math.floor(rand() * types.length)]!
+      if (rand() < 0.97) parts.splice(Math.floor(rand() * (parts.length + 1)), 0, [typeLine])
+      const lines = parts.flatMap((p) => (rand() < 0.2 ? ['# a remark', ...p] : rand() < 0.1 ? ['', ...p] : p))
+      const eol = rand() < 0.25 ? '\r\n' : '\n'
+      const head = `${rand() < 0.1 ? '\uFEFF' : ''}---${eol}${lines.join(eol)}${lines.length ? eol : ''}---${eol}# Body${eol}`
+      const core = isBoardNote(head)
+      if (core) yes++
+      expect(isBoardHead(head), JSON.stringify(head)).toBe(core)
+    }
+    expect(yes).toBeGreaterThan(500)
   })
 
   it('looks at a head of 4 KB: the check after a write sees what the check before it did', () => {
@@ -352,6 +489,24 @@ describe('saveBoard', () => {
     } finally {
       watcher.stop()
     }
+  })
+
+  it('never calls noteSelfWrite on any watcher, whichever path a save takes (a prototype-wide spy, with a control)', async () => {
+    const v = vault()
+    const noted = vi.spyOn(VaultWatcher.prototype, 'noteSelfWrite')
+    const watcher = new VaultWatcher(v, { files: [], folders: [], images: [] }, () => undefined)
+    const next = board('Gate').replace('Reference board.', 'Edited.')
+    await expect(saveBoard({ path: 'Boards/Gate.md', text: next }, v)).resolves.toEqual({ ok: true })
+    // The refused ones, the reads and the checks: none of them announces anything either.
+    await saveBoard({ path: 'Notes/Plain.md', text: next }, v)
+    await saveBoard({ path: 'Boards/Gate.md', text: PLAIN }, v)
+    await validateBoardSave({ path: 'Boards/Gate.md', text: next }, v)
+    await readBoard('Boards/Gate.md', v)
+    await checkBoard('Boards/Gate.md', v)
+    expect(noted).not.toHaveBeenCalled()
+    // The control: the spy does see an announcement when one is made.
+    watcher.noteSelfWrite('Boards/Gate.md', next)
+    expect(noted).toHaveBeenCalledTimes(1)
   })
 
   it('wires board:save, board:read and board:open in main.ts to the checked functions only, never announcing a write', async () => {
