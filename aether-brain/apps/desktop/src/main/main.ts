@@ -8,6 +8,7 @@
  *   - watch them (VaultWatcher) and stream debounced change batches to the renderer and the AI link
  *   - run the AI link (the in-app MCP server on 127.0.0.1) when the user switches it on
  *   - open the user's Concept Forge page in a window of its own and relay its saves to the brain (ForgeHost)
+ *   - show a reference board in a floating window of its own that stays on top of other programs (BoardWindowHost)
  *
  * No telemetry. The renderer is sandboxed with context isolation and makes no network requests.
  */
@@ -48,6 +49,9 @@ import {
 import { THUMB_IPC, Thumbnailer, VIDEO_SCHEME } from './thumbnailer.js'
 import { AiLinkHost, aiSettings, cleanPatch, type AiLinkSettings, type LinkVault } from './ai-link.js'
 import { ForgeHost, forgeSettings, type ForgeSettings } from './forge.js'
+import { BoardWindowHost, PictureLedger, boardSettings, cleanBoardPath, type BoardSettings } from './board-window.js'
+import { checkBoard, readBoard, saveBoard } from './board-save.js'
+import { readAssetBytes } from './read-asset.js'
 import { CompanionHost, companionSettings, type CompanionSettings } from './companion.js'
 import { ChatHost, chatSettings, type ChatSettingsStored } from './chat-host.js'
 import { LibraryHost, librarySettings, type LibrarySettings } from './library-host.js'
@@ -94,6 +98,8 @@ interface Settings {
   library?: LibrarySettings
   /** The companion link (the Unreal viewer). */
   companion?: Partial<CompanionSettings>
+  /** The reference board's floating window: where it was, how big, on top, how dim. */
+  board?: BoardSettings
 }
 
 let settings: Settings = {}
@@ -214,6 +220,9 @@ let ai: AiLinkHost | null = null
 let chat: ChatHost | null = null
 let library: LibraryHost | null = null
 let vision: VisionHelper | null = null
+let board: BoardWindowHost | null = null
+/** Pictures created or removed since the last scan, which `listAssets` does not have (the floating board window needs them). */
+const pictureLedger = new PictureLedger()
 
 /** Changes for the AI link's brain: held during a read, else applied now. */
 function toAi(changes: VaultChangeDto[]): void {
@@ -297,6 +306,7 @@ async function openVault(input: string[]): Promise<VaultInfo> {
   watcher = null
   aiHeld = null
   thumbs.clear()
+  pictureLedger.clear()
   vault = next
   opened = true
   settings.roots = wanted
@@ -337,6 +347,8 @@ async function listFiles(): Promise<VaultFileDto[]> {
         throw err
       })
     if (latest()) {
+      // The new list has every picture the old changes were about; what the watcher reports from here on is new.
+      pictureLedger.clear()
       w.seed({ files: scan.files.map((f) => f.path), folders: scan.folders, images: scan.assets.map((a) => a.path), imagesCapped: scan.assetsTruncated })
     }
     const found = scan.files.length
@@ -360,6 +372,9 @@ async function startWatcher(v: FsVault): Promise<VaultWatcher> {
   const w = new VaultWatcher(v, null, (changes) => {
     toRenderer(IPC.changes, changes)
     toAi(changes)
+    // The floating board window gets the pictures (no note text) and the board it shows, to keep both right.
+    pictureLedger.apply(changes)
+    board?.forward(changes)
   })
   watcher = w
   await w.start()
@@ -465,6 +480,8 @@ const thumbnailer = new Thumbnailer({
  * the renderer's few requests in flight forever (it gets null, a plain moon).
  */
 const THUMB_TIMEOUT = 20_000
+/** Longest wait for a whole picture (up to 64 MB) from a share that may have stopped answering. */
+const READ_ASSET_TIMEOUT = 60_000
 /** A video's still that came back empty after this long timed out in the helper (it waits 15 s). */
 const VIDEO_GAVE_UP_MS = 14_000
 
@@ -555,6 +572,7 @@ async function createAsset(p: unknown, data: unknown): Promise<void> {
   const parent = canonical.includes('/') ? canonical.slice(0, canonical.lastIndexOf('/')) : ''
   const madeFolder = parent !== '' && (await v.stat(parent)) === null
   await v.createBinary(rel, bytes)
+  pictureLedger.add(canonical, { mtime: Date.now(), size: bytes.length })
   const changes: VaultChangeDto[] = madeFolder ? [{ kind: 'addDir', path: parent }] : []
   changes.push({ kind: 'add', path: canonical, mtime: Date.now(), size: bytes.length })
   toAi(changes)
@@ -573,6 +591,16 @@ async function openAsset(p: unknown): Promise<void> {
   if (isVideoName(path.basename(abs)) && !videoKindOf(await readHead(abs, VIDEO_HEAD_BYTES))) throw new Error(`Not a video: ${rel}`)
   const err = await shell.openPath(abs)
   if (err) throw new Error(`Could not open ${rel}: ${err}`)
+}
+
+/**
+ * Every picture of the vault as it is now: the last scan's list with what changed since, for the floating board window (`listAssets`
+ * is the scan's snapshot, and a picture dropped into a board a minute ago would be drawn there as a missing one). No stat: the
+ * board needs names, and the list can be 200,000 long.
+ */
+function boardAssets(): AssetListDto {
+  const scan = vault?.lastScan
+  return { assets: pictureLedger.list(scan?.assets ?? []), truncated: (scan?.assetsTruncated ?? false) || pictureLedger.overflowed }
 }
 
 /** OS folder picker; null when cancelled. */
@@ -865,6 +893,41 @@ function createForge(): ForgeHost {
   })
 }
 
+function createBoardWindow(): BoardWindowHost {
+  return new BoardWindowHost({
+    electron: { BrowserWindow, screen, shell, dialog },
+    settings: boardSettings(settings.board),
+    save: (s) => {
+      settings.board = s
+      return saveSettings()
+    },
+    brain: () => win,
+    // The brain window's own preload: the floating window has the same bridge (and the same session, no partition).
+    preload: path.join(__dirname, '..', 'preload', 'preload.cjs'),
+    devUrl: process.env['VITE_DEV_SERVER_URL'] ?? null,
+    pageFile: path.join(__dirname, '..', 'renderer', 'board.html'),
+  })
+}
+
+/**
+ * Either window opens, closes and sets up the floating board window; its page reads and saves the one board note (only a board
+ * note that is already there, see board-save.ts) and learns of the vault's pictures from here, since it is not the brain window.
+ */
+function registerBoardIpc(host: BoardWindowHost): void {
+  ipcMain.handle(IPC.boardOpen, async (_e, p: unknown) => {
+    const rel = cleanBoardPath(p)
+    const found = await checkBoard(rel, vault)
+    if (!found.ok) throw new Error(found.reason)
+    return host.open(rel)
+  })
+  ipcMain.handle(IPC.boardClose, () => host.close())
+  ipcMain.handle(IPC.boardStatus, () => host.status())
+  ipcMain.handle(IPC.boardConfigure, (_e, patch: unknown) => host.configure(patch))
+  ipcMain.handle(IPC.boardSave, (_e, p: unknown, text: unknown) => saveBoard({ path: p, text }, vault))
+  ipcMain.handle(IPC.boardRead, (_e, p: unknown) => readBoard(p, vault))
+  ipcMain.handle(IPC.boardAssets, () => boardAssets())
+}
+
 /**
  * The brain window opens the Forge window; the Forge window's requests go through the host to the brain window's
  * store; the brain window's Concept Forge star gets frames of the page while its screen is in view.
@@ -977,6 +1040,8 @@ function registerIpc(): void {
   ipcMain.on(THUMB_IPC.done, (e, id: unknown, png: unknown) => thumbnailer.done(e.sender, id, png))
   ipcMain.handle(IPC.createAsset, (_e, p: unknown, data: unknown) => createAsset(p, data))
   ipcMain.handle(IPC.openAsset, (_e, p: unknown) => openAsset(p))
+  // A whole picture for the reference board to decode (never decoded here); null for anything but a picture of the open vault.
+  ipcMain.handle(IPC.readAsset, (_e, p: unknown) => (vault && typeof p === 'string' ? within(readAssetBytes(vault, p), READ_ASSET_TIMEOUT, null) : null))
   ipcMain.handle(IPC.chatStatus, () => requireChat().status())
   ipcMain.handle(IPC.chatConfigure, (_e, patch: unknown) => requireChat().configure(patch && typeof patch === 'object' ? (patch as ChatPatch) : {}))
   ipcMain.handle(IPC.chatSend, (_e, conv: unknown, text: unknown) => requireChat().send(conv, text))
@@ -1090,6 +1155,7 @@ app.on('before-quit', () => {
   thumbnailer.stop()
   library?.close()
   vision?.stop()
+  board?.flush()
   void chat?.close()
   void ai?.stop()
   companion?.quit()
@@ -1110,6 +1176,8 @@ void app.whenReady().then(async () => {
   registerIpc()
   createWindow()
   registerForgeIpc(createForge())
+  board = createBoardWindow()
+  registerBoardIpc(board)
   companion = createCompanion()
   registerCompanionIpc(companion)
   void companion.start()

@@ -2,6 +2,7 @@ import {
   MemoryVaultAdapter,
   folderOf,
   generateSyntheticVault,
+  isImagePath,
   mimeOf,
   normalizePath,
   type MemoryAsset,
@@ -224,6 +225,17 @@ class DemoVaultAdapter extends MemoryVaultAdapter {
     const url = this.pictures.get(p)
     const source = own ? new Blob([own.slice()], { type: mimeOf(p) }) : url !== undefined ? await bundledBlob(url, mimeOf(p)) : null
     return source ? resizeImage(source, size) : null
+  }
+
+  /** The picture's bytes: one added in the app first (as `thumbnail` does), else the bundled file. Null for a video or nothing readable. */
+  override async readAsset(path: string): Promise<Blob | null> {
+    const p = normalizePath(path)
+    if (!isImagePath(p)) return null
+    if (this.assetData(p)) return super.readAsset(p)
+    const url = this.pictures.get(p)
+    const bundled = url === undefined ? null : await bundledBlob(url, mimeOf(p))
+    // A fetched file carries the server's type (none, for some schemes): the extension decides.
+    return bundled?.size ? new Blob([bundled], { type: mimeOf(p) }) : null
   }
 
   /** Create-only over the bundled pictures too (any letter case), like a disk that has them. */

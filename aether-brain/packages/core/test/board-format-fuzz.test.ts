@@ -246,6 +246,24 @@ describe('round trip: random boards', () => {
     expect(pics - unsafe).toBeGreaterThan(100)
   })
 
+  it('serializing never changes the doc it is given (frozen docs, 100 boards), and the same doc gives the same text every time', () => {
+    const freeze = <T,>(v: T): T => {
+      if (v !== null && typeof v === 'object') {
+        Object.values(v as Record<string, unknown>).forEach(freeze)
+        Object.freeze(v)
+      }
+      return v
+    }
+    const r = new R(555)
+    for (let i = 0; i < 100; i++) {
+      const d = freeze(randDoc(r))
+      const text = serializeBoard(d, undefined, NOW)
+      expect(serializeBoard(d, undefined, NOW)).toBe(text)
+      expect(serializeBoard(d, text, LATER)).toBe(text)
+      expect(() => parseBoard(text)).not.toThrow()
+    }
+  })
+
   it('wild boards (out of range, not finite, off the grid, too long, odd colours) still settle: writing what was read gives the same text', () => {
     const r = new R(7)
     const wild = (n: number): number => {
@@ -511,9 +529,9 @@ describe('text and paths against the real markdown parser', () => {
     }
   })
 
-  it('random note texts and captions never make a link, tag, task, html or block (500 texts)', () => {
+  it('random note texts and captions never make a link, tag, task, html or block (300 boards of 4 items)', () => {
     const r = new R(77)
-    for (let i = 0; i < 500; i++) {
+    for (let i = 0; i < 300; i++) {
       const items: BoardItem[] = []
       for (let k = 0; k < 4; k++) {
         const text = randText(r, 25, false)

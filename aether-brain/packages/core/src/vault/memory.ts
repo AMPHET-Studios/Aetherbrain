@@ -2,6 +2,13 @@ import type { VaultAdapter, VaultAsset, VaultChange, VaultFile } from '../types'
 import { isImagePath, isMediaPath } from './assets'
 import { folderOf, isIgnoredPath, isMarkdownPath, normalizeFolderPath, normalizePath } from './paths'
 
+/**
+ * Largest picture `VaultAdapter.readAsset` hands out whole: the cap the
+ * desktop's main process reads under (it cannot import this, so it keeps its
+ * own copy in `main/read-asset.ts`).
+ */
+export const READ_ASSET_MAX_BYTES = 64 * 1024 * 1024
+
 /** An image held by a MemoryVaultAdapter: its bytes (possibly empty in tests) and when it was written. */
 export interface MemoryAsset {
   path: string
@@ -92,6 +99,18 @@ export class MemoryVaultAdapter implements VaultAdapter {
     const a = this.assets.get(normalizePath(path))
     if (!a || typeof Blob === 'undefined') return null
     return new Blob([a.data.slice()], { type: mimeOf(a.path) })
+  }
+
+  /**
+   * The picture's own bytes as a Blob typed by its extension, or null: no such
+   * picture, a video (the board reads pictures), or nothing stored in it.
+   */
+  async readAsset(path: string): Promise<Blob | null> {
+    const p = normalizePath(path)
+    const a = this.assets.get(p)
+    if (!a || !isImagePath(p) || typeof Blob === 'undefined') return null
+    if (!a.data.byteLength || a.data.byteLength > READ_ASSET_MAX_BYTES) return null
+    return new Blob([a.data.slice()], { type: mimeOf(p) })
   }
 
   /** Bytes of an image (tests / persistence), or null. */

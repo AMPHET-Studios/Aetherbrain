@@ -309,6 +309,31 @@ export interface AiActivityDto {
   write: boolean
 }
 
+/* ---- the reference board's floating window ---- */
+
+/** The floating board window, for both windows' toolbars and the palette. */
+export interface BoardStatusDto {
+  /** The window exists. */
+  open: boolean
+  /** The board (vault path of its note) it shows, or null when closed. */
+  path: string | null
+  alwaysOnTop: boolean
+  /** 0.2 to 1. Always 1 where the platform cannot dim a window (`supportsOpacity` false). */
+  opacity: number
+  /** Window opacity works here (Windows, macOS). */
+  supportsOpacity: boolean
+}
+
+/** What `board:configure` takes: either field, either window may send it. */
+export interface BoardConfigureDto {
+  alwaysOnTop?: boolean
+  /** 0.2 to 1 (clamped); ignored where the platform cannot dim a window. */
+  opacity?: number
+}
+
+/** The answer to `board:save`: nothing is written unless `ok`. */
+export type BoardSaveResult = { ok: true } | { ok: false; reason: string }
+
 export interface AetherBridge {
   /** Show the OS folder picker; returns null if cancelled. Opens + watches it as a single-root vault. */
   pickVault(): Promise<VaultInfo | null>
@@ -392,6 +417,39 @@ export interface AetherBridge {
   createAsset(path: string, data: Uint8Array): Promise<void>
   /** Open an image of the vault in the OS default app (image paths only). */
   openAsset(path: string): Promise<void>
+  /**
+   * The bytes of a picture of the vault as they are on disk (a picture name, at most 64 MB), or null: not a picture, not in the
+   * visible vault, empty, too big, unreadable, or no vault open. Main reads and never decodes; the caller does.
+   */
+  readAsset(path: string): Promise<Uint8Array | null>
+
+  /**
+   * The reference board's floating window. `boardOpen` opens it on a board note (a vault `.md` path whose note is a board) or, when it
+   * is open, shows that board in it; the window belongs to the brain window and closes with it.
+   */
+  boardOpen(path: string): Promise<BoardStatusDto>
+  /** Close the floating window (the brain window hears `onBoardClosed`). */
+  boardClose(): Promise<void>
+  boardStatus(): Promise<BoardStatusDto>
+  /** Change the window's always-on-top and opacity; callable from either window. */
+  boardConfigure(patch: BoardConfigureDto): Promise<BoardStatusDto>
+  /**
+   * Overwrite an existing board note (`type: board` in its first 4 KB, text at most 400,000 characters). Never creates a note. Written
+   * WITHOUT telling the watcher it was us, so the brain window sees it like an outside edit and rebuilds its graph.
+   */
+  boardSave(path: string, text: string): Promise<BoardSaveResult>
+  /** A board note's text for the floating window, or null when the path is not a board note (or no vault is open). */
+  boardRead(path: string): Promise<string | null>
+  /**
+   * Every picture of the vault as it is NOW (the scan's list plus what was added or removed since: `listAssets` is the scan's
+   * snapshot, and a picture dropped into a board a minute ago is not in it). For the floating window, which gets later changes
+   * through `onChanges` (pictures only).
+   */
+  boardAssets(): Promise<AssetListDto>
+  /** The floating window opened, closed, moved to another board or changed its settings. Sent to both windows. */
+  onBoardState(cb: (s: BoardStatusDto) => void): () => void
+  /** The floating window stopped showing the board at `path` (closed, or moved to another board): the docked view takes it back. */
+  onBoardClosed(cb: (path: string) => void): () => void
 
   /** Open (or focus) the Concept Forge window; asks for concept-forge.html the first time or with `pick`. */
   forgeOpen(opts?: { pick?: boolean }): Promise<ForgeStatus>
@@ -482,6 +540,18 @@ export const IPC = {
   thumb: 'vault:thumb',
   createAsset: 'vault:createAsset',
   openAsset: 'vault:openAsset',
+  readAsset: 'vault:readAsset',
+  boardOpen: 'board:open',
+  boardClose: 'board:close',
+  boardStatus: 'board:status',
+  boardConfigure: 'board:configure',
+  boardSave: 'board:save',
+  boardRead: 'board:read',
+  boardAssets: 'board:assets',
+  /** main → brain window and floating window: a BoardStatusDto. */
+  boardState: 'board:state',
+  /** main → brain window: the vault path of the board the floating window stopped showing. */
+  boardClosed: 'board:closed',
   forgeOpen: 'forge:open',
   forgeStatus: 'forge:status',
   /** main → brain window: a ForgeRequest to serve. */

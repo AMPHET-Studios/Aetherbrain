@@ -759,6 +759,20 @@ describe('the board section in a whole note', () => {
     expect(out).not.toContain('title:')
   })
 
+  it('a title with a double space is the title the note has, not a rename: an unchanged board is still given back as it was', () => {
+    const raw = ['---', 'title: "Gate  reference"', 'type: board', 'updated: "2026-01-01"', '---', '## Board', '', VIEW, ''].join('\n')
+    const { doc } = parseBoard(raw)
+    expect(doc.title).toBe('Gate  reference')
+    expect(serializeBoard(doc, raw, NOW)).toBe(raw)
+    expect(serializeBoard(doc, raw)).toBe(raw)
+  })
+
+  it('without a clock argument it stamps today', () => {
+    const out = serializeBoard(board([note()], { title: 'Gate' }), newBoardNote('Gate', NOW))
+    expect(out).toMatch(/\nupdated: "\d{4}-\d{2}-\d{2}"\n/)
+    expect(out).toContain('created: "2026-10-09"')
+  })
+
   it('saving a board that did not change returns the note itself, and does not move "updated"', () => {
     const fresh = newBoardNote('Gate', NOW)
     const doc = parseBoard(fresh).doc

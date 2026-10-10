@@ -1,4 +1,4 @@
-import { isMediaPath, type VaultAdapter, type VaultAsset, type VaultChange, type VaultFile, type VaultRootInfo } from '@aether/core'
+import { isImagePath, isMediaPath, mimeOf, type VaultAdapter, type VaultAsset, type VaultChange, type VaultFile, type VaultRootInfo } from '@aether/core'
 import type { AetherBridge, VaultChangeDto, VaultInfo } from '../../shared/ipc'
 
 /** A change as main reported it (a picture's comes without content, with its size). */
@@ -199,6 +199,21 @@ export class ElectronVaultAdapter implements VaultAdapter {
     const bytes = await this.bridge.thumbnail(path, size)
     // Bytes that crossed IPC sit in a plain ArrayBuffer, never a shared one.
     return bytes?.length ? new Blob([bytes as Uint8Array<ArrayBuffer>], { type: 'image/png' }) : null
+  }
+
+  /**
+   * The picture file itself, whole: main reads the bytes (at most 64 MB, nothing decoded there) and this side decodes them. Null
+   * for a video, a path main refuses, an empty or too big file, and when the read fails: it never rejects.
+   */
+  async readAsset(path: string): Promise<Blob | null> {
+    // A video is a vault asset but not a picture to read whole: no round trip to main for it.
+    if (!isImagePath(path)) return null
+    try {
+      const bytes = await this.bridge.readAsset(path)
+      return bytes?.length ? new Blob([bytes as Uint8Array<ArrayBuffer>], { type: mimeOf(path) }) : null
+    } catch {
+      return null
+    }
   }
 
   /**
