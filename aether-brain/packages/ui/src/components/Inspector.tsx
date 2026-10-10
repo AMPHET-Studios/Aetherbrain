@@ -18,6 +18,7 @@ import {
   type NoteId,
 } from '@aether/core'
 import { AREA_LABELS, IMAGE_COLOR, STAR_COLOR, SUN_COLOR, TODAY_COLOR, planetColor } from '@aether/graph'
+import { listBoards } from '../board/boardRegistry'
 import { picturesUnder, useAether } from '../store'
 import { cx, plural, relativeTime, truncate, MOD } from '../util'
 import { copyEmbed, formatBytes, importPicturesFromDialog, usePreview } from './pictures'
@@ -801,6 +802,8 @@ function ImageInspector({ id }: { id: NoteId }) {
   const showFolder = useAether((s) => s.showFolder)
   const reveal = useAether((s) => s.reveal)
   const controller = useAether((s) => s.controller)
+  const canWrite = useAether((s) => !!s.adapter && !s.adapter.readOnly)
+  const [boardMenu, setBoardMenu] = useState(false)
   const mtime = info?.mtime ?? asset?.mtime ?? null
   const size = info?.size ?? asset?.size ?? null
   const preview = usePreview(path, `${mtime ?? ''}:${size ?? ''}`)
@@ -871,6 +874,20 @@ function ImageInspector({ id }: { id: NoteId }) {
         <button type="button" className="hud-btn" onClick={() => void copyEmbed(path)} title={`Copy ![[${name}]] to paste into a note`}>
           Copy embed
         </button>
+        {!video && (
+          <button
+            type="button"
+            className="hud-btn"
+            aria-pressed={boardMenu}
+            aria-haspopup="menu"
+            aria-expanded={boardMenu}
+            disabled={!canWrite}
+            onClick={() => setBoardMenu((v) => !v)}
+            title={canWrite ? 'Put this picture on a reference board (palette: Boards: add the selected picture…)' : 'This vault is read-only'}
+          >
+            Add to board ▾
+          </button>
+        )}
         <button type="button" className="hud-btn" onClick={() => controller.flyTo(id)} title="Fly to (f)">
           ✈
         </button>
@@ -878,6 +895,8 @@ function ImageInspector({ id }: { id: NoteId }) {
           ✕
         </button>
       </div>
+
+      {boardMenu && !video && <AddToBoardMenu path={path} onDone={() => setBoardMenu(false)} />}
 
       <div className="scroll flex-1 border-t border-[var(--line)] px-4 py-3">
         {refs.length > 0 ? (
@@ -887,5 +906,41 @@ function ImageInspector({ id }: { id: NoteId }) {
         )}
       </div>
     </aside>
+  )
+}
+
+/** Boards offered in the picture inspector's menu; the rest are in the Boards view. */
+export const BOARD_CHOICES = 8
+
+/**
+ * The boards a picture can be put on, most recently updated first, and a new one named after the picture. Drawn in place (the
+ * inspector clips a floating menu). Read when it opens, not on every change of the vault.
+ */
+export function AddToBoardMenu({ path, onDone }: { path: string; onDone: () => void }) {
+  const [boards] = useState(() => listBoards(useAether.getState().notes))
+  const shown = boards.slice(0, BOARD_CHOICES)
+  const add = (board: string) => {
+    onDone()
+    void useAether.getState().addPicturesToBoard([path], board)
+  }
+  const makeNew = () => {
+    onDone()
+    const s = useAether.getState()
+    void s.newBoard(`${imageFileName(path).replace(/\.[^.]+$/, '')} reference`, { open: false }).then((board) => (board ? s.addPicturesToBoard([path], board) : undefined))
+  }
+  return (
+    <div className="mx-4 mb-3 flex flex-col overflow-hidden rounded-lg border border-[var(--panel-border)] bg-black/30" role="menu" aria-label="Add to board">
+      <div className="section-title px-3 pt-2 pb-1">Add to board</div>
+      {shown.map((b) => (
+        <button key={b.meta.path} type="button" role="menuitem" className="flex items-baseline gap-2 px-3 py-1.5 text-left text-[12.5px] text-ink hover:bg-[rgba(143,124,255,0.14)]" onClick={() => add(b.meta.path)}>
+          <span className="min-w-0 flex-1 truncate">{truncate(b.meta.title, 60)}</span>
+          {b.meta.updated && <span className="shrink-0 text-[11px] text-faint">{relativeTime(b.meta.updated)}</span>}
+        </button>
+      ))}
+      {boards.length > shown.length && <div className="px-3 py-1 text-[11px] text-faint">{plural(boards.length - shown.length, 'more board')} in the Boards view (8)</div>}
+      <button type="button" role="menuitem" className="border-t border-[var(--line)] px-3 py-1.5 text-left text-[12.5px] text-accent2 hover:bg-[rgba(143,124,255,0.14)]" onClick={makeNew}>
+        ＋ New board…
+      </button>
+    </div>
   )
 }

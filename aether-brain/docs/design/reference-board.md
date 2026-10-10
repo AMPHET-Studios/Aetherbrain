@@ -5,8 +5,10 @@ or paste pictures, move, scale, rotate, flip, crop and group them, arrange them,
 colours from them, and keep the whole board in a window that floats on top of your painting program. Boards are ordinary markdown
 notes in the vault, so the brain links each board to its pictures, search finds it, git can diff it and nothing is locked in.
 
-This file is the contract the pieces are written against. Types: `packages/core/src/board/types.ts` (data model) and
-`packages/ui/src/board/api.ts` (host, input, state, commands, picture cache).
+This file is the contract the pieces were written against, brought up to date with the code when the build was finished (names,
+signatures and the places where the build went another way are marked *Built as:*). Where this text and the code differ, the code
+wins. Types: `packages/core/src/board/types.ts` (data model) and `packages/ui/src/board/api.ts` (host, input, state, commands,
+picture cache). The user's guide is [../REFERENCE-BOARD.md](../REFERENCE-BOARD.md), the keys are in [../KEYBOARD.md](../KEYBOARD.md).
 
 ## Features
 
@@ -20,7 +22,7 @@ PureRef's feature set, built for this app. Everything has a key or a palette com
 | Arrange | Optimal (a tidy packed layout), row, column, grid, stack; sort by name, added, size or shuffled; align left/right/top/bottom/centres; distribute; normalise width, height, size or scale. |
 | Writing | Text notes (size, colour, background), pen (pressure from a tablet pen thickens the line), line and arrow, rectangle, ellipse, an eraser that removes whole marks. |
 | Colour | Sampler: click anywhere to read the colour under the pointer (hex copied); extract a palette from the selection (swatch notes on the board). |
-| Files | Undo and redo (200 steps), automatic saving, many boards (a list, new, duplicate), export the selection or the whole board as a picture saved in the board's folder. |
+| Files | Undo and redo (200 steps), automatic saving, many boards (a list with search, new; a board is a note, so duplicating one is copying its file), export the selection or the whole board as a picture saved in the board's folder. |
 | Window | Desktop: pop the board out into its own window that stays on top, window opacity (Windows, macOS), hide the toolbar for a bare board, remembers its place and size. |
 
 Not in scope: online search for pictures, downloading pictures from web addresses (the app makes no network requests; copy the
@@ -42,7 +44,7 @@ picture or save it, then paste or drop), the click-through window (no safe way b
    held as `ImageBitmap`s in three tiers (256, 1024, full capped at 8192 px longer side), chosen by their size on screen, loaded
    lazily for what is in view, evicted least-recently-used under a pixel budget (128 megapixels), two decodes at a time.
 5. **Two hosts, one board view.** `BoardView` (React, in packages/ui) takes a `BoardHost` and knows nothing of the store or of Electron:
-   the **docked** host wraps the store (`rewriteNote`, `importImages`, `preview`), the **floating** host wraps the bridge in a second
+   the **docked** host wraps the store (`readBoard` / `saveBoard`, `importBoardPictures`, `preview`), the **floating** host wraps the bridge in a second
    window. A board is open in one place at a time: popping out leaves a placeholder docked, closing the window gives it back. That
    avoids two writers (the vault watcher does not echo a window's own writes, so a live two-window sync would need its own bus).
 6. **The floating window is a second HTML entry** (`board.html`) loading only the board view, with the same preload and default
@@ -112,55 +114,115 @@ changing and once at the end of a gesture**, never per pointer move, and not at 
 
 Pure TypeScript, no DOM. Exported from `@aether/core`.
 
-- `text.ts`: `escapeBoardText(s)`, `unescapeBoardText(s)`, `estimateTextMetrics: TextMetrics` (average glyph width 0.55 × size,
-  wrapping at spaces, line height 1.25 × size), `NOTE_PADDING`.
-- `format.ts`: `parseBoard(raw: string): { doc: BoardDoc; warnings: string[] }`, `serializeBoard(doc: BoardDoc, raw?: string): string`
-  (merge into `raw` when given, else a fresh note), `newBoardNote(title: string, now: Date): string`, `isBoardNote(raw: string):
-  boolean`, `boardPictures(doc): string[]` (distinct picture paths in order), `safeEmbedPath(path): boolean`, `boardFolderName(title)`.
-- `geometry.ts`: `itemSize(item, metrics): { w, h }` (shown size, unrotated), `itemCentre`, `itemQuad(item, metrics): [Vec2×4]`,
-  `itemBounds(item, metrics): Rect`, `itemsBounds(items, metrics): Rect | null`, `pointInItem(item, p, tol, metrics)`, `hitTest(doc, p,
-  tol, metrics): BoardItem | null` (topmost), `itemsInRect(doc, rect, mode: 'touch' | 'contain', metrics): number[]`, `rotatePoint`,
-  `screenToBoard(view, viewport, p)`, `boardToScreen(...)`, `zoomAt(view, factor, anchorScreen, viewport)`, `fitView(bounds,
-  viewport, margin)`, `clampView`, `snapMove(doc, movingIds, delta, opts): { delta, guides }`, `normalizeAngle`.
+- `types.ts`: `BoardDoc`, the item kinds (`PictureItem`, `NoteItem`, `StrokeItem`, `LineItem`, `RectItem`, `EllipseItem`), `BoardView`, `Crop`,
+  `TextMetrics`, `BOARD_LIMITS`, `emptyBoard(title)`.
+- `text.ts`: `escapeBoardText(s)`, `unescapeBoardText(s)`, `estimateTextMetrics: TextMetrics` (average glyph width 0.55 × size, wrapping
+  at spaces, line height 1.25 × size), `NOTE_PADDING`.
+- `format.ts`: `parseBoard(raw): { doc, warnings }`, `serializeBoard(doc, raw?, now?)` (merge into `raw` when given, else a fresh note;
+  returns `raw` itself when nothing changed), `newBoardNote(title, now)`, `isBoardNote(raw)`, `boardPictures(doc)` (distinct picture paths
+  in order), `safeEmbedPath(path)`, `boardFolderName(title)` (the folder a board's pictures live in), `boardPictureName(original,
+  mimeType, now)` (a safe file name for a dropped or pasted picture: `ref 2026-10-09 143512.png` when the name says nothing),
+  `formatNumber(n, dec)`.
+- `geometry.ts`: `itemSize`, `itemCentre`, `itemQuad`, `itemBounds`, `itemsBounds(items, metrics)`, `selectionBounds`, `noteBox`,
+  `pointInItem(item, p, tol, metrics)`, `hitTest(doc, p, tol, metrics)` (topmost), `itemsInRect(doc, rect, 'touch' | 'contain', metrics)`,
+  `rotatePoint`, `normalizeAngle`, `screenToBoard(view, viewport, p)`, `boardToScreen`, `zoomAt(view, factor, anchorScreen, viewport)`,
+  `panView`, `fitView(bounds, viewport, margin)`, `clampView`, `snapMove(doc, movingIds, delta, opts)`, `handlesFor`, `hitHandle`,
+  `canRotateItems`.
 - `ops.ts`: pure functions `BoardDoc → BoardDoc` (never mutate; unchanged parts keep their identity): `addPicture`, `addNote`,
-  `addMark`, `moveItems`, `scaleItems`, `resizePicture`, `rotateItems`, `flipItems`, `setCrop`, `setProps`, `group`, `ungroup`,
-  `expandGroups(doc, ids): number[]`, `reorder`, `removeItems`, `duplicateItems`, `lockItems`, `clampDoc`. All skip locked
+  `addMark` (each returns `{ doc, id }`, `id` null when the board is full), `insertItems`, `duplicateItems`, `moveItems`, `scaleItems`,
+  `resizePicture`, `resizeNote`, `rotateItems`, `flipItems`, `setCrop`, `resetCrop`, `setProps(doc, ids, patch: BoardPatch, metrics)`,
+  `group`, `ungroup`, `expandGroups(doc, ids)`, `reorder`, `removeItems`, `lockItems`, `clampDoc`, `BOARD_ITEM_LIMITS`. All skip locked
   items except `lockItems` itself.
-- `arrange.ts`: `arrange(doc, ids, mode, opts)` (optimal, row, column, grid, stack), `sortItems`, `align`, `distribute`, `normalize`.
-- `history.ts`: `History<T>`: `push(doc, label)`, `undo()`, `redo()`, `canUndo`, `canRedo`, `clear()`; coalesces pushes with the same
-  `key` within 800 ms (a run of arrow-key nudges is one step); 200 steps.
-- `palette.ts`: `hexToRgb`, `rgbToHex`, `luminance`, `dominantColours(rgba: Uint8ClampedArray, count): string[]` (median-cut),
-  `textColourOn(hex)`.
+- `arrange.ts`: `arrange(doc, ids, mode, opts)` (optimal, row, column, grid, stack; centred on where the units were), `sortOrder`, `align`,
+  `distribute`, `normalize`.
+- `history.ts`: `History<T>`: `reset(initial)`, `current`, `push(next, { key?, label?, now? })` (pushes with the same `key` within 800 ms
+  coalesce, so a run of arrow-key nudges is one step), `undo()`, `redo()`, `canUndo`, `canRedo`, `undoLabel`, `redoLabel`, `size`; 200
+  steps.
+- `palette.ts`: `hexToRgb`, `rgbToHex`, `luminance`, `textColourOn(hex)`, `dominantColours(rgba, count)` (median-cut), `averageColour`.
 
 ## UI (`packages/ui/src/board/`)
 
-- `controller.ts`: `class BoardController` — the whole interaction state machine, free of the DOM. `constructor({ doc, metrics?,
-  now? })`; `state: BoardUiState`; `subscribe(cb)`; `setViewport(w, h)`; `pointerDown/Move/Up/Cancel(e: PointerIn)`,
-  `wheel(e: WheelIn)`, `key(e: KeyIn): boolean` (true when consumed), `exec(id: BoardCommandId, arg?)`, `replaceDoc(doc)` (external
-  change: keeps the selection by id and the history), `onChange(cb: (doc, why) => void)` (for saving), `addPictures(items:
-  {path, w, h}[], at?: Vec2)`, `addNoteAt(p)`, `commitNoteText(id, text)`, `setNaturalSize(path, w, h)` (a picture's real
-  aspect arrived), `sampleAt(p, rgba)`.
-  It owns tools, selection, drag (move with snapping, scale from handles with aspect lock, rotate with snap, crop edges,
-  marquee), pan (middle button, Space+drag, hand tool, two-finger touch, pen barrel button), pinch zoom, wheel zoom (and trackpad
-  pan with `⇧`), the draft mark while drawing, eraser, history, dirtiness.
-- `commands.ts`: `BOARD_COMMANDS: BoardCommandInfo[]` (every `BoardCommandId`, title, group, keys), `keyToCommand(e: KeyIn, tool)`.
-- `imageCache.ts`: `class ImageCache implements ImageSource` — tiers, budget, LRU, concurrency; takes `{ load(path, tier):
-  Promise<ImageBitmap | null>, budgetPixels?, onLoaded() }`; `pickTier(wantPx, natural)`; `dispose()`.
-- `renderer.ts`: `drawBoard(ctx, args)` — background, grid, pictures (crop, flip, rotation, opacity, grey, smoothing, captions),
-  notes (real text metrics), marks, selection box and handles, guides, marquee, draft, sampler loupe, missing-picture
-  placeholders; `exportBoard(doc, ids, scale, images)` → canvas; `canvasTextMetrics(ctx): TextMetrics`.
-- `BoardView.tsx`: the React shell over a `BoardHost`: canvas (pointer, wheel and key listeners with `{ passive: false }`,
-  `touch-action: none`, pointer capture), toolbar (tools, arrange menu, colour, window controls), status bar (zoom, selection,
-  saved/saving), picker, note editor overlay (a textarea over the note), context menu, drop and paste handling (stops the
-  window's own drop-zone from importing the same files), save debounce, external-change reload, missing-picture list.
-- `BoardsView.tsx` (docked): board list (notes with `type: board`), new board, open, the placeholder when the board is popped out.
-  `docked host` over the store lives in `dockedHost.ts`.
+- `api.ts`: only types and constants: `BoardHost` (+ `BoardPictureHost`, `BoardWindowHost`), `PointerIn`, `WheelIn`, `KeyIn`, `BoardUiState`,
+  `BoardStyle`, `BoardEvent`, `BoardCommandId`, `BoardCommandInfo`, `IMAGE_TIERS`, `ImageSlot`, `ImageSource`.
+- `controller.ts`: `class BoardController` — the whole interaction state machine, free of the DOM. `constructor({ doc, metrics?, now?,
+  history?, viewport? })`; `state: BoardUiState`; `subscribe(cb)`; `onChange(cb(doc, why: { reason, final, viewOnly }))` (for saving:
+  `final` is true at the end of a gesture, false while a drag runs, `viewOnly` for a pan or zoom); `onEvent(cb(BoardEvent))` (toasts,
+  sampler requests, palette requests, commands only the shell can carry out); `setViewport(w, h)`, `setView(view)`, `replaceDoc(doc, {
+  view? })` (an outside change: keeps the history and, where the ids line up, the selection; counts as saved), `markSaved()`,
+  `setStyle(patch)`, `pointerDown/Move/Up/Cancel(e: PointerIn)`, `pointerLeave()`, `blur()`, `wheel(e: WheelIn)`, `key(e: KeyIn):
+  boolean` (true when consumed), `exec(id, arg?)`, `addPictures(items: { path, w, h }[], at?)`, `setNaturalSize(path, w, h)`,
+  `naturalSize(path)`, `addNoteAt(p)`, `editNote(id)`, `commitNoteText(id, text)`, `cancelNoteEdit()`, `sampleAt(p, hex | null)`,
+  `addSwatches(colours, near)`, `dispose()`. It owns tools, selection, drag (move with snapping, scale from handles with aspect lock,
+  rotate with snap, crop edges, marquee), pan (middle button, Space+drag, hand tool, two-finger touch, pen barrel button), pinch zoom,
+  wheel zoom (and trackpad pan with `⇧`), the draft mark while drawing, eraser, history, dirtiness. *Built as:* a press while a note is
+  being edited is dropped (the shell commits the text first); modifier keys held during a drag without movement are not re-applied;
+  ids renumber on a reload through `parseBoard`, so the selection survives `replaceDoc` only where they line up.
+- `commands.ts`: `BOARD_COMMANDS: BoardCommandInfo[]` (every `BoardCommandId`: title, group, keys, `needs`, `desktopOnly`),
+  `commandInfo(id)`, `keyToCommand(e: KeyIn, { tool, editing, cropping })`, `isRepeatable(id)`, `boardHelpRows()` (the cheatsheet rows).
+  The rows are the one source of truth: the key map is built by reading each row's `keys` text, so the cheatsheet, the palette, the
+  menus and docs/KEYBOARD.md (a test) cannot disagree.
+- `imageCache.ts`: `class ImageCache implements ImageSource`: `constructor({ load(path, tier): Promise<{ bitmap, natural? } | null>,
+  onLoaded(), budgetPixels?, concurrency?, retryAfterMs?, now? })`, `get(path, wantPx)`, `setVisible(paths)`, `forget(path)`, `clear()`,
+  `dispose()`, `stats()`; `pickTier(wantPx, natural)`. `imageLoader.ts`: `createImageLoader(host.pictures)` makes the `load` (previews for
+  the two small tiers, the original scaled while decoding past 8192 px).
+- `renderer.ts`: `drawBoard(ctx, args: DrawArgs)` — background, grid, pictures (crop, flip, rotation, opacity, grey, smoothing,
+  captions), notes (real text metrics), marks, selection box and handles, guides, marquee, draft, sampler loupe, missing-picture boxes;
+  `visiblePictures(doc, view, viewport, metrics)`; `canvasTextMetrics(ctx)`; `exportBoard(doc, ids | null, scale, images, makeCanvas,
+  metrics, opts?)` → canvas (the same draw function, a pass of full-size bitmaps at a time); `HANDLE_PX`, `ROTATE_STALK_PX`.
+- `active.ts`: two small registries that join the pieces without importing each other. The **active board**
+  (`setActiveBoard({ path, exec, state, flush })`, `getActiveBoard()`, `subscribeActiveBoard`): the mounted board view announces itself so
+  the palette, the docked host and the pop-out code can run a command, read the selection or flush a save without a reference to the
+  React tree. The **window control** (`setBoardWindowControl(control)`, `getBoardWindowControl()`, `subscribeBoardWindowControl`): the
+  desktop app announces how the floating window is driven (`BoardWindowControl`: `available`, `status()`, `subscribe`, `popOut(path)`,
+  `dock()`, `setAlwaysOnTop`, `setOpacity`, `onReturned(cb(path))`, `setFlush(fn)`), so the docked view can offer pop-out and show *this
+  board is open in its window* without importing the desktop app.
+- `BoardView.tsx` + `view/`: the React shell over a `BoardHost` (`{ host, className? }`, `initialRaw?`): canvas (pointer, wheel and key
+  listeners, `{ passive: false }`, `touch-action: none`, pointer capture), toolbar (tools, style panel, Edit / Arrange / View / Export
+  menus, add pictures, window controls from `host.window`), status bar (zoom, item count, saved / saving / not saved), picker (the vault's
+  pictures, windowed, searchable, multi-select), note editor (a text box over the note), context menu, info card, cheatsheet, drop and
+  paste handling (stops the window's drop zone from importing the same files; web addresses get a toast), save scheduling, external-change
+  reload. The engine behind it is `view/boardSession.ts` (load, controller, cache, saving, events); a test pins each part.
+- `boardRegistry.ts`: pure helpers of the app side: `listBoards(notes)` (notes whose frontmatter type is `board`, newest first), `boardStem`
+  / `uniqueBoardStem` (a new board's name), `boardFolderOf(path)` (a board's own picture folder, the same one the floating window uses),
+  `summarizeBoard(path, raw)` (what a card shows), `addPicturesToBoardText(raw, items)` (pictures onto a board that is not open),
+  `fitPictureSize`, `pictureAspect`, `PreviewUrls` (bounded object URLs of the list's previews), `BoardChangedOutsideError`.
+- `dockedHost.ts`: `createDockedBoardHost(path): BoardHost & { dispose() }` — the host over the store (see below).
+- `BoardsView.tsx`: the Boards view. A wrapper that renders nothing while the view is closed; the list of boards (cards in pages of 24, a
+  collage of up to 4 pictures per card loaded only while the card is in view, a search box, a *New board* tile, an empty state); and an
+  open board: a breadcrumb over `<BoardView host={createDockedBoardHost(path)} />` inside an `ErrorBoundary`, or, while the floating window
+  has that board, a card with *Bring it back* and the window's on-top and opacity state. It registers the active board's `flush` with the
+  window control (`setFlush`) so that popping out waits for the pending save.
 
-Store (`packages/ui/src/store.ts`): `View` gains `'boards'`; `boardPath: string | null`; `openBoard(path)`, `newBoard(title?)`
-(creates `<home>Boards/<Title>.md` through the create-only note path), `addPicturesToBoard(paths, boardPath?)` (used by the
-inspector's "Add to board" button), `boardFolderOf(path)`. Keys: `8`, `⇧B` open the boards view; `Esc` leaves it. The inspector of a
-picture gets *Add to board*. Palette: every `BOARD_COMMANDS` entry as "Board: …" (active only while the view is open) plus
-"Boards: open", "Boards: new board".
+### The docked host
+
+`createDockedBoardHost(path)` over the store's actions (components never touch adapters):
+
+| `BoardHost` | Docked |
+| --- | --- |
+| `load()` | `store.readBoard(path)`: the file as it is on disk (a pending editor draft is saved first, a change the watcher has not reported is applied). Resets "changed outside". |
+| `save(raw)` | `store.saveBoard(path, raw, lastKnown)`: runs in the note's exclusive queue; refuses with `BoardChangedOutsideError` (message contains "changed outside") when the file holds neither the text last read or written nor `raw`; the host then refuses every save until `load()` reads the note again. Also refuses when the editor holds unsaved edits of the note, the vault is read-only, the note is gone or `raw` is not a board. Saves are serialised. Never toasts (the view does). |
+| `onExternalChange(cb)` | follows the store's copy of the note; ignores the last 4 texts it read or wrote (its own saves, and a slow watcher's late echo of them); a deleted note is reported too. Listens only while somebody is subscribed. |
+| `pictures.preview` / `original` | `store.preview(path, px)` / `store.readPicture(path)` (`VaultAdapter.readAsset`) |
+| `pictures.add(files)` | `store.importBoardPictures(path, files)`: create-only into `boardFolderOf(path)`, one graph rebuild for the batch, nothing selected, no success toast, one answer per file (`null`: refused or failed); a folder the vault refuses (`excluded from the vault`) is replaced by `<folder> pictures` from then on. |
+| `pictures.list()` / `exists(p)` | pictures of `store.assets` (videos left out) / `assets.has(p)` |
+| `pictures.open` / `reveal` / `showInBrain` | `store.openImage` / `store.reveal` (present only where the vault can) / `store.showPicture` (leaves the view, selects the picture's node, flies there) |
+| `pictures.onChange(cb)` | `store.assets` changed |
+| `toast`, `copyText` | `store.toast`; `copyText` from `components/pictures.ts` (browser clipboard, else the desktop bridge) |
+| `window` | built from `getBoardWindowControl()` (`floating: false`; `popOut()` calls `control.popOut(path)`; settings shown at once and corrected by the control's state); absent when no control is registered (the web) |
+
+### Store (`packages/ui/src/store.ts`)
+
+`View` gains `'boards'` (also in `COVERING_VIEWS`). State: `boardPath` (the board open in the view; kept when the view is left so `8` returns to
+it), `lastBoardPath` (also in `localStorage` per vault). Actions: `boards()`, `openBoards()`, `openBoard(path)`, `closeBoard()`, `newBoard(title?,
+{ open? })` (`<home>Boards/<Title>.md` through the create-only note path; title and file name unique: `Title 2`), `addPicturesToBoard(paths,
+boardPath?)`, `boardFolderOf(path)`, `readBoard`, `saveBoard`, `readPicture`, `importBoardPictures`, `showPicture`; `importImages(files,
+folder, { quiet })`; `requestForm('board')` asks the list for its new-board form. *Built as:* a board's pictures folder is named like the
+note's **file** (what the floating window computes from the path alone), not like its title; `addPicturesToBoard` skips a picture the board
+already shows, and on an empty board sets the view to fit the new pictures. Keys: `8`, `⇧B` (inside the view: up); `Esc` is the board's
+ladder first, then closes the view; the global handler ignores every other single key while the view is up. The inspector of a picture
+has *Add to board*. Palette: *Boards: open*, *show list*, *new board*, *open the selected note as a board*, *add the selected picture to
+the last board* / *to a new board*, and every row of `BOARD_COMMANDS` but the window's as *Board: …* (offered while a board is open and
+enough is selected; the window rows are registered by the desktop app, so no title appears twice).
 
 ## Desktop (`apps/desktop`)
 
@@ -185,17 +247,26 @@ picture gets *Add to board*. Palette: every `BOARD_COMMANDS` entry as "Board: �
   saves with `board:save`; pictures through `thumbnail`, `readAsset`, `createAsset` into the board folder, `listAssets`). Vite
   builds two inputs (`index`, `board`); the CSP meta (with the `%VITE_CSP_*%` placeholders) is repeated. Never calls `boot()` /
   `openVault` / `listFiles`.
-- **Docked ↔ floating**: `PopOut` in the toolbar calls `board:open`; the docked view flushes its save first and shows the
-  placeholder "This board is open in its window — Bring it back"; `board:closed` re-loads the note. Registered with
-  `registerCommands` ("Board: Pop out / Dock / Always on top").
+- **Docked ↔ floating**: `renderer/board.ts` (the brain window's side) registers a `BoardWindowControl` with `setBoardWindowControl`
+  (packages/ui `board/active.ts`) over the bridge: `status()` (the last `board:status` / `board:state` main sent; one object between
+  changes), `subscribe`, `popOut(path)` (refuses a note the vault knows is no board, awaits the docked view's flush, stops with a toast
+  when the flush fails, then `board:open`; main checks the file too), `dock()` (`board:close`, only when a window is open),
+  `setAlwaysOnTop` / `setOpacity` (`board:configure`, opacity kept between 0.2 and 1; works while the window is closed, main keeps it for
+  the next), `onReturned(cb)` (`board:closed`: the window stopped showing that board), `setFlush(fn)`. The docked Boards view shows the
+  placeholder "This board is open in its window — Bring it back" while `status()` says the window shows its board, loads the note again
+  when the window gives it back, and registers the active board's `flush` with `setFlush`. Palette entries (`board-window-pop-out`,
+  `board-window-dock`, `board-window-on-top`, `board-window-opacity`: "Board: Pop out to its own window", "Board: Bring the board back
+  from its window", "Board: Always on top", "Board: Window opacity…") and the key `w` act on `store.boardPath` and exist only with the
+  bridge. `apps/desktop/test/board-ui-wiring.test.ts` drives the real module against a fake bridge.
 
 ## Pictures: where they live, and the limits
 
-- A board's pictures go to `<home>Boards/<Title>/` (the board's own folder, named like the board; if that name is one FsVault ignores
-  — `Library`, `Temp`, `Cache`, `Out`, `Build`, ... — or the write is refused as excluded, `<Title> pictures`). Names are cleaned
-  (`#|[]<>*_~` replaced by `-`); a pasted `image.png` becomes `ref 2026-10-09 143512.png`, `ref ... 2.png` when taken.
-  They are created through the store's importer (`importImages`: create-only, signature checked, ≤ 40 MB, one graph rebuild per batch)
-  and not selected (the importer's select-and-toast is switched off for boards).
+- A board's pictures go to the folder next to its note named like the note's file (`<home>Boards/<Title>/`; if that name is one FsVault
+  ignores — `Library`, `Temp`, `Cache`, `Out`, `Build`, ... — `boardFolderName` adds ` pictures`, and a vault that refuses the folder
+  as excluded gets `<Title> pictures` from then on). Names are cleaned (`#|[]<>*_~` replaced by `-`); a pasted `image.png` becomes
+  `ref 2026-10-09 143512.png`, `ref ... 2.png` when taken. The docked host adds them through `store.importBoardPictures` (the importer's
+  create-only path: file signature checked, ≤ 40 MB, one graph rebuild per batch; nothing is selected and there is no "Added" toast, the
+  option `importImages(files, folder, { quiet: true })`); the floating host through `createAsset`. The view takes at most 40 files per drop.
 - Pictures already in the vault are referenced where they are (nothing is copied).
 - Memory: the cache budget is 128 megapixels of decoded bitmaps and at most 2 loads at once; a picture is only decoded while it is
   in view; off-screen bitmaps are dropped first. 1,500 items maximum.
@@ -204,11 +275,22 @@ picture gets *Add to board*. Palette: every `BOARD_COMMANDS` entry as "Board: �
 
 - **Node (run in CI):** `format` (round trips, a fuzzer over every attribute, escape inertness: `parseNote` of a serialised board has
   no links beyond the embeds, no tags, no tasks), geometry and ops (properties: transforms are inverse, locked items are skipped,
-  groups move whole), arrange, history, the controller (scripted pointer sequences: marquee, move with snapping, scale from every
+  groups move whole), arrange, history, palette, the controller (scripted pointer sequences: marquee, move with snapping, scale from every
   corner, rotate with snap, crop, draw, erase, pan and zoom with mouse, pen and two touches, every command), image cache (tiers,
-  eviction, concurrency with fakes), commands table (every id has a row, a key that is not taken twice, a line in KEYBOARD.md), desktop
+  eviction, concurrency with fakes) and loader, the renderer against a recording context, the commands table (every id has a row, a key
+  that is not taken twice, every key runs its command), the view's engine, menus, picker and session against a fake host, desktop
   (preload/IPC parity, `readAsset` against a temp vault, `board:save` validation, the window host with fake windows, settings sanitiser).
+- **Joining the app (node):** `board-integration-store` (boards, new board, open and leave, pictures onto a closed board, read and save with
+  the changed-outside refusal, pictures dropped on a board), `board-integration-registry` (names, summaries, placing pictures, preview
+  URLs bounded), `board-integration-host` (the docked host: load, save, outside changes and the echo of its own saves, pictures, the
+  window), `board-integration-view` (the Boards view as server markup: list, empty state, paging, placeholder while popped out),
+  `board-integration-palette` (every board command offered by what is selected, window rows left to the desktop, no repeated title),
+  `board-keys` (the global key handler pressed with every key while the view is up, the way in and out, docs/KEYBOARD.md and
+  docs/REFERENCE-BOARD.md against the table of keys, the cheatsheet), `apps/desktop/test/board-ui-wiring` (the window control, the
+  palette entries and `w` against a fake bridge).
 - **Chromium (local, skipped without a browser):** the canvas renderer draws a known board and pixels are checked; pointer drags through
-  `page.mouse`; the BoardView with a fake host (drop, paste, picker, note editing, save debounce).
+  `page.mouse`; the BoardView with a fake host (drop, paste, picker, note editing, save debounce); `board-integration-dom` the Boards
+  view with the real store and keys (lazy previews that scroll away, open and leave by key, the new-board form, the placeholder and
+  the return, an outside change, the flush before a window opens).
 - **Real Electron (by hand / the harness in the scratchpad):** the floating window opens on top, opacity applies, a drop adds pictures,
   a save is seen by the brain window.

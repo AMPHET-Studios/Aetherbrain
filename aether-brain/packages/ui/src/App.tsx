@@ -11,6 +11,7 @@ import { CommandPalette } from './components/CommandPalette'
 import { Capture } from './components/Capture'
 import { Review } from './components/Review'
 import { ProjectsView } from './components/ProjectsView'
+import { BoardsView } from './board/BoardsView'
 import { Help } from './components/Help'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { Toasts } from './components/Toasts'
@@ -37,7 +38,7 @@ export interface AetherAppProps {
 /**
  * The whole app: the 3D thought-space fills the window; HUD chrome floats
  * over it; the editor slides in beside it. Views are a tiny state machine in
- * the store (graph | editor | capture | search | review), not routes.
+ * the store (graph | editor | capture | search | review | projects | boards), not routes.
  */
 export function AetherApp({ sources, onPickVault, autoOpen }: AetherAppProps) {
   useKeyboard()
@@ -140,7 +141,7 @@ export function AetherApp({ sources, onPickVault, autoOpen }: AetherAppProps) {
           </div>
           <div className="min-w-0 flex-1" />
           {/* Right: inspector */}
-          {status === 'ready' && selectedId && view !== 'projects' && (
+          {status === 'ready' && selectedId && view !== 'projects' && view !== 'boards' && (
             <div className="pointer-events-auto flex max-h-full items-start">
               <ErrorBoundary what="the inspector" onClose={() => useAether.getState().select(null)}>
                 <Inspector />
@@ -169,6 +170,9 @@ export function AetherApp({ sources, onPickVault, autoOpen }: AetherAppProps) {
       </ErrorBoundary>
       <ErrorBoundary what="the Projects board" onClose={toGraph}>
         <ProjectsView />
+      </ErrorBoundary>
+      <ErrorBoundary what="the Boards view" onClose={toGraph}>
+        <BoardsView />
       </ErrorBoundary>
       <ErrorBoundary what="the shortcuts list" onClose={() => useAether.getState().setHelp(false)}>
         <Help />
@@ -251,6 +255,15 @@ function dropBlocker(s: AetherState, chats = false): string | null {
   return null
 }
 
+/**
+ * A board open in the Boards view takes the files dropped on it itself (into its own folder, at the drop point); the window's drop
+ * zone then neither shows its overlay nor imports them, but still holds the drop so a file dropped beside the board never navigates
+ * the window to it.
+ */
+function boardTakesDrops(s: AetherState): boolean {
+  return s.view === 'boards' && s.boardPath !== null
+}
+
 /** True when a drag carries files (not text or a link dragged inside the page). */
 function hasFiles(e: DragEvent): boolean {
   return !!e.dataTransfer && Array.from(e.dataTransfer.types).includes('Files')
@@ -267,7 +280,7 @@ function draggingChats(e: DragEvent): boolean {
  * planet, else Inbox; the overlay says which while the files hover. Every
  * file drag is taken, so a dropped file never navigates the window away.
  */
-function DropZone() {
+export function DropZone() {
   /** What the overlay says; null while no files are dragged over the window. */
   const [message, setMessage] = useState<{ text: string; ok: boolean; chats: boolean } | null>(null)
 
@@ -296,11 +309,16 @@ function DropZone() {
     const enter = (e: DragEvent) => {
       if (inside || !hasFiles(e)) return
       e.preventDefault()
+      if (boardTakesDrops(useAether.getState())) return
       if (depth++ === 0) setMessage(describe(draggingChats(e)))
     }
     const over = (e: DragEvent) => {
       if (inside || !hasFiles(e)) return
       e.preventDefault()
+      if (boardTakesDrops(useAether.getState())) {
+        if (e.dataTransfer) e.dataTransfer.dropEffect = 'none'
+        return
+      }
       if (e.dataTransfer) e.dataTransfer.dropEffect = dropBlocker(useAether.getState(), draggingChats(e)) ? 'none' : 'copy'
     }
     const leave = (e: DragEvent) => {
@@ -314,6 +332,7 @@ function DropZone() {
       depth = 0
       setMessage(null)
       const s = useAether.getState()
+      if (boardTakesDrops(s)) return
       const files = Array.from(e.dataTransfer?.files ?? [])
       // Chat exports (.zip, .json) are imported as chats; everything else is taken as pictures.
       const chats = files.filter((f) => isChatExportFile(f.name))

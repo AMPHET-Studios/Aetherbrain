@@ -3,28 +3,30 @@
  * view out into its own floating window (and bring it back), the window's always-on-top and opacity from the palette, and what the
  * docked Boards view needs to know about that window. The window is main's (src/main/board-window.ts); its page is board.html.
  *
- * What the docked view uses (it is wired to these by the view's author; every one is a no-op or `false` outside the desktop app):
- *   - boardPopOutAvailable()        true in the desktop app (the Electron bridge is there): show the pop-out button, or not.
+ * How the docked view (packages/ui) uses this: through `setBoardWindowControl`, which this module calls below with a `BoardWindowControl`
+ * over the bridge, so the view never imports the desktop app. The pieces behind it are exported too:
+ *   - boardPopOutAvailable()        true in the desktop app (the Electron bridge is there).
  *   - useBoardWindow()              React hook: the window's state, a BoardStatusDto { open, path, alwaysOnTop, opacity, supportsOpacity }.
  *   - boardWindowState()            the same state, outside React (a closed, on-top, opaque window until main has spoken).
- *   - useBoardOut(path)             React hook: true while the window shows the board at `path` (draw the placeholder, not the board).
+ *   - useBoardOut(path)             React hook: true while the window shows the board at `path` (the view draws its placeholder).
  *   - onBoardReturned(cb)           cb(path) when the window stops showing a board (closed, or moved on to another): reload that note,
  *                                   the window may have saved it since the docked view read it.
- *   - popOutBoard(path) / dockBoard()   what the host's `window.popOut` / `window.dock` call. Pop-out first awaits the flush below.
+ *   - popOutBoard(path) / dockBoard()   what the control's `popOut` / `dock` do. Pop-out first awaits the flush below.
  *   - setBoardFlush(fn)             the docked view says how to save its pending change; pop-out awaits it (and stops if it fails), so
  *                                   the window opens on the latest text and the two never hold different boards.
  *
- * The palette acts on the board open in the docked view, `store.boardPath` (read defensively: it is the store's to add): "Board: Pop out
- * to its own window", "Board: Bring the board back from its window" (both also on the key `w`), "Board: Always on top" and "Board:
- * Window opacity…" (Windows and macOS only). Commands and key exist only when the Electron bridge does.
+ * The palette acts on the board of the docked view, `store.boardPath`: "Board: Pop out to its own window", "Board: Bring the board back
+ * from its window" (both also on the key `w`), "Board: Always on top" and "Board: Window opacity…" (Windows and macOS only). Commands,
+ * key and control exist only when the Electron bridge does. The rest of the board's palette entries ("Board: Undo" ...) are the UI
+ * package's (commands.ts); these four are the window's, so the two lists never repeat a title.
  *
- * `Board: Window opacity…` draws its own small dialog (below) instead of going through `store.requestForm`: that is a closed union
- * ('project' | 'note' | 'folder') whose consumers are the inspector and the Projects board, and any form request makes the store leave
- * the Projects view.
+ * `Board: Window opacity…` draws its own small dialog (below) instead of going through `store.requestForm`: that is a union whose
+ * consumers are the inspector, the Projects board and the Boards list, and any form request makes the store leave the view it is in.
  */
 import { useSyncExternalStore } from 'react'
-import { registerCommands, registerHelpRows, registerKey, useAether } from '@aether/ui'
-import type { BoardStatusDto } from '../shared/ipc'
+import { idFromPath } from '@aether/core'
+import { registerCommands, registerHelpRows, registerKey, setBoardWindowControl, useAether, type BoardWindowControl } from '@aether/ui'
+import type { BoardConfigureDto, BoardStatusDto } from '../shared/ipc'
 import { errorText, samePath } from './panels'
 import { ElectronVaultAdapter } from './vault/electron'
 
@@ -107,6 +109,12 @@ const toast = (text: string, kind: 'info' | 'success' | 'error' = 'info'): void 
  */
 export async function popOutBoard(path: string): Promise<boolean> {
   if (!bridge) return false
+  // A note the vault knows and that is no board is refused here, before anything is saved or asked of main (main checks the file too).
+  const known = useAether.getState().notes.get(idFromPath(path))
+  if (known && known.frontmatter['type'] !== 'board') {
+    toast(`Board window: ${known.meta.title} is not a board`, 'error')
+    return false
+  }
   try {
     await flush?.()
   } catch (err) {
@@ -133,10 +141,32 @@ export async function dockBoard(): Promise<void> {
   }
 }
 
-/** The board open in the docked view: the store's `boardPath`, which another module adds. */
+/** The board of the docked view: the store's `boardPath` (kept while the view is left, null for the list of boards). */
 function dockedBoard(): string | null {
-  const path = (useAether.getState() as { boardPath?: string | null }).boardPath
-  return typeof path === 'string' && path ? path : null
+  return useAether.getState().boardPath || null
+}
+
+/** A setting of the window, without a word about it (the docked view shows it); a failure is toasted. Works while the window is closed: main keeps it for the next. */
+async function configure(patch: BoardConfigureDto): Promise<void> {
+  if (!bridge) return
+  try {
+    setStatus(await bridge.boardConfigure(patch))
+  } catch (err) {
+    toast(`Board window: ${errorText(err)}`, 'error')
+  }
+}
+
+/** What the docked Boards view drives the window through (it is registered below, once the bridge is known to be there). */
+const control: BoardWindowControl = {
+  available: true,
+  status: boardWindowState,
+  subscribe,
+  popOut: popOutBoard,
+  dock: dockBoard,
+  setAlwaysOnTop: (on) => configure({ alwaysOnTop: on }),
+  setOpacity: (opacity) => (Number.isFinite(opacity) ? configure({ opacity: Math.min(1, Math.max(OPACITY_MIN_PERCENT / 100, opacity)) }) : Promise.resolve()),
+  onReturned: onBoardReturned,
+  setFlush: setBoardFlush,
 }
 
 async function toggleOnTop(): Promise<void> {
@@ -262,6 +292,7 @@ if (bridge) {
     }
   })
   bridge.boardStatus().then(setStatus, () => undefined)
+  setBoardWindowControl(control)
   registerKey('w', toggleWindow)
   registerCommands([
     {

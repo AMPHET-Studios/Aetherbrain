@@ -1,3 +1,4 @@
+import { boardHelpRows } from '../board/commands'
 import { useAether } from '../store'
 import { MOD } from '../util'
 
@@ -71,6 +72,14 @@ const GROUPS: HelpGroup[] = [
       [`${MOD} E`, 'Edit ↔ split ↔ preview'],
       [`${MOD} Enter`, 'Save & back to graph'],
       ['Tab', 'Indent'],
+    ],
+  },
+  {
+    title: 'Reference boards',
+    rows: [
+      ['8 · ⇧B', 'Open the boards: the board you were on, else the list; in a board: the list'],
+      ['n', 'In the list of boards: make a new board'],
+      ...boardHelpRows().map((r): [string, string] => [r.keys, r.label]),
     ],
   },
   {

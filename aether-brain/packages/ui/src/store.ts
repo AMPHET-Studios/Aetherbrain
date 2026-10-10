@@ -30,11 +30,13 @@ import {
   imageKey,
   imagePathOf,
   inboxNote,
+  isBoardNote,
   isExistsError,
   isFolderId,
   isGhostId,
   isIgnoredPath,
   isImageId,
+  isImagePath,
   isProjectNote,
   isTodayId,
   isVirtualId,
@@ -42,6 +44,7 @@ import {
   loadVault,
   mountOf,
   neighborhood,
+  newBoardNote,
   nextDay,
   normalizeFolderPath,
   normalizeGrade,
@@ -84,10 +87,28 @@ import {
   type LayoutMode,
   type PictureSize,
 } from '@aether/graph'
+import { getActiveBoard, getBoardWindowControl } from './board/active'
+import {
+  BOARDS_FOLDER,
+  BoardChangedOutsideError,
+  MAX_ADDED_AT_ONCE,
+  addPicturesToBoardText,
+  boardFolderFallback,
+  boardFolderOf as boardFolderOfPath,
+  boardTitleOfPath,
+  fitPictureSize,
+  isBoard,
+  listBoards,
+  pictureAspect,
+  samePath,
+  uniqueBoardStem,
+  type AddedToBoard,
+  type PictureToAdd,
+} from './board/boardRegistry'
 import { listProjects, moveTaskOnBoard } from './projects'
 import { plural, stillOf, truncate } from './util'
 
-export type View = 'graph' | 'editor' | 'capture' | 'search' | 'review' | 'projects'
+export type View = 'graph' | 'editor' | 'capture' | 'search' | 'review' | 'projects' | 'boards'
 
 export interface Filters {
   areas: Set<Area>
@@ -120,8 +141,8 @@ export interface ReviewEntry {
 
 export type ReviewOutcome = 'keep' | 'archive' | 'later' | 'processed'
 
-/** An inline form a command can ask for: a new project (the board), a note or a folder in the selected folder (the folder inspector). */
-export type FormRequest = 'project' | 'note' | 'folder'
+/** An inline form a command can ask for: a new project (the Projects board), a note or a folder in the selected folder (the folder inspector), a new reference board (the Boards view). */
+export type FormRequest = 'project' | 'note' | 'folder' | 'board'
 
 export interface Settings {
   colorMode: ColorMode
@@ -151,9 +172,15 @@ const SETTINGS_KEY = 'aether:settings'
 const REVIEW_KEY = 'aether:review'
 /** Expanded folders, per vault location. */
 const EXPANDED_KEY = 'aether:expanded:'
+/** The board last open, per vault location (the `8` key goes back to it). */
+const LAST_BOARD_KEY = 'aether:board:'
 const SETTINGS_VERSION = 2
 /** Views drawn over the graph: flying to something there shows nothing until they close. */
-const COVERING_VIEWS: ReadonlySet<View> = new Set<View>(['projects', 'review', 'capture', 'search'])
+const COVERING_VIEWS: ReadonlySet<View> = new Set<View>(['projects', 'review', 'capture', 'search', 'boards'])
+/** Previews read at once to learn the shapes of pictures going onto a board that is not open. */
+const ASPECT_PARALLEL = 4
+/** What the vault says when it will not take pictures in a folder (the desktop's exclude list, an ignored folder name). */
+const OUT_OF_VAULT = /excluded from the vault|skipped by the brain/i
 /** Numbered names (` 2` … ` 1000`) tried for a new note or picture before giving up. */
 const MAX_SUFFIX = 1000
 /** Largest picture the app writes (an imported file, a Concept Forge drawing). */
@@ -240,6 +267,26 @@ function loadExpanded(location: string): Set<string> {
     return new Set(Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === 'string').map(normalizeFolderPath) : [])
   } catch {
     return new Set()
+  }
+}
+
+/** The board last open in the vault at `location` (a vault path), or null. */
+function loadLastBoard(location: string): string | null {
+  try {
+    const path = localStorage.getItem(LAST_BOARD_KEY + location)
+    return path && path.length <= 1000 ? path : null
+  } catch {
+    return null
+  }
+}
+
+/** Remember the board last open in the vault at `location`. */
+function saveLastBoard(location: string | undefined, path: string): void {
+  if (location === undefined) return
+  try {
+    localStorage.setItem(LAST_BOARD_KEY + location, path)
+  } catch {
+    /* private mode etc. */
   }
 }
 
@@ -577,8 +624,11 @@ export interface AetherState {
    * Save picture files into the vault, create-only (`name 2.png` when taken).
    * Target: `folder`, else the selected folder, else the selected project's
    * Critique planet, else `<home>Inbox`. Returns the vault paths written.
+   * `quiet` (a board adding its own pictures): the first new picture is not
+   * selected, there is no "Added" toast, and files refused or too big are the
+   * caller's to report (a vault that cannot save pictures is still said).
    */
-  importImages(files: { name: string; data: Uint8Array }[], folder?: string): Promise<string[]>
+  importImages(files: { name: string; data: Uint8Array }[], folder?: string, opts?: { quiet?: boolean }): Promise<string[]>
   /**
    * The folder `importImages` would save into right now (`folder`, the
    * selection, else `<home>Inbox`), spelled as on disk; null without a vault.
@@ -630,6 +680,60 @@ export interface AetherState {
   hideFolder(path: string): Promise<void>
   /** Let a folder left out with hideFolder back in. */
   unhideFolder(path: string): Promise<void>
+
+  /* ---- reference boards (docs/REFERENCE-BOARD.md) ---- */
+
+  /** The board open in the Boards view (its note's vault path), or null for the list of boards. Kept when the view is left, so `8` comes back to it. */
+  boardPath: string | null
+  /** The board last open (also remembered per vault): `8` from the list goes back to it. */
+  lastBoardPath: string | null
+  /** Every board of the vault (notes with `type: board`), the most recently updated first. */
+  boards(): ParsedNote[]
+  /**
+   * `8` and `⇧ B`: from another view, the Boards view on the board last open (else the list); inside it, the list of boards, and from
+   * the list the board last open again.
+   */
+  openBoards(): void
+  /** Open a board in the Boards view. Refuses (with a toast) a path that is not a board note of the vault. */
+  openBoard(path: string): void
+  /** Back to the list of boards (the board's own changes are saved by the view as it goes). */
+  closeBoard(): void
+  /**
+   * Make a board: `<home>Boards/<Title>.md` through the create-only note path, its title and file name unique (`Title 2`, `Title 3` ...),
+   * and open it (`open: false` leaves the view alone, for a caller that goes on to add pictures). Resolves with the path, or null (with
+   * a toast) when it could not be made.
+   */
+  newBoard(title?: string, opts?: { open?: boolean }): Promise<string | null>
+  /**
+   * Put pictures of the vault on a board (`boardPath`, else the board open or last open) without opening it: the note is rewritten
+   * through the exclusive queue, the new pictures packed to the right of what is there. A board that is open in the view saves first
+   * and then reloads by itself. Resolves with how many were added (a picture already on the board is not added twice).
+   */
+  addPicturesToBoard(picturePaths: readonly string[], boardPath?: string): Promise<number>
+  /** The folder a board's own pictures go in (dropped or pasted ones): next to the note, named like it. */
+  boardFolderOf(boardPath: string): string
+  /**
+   * The board note's text as it is on disk now (a pending editor draft is saved first, changes the watcher has not reported yet are
+   * applied), or null with a toast when it is not a board or is gone. The docked host's `load`.
+   */
+  readBoard(path: string): Promise<string | null>
+  /**
+   * Write a board note. `expected` is the text the board was read from (or last saved as): when the file now holds anything else the
+   * save is refused with a `BoardChangedOutsideError` and nothing is written; null skips that check. Rejects with a readable message
+   * when the note is gone, the vault read-only, the text not a board, or the editor holds unsaved edits of the note. Starts from the
+   * file on disk and runs after any other rewrite of the note. The docked host's `save`; it never toasts (the view does).
+   */
+  saveBoard(path: string, text: string, expected: string | null): Promise<void>
+  /** A picture of the vault whole (at most 64 MB), for the board at full size; null when it cannot be read. Never rejects. */
+  readPicture(path: string): Promise<Blob | null>
+  /**
+   * Save pictures into a board's own folder, create-only, one graph rebuild for the batch, nothing selected and no success toast.
+   * Resolves with the vault path of each file in the order given, null for one that was refused or could not be written. A folder the
+   * vault leaves out is replaced by `<folder> pictures` for this and the next calls.
+   */
+  importBoardPictures(boardPath: string, files: { name: string; data: Uint8Array }[]): Promise<(string | null)[]>
+  /** Leave the Boards view, select a picture's node in the brain and fly to it. */
+  showPicture(path: string): void
 }
 
 /** Pictures under a folder, subfolders included. */
@@ -933,6 +1037,13 @@ export const useAether = create<AetherState>()((set, get) => {
       out = folderSpelling(next) ?? next
     }
     return out
+  }
+
+  /** The board note at `path` (any spelling of its letter case) when the vault has one, else null. */
+  const liveBoard = (path: string): ParsedNote | null => {
+    const id = existingId(idFromPath(path))
+    const note = id !== null && !isVirtualId(id) ? get().notes.get(id) : undefined
+    return note && isBoard(note) ? note : null
   }
 
   /** The id of the note at `id` under any spelling (case-insensitive), or null. */
@@ -1389,9 +1500,16 @@ export const useAether = create<AetherState>()((set, get) => {
     const open = s.editorId === id
     const selected = s.selectedId === id
     const project = s.projectId === id
+    const from = s.notes.get(id)?.meta.path
+    const board = from !== undefined && s.boardPath !== null && samePath(s.boardPath, from)
+    const lastBoard = from !== undefined && s.lastBoardPath !== null && samePath(s.lastBoardPath, from)
     return (newId: NoteId, content: string) => {
+      const to = get().notes.get(newId)?.meta.path ?? `${newId}.md`
       set((now) => ({
         projectId: project ? newId : now.projectId,
+        // A board moved or renamed while it is open stays open.
+        ...(board ? { boardPath: to } : {}),
+        ...(lastBoard ? { lastBoardPath: to } : {}),
         history: now.history.map((h) => (h === id ? newId : h)),
         ...(open ? { editorId: newId, draft: content, dirty: false } : {}),
       }))
@@ -1602,42 +1720,117 @@ export const useAether = create<AetherState>()((set, get) => {
    * The writing half of `importImages`: make the target folder when needed,
    * then each picture create-only. Null (with a toast) when the folder can't
    * be made. Runs inside `batched`, so the whole drop is one rebuild.
+   * `results` lines up with `pictures`: where each was written, null for one
+   * that failed. With `failures` given nothing is toasted: what went wrong is
+   * put there instead (`index` is the picture's place in `pictures`, -1 for
+   * the folder), for a caller that reports it its own way.
    */
   const writePictures = async (
     target: string,
     pictures: { name: string; data: Uint8Array }[],
-  ): Promise<{ dir: string; written: { path: string; size: number }[] } | null> => {
+    failures?: { index: number; message: string }[],
+  ): Promise<{ dir: string; results: ({ path: string; size: number } | null)[] } | null> => {
+    const say = (index: number, message: string) => (failures ? failures.push({ index, message }) : void get().toast(message, 'error'))
     let dir = target
     if (dir && !get().folders.has(dir)) {
       // A folder to make first (Inbox, a Critique planet): only under a name every OS takes.
       const clean = cleanFolderPath(dir, folderSpelling)
       if ('error' in clean) {
-        get().toast(clean.error, 'error')
+        say(-1, clean.error)
         return null
       }
       dir = clean.path
       try {
         await ensureFolder(dir)
       } catch (err) {
-        get().toast(`Could not create ${dir}: ${errText(err)}`, 'error')
+        say(-1, `Could not create ${dir}: ${errText(err)}`)
         return null
       }
     }
     const taken = takenImages()
-    const written: { path: string; size: number }[] = []
+    const results: ({ path: string; size: number } | null)[] = []
     const failed: string[] = []
-    for (const p of pictures) {
+    for (const [k, p] of pictures.entries()) {
       const m = IMAGE_NAME.exec(p.name)
       try {
-        written.push({ path: await createAssetNew(dir, m?.[1] ?? p.name, m?.[2] ?? '', p.data, taken), size: p.data.byteLength })
+        results.push({ path: await createAssetNew(dir, m?.[1] ?? p.name, m?.[2] ?? '', p.data, taken), size: p.data.byteLength })
       } catch (err) {
+        results.push(null)
         failed.push(`${p.name}: ${errText(err)}`)
+        failures?.push({ index: k, message: errText(err) })
       }
     }
-    applyImageAdds(written)
-    if (failed.length) get().toast(`Could not save ${failed[0]}${failed.length > 1 ? ` (and ${failed.length - 1} more)` : ''}`, 'error')
-    return { dir, written }
+    applyImageAdds(results.filter((r): r is { path: string; size: number } => r !== null))
+    if (failed.length && !failures) get().toast(`Could not save ${failed[0]}${failed.length > 1 ? ` (and ${failed.length - 1} more)` : ''}`, 'error')
+    return { dir, results }
   }
+
+  /**
+   * Check and save picture files (the body of `importImages`, shared with a board adding its own). `paths` lines up with `files`: the
+   * vault path each was saved under, null for one refused (not a picture, over 40 MB) or that could not be written, with the reason
+   * in `failures` (`index` is the file's place in `files`, -1 for the folder). `quiet` toasts nothing about the files themselves.
+   * Null when nothing could be tried: no vault ready, read-only, no picture support (toasted), or the folder can't be made.
+   */
+  const savePictures = async (
+    files: { name: string; data: Uint8Array }[],
+    folder: string | undefined,
+    quiet: boolean,
+  ): Promise<{ dir: string; paths: (string | null)[]; failures: { index: number; message: string }[] } | null> => {
+    const { adapter, status } = get()
+    if (!adapter || status !== 'ready') return null
+    if (adapter.readOnly) {
+      get().toast('This vault is read-only', 'error')
+      return null
+    }
+    if (!adapter.createAsset) {
+      get().toast('This vault can’t save pictures', 'error')
+      return null
+    }
+    const paths: (string | null)[] = files.map(() => null)
+    const failures: { index: number; message: string }[] = []
+    const pictures: { name: string; data: Uint8Array }[] = []
+    /** Where each of `pictures` came from in `files`. */
+    const origin: number[] = []
+    const refused: string[] = []
+    const tooBig: string[] = []
+    files.forEach((f, i) => {
+      const name = cleanImageName(String(f.name))
+      const data = asBytes(f.data)
+      if (name === null || data === null) {
+        refused.push(String(f.name))
+        failures.push({ index: i, message: `${truncate(String(f.name), 48)} is not a picture` })
+      } else if (data.byteLength > MAX_IMAGE_BYTES) {
+        tooBig.push(name)
+        failures.push({ index: i, message: `${truncate(name, 48)} is over 40 MB` })
+      } else {
+        pictures.push({ name, data })
+        origin.push(i)
+      }
+    })
+    if (!quiet) {
+      if (refused.length) {
+        const what = refused.length === 1 ? `${truncate(refused[0] ?? '', 48)} is not a picture` : `${refused.length} files are not pictures`
+        get().toast(`${what} (png, jpg, webp, gif, bmp, avif)`, 'error')
+      }
+      if (tooBig.length) get().toast(`${tooBig.length === 1 ? truncate(tooBig[0] ?? '', 48) : plural(tooBig.length, 'picture')} over 40 MB, not added`, 'error')
+    }
+    if (!pictures.length) return { dir: '', paths, failures }
+    const target = get().importTarget(folder)
+    if (target === null) return null
+    const written: { index: number; message: string }[] = []
+    const done = await batched(() => writePictures(target, pictures, quiet ? written : undefined))
+    // The reasons of a quiet save are the caller's; map them from the pictures to the files.
+    for (const f of written) failures.push({ index: f.index < 0 ? -1 : (origin[f.index] ?? -1), message: f.message })
+    // A folder that cannot be made: a quiet caller learns why from `failures`; the rest is toasted already.
+    if (!done) return quiet ? { dir: target, paths, failures } : null
+    done.results.forEach((r, k) => {
+      paths[origin[k]!] = r?.path ?? null
+    })
+    return { dir: done.dir, paths, failures }
+  }
+
+  /** Board folders the vault refused (a name left out of it): the folder used instead, by board path in lower case. */
+  const boardPictureFolders = new Map<string, string>()
 
   const fileCritique = (input: CritiqueSave): Promise<CritiqueSaved> => batched(() => writeCritique(input))
 
@@ -1720,6 +1913,8 @@ export const useAether = create<AetherState>()((set, get) => {
     },
     projectId: null,
     formRequest: null,
+    boardPath: null,
+    lastBoardPath: null,
 
     async openVault(adapter) {
       unwatch?.()
@@ -1748,7 +1943,11 @@ export const useAether = create<AetherState>()((set, get) => {
         projectId: null,
         formRequest: null,
         gallery: null,
+        // A board is a note of the vault that was open: the next one has its own (the last one used is remembered per vault).
+        boardPath: null,
+        lastBoardPath: loadLastBoard(adapter.location),
       })
+      boardPictureFolders.clear()
       try {
         const search = new SearchIndex()
         const loaded = await loadVault(
@@ -2384,8 +2583,10 @@ export const useAether = create<AetherState>()((set, get) => {
 
     requestForm(form) {
       // The board hides the inspector: a folder form needs the graph view.
-      const view = form === 'project' ? 'projects' : form && get().view === 'projects' ? 'graph' : get().view
-      set({ formRequest: form, view })
+      // The Boards view is its own page: the new-board form is on its list.
+      const view =
+        form === 'project' ? 'projects' : form === 'board' ? 'boards' : form && (get().view === 'projects' || get().view === 'boards') ? 'graph' : get().view
+      set({ formRequest: form, view, ...(form === 'board' ? { boardPath: null } : {}) })
     },
 
     toast(text, kind = 'info', action) {
@@ -2664,44 +2865,18 @@ export const useAether = create<AetherState>()((set, get) => {
       return canonicalFolder(`${get().homePrefix()}Inbox`)
     },
 
-    async importImages(files, folder) {
-      const { adapter, status } = get()
-      if (!adapter || status !== 'ready') return []
-      if (adapter.readOnly) {
-        get().toast('This vault is read-only', 'error')
-        return []
-      }
-      if (!adapter.createAsset) {
-        get().toast('This vault can’t save pictures', 'error')
-        return []
-      }
-      const pictures: { name: string; data: Uint8Array }[] = []
-      const refused: string[] = []
-      const tooBig: string[] = []
-      for (const f of files) {
-        const name = cleanImageName(String(f.name))
-        const data = asBytes(f.data)
-        if (name === null || data === null) refused.push(String(f.name))
-        else if (data.byteLength > MAX_IMAGE_BYTES) tooBig.push(name)
-        else pictures.push({ name, data })
-      }
-      if (refused.length) {
-        const what = refused.length === 1 ? `${truncate(refused[0] ?? '', 48)} is not a picture` : `${refused.length} files are not pictures`
-        get().toast(`${what} (png, jpg, webp, gif, bmp, avif)`, 'error')
-      }
-      if (tooBig.length) get().toast(`${tooBig.length === 1 ? truncate(tooBig[0] ?? '', 48) : plural(tooBig.length, 'picture')} over 40 MB, not added`, 'error')
-      if (!pictures.length) return []
-      const target = get().importTarget(folder)
-      if (target === null) return []
-      const done = await batched(() => writePictures(target, pictures))
-      if (!done) return []
-      const { dir, written } = done
-      const first = written[0]?.path
+    async importImages(files, folder, opts) {
+      const quiet = opts?.quiet === true
+      const saved = await savePictures(files, folder, quiet)
+      if (!saved) return []
+      const written = saved.paths.filter((p): p is string => p !== null)
+      const first = written[0]
       if (first === undefined) return []
+      if (quiet) return written
       if (get().graph?.index.has(imageKey(first))) get().select(imageKey(first))
       const what = written.length === 1 ? imageFileName(first) : plural(written.length, 'picture')
-      get().toast(`Added ${what} to ${dir || 'the vault'}`, 'success', { label: 'Show', run: () => showImage(first) })
-      return written.map((w) => w.path)
+      get().toast(`Added ${what} to ${saved.dir || 'the vault'}`, 'success', { label: 'Show', run: () => showImage(first) })
+      return written
     },
 
     forgeProjects() {
@@ -2797,6 +2972,252 @@ export const useAether = create<AetherState>()((set, get) => {
       } finally {
         chatImportRunning = false
       }
+    },
+
+    /* ---- reference boards ---- */
+
+    boards() {
+      return listBoards(get().notes)
+    },
+
+    openBoards() {
+      const { view, boardPath, lastBoardPath } = get()
+      if (view === 'boards') {
+        // Already there: from a board to the list, from the list back to the board last open.
+        if (boardPath !== null) get().closeBoard()
+        else if (lastBoardPath !== null && liveBoard(lastBoardPath)) get().openBoard(lastBoardPath)
+        return
+      }
+      const path = boardPath ?? lastBoardPath
+      set({ boardPath: path !== null && liveBoard(path) ? path : null, view: 'boards', formRequest: null })
+    },
+
+    openBoard(path) {
+      const note = liveBoard(path)
+      if (!note) {
+        get().toast(`${path} is not a board of this vault`, 'error')
+        return
+      }
+      set({ boardPath: note.meta.path, lastBoardPath: note.meta.path, view: 'boards', formRequest: null })
+      saveLastBoard(get().adapter?.location, note.meta.path)
+    },
+
+    closeBoard() {
+      const { boardPath } = get()
+      set(boardPath === null ? {} : { boardPath: null, lastBoardPath: boardPath })
+    },
+
+    async newBoard(title, opts) {
+      const { adapter, status } = get()
+      if (!adapter || status !== 'ready') {
+        get().toast('Open a vault first to make a board', 'error')
+        return null
+      }
+      if (adapter.readOnly) {
+        get().toast('This vault is read-only', 'error')
+        return null
+      }
+      const dir = canonicalFolder(`${get().homePrefix()}${BOARDS_FOLDER}`)
+      // A board's title and file name are one name, and no other note has it (links and the picker find boards by title).
+      const names = new Set<string>()
+      for (const n of get().notes.values()) {
+        names.add(n.meta.title.toLowerCase())
+        names.add(basenameOf(n.meta.path).toLowerCase())
+        for (const a of n.meta.aliases) names.add(a.toLowerCase())
+      }
+      const stem = uniqueBoardStem(title ?? '', (lower) => names.has(lower))
+      try {
+        const made = await createNew(`${dir ? `${dir}/` : ''}${stem}.md`, (p) => newBoardNote(boardTitleOfPath(p), new Date()))
+        if (!made) throw new Error(`${stem} is taken`)
+        get().applyExternal([{ kind: 'add', path: made.path, content: made.content, mtime: Date.now() }])
+        if (opts?.open !== false) {
+          get().openBoard(made.path)
+          get().toast(`Board “${boardTitleOfPath(made.path)}” made in ${dir || 'the vault'}`, 'success')
+        }
+        return made.path
+      } catch (err) {
+        get().toast(`Could not make the board: ${errText(err)}`, 'error')
+        return null
+      }
+    },
+
+    async addPicturesToBoard(picturePaths, boardPath) {
+      const target = boardPath ?? get().boardPath ?? get().lastBoardPath
+      if (target === null) {
+        get().toast('Open or make a board first (8), then add pictures to it', 'error')
+        return 0
+      }
+      const note = liveBoard(target)
+      if (!note) {
+        get().toast(`${target} is not a board of this vault`, 'error')
+        return 0
+      }
+      if (get().adapter?.readOnly) {
+        get().toast('This vault is read-only', 'error')
+        return 0
+      }
+      // A board in the floating window is that window's: it is not told of a rewrite made here, and its next save would be refused.
+      const win = getBoardWindowControl()
+      const out = win?.available ? win.status() : null
+      if (out?.open && out.path !== null && samePath(out.path, note.meta.path)) {
+        get().toast(`${note.meta.title} is open in its own window: bring it back to the app first, or add pictures in the window (the + button)`, 'error')
+        return 0
+      }
+      const known = new Set<string>()
+      const wanted: string[] = []
+      for (const p of picturePaths) {
+        if (known.has(p) || !isImagePath(p) || !get().assets.has(p)) continue
+        known.add(p)
+        wanted.push(p)
+        if (wanted.length >= MAX_ADDED_AT_ONCE) break
+      }
+      if (wanted.length === 0) {
+        get().toast(picturePaths.length > 0 ? 'Only pictures of the vault can go on a board' : 'Select a picture first', 'error')
+        return 0
+      }
+      // A board open in the view saves what it holds first, so this edit starts from what the view shows (and the view reloads after).
+      const open = getActiveBoard()
+      const inView = !!open && samePath(open.path, note.meta.path)
+      if (inView) await open.flush()
+      // Their shapes, read from small previews a few at a time (the desktop makes each in a helper window).
+      const aspects: (number | null)[] = wanted.map(() => null)
+      let nextShape = 0
+      await Promise.all(
+        Array.from({ length: Math.min(ASPECT_PARALLEL, wanted.length) }, async () => {
+          while (nextShape < wanted.length) {
+            const i = nextShape++
+            aspects[i] = await pictureAspect(get().preview, wanted[i]!)
+          }
+        }),
+      )
+      const sizes: PictureToAdd[] = wanted.map((path, i) => ({ path, ...fitPictureSize(aspects[i] ?? null) }))
+      let result: AddedToBoard | null = null
+      const done = await rewriteNote(
+        note.meta.id,
+        (raw) => {
+          result = addPicturesToBoardText(raw, sizes)
+          return result.text
+        },
+        'add the pictures to the board',
+      )
+      const r = result as AddedToBoard | null
+      // The edit never ran: rewriteNote said why.
+      if (!r) return 0
+      const title = note.meta.title
+      if (r.added === 0) {
+        if (r.full > 0) get().toast(`${title} is full: a board holds at most 1,500 items`, 'error')
+        else if (r.skipped > 0) get().toast(`${r.skipped === 1 ? 'That picture is' : 'Those pictures are'} already on ${title}`)
+        return 0
+      }
+      if (!done) return 0
+      const what = r.added === 1 ? imageFileName(r.paths[0] ?? '') : plural(r.added, 'picture')
+      const notes = [r.skipped ? `${r.skipped} already there` : '', r.full ? `${r.full} did not fit` : ''].filter(Boolean)
+      const text = `Added ${what} to ${title}${notes.length ? ` (${notes.join(', ')})` : ''}`
+      get().toast(text, 'success', inView ? undefined : { label: 'Open', run: () => get().openBoard(note.meta.path) })
+      return r.added
+    },
+
+    boardFolderOf(boardPath) {
+      return boardFolderOfPath(boardPath)
+    },
+
+    async readBoard(path) {
+      const id = existingId(idFromPath(path))
+      if (id === null || isVirtualId(id)) {
+        get().toast(`Could not open the board: ${path} is not in the vault`, 'error')
+        return null
+      }
+      return exclusive(id, async () => {
+        if (!(await flushDraft(id, 'open the board'))) return null
+        const note = await freshNote(id, 'open the board')
+        if (!note) return null
+        if (!isBoard(note)) {
+          get().toast(`${note.meta.title} is not a board (its frontmatter has no type: board)`, 'error')
+          return null
+        }
+        return note.raw
+      })
+    },
+
+    async saveBoard(path, text, expected) {
+      const { adapter } = get()
+      const id = existingId(idFromPath(path))
+      if (!adapter || id === null || isVirtualId(id)) throw new Error(`The board note ${path} is gone from the vault: nothing was saved`)
+      if (adapter.readOnly) throw new Error('This vault is read-only: the board was not saved')
+      if (!isBoardNote(text)) throw new Error('The text to save is not a board (its frontmatter has no type: board): nothing was saved')
+      return exclusive(id, async () => {
+        const note = get().notes.get(id)
+        if (!note) throw new Error(`The board note ${path} was moved or deleted: nothing was saved`)
+        // A draft of the note typed in the editor is the user's; the board never writes over it.
+        if (get().editorId === id && get().dirty) throw new Error('The board note has unsaved edits in the editor: save them (or close the editor) and reload the board')
+        let disk: string | null
+        try {
+          disk = await adapter.read(note.meta.path)
+        } catch {
+          disk = null
+        }
+        if (disk === null) throw new Error(`The board note ${note.meta.path} is no longer on disk: nothing was saved`)
+        if (disk !== text) {
+          if (expected !== null && disk !== expected) throw new BoardChangedOutsideError()
+          await adapter.write(note.meta.path, text)
+        }
+        if (get().editorId === id && !get().dirty) set({ draft: text })
+        // Also when the file already held this text: the store catches up with the disk.
+        if (get().notes.get(id)?.raw !== text) get().applyExternal([{ kind: 'change', path: note.meta.path, content: text, mtime: Date.now() }])
+      })
+    },
+
+    async readPicture(path) {
+      const { adapter } = get()
+      if (!adapter?.readAsset) return null
+      try {
+        return await adapter.readAsset(path)
+      } catch {
+        return null
+      }
+    },
+
+    async importBoardPictures(boardPath, files) {
+      const key = boardPath.toLowerCase()
+      const home = boardFolderOfPath(boardPath)
+      const first = boardPictureFolders.get(key) ?? home
+      const saved = await savePictures(files, first, true)
+      if (!saved) return files.map(() => null)
+      const { paths } = saved
+      /** What went wrong in the end: the first pass's failures, less those a second try put right. */
+      let failures = saved.failures
+      // The vault will not take the board's folder (a name the user left out of it): once, a folder beside it, from then on too.
+      if (first === home) {
+        const retry = files.map((_, i) => i).filter((i) => paths[i] === null && failures.some((f) => (f.index === i || f.index === -1) && OUT_OF_VAULT.test(f.message)))
+        if (retry.length > 0) {
+          const fallback = boardFolderFallback(home)
+          boardPictureFolders.set(key, fallback)
+          const again = await savePictures(
+            retry.map((i) => files[i]!),
+            fallback,
+            true,
+          )
+          if (again) {
+            retry.forEach((i, k) => {
+              paths[i] = again.paths[k] ?? null
+            })
+            const tried = new Set(retry)
+            failures = [
+              ...failures.filter((f) => f.index !== -1 && !tried.has(f.index)),
+              ...again.failures.map((f) => ({ index: f.index < 0 ? -1 : (retry[f.index] ?? -1), message: f.message })),
+            ]
+          }
+        }
+      }
+      // A write that failed for its own reason (a full disk, a locked file) is said once, here: the caller only learns "not added".
+      // Files that were not pictures, or too big, the caller already knows about.
+      const real = failures.filter((f) => !/is not a picture|is over 40 MB/.test(f.message))
+      if (real.length > 0 && paths.some((p) => p === null)) get().toast(`Could not add ${plural(real.length, 'picture')} to the board: ${truncate(real[0]?.message ?? '', 120)}`, 'error')
+      return paths
+    },
+
+    showPicture(path) {
+      showImage(path)
     },
   }
 })
