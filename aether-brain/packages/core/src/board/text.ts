@@ -20,6 +20,15 @@ function isAsciiPunctuation(code: number): boolean {
   return (code >= 33 && code <= 47) || (code >= 58 && code <= 64) || (code >= 91 && code <= 96) || (code >= 123 && code <= 126)
 }
 
+/** `text` cut to at most `max` UTF-16 units without splitting a surrogate pair (a cut emoji would be written as a lone surrogate). */
+export function cutText(text: string, max: number): string {
+  if (text.length <= max) return text
+  let end = Math.max(0, max)
+  const last = text.charCodeAt(end - 1)
+  if (end > 0 && last >= 0xd800 && last <= 0xdbff) end--
+  return text.slice(0, end)
+}
+
 /**
  * Text as one inert line: `\` becomes `\\`, a line feed `\n`, a carriage return `\r`, and `\` goes before each of
  * `[ ] # < > | * _ ~ ! \``. What comes out holds no link, tag, task, table or HTML a markdown parser would read, and no line break.

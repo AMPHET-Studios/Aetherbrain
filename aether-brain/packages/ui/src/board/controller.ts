@@ -2338,6 +2338,28 @@ export class BoardController {
     if (!quiet) this.toast(items.length === 1 ? 'Copied 1 item.' : `Copied ${items.length} items.`, 'info')
   }
 
+  /**
+   * The items last copied (or cut) as text for the SYSTEM clipboard: a first line the user can read, then the items as a small board
+   * note (core `serializeBoard`), so another board, another window or a later session can paste them. Null when nothing was copied.
+   * (Stub for now: the controller work in the review fixes fills it in.)
+   */
+  exportCopy(): { text: string; count: number } | null {
+    return null
+  }
+
+  /**
+   * Paste what `exportCopy` made (read from the system clipboard) into this board at `at` (board units; the view centre when absent).
+   * Returns how many items were pasted, 0 when the board is full, or null when `text` is not a copy from a board. Never throws.
+   */
+  importCopy(_text: string, _at?: Vec2): number | null {
+    return null
+  }
+
+  /** Drop every held pointer and end any gesture (the window lost focus, the canvas lost pointer capture). */
+  cancelPointers(): void {
+    // Filled in by the review fixes.
+  }
+
   private paste(): void {
     if (this.clipboard.length === 0) return
     const bounds = itemsBounds(this.clipboard, this.metrics)
