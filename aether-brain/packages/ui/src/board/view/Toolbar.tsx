@@ -10,12 +10,12 @@ import { commandInfo } from '../commands'
 import type { BoardSession } from './boardSession'
 import { Icon, ToolIcon, type ButtonIconName } from './icons'
 import { MenuPanel, useDismiss } from './Menu'
-import { arrangeMenu, editMenu, exportMenu, menuContextOf, viewMenu, type MenuContext, type MenuEntry } from './menus'
+import { arrangeMenu, editMenu, exportMenu, menuContextOf, toolEntries, viewMenu, type MenuContext, type MenuEntry } from './menus'
 import { formatKeys } from './session'
 import { StylePanel } from './StylePanel'
 import { useBoardState, useSessionVersion } from './useBoardSession'
 
-export type ToolbarMenu = 'edit' | 'arrange' | 'view' | 'export' | 'style'
+export type ToolbarMenu = 'edit' | 'arrange' | 'view' | 'export' | 'style' | 'tools'
 
 export interface ToolbarProps {
   session: BoardSession
@@ -39,6 +39,12 @@ export function capabilitiesOf(session: BoardSession): MenuContext['can'] {
 }
 
 const TOOL_GROUPS: BoardTool[][] = [['select', 'hand'], ['note'], ['pen', 'line', 'rect', 'ellipse', 'eraser'], ['sampler', 'crop']]
+/** The tools a toolbar narrower than NARROW_PX tucks into its "More tools" menu (their keys work all the same). */
+const TUCKED_TOOLS: ReadonlySet<BoardTool> = new Set<BoardTool>(['line', 'rect', 'ellipse', 'eraser', 'sampler', 'crop'])
+// Written out in full (a class name built from parts is not seen by Tailwind): a toolbar narrower than 560 px tucks the rarer tools away.
+// (`.hud-btn` sets its own display, outside any layer: only an important utility can hide a button.)
+const HIDE_WHEN_NARROW = '@max-[560px]:!hidden'
+const SHOW_WHEN_NARROW = 'hidden @max-[560px]:block'
 
 function Divider() {
   return <span className="mx-1 h-5 w-px shrink-0 bg-[var(--line)]" aria-hidden />
@@ -53,7 +59,7 @@ function ToolButton({ session, tool, on }: { session: BoardSession; tool: BoardT
   return (
     <button
       type="button"
-      className="hud-btn !w-8 !justify-center !px-0"
+      className={cx('hud-btn !w-8 !justify-center !px-0', TUCKED_TOOLS.has(tool) && HIDE_WHEN_NARROW)}
       aria-pressed={on}
       aria-label={info.title}
       aria-keyshortcuts={keys || undefined}
@@ -88,8 +94,17 @@ function IconButton({ icon, label, keys, disabled, onClick, pressed }: { icon: B
 function OpenMenu({ session, kind, onClose, align, reducedMotion }: { session: BoardSession; kind: Exclude<ToolbarMenu, 'style'>; onClose(): void; align: 'left' | 'right'; reducedMotion: boolean }) {
   const state = useBoardState(session, (s) => s)
   const ctx = menuContextOf(state, capabilitiesOf(session))
-  const entries: MenuEntry[] = kind === 'edit' ? editMenu(ctx) : kind === 'arrange' ? arrangeMenu(ctx) : kind === 'view' ? viewMenu(ctx) : exportMenu(ctx)
-  const label = { edit: 'Edit', arrange: 'Arrange', view: 'View', export: 'Export' }[kind]
+  const entries: MenuEntry[] =
+    kind === 'edit'
+      ? editMenu(ctx)
+      : kind === 'arrange'
+        ? arrangeMenu(ctx)
+        : kind === 'view'
+          ? viewMenu(ctx)
+          : kind === 'tools'
+            ? toolEntries(ctx).filter((e) => e.kind === 'command' && TUCKED_TOOLS.has(e.id.slice('tool.'.length) as BoardTool))
+            : exportMenu(ctx)
+  const label = { edit: 'Edit', arrange: 'Arrange', view: 'View', export: 'Export', tools: 'More tools' }[kind]
   return (
     <MenuPanel
       entries={entries}
@@ -114,6 +129,7 @@ function MenuButton({
   reducedMotion,
   keys,
   labelClass = '@max-[860px]:hidden',
+  className,
 }: {
   session: BoardSession
   kind: Exclude<ToolbarMenu, 'style'>
@@ -127,10 +143,11 @@ function MenuButton({
   keys?: string | undefined
   /** When the text beside the icon gives way to the icon alone (the toolbar's own width decides). */
   labelClass?: string
+  className?: string
 }) {
   const wrap = useRef<HTMLDivElement>(null)
   return (
-    <div className="relative" ref={wrap}>
+    <div className={cx('relative', className)} ref={wrap}>
       <button
         type="button"
         className="hud-btn"
@@ -262,6 +279,19 @@ export function Toolbar({ session, menu, onMenu, onHelp, reducedMotion }: Toolba
             ))}
           </span>
         ))}
+        <MenuButton
+          session={session}
+          kind="tools"
+          icon="more"
+          label="More tools"
+          title="Line, rectangle, ellipse, eraser, colour sampler, crop"
+          open={menu === 'tools'}
+          onToggle={toggle('tools')}
+          align="left"
+          reducedMotion={reducedMotion}
+          labelClass="sr-only"
+          className={SHOW_WHEN_NARROW}
+        />
       </div>
       <Divider />
 

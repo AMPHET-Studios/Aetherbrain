@@ -6,6 +6,7 @@
 import { useEffect, useRef, useState, type RefObject } from 'react'
 import type { BoardStyle } from '../api'
 import { cx } from '../../util'
+import { trapTab } from './dom'
 import { POPUP_BG, useDismiss } from './Menu'
 import { parseHexInput } from './session'
 import { Icon } from './icons'
@@ -72,6 +73,9 @@ function ColourRow({
           placeholder="rrggbb"
           onChange={(e) => {
             setText(e.target.value)
+            // A colour is taken as it is typed only when it is whole: "f80" is a colour too, but on the way to "f80000" it would
+            // rewrite the field under the user's fingers. The short form is taken on Enter or when the field is left.
+            if (!/^#?[0-9a-fA-F]{6}$/.test(e.target.value.trim())) return
             const hex = parseHexInput(e.target.value)
             if (hex && hex !== value) onChange(hex)
           }}
@@ -129,17 +133,27 @@ export function StylePanel({
 }) {
   const ref = useRef<HTMLDivElement>(null)
   useDismiss(ref, onClose, anchor)
+  // The panel holds the keyboard while it is open (a press on its text, or none at all, must not leave the keys with the board).
+  useEffect(() => {
+    ref.current?.focus({ preventScroll: true })
+  }, [])
   return (
     <div
       ref={ref}
       role="dialog"
+      aria-modal="true"
       aria-label="Colour and size"
+      tabIndex={-1}
       data-board-overlay
       onKeyDown={(e) => {
         e.stopPropagation()
-        if (e.key === 'Escape') onClose()
+        trapTab(e, ref.current)
+        if (e.key === 'Escape') {
+          e.preventDefault()
+          onClose()
+        }
       }}
-      className={cx('panel scroll absolute left-0 top-full z-40 mt-1 flex max-h-[min(78vh,640px)] w-[292px] flex-col gap-3.5 overflow-y-auto p-3 text-[12.5px]', !reducedMotion && 'rise')}
+      className={cx('panel scroll absolute left-0 top-full z-40 mt-1 flex max-h-[min(78vh,640px)] w-[292px] flex-col gap-3.5 overflow-y-auto p-3 text-[12.5px] outline-none', !reducedMotion && 'rise')}
       style={{ background: POPUP_BG }}
     >
       <ColourRow label="Colour" value={style.color} onChange={(color) => onChange({ color })} />

@@ -404,7 +404,7 @@ describe('dirty and markSaved', () => {
 describe('replaceDoc', () => {
   const change = (doc: BoardDoc): BoardDoc => ({ ...doc, items: doc.items.map((i) => (i.kind === 'picture' && i.id === 1 ? { ...i, x: i.x + 500 } : i)) })
 
-  it('takes the new board, keeps the selection by id, the history and the camera, and counts as saved', () => {
+  it('takes the new board, keeps the camera and the selection of items that are exactly what they were, restarts the history, and counts as saved', () => {
     const { doc, id } = threeThings()
     const r = new Rig(doc)
     r.c.exec('view.gray')
@@ -414,15 +414,15 @@ describe('replaceDoc', () => {
     r.c.replaceDoc({ ...outside, view: { x: 0, y: 0, zoom: 1 } })
     expect(pic(r, id.a).x).toBe(200)
     expect(r.doc.view).toEqual({ x: 9, y: 8, zoom: 2 })
-    expect(r.s.selection).toEqual([id.a, id.b, id.n])
+    // Picture a is not what it was: it leaves the selection. The other two are the same at the same place.
+    expect(r.s.selection).toEqual([id.b, id.n])
     expect(r.s.dirty).toBe(false)
-    expect(r.s.undoLabel).toBe('External change')
-    // The history is kept: undo goes back over the outside change, then over the edit before it.
+    // An outside change is a barrier: there is nothing to undo, so an undo cannot take back what another program wrote.
+    expect(r.s.canUndo).toBe(false)
+    expect(r.s.undoLabel).toBeNull()
     r.c.exec('edit.undo')
-    expect(pic(r, id.a).x).toBe(-300)
+    expect(pic(r, id.a).x).toBe(200)
     expect(r.doc.gray).toBe(true)
-    r.c.exec('edit.undo')
-    expect(r.doc.gray).toBe(false)
   })
 
   it('drops from the selection what the new board no longer has', () => {
@@ -669,8 +669,8 @@ describe('setNaturalSize', () => {
     expect(pic(r, id.a)).toMatchObject({ x: 10, y: 20, w: 200, h: 100 })
     expect(pic(r, id.b)).toMatchObject({ w: 200, h: 200 })
     expect(r.s.canUndo).toBe(false)
-    expect(r.changes.map((c) => c.why)).toEqual([{ reason: 'natural-size', final: true, viewOnly: false }])
-    expect(r.s.dirty).toBe(true)
+    // Not a change of the board for the savers: a board that is only looked at is never written (the shape rides the next real edit).
+    expect(r.changes.map((c) => c.why)).toEqual([{ reason: 'natural-size', final: false, viewOnly: true }])
   })
 
   it('leaves a picture within 1% alone, as the same object', () => {

@@ -6,10 +6,12 @@
  * pixel (x + 500, y + 400): `at(x, y)` does that sum.
  */
 import {
+  BOARD_ITEM_LIMITS,
   BOARD_LIMITS,
   addMark,
   addNote,
   addPicture,
+  boardChars,
   emptyBoard,
   estimateTextMetrics,
   group,
@@ -374,14 +376,14 @@ export function assertSane(doc: BoardDoc, metrics: TextMetrics = estimateTextMet
         if (it.points.length < 2 || it.points.length % 2 !== 0) throw new Error(`${tag} has ${it.points.length} numbers`)
         if (it.points.length / 2 > BOARD_LIMITS.strokePoints) throw new Error(`${tag} has ${it.points.length / 2} points`)
         for (const v of it.points) num(`${tag}.point`, v, -L, L)
-        num(`${tag}.width`, it.width, 0.1, 1000)
+        num(`${tag}.width`, it.width, BOARD_ITEM_LIMITS.markWidth.min, BOARD_ITEM_LIMITS.markWidth.max)
         break
       default:
         num(`${tag}.x1`, it.x1, -L, L)
         num(`${tag}.y1`, it.y1, -L, L)
         num(`${tag}.x2`, it.x2, -L, L)
         num(`${tag}.y2`, it.y2, -L, L)
-        num(`${tag}.width`, it.width, 0.1, 1000)
+        num(`${tag}.width`, it.width, BOARD_ITEM_LIMITS.markWidth.min, BOARD_ITEM_LIMITS.markWidth.max)
     }
     if (it.group < 0 || !Number.isInteger(it.group)) throw new Error(`${tag} group ${it.group}`)
   }
@@ -404,4 +406,38 @@ export function rng(seed: number): () => number {
     t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296
   }
+}
+
+/* ------------------------------------------------------------------- budget --- */
+
+/**
+ * A board whose items take EXACTLY `chars` characters of the note (core `boardChars`): pen strokes of 3,000 points with long coordinates
+ * (about 40,000 characters each), and one note of filler to land on the number. A test can stand any number of characters below
+ * BOARD_LIMITS.noteTotal without drawing thousands of strokes.
+ */
+export function fatBoard(chars: number, start: BoardDoc = emptyBoard('fat')): BoardDoc {
+  let doc = start
+  let k = 0
+  while (boardChars(doc) < chars - 50_000 && doc.items.length < BOARD_LIMITS.items - 100) {
+    const points: number[] = []
+    for (let i = 0; i < BOARD_LIMITS.strokePoints; i++) {
+      k++
+      points.push(((k * 7919) % 200000) / 7 - 14000, ((k * 104729) % 200000) / 7 - 14000)
+    }
+    doc = addMark(doc, { kind: 'stroke', points, color: '00ff00', width: 3 }).doc
+  }
+  // Notes of 3,000 characters do the rest, and a last one of the right length lands on the number (a note with any text at all costs
+  // its text plus a fixed amount, so the length is worked out from a note of one character).
+  for (;;) {
+    const one = boardChars(addNote(doc, { text: 'a', x: 0, y: 0 }).doc)
+    const n = chars - one + 1
+    if (n <= 3000) {
+      if (n < 1) throw new Error(`fatBoard(${chars}): the board is already ${boardChars(doc)}`)
+      doc = addNote(doc, { text: 'a'.repeat(n), x: 0, y: 0 }).doc
+      break
+    }
+    doc = addNote(doc, { text: 'a'.repeat(3000), x: 0, y: 0 }).doc
+  }
+  if (boardChars(doc) !== chars) throw new Error(`fatBoard(${chars}) made ${boardChars(doc)}`)
+  return doc
 }

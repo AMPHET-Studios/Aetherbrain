@@ -68,7 +68,8 @@ describe('the pen', () => {
     r.down(at(0, 0))
     r.move(at(1, 0))
     r.move(at(1.4, 0))
-    expect((r.s.draft as StrokeItem).points).toEqual([0, 0])
+    // One point is no stroke (a tap leaves nothing), so nothing is drawn for it either: the draft is what would be committed.
+    expect(r.s.draft).toBeNull()
     r.move(at(1.6, 0))
     expect((r.s.draft as StrokeItem).points).toHaveLength(4)
     expect((r.s.draft as StrokeItem).points[2]).toBeCloseTo(1.6, 9)
@@ -778,13 +779,16 @@ describe('the drawing style', () => {
     expect(r.item<NoteItem>(id.n!)).toMatchObject({ text: 'typed meanwhile', color: 'ffcc00' })
   })
 
-  it('a new note being typed is not restyled by the style controls, but takes the new style when made', () => {
+  it('a new note being typed takes the style controls in place (it is in no history step yet) and the next note is made with them', () => {
     const r = new Rig(emptyBoard('t'))
     const id = r.c.addNoteAt({ x: 0, y: 0 })
-    const before = r.item<NoteItem>(id)
     r.c.setStyle({ noteColor: 'ffcc00', noteSize: 40 })
-    expect(r.item<NoteItem>(id)).toBe(before)
-    r.c.cancelNoteEdit()
+    expect(r.item<NoteItem>(id)).toMatchObject({ color: 'ffcc00', size: 40 })
+    expect(r.s.canUndo).toBe(false)
+    r.c.commitNoteText(id, 'typed')
+    expect(r.item<NoteItem>(id)).toMatchObject({ text: 'typed', color: 'ffcc00', size: 40 })
+    r.c.exec('edit.undo')
+    expect(r.doc.items).toHaveLength(0)
     const id2 = r.c.addNoteAt({ x: 0, y: 0 })
     expect(r.item<NoteItem>(id2)).toMatchObject({ color: 'ffcc00', size: 40 })
   })

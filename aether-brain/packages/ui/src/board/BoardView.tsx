@@ -14,7 +14,7 @@ import type { BoardHost } from './api'
 import { getActiveBoard, setActiveBoard, type ActiveBoard } from './active'
 import { BoardCanvas } from './view/BoardCanvas'
 import { ContextMenu, type ContextMenuAt } from './view/ContextMenu'
-import { dragCarriesContent, isTypingTarget, keyInOf, snapshotTransfer } from './view/dom'
+import { MODAL_SELECTOR, dragCarriesContent, focusInto, isTypingTarget, keyInOf, snapshotTransfer } from './view/dom'
 import { HelpPanel } from './view/HelpPanel'
 import { Icon } from './view/icons'
 import { InfoCard } from './view/InfoCard'
@@ -65,7 +65,7 @@ export function BoardView({ host, className, initialRaw }: BoardViewProps) {
   // The outer box is the caller's (it positions the view: `absolute inset-0` in the docked app, the whole window in the floating one);
   // the inner box is the board's own layout and the anchor of its overlays. The root takes the keyboard and shows no focus ring.
   return (
-    <div ref={rootRef} tabIndex={0} data-board-root aria-label={`Reference board: ${host.title}`} className={cx('h-full min-h-0 w-full overflow-hidden outline-none', className)}>
+    <div ref={rootRef} tabIndex={0} role="group" data-board-root aria-label={`Reference board: ${host.title}`} className={cx('h-full min-h-0 w-full overflow-hidden outline-none', className)}>
       <div className="relative flex h-full min-h-0 w-full select-none flex-col bg-[var(--bg-deep)] text-ink">
         {phase === 'ready' ? (
           <ReadyView session={session} rootRef={rootRef} reduced={reduced} menu={menu} setMenu={setMenu} picker={picker} setPicker={setPicker} help={help} setHelp={setHelp} info={info} setInfo={setInfo} hideUi={hideUi} setHideUi={setHideUi} />
@@ -125,10 +125,8 @@ function ReadyView({ session, rootRef, reduced, menu, setMenu, picker, setPicker
       path: host.path,
       exec: (id, arg) => session.exec(id, arg),
       state: () => session.controller.state,
-      flush: async () => {
-        await session.flush()
-        return true
-      },
+      // True only when everything is on disk: a note being typed is committed and written, and a save that failed says false.
+      flush: () => session.flush(),
     }
     setActiveBoard(mine)
     return () => {
@@ -154,7 +152,8 @@ function ReadyView({ session, rootRef, reduced, menu, setMenu, picker, setPicker
 
   /* ---- saving when the user leaves ---- */
   useEffect(() => {
-    // A window that loses the focus writes what is pending (not the note being typed: that is still being typed).
+    // A window that loses the focus writes what is pending. The note being typed is not ended by it (the text box commits itself when
+    // the focus really leaves it), but its text is already on its way to the saver as it is typed.
     const onBlur = () => {
       session.controller.blur()
       void session.save()
@@ -185,7 +184,28 @@ function ReadyView({ session, rootRef, reduced, menu, setMenu, picker, setPicker
         const root = rootRef.current
         if (root && !root.contains(target) && target.closest('[role="dialog"], [role="alertdialog"]')) return
       }
+      // A modal overlay (the picker, the cheatsheet, the colour panel) holds the keyboard. With the focus anywhere else - on the board
+      // after a click on the overlay's dead space, on a toolbar button behind it - the board's keys must not run (Delete would empty
+      // the board under the picker): Esc closes the overlay, Tab brings the focus back into it, everything else waits.
+      const modal = rootRef.current?.querySelector<HTMLElement>(MODAL_SELECTOR)
+      if (modal && !(target instanceof Node && modal.contains(target))) {
+        if (e.type === 'keydown' && e.key === 'Escape') {
+          const o = open.current
+          if (o.help) setHelp(false)
+          else if (o.picker) setPicker(false)
+          else setMenu(null)
+          e.preventDefault()
+          e.stopPropagation()
+        } else if (e.type === 'keydown' && e.key === 'Tab') {
+          e.preventDefault()
+          e.stopPropagation()
+          focusInto(modal)
+        }
+        return
+      }
       if (session.controller.state.editingNote !== null) return
+      // Enter and Space belong to a button that has the focus (Space acts when it is released, so the release is left alone too).
+      if ((e.key === ' ' || e.key === 'Enter') && isControl(target)) return
       if (e.type === 'keydown') {
         if (e.key === 'Escape' && open.current.info !== null) {
           setInfo(null)
@@ -193,8 +213,8 @@ function ReadyView({ session, rootRef, reduced, menu, setMenu, picker, setPicker
           e.stopPropagation()
           return
         }
-        // Enter and Space belong to a button that has the focus.
-        if ((e.key === ' ' || e.key === 'Enter') && isControl(target)) return
+        // Tab hides the toolbar from the board; from a button of the bars, and with Shift, it is the browser's focus move.
+        if (e.key === 'Tab' && (e.shiftKey || (target instanceof Element && target.closest('[role="toolbar"], footer')))) return
         // The floating window has no app around it to answer the cheatsheet key.
         if (e.key === '?' && host.window?.floating) {
           setHelp(true)
@@ -214,7 +234,7 @@ function ReadyView({ session, rootRef, reduced, menu, setMenu, picker, setPicker
       window.removeEventListener('keydown', onKey, true)
       window.removeEventListener('keyup', onKey, true)
     }
-  }, [session, rootRef, host, setInfo, setHelp])
+  }, [session, rootRef, host, setInfo, setHelp, setPicker, setMenu])
 
   /* ---- paste: a picture on the clipboard, text, or (when there is neither) the board's own copy ---- */
   useEffect(() => {

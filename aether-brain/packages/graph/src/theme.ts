@@ -39,6 +39,7 @@ export const TYPE_COLORS: Record<NoteType, string> = {
   inbox: '#ffb454',
   concept: '#7cf5c9',
   moc: '#dfe6ff',
+  board: '#9fe8d4',
 }
 
 export const GHOST_COLOR = '#ff3e6c'

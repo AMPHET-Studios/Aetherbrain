@@ -135,7 +135,7 @@ export function buildGraph(notes: Map<NoteId, ParsedNote>, opts: BuildGraphOptio
     for (const link of n.links) {
       // Always resolve from the raw text so rebuilding after a vault change
       // (a ghost becoming real, a rename) never needs a re-parse.
-      const rawTarget = stripRaw(link.raw)
+      const rawTarget = link.literal ? link.raw.trim() : stripRaw(link.raw)
       if (isMediaPath(rawTarget)) {
         // A picture or video: an image node when the file exists, else nothing (never a ghost).
         const img = pictures()?.resolve(rawTarget, n.meta.folder) ?? null

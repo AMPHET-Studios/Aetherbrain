@@ -35,6 +35,7 @@ export const COMMAND_HOME: Record<BoardCommandId, MenuHome> = {
   'edit.ungroup': 'edit',
   'edit.lock': 'edit',
   'edit.unlock': 'edit',
+  'note.edit': 'edit',
   'order.front': 'edit',
   'order.forward': 'edit',
   'order.backward': 'edit',
@@ -168,8 +169,8 @@ export type MenuEntry =
   | { kind: 'heading'; label: string }
   | { kind: 'separator' }
   | { kind: 'command'; id: BoardCommandId; label: string; keys?: string; disabled: boolean; checked?: boolean; note?: string }
-  /** Something the controller has an API for but no command: editing a note's text, a note at the click. */
-  | { kind: 'action'; action: 'edit-note' | 'add-note-here'; label: string; disabled: boolean }
+  /** Something the controller has an API for but no command: a note at the click. */
+  | { kind: 'action'; action: 'add-note-here'; label: string; disabled: boolean }
 
 /** "Arrange: in a row" → "In a row": inside the Arrange menu the prefix says nothing. */
 function shortTitle(title: string): string {
@@ -219,9 +220,9 @@ export function commandDisabled(id: BoardCommandId, ctx: MenuContext): boolean {
       return !ctx.canUndo
     case 'edit.redo':
       return !ctx.canRedo
-    case 'edit.paste':
-      return !ctx.canPaste
     case 'tool.crop':
+    // Paste is always offered: with nothing of the board's own to paste it says how to paste what is on the system clipboard (⌘ V).
+    case 'edit.paste':
     case 'picture.add':
     case 'export.board':
       return false
@@ -336,7 +337,7 @@ export function contextMenu(ctx: MenuContext, target: 'item' | 'canvas', singleN
     commandEntry('edit.duplicate', ctx),
     commandEntry('edit.delete', ctx),
   ]
-  if (singleNote) edit.push({ kind: 'action', action: 'edit-note', label: 'Edit text', disabled: false })
+  if (singleNote) edit.push(commandEntry('note.edit', ctx, 'Edit text'))
   // Only what makes sense for this selection: group needs two, ungroup a group, and a lock is either put on or taken off.
   const group: MenuEntry[] = []
   if (ctx.selected >= 2) group.push(commandEntry('edit.group', ctx))

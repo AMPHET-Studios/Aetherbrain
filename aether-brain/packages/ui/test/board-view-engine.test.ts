@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { BOARD_LIMITS, newBoardNote, parseBoard, type Vec2 } from '@aether/core'
 import type { BoardEvent, PointerIn } from '../src/board/api'
 import { BoardSession } from '../src/board/view/boardSession'
-import { VIEW_KEY_PREFIX } from '../src/board/view/session'
+import { SAVE_THROTTLE_MS, VIEW_KEY_PREFIX } from '../src/board/view/session'
 import { FakeHost, NOW, boardRaw, fakeEnv, FakeTimers, FakeUi, rig, settle } from './helpers/board-view-fakes'
 import { makeBitmap } from './helpers/recordingContext'
 
@@ -164,6 +164,8 @@ describe('saving', () => {
     const r = rig(RAW)
     r.session.exec('view.gray')
     await settle()
+    // A second command this soon after the first would ride the burst throttle: a person's next command is seconds away.
+    await r.timers.advance(300)
     r.session.exec('view.gray')
     await settle()
     // Back to the original board: the second write is the original text, which differs from the first, so it is written; a third no-op is not.
@@ -188,7 +190,8 @@ describe('saving', () => {
     expect(r.host.inFlight).toBe(1)
     r.host.saveGate = null
     release()
-    await settle()
+    // Commands that follow each other within a quarter of a second are one burst: the rest of it is written at the throttle.
+    await r.timers.advance(SAVE_THROTTLE_MS + 1)
     expect(r.host.maxInFlight).toBe(1)
     expect(r.host.saves).toHaveLength(2)
     const last = parseBoard(r.host.saves[1]!).doc
@@ -257,13 +260,16 @@ describe('the note changing outside', () => {
     expect(doc.view).toEqual(view)
     const pic = doc.items.find((i) => i.kind === 'picture')
     expect(pic && pic.kind === 'picture' ? [pic.x, pic.y] : null).toEqual([50, 60])
-    expect(c.state.selection.length).toBe(2)
+    // The selection stays on the items that are exactly what they were (the picture moved, the note did not).
+    expect(c.state.selection.length).toBe(1)
     expect(c.state.dirty).toBe(false)
     expect(r.host.toastTexts()).toEqual([])
   })
 
   it('with unsaved local changes ours are kept, the user is told, and our next save is merged into the new text', async () => {
     const r = rig(RAW)
+    // Like the real hosts, which refuse a save made from a text that is no longer the note's.
+    r.host.strict = true
     const c = r.session.controller
     r.session.pointerDown(ptr(at(0, 0)))
     c.pointerMove(ptr(at(30, 0)))
@@ -271,11 +277,12 @@ describe('the note changing outside', () => {
     r.host.raw = outside
     r.host.fireExternal()
     await settle()
-    expect(r.host.toastTexts().some((t) => /changed outside/i.test(t))).toBe(true)
+    // The drag is held: the outside change waits for it (see board-fix-shell-session.test.ts), the drag is not touched.
     const pic = c.state.doc.items.find((i) => i.kind === 'picture')
     expect(pic && pic.kind === 'picture' ? pic.x : null).toBe(30)
     c.pointerUp(ptr(at(30, 0), { buttons: 0 }))
     await settle()
+    expect(r.host.toastTexts().some((t) => /changed outside/i.test(t))).toBe(true)
     expect(r.host.saves).toHaveLength(1)
     expect(r.host.saves[0]).toContain('Written by hand outside.')
     expect(parseBoard(r.host.saves[0]!).doc.items.some((i) => i.kind === 'picture' && i.x === 30)).toBe(true)
@@ -662,15 +669,18 @@ describe('keys and clipboard', () => {
     expect(c.state.doc.items.filter((i) => i.kind === 'picture')).toHaveLength(2)
   })
 
-  it('a copy of the board’s items leaves a marker on the system clipboard; a paste carrying it pastes the items, other text becomes a note', async () => {
+  it('a copy of the board’s items leaves a self-describing copy on the system clipboard; a paste carrying it pastes the items, other text becomes a note', async () => {
     const r = rig(RAW)
     const c = r.session.controller
     c.exec('edit.selectAll')
     r.session.exec('edit.copy')
-    const marker = r.host.copied.at(-1)!
-    expect(marker).toMatch(/^Aether Brain board: 2 items copied$/)
+    await settle()
+    const copy = r.host.copied.at(-1)!
+    // A line a person can read, then the items as a small board note: any board, window or session can read them back.
+    expect(copy.startsWith('Aether Brain board: 2 items copied\n')).toBe(true)
+    expect(copy).toContain('## Board')
     const n = c.state.doc.items.length
-    await r.session.handlePaste({ files: [], uriList: '', html: '', text: marker }, null)
+    await r.session.handlePaste({ files: [], uriList: '', html: '', text: copy }, null)
     expect(c.state.doc.items).toHaveLength(n + 2)
     await r.session.handlePaste({ files: [], uriList: '', html: '', text: 'something I copied elsewhere' }, { x: 10, y: 10 })
     expect(c.state.doc.items).toHaveLength(n + 3)

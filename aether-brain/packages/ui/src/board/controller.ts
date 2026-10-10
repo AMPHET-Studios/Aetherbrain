@@ -6,7 +6,8 @@
  *
  * Two documents. `history.current` is the last committed step; `doc` is the live board and runs ahead of it only while a gesture is
  * under way (a drag updates the live board on every move and pushes ONE history step when it ends), while a new note is being typed
- * (it is on the board but in no step until its text is committed) and after a silent correction (`setNaturalSize`). Every drag
+ * (it is on the board but in no step until its text is committed, and the savers are never sent it) and after a silent correction
+ * (`setNaturalSize`, which the savers are not told of either: it rides the next real edit, like the camera). Every drag
  * recomputes the live board from the board as it was when the drag began, so snapping and constraints are stable and a cancelled drag
  * puts the old board back exactly. The view (pan, zoom) is part of the document but never of a history step: undo keeps the camera
  * where the user left it.
@@ -14,7 +15,9 @@
  * Units. Pointers arrive in CSS pixels; the board is in board units; `screenToBoard` turns one into the other. Distances the user
  * feels (a 6 px hit tolerance, a 3 px click, the rotate handle 28 px above the box, a mark's width) are CSS pixels and become
  * `px / zoom` board units. Nothing here is unbounded: strokes are cut to BOARD_LIMITS.strokePoints while they are drawn, the board to
- * BOARD_LIMITS.items, notes to BOARD_LIMITS.noteChars, the history to its own limit.
+ * BOARD_LIMITS.items and, whatever it holds, to BOARD_LIMITS.noteTotal characters of items (anything that would GROW it past that is
+ * refused with the board-is-full message; shrinking or keeping its size is always allowed), notes to BOARD_LIMITS.noteChars, the
+ * history to its own limit.
  */
 import {
   BOARD_ITEM_LIMITS,
@@ -26,10 +29,13 @@ import {
   addPicture,
   align,
   arrange,
+  boardChars,
   clampDoc,
   clampView,
+  cutText,
   distribute,
   duplicateItems,
+  emptyBoard,
   estimateTextMetrics,
   expandGroups,
   fitView,
@@ -40,6 +46,7 @@ import {
   hitTest,
   insertItems,
   itemBounds,
+  itemChars,
   itemQuad,
   itemsBounds,
   itemsInRect,
@@ -48,6 +55,7 @@ import {
   normalize,
   normalizeAngle,
   panView,
+  parseBoard,
   pointInItem,
   removeItems,
   reorder,
@@ -57,6 +65,7 @@ import {
   rotatePoint,
   scaleItems,
   screenToBoard,
+  serializeBoard,
   setCrop,
   setProps,
   snapMove,
@@ -128,7 +137,13 @@ const NUDGE_KEY = 'nudge'
 const OPACITY_KEY = 'opacity'
 const STYLE_KEY = 'style'
 const MAX_SWATCHES = 16
-const MAX_ERASE_STEPS = 32
+/** The eraser looks along a pointer jump at points about its own radius apart, up to this many (a 4,000 px jump is 500 radii). */
+const MAX_ERASE_STEPS = 512
+/** Room the arrangement of new pictures may take on top of what they measured when added (coordinates get longer digits). */
+const ARRANGE_SLACK_CHARS = 32
+/** A copy for the system clipboard: its first line, and the most text a paste will read (twice the board's budget). */
+const COPY_HEAD = /^Aether Brain board: (\d+) items? copied\r?\n/
+const MAX_COPY_CHARS = 2 * BOARD_LIMITS.noteTotal
 /** Pictures' own sizes remembered (the oldest are forgotten past it) and pointers followed at once (a pointer that never lifted is dropped). */
 const MAX_NATURALS = 4096
 const MAX_POINTERS = 32
@@ -252,6 +267,33 @@ function differs(a: BoardDoc, b: BoardDoc): boolean {
   )
 }
 
+/**
+ * Whether two boards hold the same work: the same items in the same order and the same settings, whatever their ids (a board read from
+ * a note numbers its items 1, 2, 3 ..., one that was edited has gaps) and however their groups are numbered, and whatever the camera.
+ */
+function sameBoard(a: BoardDoc, b: BoardDoc): boolean {
+  if (a === b) return true
+  if (a.items.length !== b.items.length) return false
+  if (!deepEqual({ ...a, items: 0, view: 0, nextId: 0 }, { ...b, items: 0, view: 0, nextId: 0 })) return false
+  const labelsA = new Map<number, number>()
+  const labelsB = new Map<number, number>()
+  const label = (m: Map<number, number>, g: number): number => {
+    if (!(g > 0)) return 0
+    let v = m.get(g)
+    if (v === undefined) {
+      v = m.size + 1
+      m.set(g, v)
+    }
+    return v
+  }
+  for (let i = 0; i < a.items.length; i++) {
+    const x = a.items[i]!
+    const y = b.items[i]!
+    if (!deepEqual({ ...x, id: 0, group: label(labelsA, x.group) }, { ...y, id: 0, group: label(labelsB, y.group) })) return false
+  }
+  return true
+}
+
 /** The doc with the view of `view` (the same object when it already has it). */
 function withView(doc: BoardDoc, view: BoardView): BoardDoc {
   return doc.view === view ? doc : { ...doc, view }
@@ -263,6 +305,35 @@ function isMark(item: BoardItem): boolean {
 
 function isLaidOut(item: BoardItem): boolean {
   return item.kind === 'picture' || item.kind === 'note'
+}
+
+/** The part of the segment a to b inside the rectangle, as the range of t (0 at a, 1 at b) it covers, or null when it misses it. */
+function clipSegment(a: Vec2, b: Vec2, r: Rect): { t0: number; t1: number } | null {
+  let t0 = 0
+  let t1 = 1
+  const dx = b.x - a.x
+  const dy = b.y - a.y
+  const edges: [number, number][] = [
+    [-dx, a.x - r.x],
+    [dx, r.x + r.w - a.x],
+    [-dy, a.y - r.y],
+    [dy, r.y + r.h - a.y],
+  ]
+  for (const [p, q] of edges) {
+    if (p === 0) {
+      if (q < 0) return null
+      continue
+    }
+    const t = q / p
+    if (p < 0) {
+      if (t > t1) return null
+      if (t > t0) t0 = t
+    } else {
+      if (t < t0) return null
+      if (t < t1) t1 = t
+    }
+  }
+  return { t0, t1 }
 }
 
 function segmentDistSq(px: number, py: number, ax: number, ay: number, bx: number, by: number): number {
@@ -462,12 +533,16 @@ interface DrawGesture extends GestureBase {
   pressureSum: number
   pressureN: number
   pen: boolean
+  /** Shift and Alt as the last move had them: the mark that is committed is the one the draft showed, whatever the release says. */
+  mods: { shift: boolean; alt: boolean }
 }
 
 interface EraseGesture extends GestureBase {
   kind: 'erase'
   last: Vec2
   bounds: Map<number, Rect>
+  /** The selection when the press began: the marks come back with a cancel, and selected again. */
+  before: number[]
 }
 
 interface NoteGesture extends GestureBase {
@@ -536,7 +611,16 @@ export class BoardController {
   private clipboard: BoardItem[] = []
   private pasteCount = 0
   private shuffles = 0
-  private readonly naturals = new Map<string, { w: number; h: number }>()
+  /** Pictures' own sizes by path; `exact` is false for the shape of a preview, which is not the picture's pixel size. */
+  private readonly naturals = new Map<string, { w: number; h: number; exact: boolean }>()
+  /** The last copy or cut stored items (nothing selected, or only locked items, stores none): what `exportCopy` hands out. */
+  private copyStored = false
+  /** Where the last paste from the system clipboard landed and how many in a row landed there (a cascade, like paste). */
+  private lastImport: { x: number; y: number; n: number } | null = null
+  /** The grid size to come back to when snapping is switched on again. */
+  private lastGrid = 16
+  /** The BOARD size in characters, by the items it was counted for. */
+  private charsCache: { items: readonly BoardItem[]; extra: readonly string[]; n: number } | null = null
 
   private readonly pointers = new Map<number, Tracked>()
   /** Pointers whose gesture was cancelled or cut short: ignored until they lift. */
@@ -546,6 +630,9 @@ export class BoardController {
   private space = false
   private lastClick: { time: number; x: number; y: number } | null = null
   private hover: Vec2 | null = null
+  private hoverType: PointerIn['pointerType'] = 'mouse'
+  /** The cursor depends on the selection or the tool, which changed: it is worked out again at the next flush. */
+  private rehover = false
   private hoverHandle: HandleKind | null = null
   private hoverOnSelection = false
   private wheelMoving = false
@@ -563,6 +650,7 @@ export class BoardController {
     this.metrics = opts.metrics ?? estimateTextMetrics
     this.clock = opts.now ?? (() => Date.now())
     this.doc = clampDoc(opts.doc)
+    if (this.doc.grid > 0) this.lastGrid = this.doc.grid
     this.hist = new History<BoardDoc>(opts.history)
     this.hist.reset(this.doc)
     this.savedAt = this.doc
@@ -618,7 +706,12 @@ export class BoardController {
 
   private changed(reason: string, final: boolean, viewOnly = false): void {
     this.touch()
-    this.outbox.push({ kind: 'change', doc: this.doc, why: { reason, final, viewOnly } })
+    this.outbox.push({ kind: 'change', doc: this.emittable(), why: { reason, final, viewOnly } })
+  }
+
+  /** The board as the savers hear of it: a note still being typed is in no step and not in the file, so it is not in what is sent. */
+  private emittable(): BoardDoc {
+    return this.pendingNote === null ? this.doc : removeItems(this.doc, [this.pendingNote])
   }
 
   private emit(event: BoardEvent): void {
@@ -634,11 +727,39 @@ export class BoardController {
   }
 
   /**
+   * Whether the board `next` may replace the present one in an operation that adds to it: it fits the character budget
+   * (`BOARD_LIMITS.noteTotal`, measured by core's `boardChars`), or it is no bigger than the board is now (a board that was loaded
+   * over the budget can still be edited and thinned, never grown).
+   */
+  private fits(next: BoardDoc): boolean {
+    const after = boardChars(next)
+    return after <= BOARD_LIMITS.noteTotal || after <= boardChars(this.doc)
+  }
+
+  private refuseBudget(): void {
+    const n = this.doc.items.length
+    this.toast(
+      `The board is full: it holds at most about ${BOARD_LIMITS.noteTotal.toLocaleString('en-US')} characters of items (${n} item${n === 1 ? '' : 's'}).`,
+      'error',
+      'limit',
+    )
+  }
+
+  private toastItemsFull(): void {
+    this.toast(`The board is full: it holds at most ${BOARD_LIMITS.items} items.`, 'error', 'limit')
+  }
+
+  /**
    * Hands what happened to the listeners, after the call that caused it has finished its work (a listener may call straight back in:
    * the shell answers a sample request from inside its event). A listener that throws does not stop the others.
    */
   private flush(): void {
     if (this.flushing) return
+    // The selection or the tool changed under a pointer that is not moving: the cursor is worked out again where it stands.
+    if (this.rehover) {
+      this.rehover = false
+      if (!this.gesture && this.tool !== 'sampler') this.updateHover()
+    }
     this.flushing = true
     let failure: unknown = null
     try {
@@ -712,13 +833,17 @@ export class BoardController {
     const next = expandGroups(this.doc, ids)
     if (sameIds(next, this.selection)) return
     this.selection = next
+    this.rehover = true
     this.touch()
   }
 
   /** After the board changed under the selection, the note or the crop: drop what is gone. */
   private reconcile(): void {
     const next = expandGroups(this.doc, this.selection)
-    if (!sameIds(next, this.selection)) this.selection = next
+    if (!sameIds(next, this.selection)) {
+      this.selection = next
+      this.rehover = true
+    }
     if (this.editingNote !== null && !this.itemById(this.editingNote)) {
       this.editingNote = null
       this.pendingNote = null
@@ -748,12 +873,20 @@ export class BoardController {
 
   /** Makes `next` the board and pushes it as one history step. */
   private commit(next: BoardDoc, label: string, o: CommitOptions = {}): void {
+    // A note being typed is in no step until its text is committed: an operation computed on the board that holds it must not take it along.
+    const pending = this.pendingNote
     if (!o.keepEditing) this.cancelEditing()
+    if (pending !== null && !o.keepEditing && this.itemIn(next, pending)) next = removeItems(next, [pending])
     this.doc = withView(next, this.doc.view)
-    this.hist.push(this.doc, { label, key: o.key, now: this.clock() })
+    const step = pending !== null && o.keepEditing && this.itemIn(this.doc, pending) ? withView(removeItems(this.doc, [pending]), this.doc.view) : this.doc
+    this.hist.push(step, { label, key: o.key, now: this.clock() })
     if (o.select) this.selection = expandGroups(this.doc, o.select)
     this.reconcile()
     this.changed(o.reason ?? label.toLowerCase(), true)
+  }
+
+  private itemIn(doc: BoardDoc, id: number): boolean {
+    return doc.items.some((it) => it.id === id)
   }
 
   /** Runs an operation on the selection and commits it; false (with a toast for a locked selection) when it changed nothing. */
@@ -775,6 +908,15 @@ export class BoardController {
 
   private isDirty(): boolean {
     return this.hist.current !== this.savedAt || differs(this.doc, this.hist.current)
+  }
+
+  /**
+   * A key or a style change meets a gesture that rewrites the board from the board as it was when the gesture began (a drag, a scale, a
+   * turn, a crop, a stroke being erased): the gesture is cancelled first, as for a command, so that what follows is ONE step on the board
+   * as it was, not a step on a half-made drag that the drag then overwrites. A pan only moves the camera and carries on.
+   */
+  private settleGesture(): void {
+    if (this.gesture && this.gesture.kind !== 'pan') this.cancelGesture()
   }
 
   /** The note being typed is dropped when something else wants to change the board (the shell should commit or cancel it first). */
@@ -887,10 +1029,21 @@ export class BoardController {
       redoLabel: this.hist.redoLabel,
       dirty: this.isDirty(),
       moving: this.isMoving(),
-      gesturing: this.gesture !== null,
+      gesturing: this.gesture !== null || this.pinch !== null,
       style: this.style,
       canPaste: this.clipboard.length > 0,
+      chars: this.charsOf(this.gesture ? this.gesture.base : this.doc),
+      charsLimit: BOARD_LIMITS.noteTotal,
     }
+  }
+
+  /** The size of the board's items in the note; counted once per set of items (a drag is shown at the size it began with: it changes no item count). */
+  private charsOf(doc: BoardDoc): number {
+    const c = this.charsCache
+    if (c && c.items === doc.items && c.extra === doc.extra) return c.n
+    const n = boardChars(doc)
+    this.charsCache = { items: doc.items, extra: doc.extra, n }
+    return n
   }
 
   /* ------------------------------------------------------ outside changes --- */
@@ -920,24 +1073,38 @@ export class BoardController {
   }
 
   /**
-   * The board changed somewhere else (an editor, an AI, another window): take it. The selection is kept by id, the history and the
-   * camera are kept, and the new board counts as saved: it is what is on disk. A board equal to the present one changes nothing (the
-   * echo of this controller's own save). Pass `view: true` to take the new board's view too (first load).
+   * The board changed somewhere else (an editor, an AI, another window): take it. A board that holds the same work as the present one
+   * (the echo of this controller's own save, a rewrite of the prose or the line endings round the board) changes nothing, and is judged
+   * BEFORE anything is cancelled: a stroke being drawn, a drag or a note being typed goes on. A board that differs ends the gesture and
+   * the typing, replaces the board, and is a BARRIER: the history starts again from it (an undo must not take back what another
+   * program wrote and save the older board over it), the camera is kept, the new board counts as saved, and the selection stays only
+   * on items that are exactly what they were (ids are numbered by position in the note, so a line inserted above shifts every id below
+   * it). Pass `view: true` to take the new board's view too (first load).
    */
   replaceDoc(doc: BoardDoc, opts: { view?: boolean } = {}): void {
-    this.cancelGesture()
-    this.cancelEditing()
     let next = clampDoc(doc)
     if (!opts.view) next = withView(next, this.doc.view)
     next = this.fixAspects(next)
-    if (deepEqual({ ...next, view: 0 }, { ...this.doc, view: 0 })) {
+    if (sameBoard(next, this.gesture ? this.gesture.base : this.emittable())) {
       if (opts.view) this.setViewDoc(next.view)
       this.flush()
       return
     }
+    this.cancelGesture()
+    this.cancelEditing()
+    const was = this.doc
+    const identical = (id: number): boolean => {
+      const a = was.items.find((it) => it.id === id)
+      const b = next.items.find((it) => it.id === id)
+      return a !== undefined && b !== undefined && deepEqual(a, b)
+    }
+    this.selection = this.selection.filter(identical)
+    if (this.cropping !== null && !identical(this.cropping)) this.leaveCrop()
     this.doc = next
-    this.hist.push(next, { label: 'External change', now: this.clock() })
+    this.hist.reset(next)
     this.savedAt = this.hist.current
+    if (next.grid > 0) this.lastGrid = next.grid
+    this.rehover = true
     this.reconcile()
     this.touch()
     this.flush()
@@ -978,14 +1145,36 @@ export class BoardController {
       this.style = next
       this.touch()
     }
-    if (this.tool === 'select' && this.selection.length > 0 && !this.pendingNote) this.restyleSelection(taken, next)
+    if (this.pendingNote !== null) this.restylePending(taken, next)
+    else if (this.tool === 'select' && this.selection.length > 0) this.restyleSelection(taken, next)
     this.flush()
   }
 
+  /** The note being typed takes the note styles in place: it is in no history step yet, and its own commit carries them. */
+  private restylePending(patch: Partial<BoardStyle>, style: BoardStyle): void {
+    const id = this.pendingNote
+    if (id === null) return
+    const p: BoardPatch = {}
+    if (patch.noteSize !== undefined) p.size = style.noteSize / this.zoom
+    if (patch.noteColor !== undefined && style.noteColor !== '') p.color = style.noteColor
+    if (patch.noteFill !== undefined) p.fill = style.noteFill
+    if (Object.keys(p).length === 0) return
+    const doc = setProps(this.doc, [id], p, this.metrics)
+    if (doc === this.doc) return
+    this.doc = doc
+    this.touch()
+  }
+
   private restyleSelection(patch: Partial<BoardStyle>, style: BoardStyle): void {
-    const items = this.selectedItems().filter((it) => !it.locked)
-    const marks = items.filter(isMark).map((it) => it.id)
-    const notes = items.filter((it) => it.kind === 'note').map((it) => it.id)
+    if (Object.keys(patch).length === 0) return
+    const targets = (): { marks: number[]; notes: number[] } => {
+      const items = this.selectedItems().filter((it) => !it.locked)
+      return { marks: items.filter(isMark).map((it) => it.id), notes: items.filter((it) => it.kind === 'note').map((it) => it.id) }
+    }
+    if (targets().marks.length + targets().notes.length === 0) return
+    // A drag in progress ends first: the restyle is one step on the board as it was, not on a half-made drag that carries on.
+    this.settleGesture()
+    const { marks, notes } = targets()
     const px = 1 / this.zoom
     let doc = this.doc
     if (marks.length > 0) {
@@ -1010,11 +1199,12 @@ export class BoardController {
 
   /**
    * Adds pictures to the board, on top, shown at a sensible size and laid out as the 'optimal' arrangement round `at` (the middle of
-   * the view when left out), selected, as one history step. `w`, `h` are each picture's own pixel size. The longest side of a picture
-   * is about 35% of the viewport's width and never more than twice its own pixels on the screen. Past BOARD_LIMITS.items the rest
-   * are left out and the user is told. Returns the new ids.
+   * the view when left out), selected, as one history step. `w`, `h` are each picture's own pixel size, or the shape of a preview of
+   * it: `exact` says it is the picture's own (the controller then knows it for Reset size and 100%; it learns the rest from
+   * `setNaturalSize`). The longest side of a picture is about 35% of the viewport's width and never more than twice its own pixels on
+   * the screen. Past BOARD_LIMITS.items or the character budget the rest are left out and the user is told. Returns the new ids.
    */
-  addPictures(items: readonly { path: string; w: number; h: number }[], at?: Vec2): number[] {
+  addPictures(items: readonly { path: string; w: number; h: number; exact?: boolean }[], at?: Vec2): number[] {
     this.cancelGesture()
     this.cancelEditing()
     const given = items.filter((it) => typeof it.path === 'string' && it.path !== '')
@@ -1024,7 +1214,7 @@ export class BoardController {
     }
     const room = BOARD_LIMITS.items - this.doc.items.length
     if (room <= 0) {
-      this.toast(`The board is full: it holds at most ${BOARD_LIMITS.items} items.`, 'error', 'limit')
+      this.toastItemsFull()
       this.flush()
       return []
     }
@@ -1034,9 +1224,10 @@ export class BoardController {
     const centre = at && Number.isFinite(at.x) && Number.isFinite(at.y) ? at : { x: view.x, y: view.y }
     let doc = this.doc
     const ids: number[] = []
+    let chars = boardChars(doc)
+    let overBudget = false
     for (const it of take) {
       const known = Number.isFinite(it.w) && Number.isFinite(it.h) && it.w > 0 && it.h > 0
-      if (known) this.rememberNatural(it.path, it.w, it.h)
       const nw = known ? it.w : 1
       const nh = known ? it.h : 1
       const longest = Math.max(nw, nh)
@@ -1045,19 +1236,37 @@ export class BoardController {
       const shown = known ? Math.min(wanted, (MAX_ENLARGE * longest) / zoom) : wanted
       const s = shown / longest
       const res = addPicture(doc, { path: it.path, w: nw * s, h: nh * s, x: centre.x, y: centre.y })
+      if (res.id === null) continue
+      // The arrangement below rewrites the coordinates with longer digits: a little room is kept for it.
+      const made = res.doc.items[res.doc.items.length - 1]
+      const grown = chars + (made ? itemChars(made) : 0) + ARRANGE_SLACK_CHARS
+      if (grown > BOARD_LIMITS.noteTotal) {
+        overBudget = true
+        break
+      }
+      chars = grown
       doc = res.doc
-      if (res.id !== null) ids.push(res.id)
+      ids.push(res.id)
+      if (known) this.rememberNatural(it.path, it.w, it.h, it.exact === true)
     }
     if (ids.length === 0) {
+      if (overBudget) this.refuseBudget()
       this.flush()
       return []
     }
     const aspect = clampTo(this.viewport.w / this.viewport.h, 0.5, 3)
     doc = arrange(doc, ids, 'optimal', { metrics: this.metrics, gap: PICTURE_GAP_PX / zoom, aspect })
+    if (!this.fits(doc)) {
+      this.refuseBudget()
+      this.flush()
+      return []
+    }
     this.commit(doc, 'Add pictures', { select: ids, reason: 'pictures' })
-    if (take.length < given.length) {
-      const text = `The board is full: added ${take.length} of ${given.length} pictures (it holds at most ${BOARD_LIMITS.items} items).`
-      this.toast(text, 'error', 'limit')
+    if (ids.length < given.length) {
+      const why = overBudget
+        ? `it holds at most about ${BOARD_LIMITS.noteTotal.toLocaleString('en-US')} characters of items`
+        : `it holds at most ${BOARD_LIMITS.items} items`
+      this.toast(`The board is full: added ${ids.length} of ${given.length} pictures (${why}).`, 'error', 'limit')
     }
     this.flush()
     return ids
@@ -1065,24 +1274,38 @@ export class BoardController {
 
   /**
    * A picture's real size arrived (from decoding it): every picture of that path whose shape differs from it by more than 1% takes
-   * the real shape, keeping its width. Silent: no history step, no toast. History states (undo) are corrected the same way when they
-   * come back.
+   * the real shape, keeping its width. Silent: no history step, no toast, and NOT a change of the board for the savers (a board that is
+   * only looked at is never written): the corrected shape is kept in memory and goes into the note with the next real edit, as the
+   * camera does. A drag in progress is corrected too (its base is what every step is made from). History states (undo) are corrected
+   * the same way when they come back.
    */
   setNaturalSize(path: string, w: number, h: number): void {
     if (!(w > 0 && h > 0) || !Number.isFinite(w) || !Number.isFinite(h)) return
-    this.rememberNatural(path, w, h)
+    this.rememberNatural(path, w, h, true)
     const next = this.fixAspects(this.doc)
+    const g = this.gesture
+    if (g) {
+      // The same set of items stays the same set (a gesture that has changed nothing yet must not look changed).
+      g.base = g.base.items === this.doc.items ? withView(next, g.base.view) : this.fixAspects(g.base)
+      if (g.kind === 'crop') {
+        const pic = g.base.items.find((it) => it.id === g.pic.id)
+        if (pic?.kind === 'picture') g.pic = pic
+      }
+    }
     if (next !== this.doc) {
       this.doc = next
-      this.changed('natural-size', true)
+      this.changed('natural-size', false, true)
     }
     this.flush()
   }
 
-  private rememberNatural(path: string, w: number, h: number): void {
+  private rememberNatural(path: string, w: number, h: number, exact: boolean): void {
+    const old = this.naturals.get(path)
+    // A shape taken from a preview never replaces the picture's own size.
+    if (old?.exact && !exact) return
     // Re-inserting moves the path to the newest end of the map, which is where the forgetting starts from the other side.
     this.naturals.delete(path)
-    this.naturals.set(path, { w, h })
+    this.naturals.set(path, { w, h, exact })
     if (this.naturals.size > MAX_NATURALS) {
       const oldest = this.naturals.keys().next()
       if (!oldest.done) this.naturals.delete(oldest.value)
@@ -1092,6 +1315,7 @@ export class BoardController {
   private fixAspects(doc: BoardDoc): BoardDoc {
     if (this.naturals.size === 0) return doc
     let items: BoardItem[] | null = null
+    const fixed: number[] = []
     for (let i = 0; i < doc.items.length; i++) {
       const it = doc.items[i]!
       if (it.kind !== 'picture') continue
@@ -1101,13 +1325,34 @@ export class BoardController {
       if (!(it.h > 0) || Math.abs(it.w / it.h / want - 1) <= 0.01) continue
       items ??= doc.items.slice()
       items[i] = { ...it, h: it.w / want }
+      fixed.push(i)
     }
-    return items ? clampDoc({ ...doc, items }) : doc
+    if (!items) return doc
+    const next = clampDoc({ ...doc, items })
+    // A shape the size limits would put back (a very long thin picture) is no correction: the picture stays the very same object.
+    let kept: BoardItem[] | null = null
+    for (const i of fixed) {
+      const before = doc.items[i]!
+      const after = next.items[i]!
+      if (before.kind === 'picture' && after.kind === 'picture' && before.w === after.w && before.h === after.h) {
+        kept ??= next.items.slice()
+        kept[i] = before
+      }
+    }
+    if (!kept) return next
+    return kept.every((it, i) => it === doc.items[i]) ? doc : { ...next, items: kept }
   }
 
-  /** The pictures' own sizes the controller knows (what `normalize.scale` and `view.zoom100` use), or null. */
+  /** The pictures' own sizes the controller knows (a shape taken from a preview is among them: see `exactNaturalSize`), or null. */
   naturalSize(path: string): { w: number; h: number } | null {
-    return this.naturals.get(path) ?? null
+    const n = this.naturals.get(path)
+    return n ? { w: n.w, h: n.h } : null
+  }
+
+  /** The picture's size in pixels when the controller knows it for sure (from decoding the picture itself), else null. */
+  exactNaturalSize(path: string): { w: number; h: number } | null {
+    const n = this.naturals.get(path)
+    return n?.exact ? { w: n.w, h: n.h } : null
   }
 
   /**
@@ -1128,7 +1373,7 @@ export class BoardController {
       return []
     }
     if (room < list.length) {
-      this.toast(`The board is full: it holds at most ${BOARD_LIMITS.items} items.`, 'error', 'limit')
+      this.toastItemsFull()
       this.flush()
       return []
     }
@@ -1153,6 +1398,11 @@ export class BoardController {
       doc = res.doc
       if (res.id !== null) ids.push(res.id)
     })
+    if (!this.fits(doc)) {
+      this.refuseBudget()
+      this.flush()
+      return []
+    }
     this.commit(doc, 'Add colours', { select: ids, reason: 'swatches' })
     this.flush()
     return ids
@@ -1174,7 +1424,7 @@ export class BoardController {
     this.cancelGesture()
     this.cancelEditing()
     if (this.doc.items.length >= BOARD_LIMITS.items) {
-      this.toast(`The board is full: it holds at most ${BOARD_LIMITS.items} items.`, 'error', 'limit')
+      this.toastItemsFull()
       return 0
     }
     if (!Number.isFinite(left) || !Number.isFinite(top)) return 0
@@ -1192,10 +1442,15 @@ export class BoardController {
       fill: this.style.noteFill,
     })
     if (res.id === null) return 0
+    if (!this.fits(res.doc)) {
+      this.refuseBudget()
+      return 0
+    }
     this.doc = withView(res.doc, this.doc.view)
     this.pendingNote = res.id
     this.editingNote = res.id
     this.selection = [res.id]
+    this.rehover = true
     if (this.tool === 'note') this.tool = 'select'
     this.touch()
     return res.id
@@ -1203,36 +1458,51 @@ export class BoardController {
 
   /** Starts editing the text of an existing note (the context menu's "Edit"). */
   editNote(id: number): void {
-    const it = this.itemById(id)
-    if (it?.kind === 'note') {
-      if (it.locked) this.toastLocked()
-      else {
-        this.cancelGesture()
-        this.cancelEditing()
-        this.editingNote = id
-        this.selection = expandGroups(this.doc, [id])
-        this.touch()
-      }
-    }
+    this.beginEdit(id)
     this.flush()
+  }
+
+  private beginEdit(id: number): void {
+    const it = this.itemById(id)
+    if (it?.kind !== 'note') return
+    if (it.locked) {
+      this.toastLocked()
+      return
+    }
+    this.cancelGesture()
+    this.cancelEditing()
+    this.editingNote = id
+    this.selection = expandGroups(this.doc, [id])
+    this.rehover = true
+    this.touch()
   }
 
   /**
    * Gives a note its text: one history step (a new note's step adds it). Text is cut to BOARD_LIMITS.noteChars; text that is empty or
-   * only white space deletes the note. Ends editing.
+   * only white space deletes the note. Ends editing, except when the text would take the board past its character budget: that is
+   * refused with a message, and the note stays open to be shortened (shrinking a note is always allowed).
    */
   commitNoteText(id: number, text: string): void {
     const note = this.itemById(id)
     const wasEditing = this.editingNote === id
     const pending = this.pendingNote === id
-    if (wasEditing) this.editingNote = null
-    if (pending) this.pendingNote = null
     if (note?.kind !== 'note') {
+      if (wasEditing) this.editingNote = null
+      if (pending) this.pendingNote = null
       this.touch()
       this.flush()
       return
     }
-    const clean = String(text).slice(0, BOARD_LIMITS.noteChars)
+    const clean = cutText(String(text), BOARD_LIMITS.noteChars)
+    const grown = !note.locked && clean.trim() !== '' && (pending || clean !== note.text) ? setProps(this.doc, [id], { text: clean }, this.metrics) : null
+    if (grown && !this.fits(grown)) {
+      this.refuseBudget()
+      this.touch()
+      this.flush()
+      return
+    }
+    if (wasEditing) this.editingNote = null
+    if (pending) this.pendingNote = null
     if (note.locked) {
       this.toastLocked()
     } else if (clean.trim() === '') {
@@ -1240,10 +1510,10 @@ export class BoardController {
       if (pending) this.doc = this.fixAspects(withView(this.hist.current, this.doc.view))
       else this.commit(removeItems(this.doc, [id]), 'Delete note', { reason: 'note' })
       this.reconcile()
-    } else if (pending) {
-      this.commit(setProps(this.doc, [id], { text: clean }, this.metrics), 'Add note', { reason: 'note', select: [id] })
-    } else if (clean !== note.text) {
-      this.commit(setProps(this.doc, [id], { text: clean }, this.metrics), 'Edit note', { reason: 'note' })
+    } else if (grown && pending) {
+      this.commit(grown, 'Add note', { reason: 'note', select: [id] })
+    } else if (grown) {
+      this.commit(grown, 'Edit note', { reason: 'note' })
     }
     this.touch()
     this.flush()
@@ -1301,6 +1571,7 @@ export class BoardController {
     this.sampleCommit = false
     this.hoverHandle = null
     this.hoverOnSelection = false
+    this.rehover = true
     this.touch()
   }
 
@@ -1313,34 +1584,55 @@ export class BoardController {
 
   private handleDown(e: PointerIn): void {
     if (this.editingNote !== null) return
+    // Where the pointer is, for the cursor to be worked out against when the selection or the tool changes under it.
+    this.hover = { x: e.x, y: e.y }
+    this.hoverType = e.pointerType
     const stale = this.pointers.get(e.id)
     // A press for a pointer we think is still down: its release was lost. The old press ends where it was last seen.
-    if (stale) this.handleUp({ ...e, x: stale.x, y: stale.y }, false)
-    this.ignored.delete(e.id)
-    if (this.pointers.size >= MAX_POINTERS) {
-      // Pointers that never lifted (their release was lost) are forgotten rather than followed for ever.
-      this.cancelGesture()
-      this.pointers.clear()
-      this.ignored.clear()
-      this.pinch = null
+    if (stale) {
+      this.handleUp({ ...e, x: stale.x, y: stale.y }, false)
+      // That press may have started a note: the text box has the board now, and this press is not for the canvas.
+      if (this.editingNote !== null) return
     }
+    this.ignored.delete(e.id)
+    // Pointers that never lifted (their release was lost) are forgotten rather than followed for ever.
+    if (this.pointers.size >= MAX_POINTERS) this.dropPointers()
     if (e.pointerType === 'touch') {
       const others = [...this.pointers.entries()].filter(([, t]) => t.type === 'touch')
       if (others.length >= 1) {
         this.pointers.set(e.id, { x: e.x, y: e.y, type: 'touch' })
-        if (others.length === 1 && this.pinch === null) this.startPinch(others[0]![0], e)
+        // Fingers never take a stroke or a drag from a pen or a mouse: two palm contacts beside a pen are not a pinch.
+        const owner = this.gesture ? this.pointers.get(this.gesture.pointer) : undefined
+        if (owner && owner.type !== 'touch') this.ignored.add(e.id)
+        else if (others.length === 1 && this.pinch === null) this.startPinch(others[0]![0], e)
         else this.ignored.add(e.id)
         return
       }
     }
     this.pointers.set(e.id, { x: e.x, y: e.y, type: e.pointerType })
-    // One gesture at a time: a second pointer (a pen beside the mouse, a third finger) waits for its turn.
+    // One gesture at a time: a second pointer (a pen beside the mouse, a third finger) waits for its turn. A pen is the exception to
+    // a finger's gesture: a palm resting on the glass starts a stroke (or a pinch) of its own, and the pen must still draw.
+    if (e.pointerType === 'pen' && this.pinch !== null) {
+      this.ignored.add(this.pinch.a)
+      this.ignored.add(this.pinch.b)
+      this.pinch = null
+      this.touch()
+    }
     if (this.gesture) {
-      this.ignored.add(e.id)
-      return
+      if (e.pointerType === 'pen' && this.pointers.get(this.gesture.pointer)?.type === 'touch') this.cancelGesture()
+      else {
+        this.ignored.add(e.id)
+        return
+      }
     }
     this.sampleCommit = false
     const s = { x: e.x, y: e.y }
+    // The eraser end of a pen (button 5, or the eraser bit of `buttons`) rubs out whatever tool is chosen, for as long as it is down.
+    if (e.pointerType === 'pen' && (e.button === 5 || (e.buttons & 32) !== 0)) {
+      const p = this.toBoard(s)
+      this.startErase(e, p)
+      return
+    }
     const panning =
       e.button === 1 || (e.button === 0 && (this.space || this.tool === 'hand')) || (e.button === 2 && e.pointerType === 'pen')
     if (panning) {
@@ -1375,8 +1667,7 @@ export class BoardController {
         this.downDraw(e, p, this.tool)
         break
       case 'eraser':
-        this.startGesture({ kind: 'erase', pointer: e.id, startScreen: s, start: p, base: this.doc, last: p, bounds: new Map() })
-        this.eraseTo(p, p)
+        this.startErase(e, p)
         break
       case 'sampler':
         this.startGesture({ kind: 'sample', pointer: e.id, startScreen: s, start: p, base: this.doc })
@@ -1390,10 +1681,31 @@ export class BoardController {
     }
   }
 
+  private startErase(e: PointerIn, p: Vec2): void {
+    this.startGesture({
+      kind: 'erase',
+      pointer: e.id,
+      startScreen: { x: e.x, y: e.y },
+      start: p,
+      base: this.doc,
+      last: p,
+      bounds: new Map(),
+      before: this.selection,
+    })
+    this.eraseTo(p, p)
+  }
+
+  /** A press that would add something (a mark, a note) on a board that has no room: refused up front, not after the drawing. */
   private refuseWhenFull(): boolean {
-    if (this.doc.items.length < BOARD_LIMITS.items) return false
-    this.toast(`The board is full: it holds at most ${BOARD_LIMITS.items} items.`, 'error', 'limit')
-    return true
+    if (this.doc.items.length >= BOARD_LIMITS.items) {
+      this.toastItemsFull()
+      return true
+    }
+    if (boardChars(this.doc) >= BOARD_LIMITS.noteTotal) {
+      this.refuseBudget()
+      return true
+    }
+    return false
   }
 
   private startGesture(g: Gesture): void {
@@ -1418,7 +1730,16 @@ export class BoardController {
     if (this.tool !== 'select') return null
     const box = this.computeBox()
     if (!box) return null
-    const h = hitHandle(box, p, tol)
+    // Nothing can be done with the handles of a selection that is all locked: a press near them is a press on the canvas.
+    if (this.allSelectionLocked()) return null
+    // A box smaller than its own handles is all handle: the zones shrink to the outer thirds so that the middle still moves it.
+    const wPx = dist(box.corners[0], box.corners[1]) * this.zoom
+    const hPx = dist(box.corners[0], box.corners[3]) * this.zoom
+    const grab = type === 'touch' ? HANDLE_HIT_TOUCH_PX : HANDLE_HIT_PX
+    const reach = wPx < 2 * grab && hPx < 2 * grab ? Math.max(2, Math.min(wPx, hPx) / 3) / this.zoom : tol
+    let h = hitHandle(box, p, Math.min(tol, reach))
+    // The rotate handle floats clear of the box and keeps its full reach.
+    if (!h && reach < tol && hitHandle(box, p, tol) === 'rotate') h = 'rotate'
     if (!h) return null
     const items = this.selectedItems()
     // A note's height follows its text: only its sides change it.
@@ -1552,9 +1873,11 @@ export class BoardController {
       pressureSum: pen ? this.pressureOf(e) : 0.5,
       pressureN: 1,
       pen,
+      mods: { shift: e.shift, alt: e.alt },
     }
     this.gesture = g
-    this.draft = this.makeDraft(g, p, e)
+    // A stroke of one point is no stroke (a tap leaves nothing): nothing is drawn for it until a second point arrives.
+    this.draft = tool === 'pen' ? null : this.makeDraft(g, p, e)
     this.touch()
   }
 
@@ -1679,17 +2002,26 @@ export class BoardController {
   /** The pointer moved with no button down: the cursor, the sampler. */
   private hoverMove(e: PointerIn): void {
     this.hover = { x: e.x, y: e.y }
+    this.hoverType = e.pointerType
+    this.rehover = false
+    this.updateHover()
+  }
+
+  /** The cursor for the pointer where it was last seen: the handle it is on, or whether it is on the selection. */
+  private updateHover(): void {
+    const at = this.hover
+    if (!at) return
     if (this.tool === 'sampler') {
-      this.emit({ type: 'sample-request', at: { x: e.x, y: e.y } })
+      this.emit({ type: 'sample-request', at: { x: at.x, y: at.y } })
       return
     }
     let handle: HandleKind | null = null
     let onSelection = false
     if (this.tool === 'select' || this.tool === 'crop') {
-      handle = this.handleAt(this.hover, e.pointerType)
+      handle = this.handleAt(at, this.hoverType)
       // Only a selected item changes the cursor: with nothing selected the hit test would be for nothing.
       if (handle === null && this.tool === 'select' && this.selection.length > 0) {
-        const hit = this.hitAt(this.toBoard(this.hover))
+        const hit = this.hitAt(this.toBoard(at))
         onSelection = hit !== null && this.selection.includes(hit.id)
       }
     }
@@ -1707,6 +2039,25 @@ export class BoardController {
       this.touch()
     }
     this.flush()
+  }
+
+  /**
+   * Drops every pointer held, ends any gesture (the board is put back as it was before it began, a stroke half drawn is gone) and
+   * forgets a pinch and the pointers being ignored. For when a release will never arrive: the window lost the focus mid-drag, the canvas
+   * lost its pointer capture, a touch was taken by the system. Nothing is committed.
+   */
+  cancelPointers(): void {
+    this.dropPointers()
+    this.flush()
+  }
+
+  private dropPointers(): void {
+    this.cancelGesture()
+    this.pointers.clear()
+    this.ignored.clear()
+    this.pinch = null
+    this.lastClick = null
+    this.touch()
   }
 
   /** The pointer left the canvas: no hover, no loupe. */
@@ -1732,6 +2083,8 @@ export class BoardController {
   }
 
   private handleUp(e: PointerIn, cancelled: boolean): void {
+    this.hover = { x: e.x, y: e.y }
+    this.hoverType = e.pointerType
     const wasTracked = this.pointers.delete(e.id)
     const wasIgnored = this.ignored.delete(e.id)
     if (!wasTracked) return
@@ -1755,6 +2108,7 @@ export class BoardController {
   }
 
   private endGesture(): void {
+    this.rehover = true
     this.gesture = null
     this.marquee = null
     this.draft = null
@@ -1774,6 +2128,8 @@ export class BoardController {
       this.doc = withView(g.base, this.doc.view)
       this.reconcile()
     }
+    // The marks an eraser took out come back selected, as they were.
+    if (g.kind === 'erase') this.setSelection(g.before)
     this.endGesture()
     if (hadChange) this.changed('cancel', true)
   }
@@ -1807,7 +2163,7 @@ export class BoardController {
         this.commitGesture(g, 'Crop', 'crop')
         break
       case 'draw':
-        this.finishDraw(g, s, p, e)
+        this.finishDraw(g, s, p)
         break
       case 'erase':
         this.commitGesture(g, 'Erase', 'erase')
@@ -1986,6 +2342,7 @@ export class BoardController {
   }
 
   private drawMove(g: DrawGesture, s: Vec2, p: Vec2, e: PointerIn): void {
+    g.mods = { shift: e.shift, alt: e.alt }
     if (g.tool !== 'pen') {
       this.draft = this.makeDraft(g, p, e)
       this.touch()
@@ -2001,18 +2358,20 @@ export class BoardController {
     if (g.pts.length >> 1 > BOARD_LIMITS.strokePoints) {
       g.pts = capStroke(g.pts, BOARD_LIMITS.strokePoints, (STROKE_TOLERANCE_PX * 1.5) / this.zoom)
     }
-    this.draft = this.makeDraft(g, p, e)
+    this.draft = g.pts.length >= 4 ? this.makeDraft(g, p, e) : null
     this.touch()
   }
 
-  private finishDraw(g: DrawGesture, s: Vec2, p: Vec2, e: PointerIn): void {
+  private finishDraw(g: DrawGesture, s: Vec2, p: Vec2): void {
     let mark: Parameters<typeof addMark>[1] | null = null
     if (g.tool === 'pen') {
       const pts = simplifyStroke(g.pts, STROKE_TOLERANCE_PX / this.zoom)
       const capped = capStroke(pts, BOARD_LIMITS.strokePoints, (STROKE_TOLERANCE_PX * 1.5) / this.zoom)
       if (capped.length >= 4) mark = { kind: 'stroke', points: capped, color: this.style.color, width: this.penWidth(g) }
     } else if (dist(s, g.startScreen) >= CLICK_PX) {
-      const d = this.makeDraft(g, p, e)
+      // The mark the draft showed: the release gives the end point, the last move gave Shift and Alt (a key let go a moment before the button
+      // is not a change of mind).
+      const d = this.makeDraft(g, p, g.mods)
       const { id: _id, group: _group, locked: _locked, ...spec } = d
       mark = spec as Parameters<typeof addMark>[1]
     }
@@ -2020,7 +2379,11 @@ export class BoardController {
     if (!mark) return
     const res = addMark(this.doc, mark)
     if (res.id === null) {
-      this.toast(`The board is full: it holds at most ${BOARD_LIMITS.items} items.`, 'error', 'limit')
+      this.toastItemsFull()
+      return
+    }
+    if (!this.fits(res.doc)) {
+      this.refuseBudget()
       return
     }
     const label = g.tool === 'pen' ? 'Draw' : g.tool === 'line' ? (this.style.arrow ? 'Draw arrow' : 'Draw line') : `Draw ${g.tool === 'rect' ? 'rectangle' : 'ellipse'}`
@@ -2043,7 +2406,7 @@ export class BoardController {
     const g = this.gesture
     if (g?.kind !== 'erase') return
     const tol = ERASER_PX / this.zoom
-    const steps = clampTo(Math.ceil(dist(from, to) / (tol / 2)), 1, MAX_ERASE_STEPS)
+    const len = dist(from, to)
     const hit = new Set<number>()
     for (const it of this.doc.items) {
       if (!isMark(it) || it.locked) continue
@@ -2053,13 +2416,13 @@ export class BoardController {
         g.bounds.set(it.id, box)
       }
       if (!Number.isFinite(box.x + box.y + box.w + box.h)) continue
-      const x0 = Math.min(from.x, to.x) - tol
-      const x1 = Math.max(from.x, to.x) + tol
-      const y0 = Math.min(from.y, to.y) - tol
-      const y1 = Math.max(from.y, to.y) + tol
-      if (box.x > x1 || box.x + box.w < x0 || box.y > y1 || box.y + box.h < y0) continue
+      // Only the part of the pointer's path that passes the mark's box is looked at, at points a radius apart: a mark crossing the path
+      // is never stepped over, however fast the pointer went, and a mark far from the path costs nothing.
+      const span = clipSegment(from, to, { x: box.x - tol, y: box.y - tol, w: box.w + 2 * tol, h: box.h + 2 * tol })
+      if (!span) continue
+      const steps = clampTo(Math.ceil(((span.t1 - span.t0) * len) / tol), 1, MAX_ERASE_STEPS)
       for (let i = 0; i <= steps; i++) {
-        const t = i / steps
+        const t = span.t0 + ((span.t1 - span.t0) * i) / steps
         if (pointInItem(it, { x: from.x + (to.x - from.x) * t, y: from.y + (to.y - from.y) * t }, tol, this.metrics)) {
           hit.add(it.id)
           break
@@ -2169,6 +2532,8 @@ export class BoardController {
     const arrow = nudgeOf(e)
     if (arrow) {
       if (this.selection.length === 0) return false
+      // A drag in progress ends first (as for a command): the nudge is one step on the board as it was, not on a half-made drag.
+      this.settleGesture()
       const step = e.shift ? NUDGE_BIG : NUDGE
       if (this.allSelectionLocked()) {
         if (!e.repeat) this.toastLocked()
@@ -2177,9 +2542,15 @@ export class BoardController {
       this.edit('Nudge', (d) => moveItems(d, this.selection, arrow.x * step, arrow.y * step), { key: this.runKey(NUDGE_KEY), reason: 'nudge' })
       return true
     }
-    const id = keyToCommand(e, { tool: this.tool, editing: this.editingNote !== null, cropping: this.cropping !== null })
+    let id = keyToCommand(e, { tool: this.tool, editing: this.editingNote !== null, cropping: this.cropping !== null })
     if (id === null) return false
     if (e.repeat && !isRepeatable(id)) return true
+    if (id === 'picture.open' && e.key === 'Enter') {
+      // Enter is "open" for a picture and "edit" for a lone note, and nothing at all (no complaint) when there is neither.
+      const items = this.selectedItems()
+      if (items.length === 1 && items[0]!.kind === 'note') id = 'note.edit'
+      else if (!items.some((it) => it.kind === 'picture')) return false
+    }
     this.run(id, undefined)
     return true
   }
@@ -2216,7 +2587,7 @@ export class BoardController {
   private run(id: BoardCommandId, arg: unknown): void {
     // A command that only moves the camera leaves a note being typed alone; any other drops it (the shell commits it first).
     if (!(id.startsWith('view.zoom') || id.startsWith('view.fit') || id === 'view.hideUi' || id === 'arrange.menu')) this.cancelEditing()
-    if (this.gesture && this.gesture.kind !== 'pan') this.cancelGesture()
+    this.settleGesture()
     const [group_, name] = id.split('.') as [string, string]
     switch (group_) {
       case 'tool':
@@ -2225,6 +2596,12 @@ export class BoardController {
       case 'edit':
         this.runEdit(id)
         return
+      case 'note': {
+        const items = this.selectedItems()
+        if (items.length === 1 && items[0]!.kind === 'note') this.beginEdit(items[0]!.id)
+        else this.toast('Select one note first.', 'info', 'select')
+        return
+      }
       case 'order':
         this.edit(`Move ${name}`, (d) => reorder(d, this.selection, name as 'front' | 'forward' | 'backward' | 'back', this.metrics), { reason: id })
         return
@@ -2273,24 +2650,30 @@ export class BoardController {
       case 'edit.duplicate': {
         const off = DUPLICATE_OFFSET_PX / this.zoom
         let made: number[] = []
+        let tooBig = false
         const ok = this.edit('Duplicate', (d) => {
           const r = duplicateItems(d, sel, { x: off, y: off })
+          if (r.ids.length > 0 && !this.fits(r.doc)) {
+            tooBig = true
+            return d
+          }
           made = r.ids
           return r.doc
         })
         if (ok) this.setSelection(made)
-        else if (sel.length > 0 && !this.allSelectionLocked() && this.doc.items.length + sel.length > BOARD_LIMITS.items) {
-          this.toast(`The board is full: it holds at most ${BOARD_LIMITS.items} items.`, 'error', 'limit')
-        }
+        else if (tooBig) this.refuseBudget()
+        else if (sel.length > 0 && !this.allSelectionLocked() && this.doc.items.length + sel.length > BOARD_LIMITS.items) this.toastItemsFull()
         return
       }
       case 'edit.delete':
         this.edit('Delete', (d) => removeItems(d, sel))
         return
       case 'edit.copy':
+        this.copyStored = false
         this.copy(sel)
         return
       case 'edit.cut': {
+        this.copyStored = false
         const free = this.selectedItems().filter((it) => !it.locked)
         if (free.length === 0) {
           if (sel.length > 0) this.toastLocked()
@@ -2298,6 +2681,8 @@ export class BoardController {
         }
         this.copy(free.map((it) => it.id), true)
         this.edit('Cut', (d) => removeItems(d, sel))
+        const kept = sel.length - free.length
+        if (kept > 0) this.toast(`${kept} locked item${kept === 1 ? ' was' : 's were'} not cut.`, 'info')
         return
       }
       case 'edit.paste':
@@ -2310,6 +2695,8 @@ export class BoardController {
         this.edit('Ungroup', (d) => ungroup(d, sel), { select: sel })
         return
       case 'edit.lock':
+        // Everything is locked already: there is nothing to say (the "unlock them first" of a refused change would be wrong here).
+        if (this.allSelectionLocked()) return
         this.edit('Lock', (d) => lockItems(d, sel, true), { select: sel })
         return
       case 'edit.unlock':
@@ -2333,31 +2720,80 @@ export class BoardController {
       .map((it) => (it.kind === 'picture' ? { ...it, crop: { ...it.crop }, locked: false } : { ...it, locked: false }))
     if (items.length === 0) return
     this.clipboard = items
+    this.copyStored = true
     this.pasteCount = 0
     this.touch()
     if (!quiet) this.toast(items.length === 1 ? 'Copied 1 item.' : `Copied ${items.length} items.`, 'info')
   }
 
   /**
-   * The items last copied (or cut) as text for the SYSTEM clipboard: a first line the user can read, then the items as a small board
-   * note (core `serializeBoard`), so another board, another window or a later session can paste them. Null when nothing was copied.
-   * (Stub for now: the controller work in the review fixes fills it in.)
+   * The items the last copy or cut stored, as text for the SYSTEM clipboard: a first line the user can read ("Aether Brain board: 3
+   * items copied"), then the items as a small board note (core `serializeBoard`), so that another board, another window or a later
+   * session can paste them with `importCopy`. Null when the last copy or cut stored nothing (nothing selected, only locked items) or the
+   * copy is too big to put there: the system clipboard is then left alone. Paste in the same session needs none of this: the items are
+   * also kept in memory.
    */
   exportCopy(): { text: string; count: number } | null {
-    return null
+    if (!this.copyStored || this.clipboard.length === 0) return null
+    const items = this.clipboard.map((it, i) => ({ ...it, id: i + 1 }))
+    const board: BoardDoc = { ...emptyBoard('Copied items'), items, nextId: items.length + 1 }
+    const text = `Aether Brain board: ${items.length} item${items.length === 1 ? '' : 's'} copied\n${serializeBoard(board)}`
+    return text.length > MAX_COPY_CHARS ? null : { text, count: items.length }
   }
 
   /**
-   * Paste what `exportCopy` made (read from the system clipboard) into this board at `at` (board units; the view centre when absent).
-   * Returns how many items were pasted, 0 when the board is full, or null when `text` is not a copy from a board. Never throws.
+   * Paste what `exportCopy` made (read from the system clipboard) into this board with its middle at `at` (board units; the view's
+   * middle when absent). The text is untrusted: it is read with the board reader (its limits apply: item count, points, characters),
+   * only its items are taken, and they go in through the same door as a paste (new ids, the item cap, the character budget).
+   * Returns how many items were pasted, 0 when nothing was (the board is full, the items cannot be read: the user is told), or null
+   * when `text` is not a copy from a board at all. Never throws.
    */
-  importCopy(_text: string, _at?: Vec2): number | null {
-    return null
+  importCopy(text: string, at?: Vec2): number | null {
+    let n = 0
+    try {
+      if (typeof text !== 'string') return null
+      const head = COPY_HEAD.exec(text.length > 200 ? text.slice(0, 200) : text)
+      if (!head) return null
+      this.cancelGesture()
+      this.cancelEditing()
+      n = this.pasteForeign(text.slice(head[0].length), at)
+    } catch {
+      n = 0
+    }
+    this.flush()
+    return n
   }
 
-  /** Drop every held pointer and end any gesture (the window lost focus, the canvas lost pointer capture). */
-  cancelPointers(): void {
-    // Filled in by the review fixes.
+  private pasteForeign(body: string, at?: Vec2): number {
+    if (body.length > MAX_COPY_CHARS) {
+      this.toast('Those items are too big to paste.', 'error')
+      return 0
+    }
+    const items = parseBoard(body).doc.items
+    const bounds = itemsBounds(items, this.metrics)
+    if (items.length === 0 || !bounds) {
+      this.toast('Those items could not be read. Copy them again.', 'error')
+      return 0
+    }
+    const view = this.doc.view
+    const goal = at && Number.isFinite(at.x) && Number.isFinite(at.y) ? at : { x: view.x, y: view.y }
+    // Pasted again on the same spot, the copies fan out like a paste of the board's own items does.
+    const again = this.lastImport && Math.abs(this.lastImport.x - goal.x) < 1e-6 && Math.abs(this.lastImport.y - goal.y) < 1e-6
+    const n = again ? this.lastImport!.n + 1 : 0
+    this.lastImport = { x: goal.x, y: goal.y, n }
+    const step = (DUPLICATE_OFFSET_PX * n) / view.zoom
+    const offset = { x: goal.x - (bounds.x + bounds.w / 2) + step, y: goal.y - (bounds.y + bounds.h / 2) + step }
+    const res = insertItems(this.doc, items, offset)
+    if (res.ids.length === 0) {
+      this.toastItemsFull()
+      return 0
+    }
+    if (!this.fits(res.doc)) {
+      this.refuseBudget()
+      return 0
+    }
+    this.commit(res.doc, 'Paste', { select: res.ids })
+    return res.ids.length
   }
 
   private paste(): void {
@@ -2384,7 +2820,11 @@ export class BoardController {
     }
     const res = insertItems(this.doc, this.clipboard, offset)
     if (res.ids.length === 0) {
-      this.toast(`The board is full: it holds at most ${BOARD_LIMITS.items} items.`, 'error', 'limit')
+      this.toastItemsFull()
+      return
+    }
+    if (!this.fits(res.doc)) {
+      this.refuseBudget()
       return
     }
     this.commit(res.doc, 'Paste', { select: res.ids })
@@ -2404,14 +2844,16 @@ export class BoardController {
       case 'transform.rotateCcw': {
         const b = itemsBounds(free, this.metrics)
         const pivot = b ? { x: b.x + b.w / 2, y: b.y + b.h / 2 } : { x: 0, y: 0 }
-        this.edit('Rotate', (d) => rotateItems(d, sel, id === 'transform.rotateCw' ? 90 : -90, pivot))
+        // A quarter turn is exact: a frame round a picture turns with it (a free turn by dragging leaves shapes upright).
+        this.edit('Rotate', (d) => rotateItems(d, sel, id === 'transform.rotateCw' ? 90 : -90, pivot, { exactQuarter: true }))
         return
       }
       case 'transform.resetRotation':
         this.edit('Reset rotation', (d) => setProps(d, sel, { rotation: 0 }, this.metrics))
         return
       case 'transform.resetScale':
-        this.edit('Reset size', (d) => normalize(d, sel, 'scale', { target: 1, natural: (p) => this.naturals.get(p) ?? null, metrics: this.metrics }))
+        this.edit('Reset size', (d) => normalize(d, sel, 'scale', { target: 1, natural: (p) => this.exactNaturalSize(p), metrics: this.metrics }))
+        this.toastSkippedSizes()
         return
       case 'transform.resetCrop':
         this.edit('Reset crop', (d) => resetCrop(d, sel))
@@ -2420,10 +2862,22 @@ export class BoardController {
         this.edit('Reset', (d) => {
           let doc = resetCrop(d, sel)
           doc = setProps(doc, sel, { rotation: 0, flipH: false, flipV: false, opacity: 1 }, this.metrics)
-          return normalize(doc, sel, 'scale', { target: 1, natural: (p) => this.naturals.get(p) ?? null, metrics: this.metrics })
+          return normalize(doc, sel, 'scale', { target: 1, natural: (p) => this.exactNaturalSize(p), metrics: this.metrics })
         })
+        this.toastSkippedSizes()
         return
     }
+  }
+
+  /** Pictures of the selection whose own size is not known for sure yet: Reset size, Show at own size and 100% left them as they were. */
+  private toastSkippedSizes(): void {
+    const skipped = this.selectedItems().filter((it) => it.kind === 'picture' && !it.locked && !this.exactNaturalSize(it.path)).length
+    if (skipped === 0) return
+    this.toast(
+      `${skipped} picture${skipped === 1 ? ' was' : 's were'} left as ${skipped === 1 ? 'it was' : 'they were'}: ${skipped === 1 ? 'its' : 'their'} own size is not known yet. Try again in a moment.`,
+      'info',
+      'select',
+    )
   }
 
   private runArrange(id: BoardCommandId, arg: unknown): void {
@@ -2451,12 +2905,18 @@ export class BoardController {
       return
     }
     if (family === 'normalize') {
-      const natural = (p: string): { w: number; h: number } | null => this.naturals.get(p) ?? null
+      const natural = (p: string): { w: number; h: number } | null => this.exactNaturalSize(p)
       const done = this.edit('Normalize', (d) => normalize(d, sel, name as NormalizeMode, { natural, metrics: this.metrics }))
       if (done) this.toast(name === 'scale' ? 'Showing the pictures at their own size.' : `Made the pictures the same ${name}.`, 'success')
+      if (name === 'scale') this.toastSkippedSizes()
       return
     }
-    // Arrange and sort: the selection when it holds two or more items, else every picture and note on the board.
+    // Arrange and sort: the selection when it holds two or more items, the whole board when nothing is selected. One item selected is
+    // neither: it would rearrange everything the user did not point at.
+    if (sel.length === 1) {
+      this.toast('Select two or more items (or none, for the whole board).', 'info', 'select')
+      return
+    }
     const ids = sel.length >= 2 ? sel : this.doc.items.filter(isLaidOut).map((it) => it.id)
     if (ids.length === 0) return
     const o: ArrangeOptions = { metrics: this.metrics, aspect: clampTo(this.viewport.w / this.viewport.h, 0.5, 3) }
@@ -2530,7 +2990,9 @@ export class BoardController {
         return
       }
       case 'view.gridSnap':
-        this.commit({ ...doc, grid: doc.grid > 0 ? 0 : 16 }, 'Snap to grid', { reason: id })
+        // Switching snapping off keeps the size the grid had, so that switching it on again brings that size back.
+        if (doc.grid > 0) this.lastGrid = doc.grid
+        this.commit({ ...doc, grid: doc.grid > 0 ? 0 : this.lastGrid }, 'Snap to grid', { reason: id })
         this.toast(this.doc.grid > 0 ? 'Snapping to a grid.' : 'Grid snapping off.', 'info')
         return
       case 'item.opacityUp':
@@ -2554,12 +3016,26 @@ export class BoardController {
         this.fitTo(itemsBounds(this.selection.length > 0 ? this.selectedItems() : doc.items, this.metrics))
         return
       case 'view.zoom100': {
-        const pic = this.selectedItems().find((it): it is PictureItem => it.kind === 'picture' && this.naturals.has(it.path))
+        const pics = this.selectedItems().filter((it): it is PictureItem => it.kind === 'picture')
+        const pic = pics.find((it) => this.exactNaturalSize(it.path))
         if (pic) {
-          const nat = this.naturals.get(pic.path)!
+          const nat = this.exactNaturalSize(pic.path)!
           // One picture pixel per screen pixel: the screen shows `nat.w` pixels across the `w` board units of the whole picture.
-          if (this.setViewDoc({ x: pic.x, y: pic.y, zoom: nat.w / pic.w })) this.changed('zoom', true, true)
-        } else if (this.setViewDoc({ ...doc.view, zoom: 1 })) this.changed('zoom', true, true)
+          const want = nat.w / pic.w
+          const view = { x: pic.x, y: pic.y, zoom: want }
+          if (this.setViewDoc(view)) this.changed('zoom', true, true)
+          // A picture shown very small (or very large) is out of the camera's reach: say so instead of stopping short without a word.
+          if (Math.abs(this.doc.view.zoom / want - 1) > 0.01) {
+            this.toast(
+              `100% is out of reach for this picture: it would need ${Number(want.toPrecision(3))}× and the board zooms between ${BOARD_LIMITS.zoomMin}× and ${BOARD_LIMITS.zoomMax}×. Reset its size first.`,
+              'info',
+              'select',
+            )
+          }
+        } else {
+          if (this.setViewDoc({ ...doc.view, zoom: 1 })) this.changed('zoom', true, true)
+          if (pics.length > 0) this.toast('That picture’s own size is not known yet, so this is 100% of the board. Try again in a moment.', 'info', 'select')
+        }
         return
       }
       case 'view.zoomIn':

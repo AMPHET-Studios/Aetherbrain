@@ -6,6 +6,7 @@ import { useEffect, useRef } from 'react'
 import { cx, isMac } from '../../util'
 import { boardHelpRows } from '../commands'
 import { formatKeys } from './session'
+import { trapTab } from './dom'
 import { Icon } from './icons'
 
 export function HelpPanel({ onClose, reducedMotion }: { onClose(): void; reducedMotion: boolean }) {
@@ -19,11 +20,13 @@ export function HelpPanel({ onClose, reducedMotion }: { onClose(): void; reduced
       <div
         ref={ref}
         role="dialog"
+        aria-modal="true"
         aria-label="Board shortcuts"
         tabIndex={-1}
         data-board-overlay
         onKeyDown={(e) => {
           e.stopPropagation()
+          trapTab(e, ref.current)
           if (e.key === 'Escape') {
             e.preventDefault()
             onClose()

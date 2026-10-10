@@ -71,7 +71,8 @@ class Walk {
   readonly held: Held[] = []
   private nextPointer = 1
   private picturePaths = 0
-  readonly start: BoardDoc
+  /** The board undoing everything comes back to: the first one, or the one an outside change brought (it is a barrier). */
+  start: BoardDoc
   log: string[] = []
 
   constructor(
@@ -267,6 +268,9 @@ class Walk {
         const items = d.items.slice()
         items[i] = { ...it, x: it.x + 77 }
         this.r.c.replaceDoc(deepFreeze({ ...d, items }))
+        // An outside change restarts the history: undo goes back to it and no further. (One that changes nothing - an item already at the
+        // edge of the coordinates does not move - leaves the history alone.)
+        if (!this.r.s.canUndo) this.start = this.r.doc
       }
     } else if (roll < 0.9) {
       this.log.push('markSaved')
@@ -344,6 +348,10 @@ describe('a random walk through the controller', () => {
     w.r.key('Escape')
     w.r.key('Escape')
     w.check()
+    // With no gesture and no note under way the board IS the last step of the history: saved, it is clean. (A key or a style change in
+    // the middle of a drag used to leave the board ahead of its history.)
+    w.r.c.markSaved()
+    expect(w.r.s.dirty, `seed ${seed}: the board is ahead of its history`).toBe(false)
     let guard = 0
     while (w.r.s.canUndo && guard++ < 100_000) w.r.c.exec('edit.undo')
     expect(w.r.s.canUndo).toBe(false)
@@ -352,7 +360,8 @@ describe('a random walk through the controller', () => {
     w.check()
   }
 
-  for (const seed of [1, 2, 3, 4, 5, 6, 7, 8]) {
+  // Seed 32 presses an arrow key in the middle of a drag: the board used to end up ahead of its history.
+  for (const seed of [1, 2, 3, 4, 5, 6, 7, 8, 32]) {
     it(`300 steps, seed ${seed}: sane throughout, the selection on the board, and undo returns the first board`, () => {
       run(seed, 300, startBoard())
     })

@@ -7,6 +7,7 @@ import { useEffect, useLayoutEffect, useRef } from 'react'
 import { BOARD_LIMITS, NOTE_LINE_HEIGHT_EM, NOTE_PADDING_EM, boardToScreen, noteBox, textColourOn, type NoteItem, type TextMetrics } from '@aether/core'
 import type { BoardSession } from './boardSession'
 import { noteFont } from '../renderer'
+import { isComposing } from './dom'
 import { useBoardState } from './useBoardSession'
 
 const HEX6 = /^[0-9a-fA-F]{6}$/
@@ -89,11 +90,17 @@ function Editor({ session, metrics, placed }: { session: BoardSession; metrics: 
       maxLength={BOARD_LIMITS.noteChars}
       spellCheck={false}
       rows={1}
-      onInput={fit}
+      onInput={() => {
+        fit()
+        // The typed text goes to the saver as it is typed: a window closed with the box still open must not take it along.
+        session.draftNote(note.id)
+      }}
       onBlur={commit}
       onKeyDown={(e) => {
         // Typing stays here: the board's keys and the app's must not fire.
         e.stopPropagation()
+        // Esc and Enter belong to an input method that is composing (a candidate list closes with Esc, a word is chosen with Enter).
+        if (isComposing(e)) return
         if (e.key === 'Escape') {
           e.preventDefault()
           cancel()

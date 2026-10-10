@@ -4,13 +4,21 @@
  * folder and its pictures are called). Design and the file format: docs/design/reference-board.md ("The board file").
  *
  * One list line per item, back to front, `key=value` pairs and bare flags, text after the first ` » ` escaped so a line stays inert
- * (text.ts). Numbers are cut to at most two decimals (three for a crop, four for the zoom) and every value is clamped to BOARD_LIMITS
- * by the same functions on the way in and on the way out, so that reading what was written and writing it again gives the same text.
+ * (text.ts). Numbers are cut to at most two decimals (three for a crop and for a mark's width, four for the zoom) and every value is
+ * clamped to BOARD_LIMITS / BOARD_ITEM_LIMITS by the same functions on the way in and on the way out, so that reading what was written
+ * and writing it again gives the same text.
+ *
+ * What is the board's and what is the user's. The board is the `## Board` heading and the lines from its first to its last item (or view)
+ * line, plus any lines that follow the last one with no blank line in between: that span is rewritten on every save. Everything else is
+ * the user's and survives a save byte for byte, blank lines and position included: the text above the heading, and the text under the
+ * items once a blank line separates it from them. Lines the reader does not understand inside the span are kept in `doc.extra` and
+ * written back right after the items; attributes it does not know on a line it does understand are kept in the item (`unknown`).
  */
 import { asString, rewriteFrontmatter, splitFrontmatter } from '../markdown/frontmatter'
-import { IMAGE_EXTENSIONS, isImagePath } from '../vault/assets'
+import { IMAGE_EXTENSIONS, isImagePath, isMediaPath } from '../vault/assets'
 import { todayIso } from '../vault/paths'
-import { escapeBoardText, unescapeBoardText } from './text'
+import { BOARD_ITEM_LIMITS } from './ops'
+import { cleanText, cutText, escapeBoardText, unescapeBoardText } from './text'
 import { BOARD_LIMITS, FULL_CROP, emptyBoard } from './types'
 import type {
   BoardDoc,
@@ -26,6 +34,7 @@ import type {
 } from './types'
 
 const L = BOARD_LIMITS
+const IL = BOARD_ITEM_LIMITS
 
 /* -------------------------------------------------------------- numbers --- */
 
@@ -37,13 +46,16 @@ interface Spec {
 }
 
 const COORD: Spec = { lo: -L.coordinate, hi: L.coordinate, dec: 2 }
+// The ranges are the operations' own (ops.ts BOARD_ITEM_LIMITS): a value valid in memory is never changed by a save.
 const PICTURE_SIDE: Spec = { lo: L.pictureMin, hi: L.pictureMax, dec: 2 }
-const NOTE_SIZE: Spec = { lo: 1, hi: 1000, dec: 2 }
-const MARK_WIDTH: Spec = { lo: 0.1, hi: 1000, dec: 2 }
-const OPACITY: Spec = { lo: 0.05, hi: 1, dec: 2 }
+const NOTE_WIDTH: Spec = { lo: IL.noteWidth.min, hi: IL.noteWidth.max, dec: 2 }
+const NOTE_SIZE: Spec = { lo: IL.noteSize.min, hi: IL.noteSize.max, dec: 2 }
+/** The width floor (0.005) has three decimals, so a mark's width keeps three. */
+const MARK_WIDTH: Spec = { lo: IL.markWidth.min, hi: IL.markWidth.max, dec: 3 }
+const OPACITY: Spec = { lo: IL.opacity.min, hi: IL.opacity.max, dec: 2 }
 /** The zoom floor (0.005) has three decimals, so the zoom keeps four. */
 const ZOOM: Spec = { lo: L.zoomMin, hi: L.zoomMax, dec: 4 }
-const GRID: Spec = { lo: 0, hi: 10000, dec: 2 }
+const GRID: Spec = { lo: IL.grid.min, hi: IL.grid.max, dec: 2 }
 const CROP_EDGE: Spec = { lo: 0, hi: 1, dec: 3 }
 const ANGLE_DEC = 2
 
@@ -149,11 +161,9 @@ function normColor(c: unknown, fallback: string): string {
   return typeof c === 'string' && HEX6.test(c) ? c.replace('#', '').toLowerCase() : fallback
 }
 
-/** `s` cut to the note text limit, never between the halves of a surrogate pair. */
+/** A note's or caption's text as the file keeps it: no control characters, cut (never inside a surrogate pair) to what a file may hold. */
 function capText(s: string): string {
-  if (s.length <= L.noteChars) return s
-  const high = s.charCodeAt(L.noteChars - 1)
-  return s.slice(0, high >= 0xd800 && high <= 0xdbff ? L.noteChars - 1 : L.noteChars)
+  return cutText(cleanText(s), L.noteCharsFile)
 }
 
 /* ---------------------------------------------------------- the section --- */
@@ -164,15 +174,22 @@ interface Line {
   start: number
   /** Where the next line starts. */
   next: number
-  /** `\n`, `\r\n`, or '' for a last line with no break. */
+  /** `\n`, `\r\n`, a lone `\r`, or '' for a last line with no break. */
   eol: string
 }
 
+/** The line that starts at `start`. A line ends at `\n`, `\r\n` or a lone `\r` (markdown reads all three as a line break). */
 function lineAt(raw: string, start: number): Line {
-  const nl = raw.indexOf('\n', start)
-  if (nl < 0) return { text: raw.slice(start), start, next: raw.length, eol: '' }
-  const cr = nl > start && raw.charCodeAt(nl - 1) === 13
-  return { text: raw.slice(start, cr ? nl - 1 : nl), start, next: nl + 1, eol: cr ? '\r\n' : '\n' }
+  let i = start
+  while (i < raw.length) {
+    const c = raw.charCodeAt(i)
+    if (c === 10 || c === 13) break
+    i++
+  }
+  if (i >= raw.length) return { text: raw.slice(start), start, next: raw.length, eol: '' }
+  const crlf = raw.charCodeAt(i) === 13 && raw.charCodeAt(i + 1) === 10
+  const eol = crlf ? '\r\n' : raw[i]!
+  return { text: raw.slice(start, i), start, next: i + eol.length, eol }
 }
 
 /** No visible character (blank, or spaces and tabs only). */
@@ -184,11 +201,16 @@ function isBlank(text: string): boolean {
   return true
 }
 
+/**
+ * A stretch of lines that is kept as it is and hides what it holds (items, headings): a code fence, or an HTML comment that is not
+ * closed on the line that opens it. `ch` is the fence character (backtick or tilde), 0 for a comment.
+ */
 interface Fence {
-  /** Character code of the fence: backtick or tilde. */
   ch: number
   len: number
 }
+
+const COMMENT: Fence = { ch: 0, len: 0 }
 
 function fenceRun(text: string): { ch: number; len: number; rest: number } | null {
   let i = 0
@@ -200,14 +222,17 @@ function fenceRun(text: string): { ch: number; len: number; rest: number } | nul
   return j - i >= 3 ? { ch, len: j - i, rest: j } : null
 }
 
-/** The fence a line opens (``` or ~~~, up to three spaces in; a backtick fence's info text holds no backtick), or null. */
+/** The block a line opens (``` or ~~~, up to three spaces in; a backtick fence's info text holds no backtick; or `<!--` with no `-->` after it), or null. */
 function opensFence(text: string): Fence | null {
   const run = fenceRun(text)
-  if (!run || (run.ch === 96 && text.indexOf('`', run.rest) >= 0)) return null
-  return { ch: run.ch, len: run.len }
+  if (run) return run.ch === 96 && text.indexOf('`', run.rest) >= 0 ? null : { ch: run.ch, len: run.len }
+  let i = 0
+  while (i < 3 && text.charCodeAt(i) === 32) i++
+  return text.startsWith('<!--', i) && !text.includes('-->', i + 2) ? COMMENT : null
 }
 
 function closesFence(text: string, fence: Fence): boolean {
+  if (fence.ch === 0) return text.includes('-->')
   const run = fenceRun(text)
   return run !== null && run.ch === fence.ch && run.len >= fence.len && isBlank(text.slice(run.rest))
 }
@@ -234,48 +259,74 @@ function headingOf(text: string): { level: number; text: string } | null {
 interface Section {
   /** The `## Board` heading line. */
   heading: Line
-  /** The end of the section's last line that is not blank (its break included); the heading's end when it holds nothing. */
+  /** The end of the board's last line (its break included); the heading's end when the section holds no board line. */
   end: number
   /** The line break of that last line ('' at the end of a file with no final break). */
   endEol: string
+  /** Whether the section holds a view or item line (else it is a bare heading, and what follows it is the user's). */
+  lines: boolean
 }
 
 interface Scan {
   section: Section | null
   /** The text of the note's first level-1 heading outside a code fence. */
   h1: string | null
-  /** A code fence still open at the end of the note. */
+  /** A code fence (or comment) still open at the end of the note. */
   openFence: Fence | null
+}
+
+/** Whether `text` is a list line the reader understands: a view line, or an item (an embed, `pic`, `note`, `stroke`, `line`, `rect`, `ellipse`). */
+function isBoardLine(text: string): boolean {
+  return text.startsWith('- ') && lineHead(text.slice(2)).ok
 }
 
 /**
  * Finds the board section in the part of the note from `from`: from the first `## Board` heading (case-sensitive) outside code fences
- * to the line before the next heading of level 1 or 2 outside code fences, or the end of the note. Blank lines at the end of the
- * section do not belong to it.
+ * and comments to the board's last line, within the lines before the next heading of level 1 or 2 outside fences, or the end of the
+ * note. The board's lines are the view and item lines, anything between them, and whatever follows the last of them with no blank line
+ * in between; a blank line after the last item starts the user's own text, which is not the board's (and neither is anything after it).
  */
 function scan(raw: string, from: number): Scan {
   let fence: Fence | null = null
   let h1: string | null = null
   let section: Section | null = null
   let ended = false
+  // True while the lines seen follow the board's last line directly (no blank line since).
+  let touching = false
   for (let pos = from; pos < raw.length; ) {
     const line = lineAt(raw, pos)
     pos = line.next
+    // A byte-order mark in front of the first line of a note without frontmatter is not part of the line.
+    const text = line.start === 0 && line.text.charCodeAt(0) === 0xfeff ? line.text.slice(1) : line.text
     let heading: { level: number; text: string } | null = null
+    let held = false
     if (fence) {
-      if (closesFence(line.text, fence)) fence = null
+      held = true
+      if (closesFence(text, fence)) fence = null
     } else {
-      fence = opensFence(line.text)
-      if (!fence) heading = headingOf(line.text)
+      fence = opensFence(text)
+      if (fence) held = true
+      else heading = headingOf(text)
     }
     if (heading && heading.level === 1 && h1 === null) h1 = heading.text
     if (ended) continue
     if (!section) {
-      if (heading && heading.level === 2 && heading.text === 'Board') section = { heading: line, end: line.next, endEol: line.eol }
+      if (heading && heading.level === 2 && heading.text === 'Board') section = { heading: line, end: line.next, endEol: line.eol, lines: false }
       continue
     }
-    if (heading && heading.level <= 2) ended = true
-    else if (!isBlank(line.text)) {
+    if (heading && heading.level <= 2) {
+      ended = true
+      continue
+    }
+    if (!held && isBlank(text)) {
+      touching = false
+      continue
+    }
+    if (!held && isBoardLine(text)) {
+      section.lines = true
+      touching = true
+    }
+    if (touching) {
       section.end = line.next
       section.endEol = line.eol
     }
@@ -283,15 +334,30 @@ function scan(raw: string, from: number): Scan {
   return { section, h1, openFence: fence }
 }
 
-/** The line break the note uses: the first one it has (CRLF or LF), LF when it has none. */
-function detectEol(raw: string): string {
-  const nl = raw.indexOf('\n')
-  return nl > 0 && raw.charCodeAt(nl - 1) === 13 ? '\r\n' : '\n'
+/** The last line of `text` (a final line break does not start another one). */
+function lastLineOf(text: string): string {
+  let end = text.length
+  if (text.endsWith('\r\n')) end -= 2
+  else if (end > 0 && (text.charCodeAt(end - 1) === 10 || text.charCodeAt(end - 1) === 13)) end--
+  let i = end
+  while (i > 0 && text.charCodeAt(i - 1) !== 10 && text.charCodeAt(i - 1) !== 13) i--
+  return text.slice(i, end)
 }
 
+/** The line break the note uses: the first one it has (CRLF, a lone CR or LF), LF when it has none. */
+function detectEol(raw: string): string {
+  for (let i = 0; i < raw.length; i++) {
+    const c = raw.charCodeAt(i)
+    if (c === 10) return '\n'
+    if (c === 13) return raw.charCodeAt(i + 1) === 10 ? '\r\n' : '\r'
+  }
+  return '\n'
+}
+
+/** The number of the line that starts at `offset` (1 for the first). */
 function lineNumberAt(raw: string, offset: number): number {
   let n = 1
-  for (let at = raw.indexOf('\n'); at >= 0 && at < offset; at = raw.indexOf('\n', at + 1)) n++
+  for (let pos = 0; pos < offset && pos < raw.length; n++) pos = lineAt(raw, pos).next
   return n
 }
 
@@ -330,11 +396,32 @@ class Warnings {
 
 /* ------------------------------------------------------------ attributes -- */
 
-/** The `key=value` pairs and bare flags of one item line, each read once; what is left over is reported. */
+/** The most attributes and flags this version does not know that a line keeps (the rest are dropped, with a warning). */
+const MAX_UNKNOWN = 8
+
+/**
+ * An attribute or flag this version does not know is kept and written back only when it is a plain name, optionally with a plain
+ * value: nothing a markdown parser would read as a link, tag, emphasis or html (no `[ ] # < > | * _ ~ \ ` ! & @ /`, no space, no `»`).
+ */
+const KEPT_TOKEN = /^[A-Za-z][A-Za-z0-9-]{0,31}(?:=[A-Za-z0-9.,:+-]{0,64})?$/
+
+/** The unknown tokens that are safe to write, at most MAX_UNKNOWN: the filter on the way out too, for a doc not made by the reader. */
+function keptTokens(tokens: readonly string[] | undefined): string[] {
+  if (!tokens || tokens.length === 0) return []
+  const out: string[] = []
+  for (const t of tokens) {
+    if (typeof t === 'string' && KEPT_TOKEN.test(t) && out.length < MAX_UNKNOWN) out.push(t)
+  }
+  return out
+}
+
+/** The `key=value` pairs and bare flags of one item line, each read once; what is left over is reported and kept. */
 class Attrs {
   private readonly kv = new Map<string, string>()
   private readonly flags = new Set<string>()
   private readonly used = new Set<string>()
+  /** Every token that is a pair or a flag, in the order it was written, with the name it is read by. */
+  private readonly order: { token: string; name: string; flag: boolean }[] = []
   /** The tokens after `pts=` (the first one included), or null without `pts`. */
   points: string[] | null = null
 
@@ -353,9 +440,15 @@ class Attrs {
           // The points are separated by spaces too: take the tokens that look like one.
           while (i + 1 < tokens.length && tokens[i + 1]!.indexOf('=') < 0 && tokens[i + 1]!.indexOf(',') > 0) pts.push(tokens[++i]!)
           this.points = pts
-        } else this.kv.set(key, value)
-      } else if (eq === 0) this.say(`"${shorten(t)}" is not an attribute and was ignored`)
-      else this.flags.add(t)
+        } else {
+          this.kv.set(key, value)
+          this.order.push({ token: t, name: key, flag: false })
+        }
+      } else if (eq === 0) this.say(`"${shorten(t)}" is not an attribute and was dropped`)
+      else {
+        this.flags.add(t)
+        this.order.push({ token: t, name: t, flag: true })
+      }
     }
   }
 
@@ -425,15 +518,28 @@ class Attrs {
     return this.kv.get(key)
   }
 
-  /** Reports every pair and flag nobody read. */
-  rest(): void {
-    for (const key of this.kv.keys()) if (!this.used.has(key)) this.say(`unknown attribute ${key} ignored`)
-    for (const flag of this.flags) if (!this.used.has(flag)) this.say(`unknown flag ${flag} ignored`)
+  /**
+   * The pairs and flags nobody read, as written and in the order written: kept and written back with the line (a note saved by a
+   * newer version, or edited by hand, loses nothing), each with a warning. Those that are not a plain name (or are too many) are dropped.
+   */
+  rest(): string[] {
+    const kept: string[] = []
+    for (const e of this.order) {
+      if (this.used.has(e.name)) continue
+      const what = e.flag ? 'flag' : 'attribute'
+      if (!KEPT_TOKEN.test(e.token)) this.say(`unknown ${what} ${shorten(e.name)} is not a plain name and was dropped`)
+      else if (kept.length >= MAX_UNKNOWN) this.say(`unknown ${what} ${e.name} was dropped: a line keeps at most ${MAX_UNKNOWN}`)
+      else {
+        kept.push(e.token)
+        this.say(`unknown ${what} ${e.name} kept as written`)
+      }
+    }
+    return kept
   }
 }
 
 function shorten(s: string): string {
-  return s.length > 24 ? s.slice(0, 24) + '...' : s
+  return s.length > 24 ? cutText(s, 24) + '...' : s
 }
 
 /** Splits at single spaces, dropping the empty pieces. */
@@ -506,11 +612,39 @@ function readPoints(raw: string[], say: (text: string) => void): number[] {
     const comma = token.indexOf(',')
     const x = comma > 0 ? parseNumber(token.slice(0, comma)) : null
     const y = comma > 0 ? parseNumber(token.slice(comma + 1)) : null
-    if (x === null || y === null || out.length >= L.strokePoints * 2) left++
+    if (x === null || y === null || out.length >= L.strokePointsFile * 2) left++
     else out.push(norm(COORD, x, 0), norm(COORD, y, 0))
   }
-  if (left > 0) say(`${left} point${left === 1 ? '' : 's'} of the stroke could not be read or were past the limit of ${L.strokePoints}, and were left out`)
+  if (left > 0) say(`${left} point${left === 1 ? '' : 's'} of the stroke could not be read or were past the limit of ${L.strokePointsFile}, and were left out`)
   return out
+}
+
+/** What the start of an item line says it is: the kind, the picture path (pictures only) and the rest of the line; or why it is not understood. */
+type Head = { ok: true; kind: string; path: string; after: string } | { ok: false; why: string }
+
+/** Reads the kind (and a picture's path) at the start of the part of a line after the `- `. Everything after that is attributes, which never fail. */
+function lineHead(rest: string): Head {
+  if (rest.startsWith('![[')) {
+    const close = rest.indexOf(']]', 3)
+    if (close < 0) return { ok: false, why: 'an embed that is never closed' }
+    const path = rest.slice(3, close)
+    if (!readableEmbedPath(path)) return { ok: false, why: 'an embed whose picture path cannot be read' }
+    const after = rest.slice(close + 2)
+    if (after !== '' && after.charCodeAt(0) !== 32) return { ok: false, why: 'an embed followed by text' }
+    return { ok: true, kind: 'pic', path, after }
+  }
+  const sp = rest.indexOf(' ')
+  const kind = sp < 0 ? rest : rest.slice(0, sp)
+  if (!KINDS.has(kind)) return { ok: false, why: `an item kind this version does not know (${shorten(kind)})` }
+  let after = sp < 0 ? '' : rest.slice(sp)
+  let path = ''
+  if (kind === 'pic') {
+    if (after === '') return { ok: false, why: 'a picture without a path' }
+    const p = picPath(after, 1)
+    path = p.path
+    after = after.slice(p.end)
+  }
+  return { ok: true, kind, path, after }
 }
 
 /**
@@ -519,29 +653,10 @@ function readPoints(raw: string[], say: (text: string) => void): number[] {
  */
 function parseItemLine(rest: string, at: number, say: (text: string) => void): Parsed {
   const warn = (text: string): void => say(`line ${at}: ${text}`)
-  let kind: string
-  let after: string
-  let path = ''
-  if (rest.startsWith('![[')) {
-    const close = rest.indexOf(']]', 3)
-    if (close < 0) return { type: 'extra', why: 'an embed that is never closed' }
-    path = rest.slice(3, close)
-    if (!readableEmbedPath(path)) return { type: 'extra', why: 'an embed whose picture path cannot be read' }
-    after = rest.slice(close + 2)
-    if (after !== '' && after.charCodeAt(0) !== 32) return { type: 'extra', why: 'an embed followed by text' }
-    kind = 'pic'
-  } else {
-    const sp = rest.indexOf(' ')
-    kind = sp < 0 ? rest : rest.slice(0, sp)
-    if (!KINDS.has(kind)) return { type: 'extra', why: `an item kind this version does not know (${shorten(kind)})` }
-    after = sp < 0 ? '' : rest.slice(sp)
-    if (kind === 'pic') {
-      if (after === '') return { type: 'extra', why: 'a picture without a path' }
-      const p = picPath(after, 1)
-      path = p.path
-      after = after.slice(p.end)
-    }
-  }
+  const head = lineHead(rest)
+  if (!head.ok) return { type: 'extra', why: head.why }
+  const { kind, path } = head
+  const after = head.after
   // Text follows the first " » " after the path (an escaped path holds no raw space, so none can be inside it).
   let attrText = after
   let text: string | null = null
@@ -556,7 +671,7 @@ function parseItemLine(rest: string, at: number, say: (text: string) => void): P
   const a = new Attrs(tokens(attrText), warn)
   const readText = (): string => {
     const t = unescapeBoardText(text ?? '')
-    if (t.length > L.noteChars) warn(`text of ${t.length} characters cut to ${L.noteChars}`)
+    if (t.length > L.noteCharsFile) warn(`text of ${t.length} characters cut to ${L.noteCharsFile}`)
     return capText(t)
   }
 
@@ -598,7 +713,7 @@ function parseItemLine(rest: string, at: number, say: (text: string) => void): P
         kind: 'note',
         x: a.number('x', COORD, 0),
         y: a.number('y', COORD, 0),
-        w: a.number('w', PICTURE_SIDE, DEFAULT_NOTE_WIDTH),
+        w: a.number('w', NOTE_WIDTH, DEFAULT_NOTE_WIDTH),
         size: a.number('size', NOTE_SIZE, DEFAULT_NOTE_SIZE),
         rotation: a.angle('r'),
         color: a.color('color', DEFAULT_INK),
@@ -651,9 +766,22 @@ function parseItemLine(rest: string, at: number, say: (text: string) => void): P
     }
   }
   // Text on a kind that has none (or a stroke's point list on a note) is not an error of the line, but it is not kept either.
-  if (text !== null && kind !== 'pic' && kind !== 'note') warn(`${kind} has no text; the text after » was ignored`)
-  if (a.points !== null && kind !== 'stroke') warn('pts belongs to a stroke and was ignored')
-  a.rest()
+  if (text !== null && kind !== 'pic' && kind !== 'note') warn(`${kind} has no text; the text after » was dropped`)
+  if (a.points !== null && kind !== 'stroke') warn('pts belongs to a stroke and was dropped')
+  const unknown = a.rest()
+  if (unknown.length > 0) {
+    if (result.type === 'item') result.item.unknown = unknown
+    else if (result.type === 'view') {
+      const apply = result.apply
+      result = {
+        type: 'view',
+        apply(doc) {
+          apply(doc)
+          doc.viewUnknown = unknown
+        },
+      }
+    }
+  }
   return result
 }
 
@@ -695,14 +823,18 @@ export function parseBoard(raw: string): { doc: BoardDoc; warnings: string[] } {
   }
 }
 
+/** A to-do line (`- [ ] x`, `- [x] x`): the user's own, not an item kind from a newer version. */
+const TASK_LINE = /^- \[[ xX]\](?: |$)/
+
 function readBoard(raw: string, warn: Warnings): BoardDoc {
   const split = splitFrontmatter(raw)
   if (hasBrokenFrontmatter(raw)) warn.add('The frontmatter could not be read; the note is left alone.')
   const found = scan(raw, split.bodyOffset)
   const doc = emptyBoard(asString(split.frontmatter['title']) ?? found.h1 ?? 'Board')
-  if (raw.length > L.noteTotal) warn.add(`The note is ${raw.length} characters long, past the ${L.noteTotal} a board should stay under.`)
   const section = found.section
   if (!section) return doc
+  const size = section.end - section.heading.start
+  if (size > L.noteTotal) warn.add(`The board takes ${size} characters of the note, past the ${L.noteTotal} a board should stay under.`)
 
   const items: BoardItem[] = []
   const extra: string[] = []
@@ -738,7 +870,7 @@ function readBoard(raw: string, warn: Warnings): BoardDoc {
       }
     } else if (parsed.type === 'extra') {
       extra.push(t)
-      warn.add(`line ${no}: ${parsed.why ?? 'not understood'}, kept as written`)
+      if (!TASK_LINE.test(t)) warn.add(`line ${no}: ${parsed.why ?? 'not understood'}, kept as written`)
     } else if (items.length >= L.items) {
       overflow++
       extra.push(t)
@@ -757,6 +889,84 @@ function readBoard(raw: string, warn: Warnings): BoardDoc {
   doc.nextId = items.length + 1
   doc.extra = extra
   return doc
+}
+
+/**
+ * What the brain needs of a board note without reading its items as markdown (parseNote): the note's text with the board's own item
+ * lines taken out (what the user wrote, the lines the board kept as extras and the heading stay), where each picture of the board is
+ * written, and how to turn an offset in that text into an offset in `body`. Null when `body` has no board section. Linear in the size
+ * of the note and nothing like a markdown parse, which used to cost 0.3 to 0.8 s for a full board on every save.
+ */
+export interface BoardNoteParts {
+  text: string
+  /** The pictures of the first BOARD_LIMITS.items items, in order: the path, the offset in `body` of the embed (or of the path of a `pic` line), and whether the path is written as it is (a `pic` line) or as wikilink text (an embed). */
+  pictures: { path: string; offset: number; literal: boolean }[]
+  /** The offset in `body` of `offset` in `text`. */
+  original(offset: number): number
+}
+
+export function boardNoteParts(body: string): BoardNoteParts | null {
+  const section = scan(body, 0).section
+  if (!section) return null
+  const pieces: string[] = [body.slice(0, section.heading.next)]
+  let kept = section.heading.next
+  let removed = 0
+  const breaks: { at: number; by: number }[] = []
+  const pictures: { path: string; offset: number; literal: boolean }[] = []
+  let items = 0
+  let viewSeen = false
+  let fence: Fence | null = null
+  for (let pos = section.heading.next; pos < section.end; ) {
+    const line = lineAt(body, pos)
+    pos = line.next
+    const t = line.text
+    let take = true
+    if (fence) {
+      if (closesFence(t, fence)) fence = null
+    } else if (!isBlank(t)) {
+      fence = opensFence(t)
+      if (!fence && t.startsWith('- ')) {
+        const head = lineHead(t.slice(2))
+        if (head.ok) {
+          take = false
+          if (head.kind === 'view' && !viewSeen) viewSeen = true
+          else if (head.kind !== 'view') {
+            if (items < L.items && head.kind === 'pic' && isMediaPath(head.path)) {
+              // An embed's offset is its `!`; a `pic` line has no brackets, so its offset is where its path starts.
+              const literal = !t.startsWith('- ![[')
+              pictures.push({ path: head.path, offset: line.start + (literal ? 6 : 2), literal })
+            }
+            items++
+          }
+        }
+      }
+    }
+    if (take) {
+      pieces.push(body.slice(line.start, line.next))
+      kept += line.next - line.start
+    } else {
+      removed += line.next - line.start
+      const last = breaks[breaks.length - 1]
+      if (last && last.at === kept) last.by = removed
+      else breaks.push({ at: kept, by: removed })
+    }
+  }
+  pieces.push(body.slice(section.end))
+  return {
+    text: pieces.join(''),
+    pictures,
+    original(offset) {
+      // The last break at or before the offset: everything taken out before it has to be added back.
+      let lo = 0
+      let hi = breaks.length
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1
+        if (breaks[mid]!.at <= offset) lo = mid + 1
+        else hi = mid
+      }
+      return lo === 0 ? offset : offset + breaks[lo - 1]!.by
+    },
+  }
 }
 
 /* ------------------------------------------------------------- serialise -- */
@@ -845,7 +1055,7 @@ function itemLine(item: BoardItem, out: Out): string {
       if (item.gray) parts.push('gray')
       const op = norm(OPACITY, item.opacity, 1)
       if (op !== 1) parts.push(`op=${fmt(op, OPACITY)}`)
-      parts.push(...flags(item, out))
+      parts.push(...flags(item, out), ...keptTokens(item.unknown))
       const caption = capText(item.caption)
       return `- ${parts.join(' ')}${caption === '' ? '' : ` » ${escapeBoardText(caption)}`}`
     }
@@ -854,21 +1064,23 @@ function itemLine(item: BoardItem, out: Out): string {
         'note',
         `x=${n(COORD, item.x)}`,
         `y=${n(COORD, item.y)}`,
-        `w=${n(PICTURE_SIDE, item.w, DEFAULT_NOTE_WIDTH)}`,
+        `w=${n(NOTE_WIDTH, item.w, DEFAULT_NOTE_WIDTH)}`,
         `size=${n(NOTE_SIZE, item.size, DEFAULT_NOTE_SIZE)}`,
         `color=${normColor(item.color, DEFAULT_INK)}`,
         `fill=${normColor(item.fill, '')}`,
         `r=${formatNumber(normAngle(item.rotation), ANGLE_DEC)}`,
         ...flags(item, out),
+        ...keptTokens(item.unknown),
       ]
       const text = capText(item.text)
       return `- ${parts.join(' ')}${text === '' ? '' : ` » ${escapeBoardText(text)}`}`
     }
     case 'stroke': {
       const pts: string[] = []
-      const count = Math.min(Math.floor(item.points.length / 2), L.strokePoints)
+      const count = Math.min(Math.floor(item.points.length / 2), L.strokePointsFile)
       for (let i = 0; i < count; i++) pts.push(`${n(COORD, item.points[2 * i]!)},${n(COORD, item.points[2 * i + 1]!)}`)
-      return `- ${['stroke', `color=${normColor(item.color, DEFAULT_INK)}`, `width=${n(MARK_WIDTH, item.width, DEFAULT_MARK_WIDTH)}`, ...flags(item, out), `pts=${pts.join(' ')}`].join(' ')}`
+      // Tokens this version does not know go before the points: the reader takes any token with a comma that follows them for a point.
+      return `- ${['stroke', `color=${normColor(item.color, DEFAULT_INK)}`, `width=${n(MARK_WIDTH, item.width, DEFAULT_MARK_WIDTH)}`, ...flags(item, out), ...keptTokens(item.unknown), `pts=${pts.join(' ')}`].join(' ')}`
     }
     case 'line':
       return `- ${[
@@ -881,6 +1093,7 @@ function itemLine(item: BoardItem, out: Out): string {
         `width=${n(MARK_WIDTH, item.width, DEFAULT_MARK_WIDTH)}`,
         ...(item.arrow ? ['arrow'] : []),
         ...flags(item, out),
+        ...keptTokens(item.unknown),
       ].join(' ')}`
     default:
       return `- ${[
@@ -893,6 +1106,7 @@ function itemLine(item: BoardItem, out: Out): string {
         `width=${n(MARK_WIDTH, item.width, DEFAULT_MARK_WIDTH)}`,
         `fill=${normColor(item.fill, '')}`,
         ...flags(item, out),
+        ...keptTokens(item.unknown),
       ].join(' ')}`
   }
 }
@@ -908,6 +1122,7 @@ function viewLine(doc: BoardDoc): string {
     `smooth=${doc.smooth ? 1 : 0}`,
     `captions=${doc.captions ? 1 : 0}`,
     `grid=${fmt(norm(GRID, doc.grid, 0), GRID)}`,
+    ...keptTokens(doc.viewUnknown),
   ].join(' ')}`
 }
 
@@ -928,17 +1143,24 @@ export function itemChars(item: BoardItem): number {
 }
 
 /**
- * How many characters the board section takes in the note: the budget `BOARD_LIMITS.noteTotal` is measured with this. The controller
- * refuses to grow a board past it (shrinking is always allowed), the Boards code refuses to add pictures past it.
+ * How many characters the board section takes in the note (the heading, the view line, every item and the lines it keeps): the budget
+ * `BOARD_LIMITS.noteTotal` is measured with this. Within a few characters per grouped item of what `serializeBoard` writes, without
+ * writing it (cached per item, one pass over the board). The controller refuses to grow a board past it (shrinking is always
+ * allowed), the Boards code refuses to add pictures past it. The user's own text round the board is not counted.
  */
 export function boardChars(doc: BoardDoc): number {
-  let total = 160 // the heading, the view line and the blank lines
+  let total = HEADING.length + 2 + viewLine(doc).length + 1 // `## Board`, a blank line, the view line, and their breaks
   for (const item of doc.items) total += itemChars(item)
   for (const entry of doc.extra) total += entry.length + 1
   return total
 }
 
-/** The lines the board writes under its heading (the blank line after the heading included), without line breaks. */
+const HEADING = '## Board'
+
+/**
+ * The lines the board writes under its heading (the blank line after the heading included), without line breaks: the view line, the
+ * items, then the lines it kept (right after the last item with no blank line, which is how the reader knows they are the board's).
+ */
 function sectionLines(doc: BoardDoc): string[] {
   const labels = new Map<number, number>()
   const out: Out = {
@@ -952,21 +1174,17 @@ function sectionLines(doc: BoardDoc): string[] {
   const itemLines = doc.items.map((item) => itemLine(item, out))
   // Past the limit the lines are kept after the items, where the reader keeps them too, instead of being dropped.
   const lines = ['', viewLine(doc), ...itemLines.slice(0, L.items)]
-  const after: string[] = itemLines.slice(L.items)
+  // A loop, not push(...after): a hostile note can leave a hundred thousand extra lines, more than a call takes as arguments.
+  for (let i = L.items; i < itemLines.length; i++) lines.push(itemLines[i]!)
   let fence: Fence | null = null
   for (const entry of doc.extra) {
-    for (const t of entry.split(/\r?\n/)) {
+    for (const t of entry.split(/\r\n|\r|\n/)) {
       if (fence) {
         if (closesFence(t, fence)) fence = null
       } else if (isBlank(t)) continue
       else fence = opensFence(t)
-      after.push(t)
+      lines.push(t)
     }
-  }
-  // A loop, not push(...after): a hostile note can leave a hundred thousand extra lines, more than a call takes as arguments.
-  if (after.length > 0) {
-    lines.push('')
-    for (const t of after) lines.push(t)
   }
   return lines
 }
@@ -988,7 +1206,7 @@ const INTRO =
 export function newBoardNote(title: string, now: Date): string {
   const day = todayIso(now)
   const name = cleanTitle(title)
-  const body = `# ${headingText(name)}\n\n${INTRO}\n\n## Board\n${sectionLines(emptyBoard(name)).join('\n')}\n`
+  const body = `# ${headingText(name)}\n\n${INTRO}\n\n${HEADING}\n${sectionLines(emptyBoard(name)).join('\n')}\n`
   return rewriteFrontmatter(`---\n---\n${body}`, { title: name, type: 'board', created: day, updated: day })
 }
 
@@ -998,10 +1216,12 @@ export function isBoardNote(raw: string): boolean {
 }
 
 /**
- * Writes `doc` into a note: with `raw`, exactly the board section is replaced (the heading is added at the end when there is none) and
- * every other byte stays, line endings included; the frontmatter's `title`, `type` and `updated` are patched in place, only when
- * something changed (so saving an unchanged board gives back `raw` itself). Without `raw` it is a fresh note (`newBoardNote`).
- * A note whose frontmatter cannot be parsed is returned unchanged. `now` stamps `updated`.
+ * Writes `doc` into a note: with `raw`, exactly the board (the heading's lines down to the last line the board owns: see the header of
+ * this file) is replaced, the heading is added at the end when there is none, and every other byte stays: the text above, the user's
+ * text under the board with its blank lines, line endings included. The frontmatter's `title`, `type` and `updated` are patched in
+ * place, only when something changed (so saving an unchanged board gives back `raw` itself, once the board lines are in the form this
+ * function writes them). Without `raw` it is a fresh note (`newBoardNote`). A note whose frontmatter cannot be parsed is returned
+ * unchanged. `now` stamps `updated`.
  */
 export function serializeBoard(doc: BoardDoc, raw?: string, now: Date = new Date()): string {
   const base = raw ?? newBoardNote(doc.title, now)
@@ -1014,22 +1234,22 @@ export function serializeBoard(doc: BoardDoc, raw?: string, now: Date = new Date
   const section = found.section
   if (section) {
     const eol = section.heading.eol || detectEol(base)
+    // Everything after the board's last line is the user's and stays as it is.
     const after = base.slice(section.end)
     // The heading is the last line of a file with no final break: it needs one now. The section's own last line gets none there.
     const lead = section.heading.eol === '' ? eol : ''
     const closing = after === '' && section.endEol === '' ? '' : eol
-    text = base.slice(0, section.heading.next) + lead + lines.join(eol) + closing + after
+    // A bare heading with the user's text right under it: the new view line must not run into it (a paragraph would continue the list item).
+    const apart = !section.lines && after !== '' && !isBlank(lineAt(after, 0).text) && headingOf(lineAt(after, 0).text) === null ? eol : ''
+    text = base.slice(0, section.heading.next) + lead + lines.join(eol) + closing + apart + after
   } else {
     const eol = detectEol(base)
     let head = base
-    if (head !== '' && !head.endsWith('\n')) head += eol
-    // A code fence the note never closed would swallow the new heading: close it (adds a line, changes none).
-    if (found.openFence) head += String.fromCharCode(found.openFence.ch).repeat(found.openFence.len) + eol
-    if (head !== '') {
-      const last = lineAt(head, head.lastIndexOf('\n', head.length - 2) + 1)
-      if (!isBlank(last.text)) head += eol
-    }
-    text = `${head}## Board${eol}${lines.join(eol)}${eol}`
+    if (head !== '' && !/[\r\n]$/.test(head)) head += eol
+    // A code fence (or comment) the note never closed would swallow the new heading: close it (adds a line, changes none).
+    if (found.openFence) head += (found.openFence.ch === 0 ? '-->' : String.fromCharCode(found.openFence.ch).repeat(found.openFence.len)) + eol
+    if (head !== '' && !isBlank(lastLineOf(head))) head += eol
+    text = `${head}${HEADING}${eol}${lines.join(eol)}${eol}`
   }
 
   const patch: Record<string, unknown> = {}
@@ -1049,12 +1269,23 @@ export function serializeBoard(doc: BoardDoc, raw?: string, now: Date = new Date
  * The folder names the vault never looks into (lower case): `HEAVY_DIRS` of apps/desktop/src/main/fsvault.ts, copied because core
  * cannot import the desktop app. A board's pictures in a folder of one of these names would not be found. Keep the two lists the same.
  */
-const IGNORED_FOLDERS: ReadonlySet<string> = new Set([
+export const IGNORED_FOLDERS: ReadonlySet<string> = new Set([
   'node_modules', '__macosx', '__pycache__', 'venv', 'env', 'dist', 'build', 'out', 'target', 'bin', 'obj',
   'intermediate', 'saved', 'deriveddatacache', 'binaries', 'library', 'temp', 'logs',
   'cache', 'caches', 'tmp', 'coverage', 'bower_components', 'vendor', 'third_party', 'thirdparty', 'site-packages',
   'steamapps', 'windowsapps', 'appdata', 'system volume information', 'windows', 'program files',
   'program files (x86)', 'programdata', 'recovery', 'perflogs', 'msocache', 'config.msi',
+])
+
+/**
+ * The names of game libraries and Windows leftovers the vault leaves out too (`GAME_DIRS` of apps/desktop/src/main/installs.ts, lower
+ * case), copied for the same reason. A board called `Steam` or `Ubisoft` keeps its pictures in `Steam pictures`, not in a folder the
+ * vault would refuse.
+ */
+export const GAME_FOLDERS: ReadonlySet<string> = new Set([
+  'steamlibrary', 'steam library', 'steam', 'epic games', 'epicgames', 'xboxgames', 'xbox games', 'gog games', 'gog galaxy', 'riot games',
+  'ea games', 'origin games', 'rockstar games', 'ubisoft', 'ubisoft game launcher', 'battle.net', 'blizzard games', 'amazon games',
+  'windows.old', 'wpsystem', 'modifiablewindowsapps', 'onedrivetemp', 'msdownld.tmp', 'found.000',
 ])
 
 /** Names Windows will not create as a file or folder, with or without an extension. */
@@ -1069,28 +1300,21 @@ function trimEnds(s: string, chars: string, start = true, end = true): string {
   return s.slice(a, b)
 }
 
-/** `s` cut to `max` UTF-16 units without splitting a surrogate pair. */
-function cut(s: string, max: number): string {
-  if (s.length <= max) return s
-  const high = s.charCodeAt(max - 1)
-  return s.slice(0, high >= 0xd800 && high <= 0xdbff ? max - 1 : max)
-}
-
 /**
  * The name of the folder a board keeps its pictures in: the title with `\ / : * ? " < > | # [ ]` made `-`, white space collapsed,
  * no dots, spaces or `$` in front (the vault skips such folders) and no dots or spaces behind, at most 80 characters, `Board` when
- * nothing is left. A name the vault ignores (`Library`, `Temp`, `Cache`, `Out` ...), a name ending in `.aether-tmp` and a Windows
- * device name get ` pictures` after them.
+ * nothing is left. A name the vault ignores (`Library`, `Temp`, `Cache`, `Out` ... or a game library's: `Steam`, `Ubisoft` ...), a name
+ * ending in `.aether-tmp` and a Windows device name get ` pictures` after them.
  */
 export function boardFolderName(title: string): string {
   let name = title
     .replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
     .replace(/[\\/:*?"<>|#[\]]/g, '-')
     .replace(/\s+/g, ' ')
-  name = trimEnds(cut(trimEnds(name, '.$ ', true, false), 80), '. ', false, true)
+  name = trimEnds(cutText(trimEnds(name, '.$ ', true, false), 80), '. ', false, true)
   if (name === '') return 'Board'
   const bare = name.toLowerCase()
-  if (IGNORED_FOLDERS.has(bare) || DEVICE_NAMES.test(name) || bare.endsWith('.aether-tmp')) return `${name} pictures`
+  if (IGNORED_FOLDERS.has(bare) || GAME_FOLDERS.has(bare) || DEVICE_NAMES.test(name) || bare.endsWith('.aether-tmp')) return `${name} pictures`
   return name
 }
 
@@ -1113,7 +1337,8 @@ const pad = (n: number, width = 2): string => String(n).padStart(width, '0')
 
 /**
  * A safe file name for a picture added to a board. The original's base name with `# | [ ] < > * _ ~ \ / : ? "` made `-` (runs
- * become one), or `ref YYYY-MM-DD HHMMSS` (local time of `now`) when that leaves nothing or a name that says nothing. The extension
+ * become one), no dots, dashes, spaces or `$` in front (the vault skips a name that starts with a dot or a `$`), or
+ * `ref YYYY-MM-DD HHMMSS` (local time of `now`) when that leaves nothing or a name that says nothing. The extension
  * is the original's when it is a picture type (png jpg jpeg webp gif bmp avif, lower case), else the MIME type's, else png.
  */
 export function boardPictureName(original: string, mimeType: string, now: Date): string {
@@ -1127,7 +1352,7 @@ export function boardPictureName(original: string, mimeType: string, now: Date):
     .replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
     .replace(/[#|[\]<>*_~\\/:?"]+/g, '-')
     .replace(/\s+/g, ' ')
-  base = trimEnds(cut(trimEnds(base, '-. '), 80), '-. ')
+  base = trimEnds(cutText(trimEnds(base, '-.$ ', true, false), 80), '-. ', false, true)
   if (base === '' || GENERIC_NAME.test(base)) {
     base = `ref ${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`
   } else if (DEVICE_NAMES.test(base)) base += '-'

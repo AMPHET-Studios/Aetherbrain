@@ -3,8 +3,10 @@ import { splitFrontmatter } from '../src/markdown/frontmatter'
 import { parseMarkdown, parseNote } from '../src/markdown/parse'
 import { extractTasks } from '../src/markdown/tasks'
 import { isBoardNote, parseBoard, safeEmbedPath, serializeBoard } from '../src/board/format'
+import { BOARD_ITEM_LIMITS } from '../src/board/ops'
 import { escapeBoardText, unescapeBoardText } from '../src/board/text'
-import { emptyBoard } from '../src/board/types'
+import { isMediaPath } from '../src/vault/assets'
+import { BOARD_LIMITS, emptyBoard } from '../src/board/types'
 import type { BoardDoc, BoardItem, Crop } from '../src/board/types'
 
 const NOW = new Date(2026, 9, 9, 14, 35, 12)
@@ -58,9 +60,9 @@ const TEXT_BITS = [
 ]
 
 /**
- * Web and e-mail addresses. GFM turns these into links, and when it does so late (after a punctuation mark: `)www.a.b`) the pieces of
- * the text lose their place in the source, so parseNote then reads an escaped `\[\[x\]\]` or `\#tag` next to them as live. That is a
- * hole in parseNote, not in the board format (see the last test of this file): the parser-facing tests keep these out of the mix.
+ * Web and e-mail addresses. GFM turns these into links; when it did so late (after a punctuation mark: `)www.a.b`) the pieces of the
+ * text lost their place in the source, and parseNote read an escaped `\[\[x\]\]` or `\#tag` next to them as live (the last test of this
+ * file). They are in the mix of every test now.
  */
 const ADDRESS_BITS = ['http://x.example', 'www.x.example', 'a@b.example']
 
@@ -96,6 +98,21 @@ function plainPath(r: R): string {
   return parts.join('/') + r.pick(['.png', '.jpg', '.webp'])
 }
 
+const IL = BOARD_ITEM_LIMITS
+
+/** The same board note, read as a plain note: its lines go through the real markdown parser (the preview and the MCP tools read them so). */
+const plain = (raw: string): string => raw.replace('type: board', 'type: note')
+
+/** Attributes and flags this version does not know; the reader keeps them and writes them back after the known ones. */
+const UNKNOWN_TOKENS = ['theme=dark', 'pinned', 'tint=ff0000', 'blend=multiply', 'smooth=3', 'dash=4', 'radius=5', 'shadow', 'v2', 'k=1,2', 'url=www.x.y', 'a-b=c:d']
+
+function unknownOf(r: R): string[] | undefined {
+  if (!r.chance(0.25)) return undefined
+  const out: string[] = []
+  for (let n = r.int(1, 3); n > 0; n--) out.push(r.pick(UNKNOWN_TOKENS))
+  return out
+}
+
 const hex = (r: R): string => Array.from({ length: 6 }, () => '0123456789abcdef'[r.int(0, 15)]).join('')
 const GROUPS = [0, 0, 0, 0, 0, 1, 2, 3, 7, 12]
 
@@ -115,9 +132,10 @@ function randCrop(r: R): Crop {
 }
 
 function randItem(r: R): BoardItem {
-  const common = { id: 0, group: r.pick(GROUPS), locked: r.chance(0.2) }
+  const unknown = unknownOf(r)
+  const common = { id: 0, group: r.pick(GROUPS), locked: r.chance(0.2), ...(unknown ? { unknown } : {}) }
   const coord = () => num(r, -1_000_000, 1_000_000, 2)
-  const width = () => num(r, 0.1, 1000, 2)
+  const width = () => num(r, IL.markWidth.min, IL.markWidth.max, 3)
   switch (r.pick(['picture', 'picture', 'note', 'note', 'stroke', 'line', 'rect', 'ellipse'] as const)) {
     case 'picture':
       return {
@@ -143,8 +161,8 @@ function randItem(r: R): BoardItem {
         text: r.chance(0.1) ? '' : randText(r, 25),
         x: coord(),
         y: coord(),
-        w: num(r, 8, 40000, 2),
-        size: num(r, 1, 1000, 2),
+        w: num(r, IL.noteWidth.min, IL.noteWidth.max, 2),
+        size: num(r, IL.noteSize.min, IL.noteSize.max, 2),
         rotation: num(r, -179.99, 180, 2),
         color: hex(r),
         fill: r.chance(0.5) ? '' : hex(r),
@@ -177,6 +195,9 @@ const EXTRA_CHUNKS: string[][] = [
   ['- pic'],
   ['```js', '- gizmo x=9 » inside a fence', '', '## inner heading', '```'],
   ['~~~~', 'x', '```', '~~~~~'],
+  ['<!-- a comment on one line -->'],
+  ['<!--', '- gizmo x=1 » inside a comment', '', '## inner heading', '-->'],
+  ['   <!-- indented, closed on the next line', 'more -->'],
 ]
 
 function randDoc(r: R, maxItems = 30): BoardDoc {
@@ -191,10 +212,12 @@ function randDoc(r: R, maxItems = 30): BoardDoc {
     gray: r.chance(0.3),
     smooth: r.chance(0.7),
     captions: r.chance(0.3),
-    grid: r.chance(0.6) ? 0 : num(r, 0, 10000, 2),
+    grid: r.chance(0.6) ? 0 : num(r, IL.grid.min, IL.grid.max, 2),
     items: items.map((it, i) => ({ ...it, id: i + 1 })),
     nextId: items.length + 1,
     extra,
+    // (`smooth` is a key of the view line: a token of that name is not unknown there.)
+    ...(r.chance(0.25) ? { viewUnknown: [r.pick(UNKNOWN_TOKENS.filter((t) => !t.startsWith('smooth')))] } : {}),
   }
 }
 
@@ -228,7 +251,7 @@ describe('round trip: random boards', () => {
       const back = parseBoard(text)
       // The only thing to say about a board it wrote is the extras it was given (unknown items are reported, remarks are not).
       expect(back.warnings.filter((w) => !/kept as written/.test(w)), `doc ${i}`).toEqual([])
-      if (d.extra.length === 0) expect(back.warnings, `doc ${i}`).toEqual([])
+      if (d.extra.length === 0 && d.viewUnknown === undefined && d.items.every((it) => it.unknown === undefined)) expect(back.warnings, `doc ${i}`).toEqual([])
       expect(back.doc, `doc ${i}`).toEqual(normalised(d))
       expect(serializeBoard(back.doc, text, LATER), `doc ${i}`).toBe(text)
       for (const it of d.items) {
@@ -308,9 +331,9 @@ describe('round trip: random boards', () => {
           expect(it.opacity).toBeLessThanOrEqual(1)
           expect(it.crop.l < it.crop.r && it.crop.t < it.crop.b).toBe(true)
           expect(it.rotation > -180 && it.rotation <= 180).toBe(true)
-          expect(it.caption.length).toBeLessThanOrEqual(4000)
+          expect(it.caption.length).toBeLessThanOrEqual(BOARD_LIMITS.noteCharsFile)
         }
-        if (it.kind === 'note') expect(it.text.length).toBeLessThanOrEqual(4000)
+        if (it.kind === 'note') expect(it.text.length).toBeLessThanOrEqual(BOARD_LIMITS.noteCharsFile)
       }
     }
   })
@@ -361,15 +384,26 @@ describe('round trip: random boards', () => {
       if (hasSection) {
         withSection++
         const heading = r.pick(['## Board', '## Board', '## Board ##', '   ## Board'])
-        const old = Array.from({ length: r.int(0, 4) }, () => r.pick(['- note x=1 y=1 w=300 size=18 color=ffffff fill= r=0 » old', 'remark', '', '- gizmo x=1', '- view zoom=3']))
+        const recognised = (l: string): boolean => l.startsWith('- note') || l.startsWith('- view')
+        const old = Array.from({ length: r.int(0, 5) }, () => r.pick(['- note x=1 y=1 w=300 size=18 color=ffffff fill= r=0 » old', 'remark', '', '- gizmo x=1', '- view zoom=3']))
         while (old.length > 0 && old[old.length - 1] === '') old.pop()
         const blanks = eol.repeat(r.int(0, 3))
         // The last line of the note has a break, unless nothing follows the section and we choose to leave it out.
         const finalBreak = below !== '' || blanks !== '' || r.chance(0.8)
-        const lines = [heading, ...old]
-        const sectionText = lines.map((l, k) => l + (k === lines.length - 1 && !finalBreak ? '' : eol)).join('')
-        raw = fm + above + sectionText + blanks + below
-        expected = above + heading + eol + (finalBreak ? region : region.slice(0, -eol.length)) + blanks + below
+        // The board is the heading to the last line it understands and the lines that touch it (no blank between); a blank line and what
+        // follows it is the user's, and stays exactly as it was. The lines of the span are written again from the doc.
+        const last = old.reduce((at, l, k) => (recognised(l) ? k + 1 : at), 0)
+        let end = last
+        if (last > 0) while (end < old.length && old[end] !== '') end++
+        const tail = old.slice(end)
+        const lineText = (l: string, k: number, all: string[]): string => l + (k === all.length - 1 && !finalBreak ? '' : eol)
+        const all = [heading, ...old]
+        raw = fm + above + all.map((l, k) => lineText(l, k, all)).join('') + blanks + below
+        const tailText = tail.map((l, k) => lineText(l, end + k + 1, all)).join('')
+        // A bare heading with text right under it gets a blank line before it, so the new view line does not run into it.
+        const apart = last === 0 && tail.length > 0 && tail[0] !== '' ? eol : ''
+        const spanEndsTheNote = tailText === '' && blanks === '' && below === '' && !finalBreak
+        expected = above + heading + eol + (spanEndsTheNote ? region.slice(0, -eol.length) : region) + apart + tailText + blanks + below
       } else {
         withoutSection++
         let body = above + below
@@ -452,7 +486,7 @@ describe('corruption: nothing that was not corrupted is lost', () => {
       const need = new Map<string, number>()
       for (const l of kept) need.set(l, (need.get(l) ?? 0) + 1)
       for (const [l, n] of need) {
-        expect(have.get(l) ?? 0, `board ${i} lost ${JSON.stringify(l.slice(0, 80))}`).toBeGreaterThanOrEqual(n)
+        expect(have.get(l) ?? 0, `board ${i} lost ${JSON.stringify(l.slice(0, 80))}\n${JSON.stringify(corrupted)}`).toBeGreaterThanOrEqual(n)
       }
       intactTotal += kept.length
     }
@@ -515,7 +549,7 @@ describe('corruption: nothing that was not corrupted is lost', () => {
       expect(out.length).toBeGreaterThan(0)
       expect(Date.now() - t0, name).toBeLessThan(4000)
     }
-  })
+  }, 30_000)
 })
 
 describe('text and paths against the real markdown parser', () => {
@@ -534,7 +568,7 @@ describe('text and paths against the real markdown parser', () => {
     for (let i = 0; i < 300; i++) {
       const items: BoardItem[] = []
       for (let k = 0; k < 4; k++) {
-        const text = randText(r, 25, false)
+        const text = randText(r, 25)
         items.push(
           r.chance(0.5)
             ? { id: k + 1, group: 0, locked: false, kind: 'note', text, x: 0, y: 0, w: 100, size: 18, rotation: 0, color: 'ffffff', fill: '' }
@@ -543,19 +577,22 @@ describe('text and paths against the real markdown parser', () => {
       }
       const doc: BoardDoc = { ...emptyBoard('Fuzz'), items, nextId: 5 }
       const raw = serializeBoard(doc, undefined, NOW)
-      const n = parseNote({ path: 'Boards/Fuzz.md', content: raw })
       const embeds = items.filter((it) => it.kind === 'picture').map((it) => (it.kind === 'picture' ? it.path : ''))
-      expect(n.links.map((l) => l.to), JSON.stringify(items)).toEqual(embeds)
-      expect(n.inlineTags).toEqual([])
-      expect(extractTasks(raw)).toEqual([])
-      const tree = parseMarkdown(n.body)
+      // Read as a board (its item lines never reach the markdown parser) and as a plain note (they all do): no link but the embeds, no tag, no task.
+      for (const content of [raw, plain(raw)]) {
+        const n = parseNote({ path: 'Boards/Fuzz.md', content })
+        expect(n.links.map((l) => l.to), JSON.stringify(items)).toEqual(embeds)
+        expect(n.inlineTags).toEqual([])
+        expect(extractTasks(content)).toEqual([])
+      }
+      const tree = parseMarkdown(bodyOf(raw))
       expect(tree.children.map((c) => c.type), JSON.stringify(items)).toEqual(['heading', 'paragraph', 'heading', 'list'])
       const list = tree.children[3]
       if (list?.type !== 'list') throw new Error('no list')
       expect(list.children).toHaveLength(5)
       for (const li of list.children) expect(li.children.map((c) => c.type)).toEqual(['paragraph'])
     }
-  })
+  }, 30_000)
 
   it('a path safeEmbedPath accepts comes back from the real parser as exactly that one embed (4,000 random paths)', () => {
     const r = new R(2026)
@@ -578,39 +615,45 @@ describe('text and paths against the real markdown parser', () => {
     expect(unsafe).toBeGreaterThan(800)
   })
 
-  it('in a whole board, the safe paths are the links in order, every other path is none, and all of them read back (200 boards of 20 pictures, no captions: see the last test)', () => {
+  it('in a whole board, every picture with a picture path is a link in order (the others none), the safe ones as the real parser reads them, and all of them read back (200 boards of 20 pictures)', () => {
     const r = new R(1)
     for (let i = 0; i < 200; i++) {
-      const paths = Array.from({ length: 20 }, () => (r.chance(0.5) ? randPath(r, false) : plainPath(r)))
+      const paths = Array.from({ length: 20 }, () => (r.chance(0.5) ? randPath(r) : plainPath(r)))
       const items: BoardItem[] = paths.map((path, k) => ({ id: k + 1, group: 0, locked: false, kind: 'picture', path, x: k, y: 0, w: 10, h: 10, rotation: 0, crop: { l: 0, t: 0, r: 1, b: 1 }, flipH: false, flipV: false, gray: false, opacity: 1, caption: '' }))
       const doc: BoardDoc = { ...emptyBoard('Paths'), items, nextId: 21 }
       const raw = serializeBoard(doc, undefined, NOW)
+      // The board's own reader: the `pic` lines give links too (their paths hold what a wikilink cannot).
       const n = parseNote({ path: 'Boards/Paths.md', content: raw })
-      expect(n.links.map((l) => l.to)).toEqual(paths.filter((p) => safeEmbedPath(p)))
+      expect(n.links.map((l) => l.to)).toEqual(paths.filter((p) => isMediaPath(p)))
+      expect(n.links.every((l) => l.kind === 'embed' && (l.literal === true) === !safeEmbedPath(l.to))).toBe(true)
       expect(n.inlineTags).toEqual([])
+      // The real markdown parser reads exactly the safe paths, as embeds.
+      const generic = parseNote({ path: 'Boards/Paths.md', content: plain(raw) })
+      expect(generic.links.map((l) => l.to)).toEqual(paths.filter((p) => safeEmbedPath(p)))
+      expect(generic.inlineTags).toEqual([])
       expect(parseBoard(raw).doc.items.map((it) => (it.kind === 'picture' ? it.path : null))).toEqual(paths)
     }
-  })
+  }, 30_000)
 })
 
-describe('a hole in parseNote that the board cannot close from its side', () => {
+describe('a hole in parseNote that used to be open: GFM\'s late autolinks cut a text node into pieces with no position', () => {
   /**
    * parseNote reads a bracket or a hash as escaped by looking at the source of its text node. GFM's autolink transform (mdast-util-
-   * gfm-autolink-literal) cuts a text node into new nodes that have no position when it links a web or e-mail address that the
-   * tokenizer did not (one that follows punctuation: `),www.a.b`), and from then on `[[x]]` and `#tag` in those pieces count as live
-   * although the source escapes them. No escape can help: the transform works on the decoded text. Plain notes and imported chats
-   * have the same hole. The fix belongs in markdown/parse.ts (do not trust the text of a node that has no position).
-   *
-   * `it.fails` passes while the hole is open and fails the day parseNote is fixed: then make it an ordinary `it`.
+   * gfm-autolink-literal) cut a text node into new nodes that have no position when it linked a web or e-mail address that the
+   * tokenizer did not (one that follows punctuation: `),www.a.b`), and from then on `[[x]]` and `#tag` in those pieces counted as live
+   * although the source escapes them. `remarkNoLateAutolinks` (markdown/wikilink.ts, used by parseMarkdown and the preview) closes it.
    */
-  it.fails('escaped [[x]] and #tag next to an address linked late stay inert', () => {
+  it('escaped [[x]] and #tag next to an address linked late stay inert', () => {
     const doc: BoardDoc = {
       ...emptyBoard('Hole'),
       items: [{ id: 1, group: 0, locked: false, kind: 'note', text: '[[Secret]] #tag ),www.a.example', x: 0, y: 0, w: 100, size: 18, rotation: 0, color: 'ffffff', fill: '' }],
       nextId: 2,
     }
-    const n = parseNote({ path: 'Boards/Hole.md', content: serializeBoard(doc, undefined, NOW) })
-    expect(n.links).toEqual([])
-    expect(n.inlineTags).toEqual([])
+    // As a board (the item lines are never given to the markdown parser) and as a plain note (they are).
+    for (const content of [serializeBoard(doc, undefined, NOW), plain(serializeBoard(doc, undefined, NOW))]) {
+      const n = parseNote({ path: 'Boards/Hole.md', content })
+      expect(n.links).toEqual([])
+      expect(n.inlineTags).toEqual([])
+    }
   })
 })

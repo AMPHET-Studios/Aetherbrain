@@ -131,6 +131,13 @@ const BUTTON_ICONS = {
       <circle cx="9" cy="9" r="2.2" />
     </>
   ),
+  more: (
+    <>
+      <circle cx="4" cy="9" r="1.2" fill="currentColor" />
+      <circle cx="9" cy="9" r="1.2" fill="currentColor" />
+      <circle cx="14" cy="9" r="1.2" fill="currentColor" />
+    </>
+  ),
 }
 
 export type ButtonIconName = keyof typeof BUTTON_ICONS

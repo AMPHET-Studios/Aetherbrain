@@ -30,6 +30,17 @@ export function cutText(text: string, max: number): string {
 }
 
 /**
+ * What a note's or a caption's text never keeps: control characters other than tab and the line breaks (a NUL makes git call the whole
+ * note binary), DEL, and a surrogate that has no partner (it would be written as U+FFFD).
+ */
+const UNWANTED = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]|[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g
+
+/** `text` without its control characters (tab and line breaks stay) and lone surrogates; the same string when there are none. */
+export function cleanText(text: string): string {
+  return text.replace(UNWANTED, '')
+}
+
+/**
  * Text as one inert line: `\` becomes `\\`, a line feed `\n`, a carriage return `\r`, and `\` goes before each of
  * `[ ] # < > | * _ ~ ! \``. What comes out holds no link, tag, task, table or HTML a markdown parser would read, and no line break.
  * `unescapeBoardText` is its exact inverse.

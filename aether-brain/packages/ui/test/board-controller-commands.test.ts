@@ -569,10 +569,9 @@ describe('arrange commands', () => {
     for (let i = 1; i < sorted.length; i++) expect(sorted[i]!.x - (sorted[i - 1]!.x + sorted[i - 1]!.w)).toBeCloseTo(16, 9)
   })
 
-  it('with fewer than two items selected they take every picture and note, and no mark', () => {
+  it('with nothing selected they take every picture and note, and no mark', () => {
     const { doc, id } = build((b) => b.pic('a', -300, 0, 100, 100).pic('b', 300, 200, 100, 100).note('n', 0, 400, 100, 'x').line('l', 0, 0, 50, 50))
     const r = new Rig(doc)
-    r.click(at(-300, 0))
     r.c.exec('arrange.row')
     const a = itemBounds(pic(r, id.a), M)
     const b = itemBounds(pic(r, id.b), M)

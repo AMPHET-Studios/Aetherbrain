@@ -21,6 +21,11 @@ import {
 export const SAVE_THROTTLE_MS = 1000
 /** A pan or zoom is remembered in localStorage this long after the last one (ms). */
 export const VIEW_PERSIST_MS = 300
+/**
+ * One-shot commands that follow each other this closely (a held arrow key, undo or opacity repeating) are one burst: the first is
+ * written at once, the rest ride the throttle above, and the last state always lands.
+ */
+export const FINAL_BURST_MS = 250
 /** A failed save is tried again after this long, doubling up to the second (ms). */
 export const RETRY_FIRST_MS = 5000
 export const RETRY_MAX_MS = 60_000
@@ -41,6 +46,13 @@ export const HINT_MS = 8000
 /** Pictures one file read-ahead holds at once while a drop is saved (bytes in flight, not the count of pictures). */
 export const DROP_CHUNK_BYTES = 64 * 1024 * 1024
 export const DROP_CHUNK_FILES = 8
+/**
+ * The most pixels a dropped or pasted picture may claim in its header: decoded it takes 4 bytes a pixel, and a few hundred KB of PNG
+ * can claim a whole gigabyte. Pictures already in the vault are held to the picture cache's own rule (imageLoader.ts).
+ */
+export const MAX_DROP_PIXELS = 150_000_000
+/** A batch of pictures this large or larger is brought into view when it landed off screen (the new items are selected). */
+export const FIT_BATCH_MIN = 4
 
 /* ------------------------------------------------------------------- timers --- */
 
@@ -62,8 +74,8 @@ export interface SaverOptions {
   timers: Timers
   /** Writes the board as it is now. Resolves when that is done (also when there was nothing to write); rejects when it failed. */
   run(): Promise<void>
-  /** A save failed. `first` is true when the attempt before it had not failed: the user is told once per run of failures. */
-  onError(err: unknown, first: boolean): void
+  /** A save failed. `first` is true when the attempt before it had not failed: the user is told once per run of failures. `failures` counts the run so far. */
+  onError(err: unknown, first: boolean, failures?: number): void
   /** The camera moved and nothing else did: remember it where it costs nothing (never the file). */
   persistView(): void
   /** The saver's status (dirty / running / failing) changed. */
@@ -95,6 +107,8 @@ export class Saver {
   /** A final change arrived while a write was running: write again as soon as it ends. */
   private again = false
   private current: Promise<void> | null = null
+  /** When the last finished change (a final one) was noted. */
+  private lastFinalAt: number | null = null
 
   constructor(opts: SaverOptions) {
     this.opts = opts
@@ -118,19 +132,37 @@ export class Saver {
     this.dirty = true
     if (wasClean) this.opts.onStatus()
     if (why.final) {
-      this.clear('timer')
-      this.clear('retryTimer')
-      void this.pump()
-    } else if (this.timer === null && !this.running && !this.failing) {
-      this.timer = t.set(() => {
+      const now = t.now()
+      // A held key repeats a one-shot command many times a second (a nudge, an undo): all but the first of such a burst ride the
+      // throttle like a drag does, and the wait is never moved, so the last state always lands.
+      const burst = this.lastFinalAt !== null && now - this.lastFinalAt < FINAL_BURST_MS
+      this.lastFinalAt = now
+      if (burst) {
+        this.armThrottle()
+      } else {
+        this.clear('timer')
+        this.clear('retryTimer')
+        void this.pump()
+      }
+    } else {
+      this.armThrottle()
+    }
+  }
+
+  private armThrottle(): void {
+    if (this.timer === null && !this.running && !this.failing) {
+      this.timer = this.opts.timers.set(() => {
         this.timer = null
         void this.pump()
       }, this.throttle)
     }
   }
 
-  /** Writes whatever is not written and resolves when it is on disk, or when the attempt failed. Never rejects. */
-  async flush(): Promise<void> {
+  /**
+   * Writes whatever is not written and resolves when it is on disk, or when the attempt failed. Never rejects. Resolves true only when
+   * nothing is left unsaved: a write that failed, or a board that changes faster than it is written, resolves false.
+   */
+  async flush(): Promise<boolean> {
     if (this.viewTimer !== null) {
       this.clear('viewTimer')
       this.opts.persistView()
@@ -142,6 +174,15 @@ export class Saver {
       await (this.running ? this.current : this.pump())
       if (this.failing) break
     }
+    return !this.dirty && !this.running && !this.failing
+  }
+
+  /** Tries again now a write that failed (what made it fail has been put right), instead of at the end of the wait. */
+  retryNow(): void {
+    if (!this.dirty) return
+    this.clear('timer')
+    this.clear('retryTimer')
+    void this.pump()
   }
 
   /** Resolves when no write is in flight. */
@@ -192,7 +233,7 @@ export class Saver {
           const first = !this.failing
           this.failing = true
           this.failures++
-          this.opts.onError(err, first)
+          this.opts.onError(err, first, this.failures)
           this.scheduleRetry()
           break
         }
@@ -224,7 +265,8 @@ export class Saver {
 
 export const VIEW_KEY_PREFIX = 'aether.board.view:'
 
-type StorageLike = Pick<Storage, 'getItem' | 'setItem'>
+/** The browser's storage as the board uses it (`removeItem` may be missing from a stand-in). */
+export type StorageLike = Pick<Storage, 'getItem' | 'setItem'> & Partial<Pick<Storage, 'removeItem'>>
 
 /** The camera remembered for the board at `path`, or null (nothing stored, bad JSON, numbers that are no camera, storage refusing). */
 export function readStoredView(storage: StorageLike | null, path: string): BoardView | null {
@@ -253,6 +295,57 @@ export function writeStoredView(storage: StorageLike | null, path: string, view:
     return true
   } catch {
     return false
+  }
+}
+
+/* --------------------------------------------------------- the copy of an unsaved board --- */
+
+export const RECOVERY_KEY_PREFIX = 'aether.board.unsaved:'
+/** A board text longer than this is not kept (the browser's storage holds a few million characters in all). */
+export const RECOVERY_MAX_CHARS = 1_200_000
+
+export interface Recovery {
+  /** The whole note as the board would have written it. */
+  text: string
+  /** When the save failed (ms since 1970). */
+  at: number
+}
+
+/** Keeps the text of a board that could not be saved, for this board's path; replaces the one before. False when it could not be kept. */
+export function writeRecovery(storage: StorageLike | null, path: string, text: string, at: number): boolean {
+  if (!storage || text.length > RECOVERY_MAX_CHARS) return false
+  try {
+    storage.setItem(RECOVERY_KEY_PREFIX + path, JSON.stringify({ text, at }))
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** The copy kept for this board, or null (nothing kept, broken JSON, storage refusing). */
+export function readRecovery(storage: StorageLike | null, path: string): Recovery | null {
+  if (!storage) return null
+  try {
+    const raw = storage.getItem(RECOVERY_KEY_PREFIX + path)
+    if (!raw) return null
+    const v = JSON.parse(raw) as unknown
+    if (!v || typeof v !== 'object') return null
+    const { text, at } = v as Record<string, unknown>
+    if (typeof text !== 'string' || text === '' || typeof at !== 'number' || !Number.isFinite(at)) return null
+    return { text, at }
+  } catch {
+    return null
+  }
+}
+
+/** Forgets the copy kept for this board (a save went through, or it was taken back). */
+export function clearRecovery(storage: StorageLike | null, path: string): void {
+  if (!storage) return
+  try {
+    if (typeof storage.removeItem === 'function') storage.removeItem(RECOVERY_KEY_PREFIX + path)
+    else storage.setItem(RECOVERY_KEY_PREFIX + path, '')
+  } catch {
+    /* a storage that will not forget keeps a copy the next load compares with the note, and finds nothing to recover */
   }
 }
 
@@ -330,7 +423,20 @@ export const MESSAGES = {
   noNetwork:
     'The app makes no network requests, so it cannot fetch a picture from a web address. Save or copy the picture, then drop or paste it here.',
   nothing: 'There was nothing on the clipboard that a board can take.',
+  staleCopy: 'Those board items could not be read back from the clipboard. Copy them again.',
 } as const
+
+/** What the Paste menu entry says when the board holds nothing of its own to paste: a picture or text on the system clipboard is Ctrl V's. */
+export function pasteHint(mac: boolean): string {
+  return `Nothing copied on the board to paste. To paste a picture or text from the system clipboard, press ${mac ? '⌘' : 'Ctrl'} V.`
+}
+
+export function tooLargeMessage(files: readonly Pick<FileLike, 'name'>[]): string {
+  const mp = Math.round(MAX_DROP_PIXELS / 1_000_000)
+  return files.length === 1
+    ? `${files[0]!.name} is over ${mp} megapixels, so it was left out: a picture that large takes gigabytes of memory to show.`
+    : `${files.length} pictures are over ${mp} megapixels and were left out: pictures that large take gigabytes of memory to show.`
+}
 
 export function tooBigMessage(files: readonly Pick<FileLike, 'name'>[]): string {
   const mb = Math.round(MAX_FILE_BYTES / 1024 / 1024)
@@ -409,6 +515,21 @@ export function toolHint(state: { tool: string; cropping: number | null; selecti
       if (itemCount === 0) return `Drop pictures here, paste with ${mac ? '⌘' : 'Ctrl'} V, or add pictures`
       return state.selection.length > 0 ? 'Drag to move · corners scale · the knob above rotates' : 'Click to select · drag for a box · Space + drag pans'
   }
+}
+
+/** A count of characters as the status bar writes it: "812", "9.4k", "123k". */
+export function formatChars(n: number): string {
+  if (!(n > 0) || !Number.isFinite(n)) return '0'
+  if (n < 1000) return String(Math.round(n))
+  if (n < 10_000) return `${(n / 1000).toFixed(1)}k`
+  return `${Math.round(n / 1000)}k`
+}
+
+/** How full the board is against its character budget: 'ok', 'warn' from 90 percent, 'full' at the budget. */
+export function budgetTone(chars: number, limit: number): 'ok' | 'warn' | 'full' {
+  if (!(limit > 0)) return 'ok'
+  if (chars >= limit) return 'full'
+  return chars >= limit * 0.9 ? 'warn' : 'ok'
 }
 
 /** The zoom as the status bar writes it: "100%", "12.5%", "6400%". */

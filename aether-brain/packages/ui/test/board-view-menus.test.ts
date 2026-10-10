@@ -77,7 +77,8 @@ describe('the board menus', () => {
     const get = (id: string) => e.find((x) => x.id === id)!
     expect(get('edit.undo').disabled).toBe(true)
     expect(get('edit.redo').disabled).toBe(true)
-    expect(get('edit.paste').disabled).toBe(true)
+    // Paste is always offered: with nothing copied on the board it says how to paste from the system clipboard.
+    expect(get('edit.paste').disabled).toBe(false)
     expect(get('edit.delete').disabled).toBe(true)
     expect(get('edit.selectAll').disabled).toBe(false)
     expect(get('picture.info').disabled).toBe(true)
@@ -146,7 +147,7 @@ describe('the context menu', () => {
       'view.fitAll',
     ])
     expect((entries[0] as { disabled: boolean }).disabled).toBe(false)
-    expect((contextMenu(full({ selected: 0, canPaste: false }), 'canvas')[0] as { disabled: boolean }).disabled).toBe(true)
+    expect((contextMenu(full({ selected: 0, canPaste: false }), 'canvas')[0] as { disabled: boolean }).disabled).toBe(false)
   })
 
   it('on a picture: copy, duplicate, delete, group, lock, order, flip, rotate, grey, crop, and what the host can do with the file', () => {
@@ -181,7 +182,9 @@ describe('the context menu', () => {
     const ids = commands(note).map((e) => e.id)
     expect(ids).not.toContain('picture.open')
     expect(ids).not.toContain('tool.crop')
-    expect(note.some((e) => e.kind === 'action' && e.action === 'edit-note')).toBe(true)
-    expect(contextMenu(full({ selected: 2, pictures: 0 }), 'item', false).some((e) => e.kind === 'action')).toBe(false)
+    // Editing the text is a command of the table now (F2, Enter), so the menu shows its key.
+    expect(note.find((e) => e.kind === 'command' && e.id === 'note.edit')).toMatchObject({ label: 'Edit text', keys: 'F2' })
+    expect(ids).toContain('note.edit')
+    expect(contextMenu(full({ selected: 2, pictures: 0 }), 'item', false).some((e) => e.kind === 'command' && e.id === 'note.edit')).toBe(false)
   })
 })

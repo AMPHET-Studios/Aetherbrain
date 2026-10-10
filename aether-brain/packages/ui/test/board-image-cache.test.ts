@@ -118,10 +118,13 @@ describe('pickTier', () => {
     [1, 256],
     [255.9, 256],
     [256, 256],
-    [256.5, 1024],
+    // A quarter beyond a tier is still served by it: the next tier is 4 to 8 times as long.
+    [320, 256],
+    [320.5, 1024],
     [1000, 1024],
     [1024, 1024],
-    [1024.5, 8192],
+    [1280, 1024],
+    [1280.5, 8192],
     [4000, 8192],
     [8192, 8192],
     [100000, 8192],
@@ -136,8 +139,10 @@ describe('pickTier', () => {
     expect(pickTier(5000, { w: 256, h: 256 })).toBe(256)
     expect(pickTier(5000, { w: 600, h: 400 })).toBe(1024)
     expect(pickTier(5000, { w: 1024, h: 10 })).toBe(1024)
-    // Over 1024 px the preview is a scaled-down copy: zoomed in, the picture itself is the only sharper version.
+    // Over 1024 px the preview is a scaled-down copy: zoomed in, the picture itself is the only sharper version (the slack is for
+    // what is asked, not for what the picture has: a 300 px picture is not made into a 256 px preview).
     expect(pickTier(5000, { w: 1025, h: 10 })).toBe(8192)
+    expect(pickTier(5000, { w: 300, h: 10 })).toBe(1024)
     expect(pickTier(5000, { w: 3000, h: 2000 })).toBe(8192)
     expect(pickTier(5000, { w: 20000, h: 100 })).toBe(8192)
     // The longer side counts, whichever it is.
@@ -162,8 +167,8 @@ describe('pickTier', () => {
       const tb = pickTier(b, natural)
       expect(IMAGE_TIERS).toContain(ta)
       expect(ta).toBeLessThanOrEqual(tb)
-      // Big enough for what is asked, or for the whole picture, or the biggest there is.
-      const need = Math.min(a || 1, natural ? Math.max(natural.w, natural.h) : Infinity, 8192)
+      // Big enough for what is asked (a quarter short is enough), or for the whole picture, or the biggest there is.
+      const need = Math.min((a || 1) / 1.25, natural ? Math.max(natural.w, natural.h) : Infinity, 8192)
       expect(ta).toBeGreaterThanOrEqual(need)
       // Never a bigger one than that need allows: the next tier down would not do.
       const below = IMAGE_TIERS[IMAGE_TIERS.indexOf(ta) - 1]
@@ -175,13 +180,13 @@ describe('pickTier', () => {
 describe('ImageCache: what get answers, and which tier it loads', () => {
   it('loads the wanted tier of a visible picture, in a microtask, and nothing for a picture that is not visible', async () => {
     const t = rig()
-    expect(t.cache.get('a.png', 300)).toEqual({ bitmap: null, natural: null, failed: false })
+    expect(t.cache.get('a.png', 400)).toEqual({ bitmap: null, natural: null, failed: false })
     await settle()
     expect(t.jobs).toHaveLength(0)
     expect(t.cache.stats()).toEqual({ pixels: 0, bitmaps: 0, loading: 0, queued: 0, failed: 0 })
 
     t.cache.setVisible(['a.png'])
-    expect(t.cache.get('a.png', 300)).toEqual({ bitmap: null, natural: null, failed: false })
+    expect(t.cache.get('a.png', 400)).toEqual({ bitmap: null, natural: null, failed: false })
     // get never waits for anything, nor calls the loader itself.
     expect(t.jobs).toHaveLength(0)
     expect(t.cache.stats().queued).toBe(1)
@@ -191,7 +196,7 @@ describe('ImageCache: what get answers, and which tier it loads', () => {
 
     const b = t.only().give(300, 200)
     await settle()
-    expect(t.cache.get('a.png', 300).bitmap).toBe(b)
+    expect(t.cache.get('a.png', 400).bitmap).toBe(b)
     expect(t.loaded).toBe(1)
     expect(t.cache.stats()).toEqual({ pixels: 60000, bitmaps: 1, loading: 0, queued: 0, failed: 0 })
   })
@@ -218,6 +223,7 @@ describe('ImageCache: what get answers, and which tier it loads', () => {
     const small = t.only().give(256, 192, BIG)
     await settle()
     expect(t.drawn('a', 100)).toBe(small)
+    await settle() // the next frame
 
     // Zoomed in: the 256 still draws (the biggest smaller one) while the 1024 comes.
     expect(t.drawn('a', 900)).toBe(small)
@@ -230,6 +236,7 @@ describe('ImageCache: what get answers, and which tier it loads', () => {
     expect(mid.closed).toBe(0)
     expect(t.drawn('a', 900)).toBe(mid)
     expect(t.cache.stats()).toMatchObject({ bitmaps: 1, pixels: 1024 * 768 })
+    await settle() // the next frame
 
     // Zoomed out again: the 1024 is big enough, so it draws at once; the 256 is asked for and, once there, draws instead.
     expect(t.drawn('a', 100)).toBe(mid)
@@ -247,19 +254,19 @@ describe('ImageCache: what get answers, and which tier it loads', () => {
     const t = rig()
     t.cache.setVisible(['a'])
     for (let frame = 0; frame < 3; frame++) {
-      t.cache.get('a', 300)
-      t.cache.get('a', 300)
+      t.cache.get('a', 600)
+      t.cache.get('a', 600)
       await settle()
     }
     expect(t.jobs).toHaveLength(1)
-    t.only().give(300, 300, BIG)
+    t.only().give(600, 600, BIG)
     await settle()
     for (let frame = 0; frame < 3; frame++) {
-      t.cache.get('a', 300)
+      t.cache.get('a', 600)
       t.cache.get('a', 1000)
       await settle()
     }
-    // 1000 px is the same tier as 300 px.
+    // 1000 px is the same tier as 600 px.
     expect(t.jobs).toHaveLength(1)
   })
 })
@@ -467,8 +474,9 @@ describe('ImageCache: loading', () => {
     t.cache.setVisible(['x', 'a', 'b'])
     t.cache.get('x', 100)
     await settle()
-    t.cache.get('a', 300)
+    t.cache.get('a', 400)
     t.cache.get('b', 2000)
+    await settle() // the next frame
     // Later frames: b shrinks, a grows past it and now wants the picture itself.
     t.cache.get('a', 5000)
     t.cache.get('b', 400)
@@ -588,7 +596,7 @@ describe('ImageCache: failures', () => {
     await settle()
     t.only().none()
     await settle()
-    expect(t.cache.get('a', 100)).toEqual({ bitmap: null, natural: null, failed: true })
+    expect(t.cache.get('a', 100)).toEqual({ bitmap: null, natural: null, failed: true, reason: 'unreadable' })
     expect(t.cache.stats()).toMatchObject({ failed: 1, loading: 0 })
     expect(t.loaded).toBe(1)
 
@@ -800,6 +808,7 @@ describe('ImageCache: failures', () => {
     await settle()
     expect(t.cache.get('a', 5000)).toMatchObject({ bitmap: preview, failed: false })
     expect(t.cache.stats().failed).toBe(0)
+    await settle() // the next frame
     // A failure of one tier does not stop the others.
     t.cache.get('a', 100)
     await settle()
@@ -947,91 +956,100 @@ describe('ImageCache: the budget', () => {
     expect([a2!.closed, b2!.closed, c2!.closed]).toEqual([0, 1, 0])
   })
 
+  // Bitmaps of the sizes the tiers have (a 4:3 picture): the budgets below are made of them.
+  const S = 256 * 192
+  const M = 1024 * 768
+
   it('takes a picture that is off screen before the spare bitmap of one that is on, however recently it was used', async () => {
-    const t = rig({ budgetPixels: 450 })
+    const t = rig({ budgetPixels: M + 1.5 * S })
     t.cache.setVisible(['n'])
     t.cache.get('n', 100)
     await settle()
-    const n = t.only().give(10, 10, BIG)
+    const n = t.only().give(256, 192, BIG)
     await settle()
     t.cache.setVisible(['v'])
     t.cache.get('v', 900)
     await settle()
-    const big = t.only().give(300, 1, BIG) // v's 1024 tier: 300 px
+    const big = t.only().give(1024, 768, BIG) // v's 1024 tier
     await settle()
     // Zoomed out: v wants the 256 tier, the 1024 one is a spare.
     t.cache.get('v', 100)
     await settle()
     // n is touched after v's last get, so by recency alone v's spare would go first.
     t.cache.get('n', 100)
-    const small = t.only().give(10, 10, BIG)
+    const small = t.only().give(256, 192, BIG)
     await settle()
     expect(t.drawn('v', 100)).toBe(small)
     expect([n.closed, big.closed, small.closed]).toEqual([1, 0, 0])
-    expect(t.cache.stats().pixels).toBe(400)
+    expect(t.cache.stats().pixels).toBe(M + S)
   })
 
   it('takes the spare bitmap of a picture on screen before the one it draws with, and never the one it draws with', async () => {
-    const t = rig({ budgetPixels: 150 })
+    const t = rig({ budgetPixels: M + S / 2 })
     t.cache.setVisible(['v'])
     t.cache.get('v', 900)
     await settle()
-    const big = t.only().give(300, 1, BIG)
+    const big = t.only().give(1024, 768, BIG)
     await settle()
-    // Alone, it is over the budget and stays: it is what is drawn.
-    expect([big.closed, t.cache.stats().pixels]).toEqual([0, 300])
+    // Alone, it fits and is what is drawn.
+    expect([big.closed, t.cache.stats().pixels]).toEqual([0, M])
+    await settle()
     t.cache.get('v', 100)
     await settle()
-    const small = t.only().give(10, 10, BIG)
+    // The 256 tier is wanted now. Until it is there the big one is what is drawn, and it stays.
+    expect(t.drawn('v', 100)).toBe(big)
+    const small = t.only().give(256, 192, BIG)
     await settle()
-    expect(t.cache.stats().pixels).toBe(100)
+    expect(t.cache.stats().pixels).toBe(S)
     expect([big.closed, small.closed]).toEqual([1, 0])
     expect(t.drawn('v', 100)).toBe(small)
   })
 
   it('keeps the bitmap that is best for the size wanted, and drops the spare one, whichever is bigger', async () => {
-    const t = rig({ budgetPixels: 450 })
+    const t = rig({ budgetPixels: M + 1.5 * S })
     t.cache.setVisible(['v'])
     t.cache.get('v', 900)
     await settle()
-    const big = t.only().give(300, 1, BIG) // the 1024 tier, 300 px
+    const big = t.only().give(1024, 768, BIG) // the 1024 tier
     await settle()
     t.cache.get('v', 100)
     await settle()
-    const small = t.only().give(10, 10, BIG) // the 256 tier, 100 px: both fit (400)
+    const small = t.only().give(256, 192, BIG) // the 256 tier: both fit
     await settle()
     expect([big.closed, small.closed]).toEqual([0, 0])
     // Zoomed in again: the big one is what v draws with, the small one is the spare.
     expect(t.drawn('v', 900)).toBe(big)
+    await settle()
     t.cache.setVisible(['v', 'w'])
+    t.cache.get('v', 900)
     t.cache.get('w', 100)
     await settle()
-    const w = t.only().give(10, 10, BIG) // 500 px in all, 50 over
+    const w = t.only().give(256, 192, BIG) // M + 2 S in all, half an S over
     await settle()
     expect([big.closed, small.closed, w.closed]).toEqual([0, 1, 0])
     expect(t.drawn('v', 900)).toBe(big)
   })
 
   it('evicts a picture\'s biggest bitmap first', async () => {
-    const t = rig({ budgetPixels: 400 })
+    const t = rig({ budgetPixels: M + 1.5 * S })
     t.cache.setVisible(['n'])
     t.cache.get('n', 900)
     await settle()
-    const big = t.only().give(260, 1, BIG) // 260 px, the 1024 tier
+    const big = t.only().give(1024, 768, BIG) // the 1024 tier
     await settle()
     t.cache.get('n', 100)
     await settle()
-    const small = t.only().give(10, 10, BIG) // 100 px, the 256 tier
+    const small = t.only().give(256, 192, BIG) // the 256 tier
     await settle()
-    expect([big.closed, small.closed]).toEqual([0, 0]) // 360: within the budget, both kept
-    // n leaves and m arrives: 460 px, 60 over. Dropping the 260 px one fixes it; dropping the 100 px one would not.
+    expect([big.closed, small.closed]).toEqual([0, 0]) // M + S: within the budget, both kept
+    // n leaves and m arrives: M + 2 S, half an S over. Dropping the big one fixes it; dropping the small one would not.
     t.cache.setVisible(['m'])
     t.cache.get('m', 100)
     await settle()
-    const m = t.only().give(10, 10, BIG)
+    const m = t.only().give(256, 192, BIG)
     await settle()
     expect([big.closed, small.closed, m.closed]).toEqual([1, 0, 0])
-    expect(t.cache.stats().pixels).toBe(200)
+    expect(t.cache.stats().pixels).toBe(2 * S)
   })
 
   it('lets a visible picture\'s only bitmap stand over the budget, and closes it as soon as the picture leaves', async () => {

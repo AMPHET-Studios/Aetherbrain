@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { itemBounds } from '../src/board/geometry'
 import {
+  BOARD_ITEM_LIMITS,
   clampDoc,
   duplicateItems,
   expandGroups,
@@ -528,8 +529,8 @@ describe('clampDoc', () => {
     expect(out.items[2]).toMatchObject({ w: 256, h: 256, opacity: 0.05, rotation: 0, crop: { l: 0, t: 0, r: 1, b: 1 } })
     expect(out.items[3]).toMatchObject({ w: 16, size: 2, rotation: 180 })
     expect(out.items[4]).toMatchObject({ w: BOARD_LIMITS.pictureMax, size: 2000 })
-    expect(out.items[5]).toMatchObject({ width: 0.1 })
-    expect(out.items[6]).toMatchObject({ width: 1000 })
+    expect(out.items[5]).toMatchObject({ width: BOARD_ITEM_LIMITS.markWidth.min })
+    expect(out.items[6]).toMatchObject({ width: BOARD_ITEM_LIMITS.markWidth.max })
     expect(out.items[7]).toMatchObject({ width: 2 })
   })
   it('keeps the proportions of a picture it has to shrink', () => {
@@ -537,17 +538,22 @@ describe('clampDoc', () => {
     expect(out.items[0]).toMatchObject({ w: 40000, h: 10000 })
   })
   it('cleans colours and cuts texts', () => {
-    const out = clampDoc(docOf(note(1, { color: '#ABCDEF', fill: 'oops', text: 'z'.repeat(5000) }), line(2, 0, 0, 1, 1, { color: 'red' }), pic(3, { caption: 'c'.repeat(5000) })))
+    const out = clampDoc(docOf(note(1, { color: '#ABCDEF', fill: 'oops', text: 'z'.repeat(BOARD_LIMITS.noteCharsFile + 50) }), line(2, 0, 0, 1, 1, { color: 'red' }), pic(3, { caption: 'c'.repeat(BOARD_LIMITS.noteCharsFile + 50) })))
     expect(out.items[0]).toMatchObject({ color: 'abcdef', fill: '' })
-    expect((out.items[0] as NoteItem).text.length).toBe(BOARD_LIMITS.noteChars)
+    // Texts are cut at what a file may hold; the 4,000 are what a user can make (a longer one that came from a file is not cut by an edit).
+    expect((out.items[0] as NoteItem).text.length).toBe(BOARD_LIMITS.noteCharsFile)
     expect(out.items[1]).toMatchObject({ color: 'ffffff' })
-    expect((out.items[2] as PictureItem).caption.length).toBe(BOARD_LIMITS.noteChars)
+    expect((out.items[2] as PictureItem).caption.length).toBe(BOARD_LIMITS.noteCharsFile)
+    expect((clampDoc(docOf(note(1, { text: 'z'.repeat(5000) }))).items[0] as NoteItem).text.length).toBe(5000)
   })
   it('drops a stroke with no point, cuts a stroke past the limit, and keeps the others', () => {
-    const long = stroke(2, Array.from({ length: 2 * (BOARD_LIMITS.strokePoints + 50) }, (_, i) => i))
+    const long = stroke(2, Array.from({ length: 2 * (BOARD_LIMITS.strokePointsFile + 50) }, (_, i) => i))
     const out = clampDoc(docOf(stroke(1, []), long, pic(3), stroke(4, [5])))
     expect(idsOf(out)).toEqual([2, 3])
-    expect((out.items[0] as StrokeItem).points.length).toBe(2 * BOARD_LIMITS.strokePoints)
+    expect((out.items[0] as StrokeItem).points.length).toBe(2 * BOARD_LIMITS.strokePointsFile)
+    // A stroke past what a user can draw but inside what a file holds keeps its points.
+    const drawn = stroke(2, Array.from({ length: 2 * (BOARD_LIMITS.strokePoints + 50) }, (_, i) => i))
+    expect((clampDoc(docOf(drawn)).items[0] as StrokeItem).points.length).toBe(2 * (BOARD_LIMITS.strokePoints + 50))
   })
   it('makes the view, background, flags, grid and next id valid', () => {
     const doc: BoardDoc = {
@@ -563,7 +569,7 @@ describe('clampDoc', () => {
     expect(out.grid).toBe(0)
     expect(out.nextId).toBe(10)
     expect(clampDoc({ ...doc, grid: NaN }).grid).toBe(0)
-    expect(clampDoc({ ...doc, grid: 1e9 }).grid).toBe(BOARD_LIMITS.pictureMax)
+    expect(clampDoc({ ...doc, grid: 1e9 }).grid).toBe(BOARD_ITEM_LIMITS.grid.max)
     expect(clampDoc({ ...docOf(), nextId: NaN }).nextId).toBe(1)
   })
   it('numbers a group that is not a whole number as no group, and a locked flag that is not a boolean as unlocked', () => {

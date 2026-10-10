@@ -76,3 +76,43 @@ export function isTypingTarget(target: EventTarget | null): boolean {
   const tag = el.tagName
   return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable === true
 }
+
+/** The selector of an overlay that holds the keyboard while it is open: a dialog that says it is modal (the picture info card is not). */
+export const MODAL_SELECTOR = '[data-board-overlay][role="dialog"][aria-modal="true"]'
+
+const FOCUSABLE = 'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex="0"]'
+
+/** Where the focus goes when it is sent into a modal: the element that asks for it (`data-board-focus`), else the dialog itself. */
+export function focusInto(modal: HTMLElement): void {
+  const target = modal.querySelector<HTMLElement>('[data-board-focus]') ?? modal
+  target.focus({ preventScroll: true })
+}
+
+/**
+ * Keeps Tab inside a dialog: from its last control it goes round to its first, and Shift Tab the other way. Without it the focus
+ * walks out of a picker or a panel onto the toolbar buttons behind it.
+ */
+export function trapTab(e: { key: string; shiftKey: boolean; preventDefault(): void }, dialog: HTMLElement | null): void {
+  if (e.key !== 'Tab' || !dialog) return
+  const controls = [...dialog.querySelectorAll<HTMLElement>(FOCUSABLE)].filter((el) => el.getClientRects().length > 0)
+  const first = controls[0]
+  const last = controls[controls.length - 1]
+  if (!first || !last) {
+    e.preventDefault()
+    dialog.focus({ preventScroll: true })
+    return
+  }
+  const active = document.activeElement
+  if (e.shiftKey && (active === first || active === dialog)) {
+    e.preventDefault()
+    last.focus({ preventScroll: true })
+  } else if (!e.shiftKey && (active === last || active === dialog)) {
+    e.preventDefault()
+    first.focus({ preventScroll: true })
+  }
+}
+
+/** Whether a key event belongs to an input method that is composing text (Esc and Enter then belong to the composition). */
+export function isComposing(e: { nativeEvent?: { isComposing?: boolean }; isComposing?: boolean; key: string; keyCode?: number }): boolean {
+  return e.nativeEvent?.isComposing === true || e.isComposing === true || e.key === 'Process' || e.keyCode === 229
+}

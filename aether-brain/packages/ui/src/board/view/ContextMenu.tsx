@@ -53,9 +53,6 @@ export function ContextMenu({
           else if (e.action === 'add-note-here') {
             session.commitEditing()
             session.controller.addNoteAt(at.board)
-          } else if (e.action === 'edit-note' && single?.kind === 'note') {
-            session.commitEditing()
-            session.controller.editNote(single.id)
           }
         }}
       />

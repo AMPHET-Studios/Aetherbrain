@@ -443,7 +443,7 @@ describe('scaleItems', () => {
     expect(scaleItems(doc, [], 2, { x: 0, y: 0 })).toBe(doc)
   })
   it('keeps a mark\'s line width above its minimum without touching its shape', () => {
-    const doc = docOf(stroke(1, [0, 0, 100, 100], { width: 0.2 }))
+    const doc = docOf(stroke(1, [0, 0, 100, 100], { width: 0.006 }))
     const s = byId(scaleItems(doc, [1], 0.5, { x: 0, y: 0 }), 1) as StrokeItem
     expect(s.points).toEqual([0, 0, 50, 50])
     expect(s.width).toBe(BOARD_ITEM_LIMITS.markWidth.min)

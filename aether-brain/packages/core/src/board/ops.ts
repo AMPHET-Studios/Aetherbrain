@@ -8,7 +8,7 @@
  * Where a picture's or note's size is needed (a flip about the selection's centre, which item overlaps which) the functions take the
  * text metrics last, defaulting to the estimate.
  */
-import { estimateTextMetrics } from './text'
+import { cleanText, cutText, estimateTextMetrics } from './text'
 import { clampView, itemBounds, itemsBounds, noteBox, normalizeAngle, rotatePoint } from './geometry'
 import {
   BOARD_LIMITS,
@@ -27,17 +27,25 @@ import {
   type Vec2,
 } from './types'
 
-/** What the operations keep item properties within (the inspector and the drag handles use the same numbers). */
+/**
+ * What the operations keep item properties within (the inspector and the drag handles use the same numbers), and what the markdown
+ * format (format.ts) clamps to when it reads and writes: ONE table, so a value that is valid in memory is never changed by a save.
+ */
 export const BOARD_ITEM_LIMITS = {
   /** A note's font size, board units. */
   noteSize: { min: 2, max: 2000 },
   /** A note's width, board units. */
   noteWidth: { min: 16, max: BOARD_LIMITS.pictureMax },
-  /** A mark's line width, board units. */
-  markWidth: { min: 0.1, max: 1000 },
+  /**
+   * A mark's line width, board units. A line is as thick on the screen as its style says whatever the zoom, so the range is what a pen of
+   * about half a pixel to 200 pixels needs between the zoom limits (0.5 / 64 up to 200 / 0.005).
+   */
+  markWidth: { min: 0.005, max: 40_000 },
   opacity: { min: 0.05, max: 1 },
   /** The least a crop may leave of a picture's width or height (a fraction). */
   cropMin: 0.02,
+  /** The snap grid, board units (0: none). */
+  grid: { min: 0, max: 10_000 },
 } as const
 
 const NOTE_DEFAULTS = { w: 240, size: 18 }
@@ -110,8 +118,9 @@ function validCrop(c: Crop): Crop | null {
   return next.r - next.l >= min && next.b - next.t >= min ? next : null
 }
 
-function cleanPoints(points: readonly number[]): number[] {
-  const n = Math.min(points.length >> 1, BOARD_LIMITS.strokePoints)
+/** The points with every coordinate finite and in range, at most `cap` of them (a file may hold more than a user can draw). */
+function cleanPoints(points: readonly number[], cap: number = BOARD_LIMITS.strokePointsFile): number[] {
+  const n = Math.min(points.length >> 1, cap)
   const out: number[] = new Array(n * 2)
   for (let i = 0; i < n; i++) {
     // A coordinate gone bad takes the previous point's, so the stroke keeps its shape and its length.
@@ -123,6 +132,11 @@ function cleanPoints(points: readonly number[]): number[] {
 
 function markWidth(v: number): number {
   return clampTo(fin(v, 2), BOARD_ITEM_LIMITS.markWidth.min, BOARD_ITEM_LIMITS.markWidth.max)
+}
+
+/** A note's or caption's text as it is kept: no control characters, cut to what a file may hold. */
+function keptText(s: unknown): string {
+  return typeof s === 'string' ? cutText(cleanText(s), BOARD_LIMITS.noteCharsFile) : ''
 }
 
 /** The item with every number inside its range, colours as 6 hex digits, text cut to its limit. The same object when it already is. */
@@ -146,7 +160,7 @@ function sanitizeItem(item: BoardItem): BoardItem {
         flipV: item.flipV === true,
         gray: item.gray === true,
         opacity: clampTo(fin(item.opacity, 1), BOARD_ITEM_LIMITS.opacity.min, BOARD_ITEM_LIMITS.opacity.max),
-        caption: typeof item.caption === 'string' ? item.caption.slice(0, BOARD_LIMITS.noteChars) : '',
+        caption: keptText(item.caption),
       })
     }
     case 'note':
@@ -159,7 +173,7 @@ function sanitizeItem(item: BoardItem): BoardItem {
         w: clampTo(fin(item.w, NOTE_DEFAULTS.w), BOARD_ITEM_LIMITS.noteWidth.min, BOARD_ITEM_LIMITS.noteWidth.max),
         size: clampTo(fin(item.size, NOTE_DEFAULTS.size), BOARD_ITEM_LIMITS.noteSize.min, BOARD_ITEM_LIMITS.noteSize.max),
         rotation: normalizeAngle(item.rotation),
-        text: typeof item.text === 'string' ? item.text.slice(0, BOARD_LIMITS.noteChars) : '',
+        text: keptText(item.text),
         color: hex6(item.color) ?? FALLBACK_COLOUR,
         fill: item.fill === '' ? '' : (hex6(item.fill) ?? ''),
       })
@@ -285,8 +299,38 @@ function mapPoints(item: BoardItem, fn: (p: Vec2) => Vec2): BoardItem {
   }
 }
 
+/** `o` moved by `d`, never past the coordinate range when it started inside it (a sum can overshoot the limit by one ulp). */
+function nudge(o: number, d: number): number {
+  const n = o + d
+  return n > L && o <= L ? L : n < -L && o >= -L ? -L : n
+}
+
 function translate(item: BoardItem, dx: number, dy: number): BoardItem {
-  return mapPoints(item, (p) => ({ x: p.x + dx, y: p.y + dy }))
+  return mapPoints(item, (p) => ({ x: nudge(p.x, dx), y: nudge(p.y, dy) }))
+}
+
+/**
+ * The move (dx, dy) held back so that no coordinate of `sel` goes past the coordinate range in the direction it travels (one offset for
+ * the whole selection, so its shape is kept). Items already outside are not pulled in.
+ */
+function limitedMove(sel: readonly BoardItem[], dx: number, dy: number): Vec2 {
+  let x0 = Infinity
+  let x1 = -Infinity
+  let y0 = Infinity
+  let y1 = -Infinity
+  for (const it of sel) {
+    eachCoordinate(it, (x, y) => {
+      if (x < x0) x0 = x
+      if (x > x1) x1 = x
+      if (y < y0) y0 = y
+      if (y > y1) y1 = y
+    })
+  }
+  if (x0 > x1) return { x: dx, y: dy }
+  return {
+    x: dx > 0 ? Math.min(dx, Math.max(0, L - x1)) : Math.max(dx, Math.min(0, -L - x0)),
+    y: dy > 0 ? Math.min(dy, Math.max(0, L - y1)) : Math.max(dy, Math.min(0, -L - y0)),
+  }
 }
 
 function markCentre(item: LineItem | RectItem | EllipseItem): Vec2 {
@@ -371,7 +415,7 @@ export function addPicture(doc: BoardDoc, spec: NewPicture): AddResult {
     flipV: spec.flipV ?? false,
     gray: spec.gray ?? false,
     opacity: spec.opacity ?? 1,
-    caption: spec.caption ?? '',
+    caption: cutText(cleanText(spec.caption ?? ''), BOARD_LIMITS.noteChars),
   }))
 }
 
@@ -382,7 +426,7 @@ export function addNote(doc: BoardDoc, spec: NewNote = {}): AddResult {
     id,
     group: 0,
     locked: false,
-    text: spec.text ?? '',
+    text: cutText(cleanText(spec.text ?? ''), BOARD_LIMITS.noteChars),
     x: fin(spec.x ?? doc.view.x, doc.view.x),
     y: fin(spec.y ?? doc.view.y, doc.view.y),
     w: spec.w ?? NOTE_DEFAULTS.w,
@@ -396,20 +440,22 @@ export function addNote(doc: BoardDoc, spec: NewNote = {}): AddResult {
 /** Adds a drawn mark (stroke, line, rectangle, ellipse) on top of everything. A stroke with no point is refused like a full board. */
 export function addMark(doc: BoardDoc, mark: NewMark): AddResult {
   if (mark.kind === 'stroke' && mark.points.length < 2) return { doc, id: null }
-  const own = mark.kind === 'stroke' ? { ...mark, points: mark.points.slice() } : mark
+  // A new stroke is held to what a user can draw; a longer one that came from a file keeps its points (cleanPoints' file ceiling).
+  const own = mark.kind === 'stroke' ? { ...mark, points: mark.points.slice(0, 2 * BOARD_LIMITS.strokePoints) } : mark
   return addOne(doc, (id) => ({ ...own, id, group: 0, locked: false }) as BoardItem)
 }
 
 /**
- * Adds copies of `items` on top, each with a fresh id, shifted by `offset`. Groups stay groups but become new ones (a copy is never
- * welded to the original); a group of which only one member is copied is not a group any more. All or nothing: when the copies would not
- * fit under BOARD_LIMITS.items, the same doc and no ids come back. Used by duplicate and paste.
+ * Adds copies of `items` on top, each with a fresh id, shifted by `offset` (held back, for all of them together, where it would take a
+ * coordinate past the range). Groups stay groups but become new ones (a copy is never welded to the original); a group of which only
+ * one member is copied is not a group any more. All or nothing: when the copies would not fit under BOARD_LIMITS.items, the same doc
+ * and no ids come back. Used by duplicate and paste.
  */
 export function insertItems(doc: BoardDoc, items: readonly BoardItem[], offset: Vec2): { doc: BoardDoc; ids: number[] } {
   const src = items.filter((it) => !(it.kind === 'stroke' && it.points.length < 2))
   if (src.length === 0 || doc.items.length + src.length > BOARD_LIMITS.items) return { doc, ids: [] }
-  const dx = fin(offset.x)
-  const dy = fin(offset.y)
+  // ONE offset for all the copies: clamped coordinate by coordinate, a copy near the edge would be squashed against it.
+  const { x: dx, y: dy } = limitedMove(src, fin(offset.x), fin(offset.y))
   const members = new Map<number, number>()
   for (const it of src) if (it.group > 0) members.set(it.group, (members.get(it.group) ?? 0) + 1)
   const relabel = new Map<number, number>()
@@ -436,26 +482,11 @@ export function duplicateItems(doc: BoardDoc, ids: readonly number[], offset: Ve
 
 /** Moves the free items of `ids` by (dx, dy), no further than the coordinate limit allows. */
 export function moveItems(doc: BoardDoc, ids: readonly number[], dx: number, dy: number): BoardDoc {
-  let mx = fin(dx)
-  let my = fin(dy)
-  if (mx === 0 && my === 0) return doc
+  if (fin(dx) === 0 && fin(dy) === 0) return doc
   const sel = pick(doc, ids)
   if (sel.length === 0) return doc
-  let x0 = Infinity
-  let x1 = -Infinity
-  let y0 = Infinity
-  let y1 = -Infinity
-  for (const it of sel) {
-    eachCoordinate(it, (x, y) => {
-      if (x < x0) x0 = x
-      if (x > x1) x1 = x
-      if (y < y0) y0 = y
-      if (y > y1) y1 = y
-    })
-  }
   // Only the direction of travel is held back: an item already outside is not pulled in.
-  mx = mx > 0 ? Math.min(mx, Math.max(0, L - x1)) : Math.max(mx, Math.min(0, -L - x0))
-  my = my > 0 ? Math.min(my, Math.max(0, L - y1)) : Math.max(my, Math.min(0, -L - y0))
+  const { x: mx, y: my } = limitedMove(sel, fin(dx), fin(dy))
   if (mx === 0 && my === 0) return doc
   return edit(doc, ids, (it) => translate(it, mx, my))
 }
@@ -569,15 +600,24 @@ export function resizeNote(
 /**
  * Turns the free items of `ids` by `degrees` (clockwise) about `pivot`. A picture or note turns about its own centre by that angle
  * as its centre swings round the pivot; a stroke's or a line's points swing round it; a rectangle or ellipse stays upright and only its
- * centre swings.
+ * centre swings. With `exactQuarter` and `degrees` an exact multiple of 90 (the Rotate 90 commands) a rectangle or ellipse is turned
+ * too: its half-extents swap about its rotated centre, which is exact and still upright, so a frame drawn round a picture still
+ * encloses it. A drag rotation does not pass it: with it a shape would jump between its two sizes at every quarter turn.
  */
-export function rotateItems(doc: BoardDoc, ids: readonly number[], degrees: number, pivot: Vec2): BoardDoc {
+export function rotateItems(doc: BoardDoc, ids: readonly number[], degrees: number, pivot: Vec2, opts: { exactQuarter?: boolean } = {}): BoardDoc {
   const deg = fin(degrees)
-  if (normalizeAngle(deg) === 0 || !Number.isFinite(pivot.x) || !Number.isFinite(pivot.y)) return doc
+  const turn = normalizeAngle(deg)
+  if (turn === 0 || !Number.isFinite(pivot.x) || !Number.isFinite(pivot.y)) return doc
+  const quarter = opts.exactQuarter === true && turn % 90 === 0
   return edit(doc, ids, (it) => {
     if (it.kind === 'rect' || it.kind === 'ellipse') {
       const c = markCentre(it)
       const to = rotatePoint(c, pivot, deg)
+      if (quarter && Math.abs(turn) === 90) {
+        const hw = Math.abs(it.x2 - it.x1) / 2
+        const hh = Math.abs(it.y2 - it.y1) / 2
+        return sanitizeItem({ ...it, x1: to.x - hh, x2: to.x + hh, y1: to.y - hw, y2: to.y + hw })
+      }
       return sanitizeItem(translate(it, to.x - c.x, to.y - c.y))
     }
     const turned = mapPoints(it, (p) => rotatePoint(p, pivot, deg))
@@ -697,7 +737,7 @@ function patched(it: BoardItem, p: BoardPatch, metrics: TextMetrics): BoardItem 
       const next = { ...it }
       if (typeof p.gray === 'boolean') next.gray = p.gray
       if (num(p.opacity)) next.opacity = p.opacity
-      if (typeof p.caption === 'string') next.caption = p.caption
+      if (typeof p.caption === 'string') next.caption = cutText(cleanText(p.caption), Math.max(BOARD_LIMITS.noteChars, it.caption.length))
       if (typeof p.flipH === 'boolean') next.flipH = p.flipH
       if (typeof p.flipV === 'boolean') next.flipV = p.flipV
       if (num(p.rotation)) next.rotation = p.rotation
@@ -707,7 +747,8 @@ function patched(it: BoardItem, p: BoardPatch, metrics: TextMetrics): BoardItem 
     }
     case 'note': {
       const next = { ...it }
-      if (typeof p.text === 'string') next.text = p.text
+      // A text may not grow past what a user can make, but one a file held longer is not cut by an edit of something else.
+      if (typeof p.text === 'string') next.text = cutText(cleanText(p.text), Math.max(BOARD_LIMITS.noteChars, it.text.length))
       if (num(p.size) && p.size > 0) next.size = p.size
       if (num(p.w) && p.w > 0) next.w = p.w
       if (num(p.rotation)) next.rotation = p.rotation
@@ -916,7 +957,7 @@ export function clampDoc(doc: BoardDoc): BoardDoc {
     gray: doc.gray === true,
     smooth: doc.smooth === true,
     captions: doc.captions === true,
-    grid: clampTo(fin(doc.grid), 0, BOARD_LIMITS.pictureMax),
+    grid: clampTo(fin(doc.grid), BOARD_ITEM_LIMITS.grid.min, BOARD_ITEM_LIMITS.grid.max),
     items: changed ? items : doc.items,
     nextId,
   }

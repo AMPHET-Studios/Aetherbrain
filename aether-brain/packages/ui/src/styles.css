@@ -523,6 +523,12 @@ kbd {
 .pulse {
   animation: pulse-ring 1.4s ease-out infinite;
 }
+/* The board's "Saving" dot sits still for someone who asked for less motion. */
+@media (prefers-reduced-motion: reduce) {
+  .pulse {
+    animation: none;
+  }
+}
 @keyframes spin {
   to {
     transform: rotate(360deg);

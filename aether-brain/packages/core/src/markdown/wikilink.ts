@@ -12,7 +12,7 @@
  * inline code, or html is ignored for free.
  */
 import type { Root, Text, Parent, PhrasingContent } from 'mdast'
-import type { Plugin } from 'unified'
+import type { Plugin, Processor } from 'unified'
 import { visit } from 'unist-util-visit'
 
 export interface WikilinkToken {
@@ -203,6 +203,22 @@ function literalHashes(value: string, source: string): number[] {
     k++
   }
   return out
+}
+
+/**
+ * remark plugin, used right after `remarkGfm` by `parseMarkdown` and by the preview (one plugin, so the two cannot drift apart):
+ * drops the "late" pass of GFM's autolink literals. Besides the tokenizer, mdast-util-gfm-autolink-literal runs a second pass over
+ * the decoded text of finished text nodes (a `www.` or address after any punctuation) and cuts them into pieces that have no
+ * position. From a node without a position the readers cannot tell what the source wrote escaped, so an escaped `\[\[x\]\]` or
+ * `\#tag` next to such an address became a live link or tag, which no escape could prevent (board notes and imported chats write
+ * their text escaped for exactly that reason). Without the pass an address after punctuation is plain text, as the GFM spec has it
+ * (`www.` counts after whitespace and `* _ ~ (` only); every text node keeps its position.
+ */
+export function remarkNoLateAutolinks(this: Processor): void {
+  const extensions = (this.data('fromMarkdownExtensions') ?? []) as unknown[]
+  for (const ext of extensions.flat(Infinity)) {
+    if (ext !== null && typeof ext === 'object' && 'transforms' in ext) (ext as { transforms: unknown }).transforms = []
+  }
 }
 
 export interface WikilinkNode {

@@ -13,10 +13,16 @@ export const BOARD_VERSION = 1
 export const BOARD_LIMITS = {
   /** Items on one board (pictures, notes and marks together). */
   items: 1500,
-  /** Characters in one text note. */
+  /** Characters in one text note a user can make (typing, pasting, adding one). */
   noteChars: 4000,
-  /** Points in one pen stroke (a longer stroke is simplified while it is drawn). */
+  /** Points in one pen stroke a user can make (a longer stroke is simplified while it is drawn). */
   strokePoints: 3000,
+  /**
+   * What a FILE may hold and still be read whole: a hand-written or tool-written board with a longer note or stroke keeps it as it
+   * is (the creation limits above only stop new ones), up to these ceilings; past them the line is cut with a warning.
+   */
+  noteCharsFile: 100_000,
+  strokePointsFile: 50_000,
   /** Zoom range: screen pixels per board unit. */
   zoomMin: 0.005,
   zoomMax: 64,
@@ -61,6 +67,11 @@ export interface ItemCommon {
   group: number
   /** A locked item cannot be moved, scaled, rotated, cropped or deleted until it is unlocked (it can still be selected). */
   locked: boolean
+  /**
+   * Attributes and flags of the item's line that this version does not know (`theme=dark`, `pinned`), as they were written: kept and
+   * written back after the known ones, so a board edited by hand or saved by a newer version loses nothing. Absent when there are none.
+   */
+  unknown?: string[]
 }
 
 /**
@@ -180,9 +191,12 @@ export interface BoardDoc {
   nextId: number
   /**
    * Lines of the board section that this version of the app did not understand, kept as they were and written back at the end of the
-   * section, so a board edited by hand or by a newer version loses nothing.
+   * section, so a board edited by hand or by a newer version loses nothing. Text the user wrote UNDER the board (after its last
+   * line, or after a blank line) is not here: it is outside the board and stays where it is, byte for byte.
    */
   extra: string[]
+  /** The attributes and flags of the view line that this version does not know, as written (see `ItemCommon.unknown`). Absent when none. */
+  viewUnknown?: string[]
 }
 
 export interface Rect {

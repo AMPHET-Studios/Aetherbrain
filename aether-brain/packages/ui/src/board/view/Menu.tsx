@@ -3,7 +3,7 @@
  * keyboard while it is open (Up / Down / Home / End, Enter, Esc) and gives it back when it closes; a click outside closes it.
  * Entries come from menus.ts, so the titles, keys and enabled states are the commands' own.
  */
-import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type RefObject } from 'react'
+import { useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type RefObject } from 'react'
 import { cx, isMac } from '../../util'
 import { formatKeys } from './session'
 import type { MenuEntry } from './menus'
@@ -53,10 +53,18 @@ export function MenuPanel({ entries, onRun, onClose, label, className, style, re
   const firstRunnable = entries.findIndex(runnable)
   const [active, setActive] = useState(-1)
   const anyChecks = entries.some((e) => e.kind === 'command' && e.checked !== undefined)
+  const uid = useId()
 
+  // The menu takes the keyboard when it opens and hands it back to what had it (the button that opened it) when it closes.
+  const [before] = useState(() => (typeof document !== 'undefined' && document.activeElement instanceof HTMLElement ? document.activeElement : null))
   useEffect(() => {
-    ref.current?.focus({ preventScroll: true })
-  }, [])
+    const el = ref.current
+    el?.focus({ preventScroll: true })
+    return () => {
+      const now = document.activeElement
+      if (before && before !== document.body && before.isConnected && (!now || now === document.body || (el && el.contains(now)))) before.focus({ preventScroll: true })
+    }
+  }, [before])
 
   const move = (from: number, dir: 1 | -1): number => {
     let i = from
@@ -94,6 +102,7 @@ export function MenuPanel({ entries, onRun, onClose, label, className, style, re
       ref={ref}
       role="menu"
       aria-label={label}
+      aria-activedescendant={active >= 0 ? `${uid}-${active}` : undefined}
       tabIndex={-1}
       data-board-overlay
       onKeyDown={onKeyDown}
@@ -119,6 +128,7 @@ export function MenuPanel({ entries, onRun, onClose, label, className, style, re
         return (
           <button
             key={i}
+            id={`${uid}-${i}`}
             type="button"
             role={checked === undefined ? 'menuitem' : 'menuitemcheckbox'}
             aria-checked={checked}

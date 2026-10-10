@@ -17,6 +17,7 @@ import {
   safeEmbedPath,
   serializeBoard,
 } from '../src/board/format'
+import { BOARD_ITEM_LIMITS } from '../src/board/ops'
 import { NOTE_LINE_HEIGHT_EM, BOARD_LIMITS, FULL_CROP, emptyBoard } from '../src/board/types'
 import type { BoardDoc, BoardItem, NoteItem, PictureItem, StrokeItem } from '../src/board/types'
 import { NOTE_PADDING, escapeBoardText, estimateTextMetrics, unescapeBoardText } from '../src/board/text'
@@ -59,6 +60,9 @@ function stroke(over: Partial<StrokeItem> = {}): StrokeItem {
 function board(items: BoardItem[], over: Partial<BoardDoc> = {}): BoardDoc {
   return { ...emptyBoard('Test board'), ...over, items: items.map((it, i) => ({ ...it, id: i + 1 })), nextId: items.length + 1 }
 }
+
+/** The same board note read as a plain note: its lines go through the real markdown parser (the preview and other tools read them so). */
+const plain = (raw: string): string => raw.replace('type: board', 'type: note')
 
 /** The lines under the `## Board` heading that are not blank. */
 function boardLines(raw: string): string[] {
@@ -365,7 +369,7 @@ describe('writing a board', () => {
       NOW,
     )
     expect(boardLines(text).slice(1)).toEqual([
-      '- note x=0 y=0 w=300 size=1000 color=ffffff fill= r=0 » hello',
+      `- note x=0 y=0 w=300 size=${BOARD_ITEM_LIMITS.noteSize.max} color=ffffff fill= r=0 » hello`,
       '- stroke color=ff0000 width=2 pts=1000000,0 0,5',
     ])
   })
@@ -403,15 +407,16 @@ describe('reading a board: clamps, defaults and warnings', () => {
       '- pic c.png x=0 y=0 w=100 h=100 r=720',
       '- note x=0 y=0 w=2 size=0 color=ffffff fill= r=1e3',
       '- stroke color=ffffff width=0 pts=1,2',
-      '- line x1=1 y1=1 x2=2 y2=2 color=ffffff width=5000',
+      '- line x1=1 y1=1 x2=2 y2=2 color=ffffff width=500000',
     )
     expect(r.doc.view).toEqual({ x: 1_000_000, y: -1_000_000, zoom: BOARD_LIMITS.zoomMax })
     expect(r.doc.items[0]).toMatchObject({ x: 1_000_000, y: -1_000_000, w: BOARD_LIMITS.pictureMin, h: BOARD_LIMITS.pictureMax, opacity: 0.05, rotation: -170 })
     expect(r.doc.items[1]).toMatchObject({ opacity: 1, rotation: 180 })
     expect(r.doc.items[2]).toMatchObject({ rotation: 0 })
-    expect(r.doc.items[3]).toMatchObject({ w: BOARD_LIMITS.pictureMin, size: 1, rotation: -80 })
-    expect(r.doc.items[4]).toMatchObject({ width: 0.1 })
-    expect(r.doc.items[5]).toMatchObject({ width: 1000 })
+    // The ranges are the operations' own (BOARD_ITEM_LIMITS): a note is at least 16 wide and 2 big, a mark's width runs from .005 to 40,000.
+    expect(r.doc.items[3]).toMatchObject({ w: BOARD_ITEM_LIMITS.noteWidth.min, size: BOARD_ITEM_LIMITS.noteSize.min, rotation: -80 })
+    expect(r.doc.items[4]).toMatchObject({ width: BOARD_ITEM_LIMITS.markWidth.min })
+    expect(r.doc.items[5]).toMatchObject({ width: BOARD_ITEM_LIMITS.markWidth.max })
     expect(r.warnings.length).toBeGreaterThanOrEqual(8)
     const zoomLow = read('- view zoom=0')
     expect(zoomLow.doc.view.zoom).toBe(BOARD_LIMITS.zoomMin)
@@ -469,16 +474,24 @@ describe('reading a board: clamps, defaults and warnings', () => {
     expect((r.doc.items[1] as PictureItem).caption).toBe('')
   })
 
-  it('cuts a note to 4,000 characters without splitting an emoji, and a stroke to 3,000 points', () => {
+  it('keeps a note and a stroke a file holds past what a user can make (4,000 characters, 3,000 points) up to the file ceiling, and cuts only past that, without splitting an emoji', () => {
+    const NOTE = BOARD_LIMITS.noteCharsFile
+    const POINTS = BOARD_LIMITS.strokePointsFile
     const long = read(`- note x=0 y=0 w=300 size=18 color=ffffff fill= r=0 » ${'a'.repeat(5000)}`)
-    expect((long.doc.items[0] as NoteItem).text).toHaveLength(4000)
-    expect(long.warnings.some((w) => /4000/.test(w))).toBe(true)
-    const split = read(`- note x=0 y=0 w=300 size=18 color=ffffff fill= r=0 » ${'a'.repeat(3999)}😀`)
-    expect((split.doc.items[0] as NoteItem).text).toBe('a'.repeat(3999))
+    expect((long.doc.items[0] as NoteItem).text).toHaveLength(5000)
+    expect(long.warnings).toEqual([])
+    const tooLong = read(`- note x=0 y=0 w=300 size=18 color=ffffff fill= r=0 » ${'a'.repeat(NOTE + 5)}`)
+    expect((tooLong.doc.items[0] as NoteItem).text).toHaveLength(NOTE)
+    expect(tooLong.warnings.some((w) => new RegExp(String(NOTE)).test(w))).toBe(true)
+    const split = read(`- note x=0 y=0 w=300 size=18 color=ffffff fill= r=0 » ${'a'.repeat(NOTE - 1)}😀`)
+    expect((split.doc.items[0] as NoteItem).text).toBe('a'.repeat(NOTE - 1))
     const pts = Array.from({ length: 3005 }, (_, i) => `${i},${i}`).join(' ')
     const s = read(`- stroke color=ffffff width=2 pts=${pts}`)
-    expect((s.doc.items[0] as StrokeItem).points).toHaveLength(6000)
-    expect(s.warnings.some((w) => /5 points/.test(w))).toBe(true)
+    expect((s.doc.items[0] as StrokeItem).points).toHaveLength(6010)
+    expect(s.warnings).toEqual([])
+    const huge = read(`- stroke color=ffffff width=2 pts=${Array.from({ length: POINTS + 5 }, (_, i) => `${i % 1000},${i % 500}`).join(' ')}`)
+    expect((huge.doc.items[0] as StrokeItem).points).toHaveLength(2 * POINTS)
+    expect(huge.warnings.some((w) => /5 points/.test(w))).toBe(true)
   })
 
   it('reads stroke points that are spread over spaces, skips a bad one, and takes flags written after them', () => {
@@ -577,11 +590,11 @@ describe('lines the reader does not understand are kept', () => {
     expect(serializeBoard(parseBoard(out).doc, out, LATER)).toBe(out)
   })
 
-  it('a separating blank line keeps the extras out of the last item\'s paragraph', () => {
+  it('the extras follow the last item with no blank line between, which is how the reader knows they are the board\'s and not the user\'s', () => {
     const out = serializeBoard(parseBoard(RAW).doc, RAW, NOW)
     const lines = out.split('\n')
     const at = lines.indexOf('a hand-written remark')
-    expect(lines[at - 1]).toBe('')
+    expect(lines[at - 1]).toBe('- stroke color=ffffff width=2 pts=1,2')
   })
 
   it('a code fence inside the section is kept whole, blank lines in it too, and hides the items it holds', () => {
@@ -833,11 +846,18 @@ describe('limits', () => {
     expect(serializeBoard(again.doc, text, LATER)).toBe(text)
   })
 
-  it('a note over 300,000 characters is read (and warned about), not refused', () => {
-    const raw = rawWith(10) + 'x'.repeat(300_001)
-    const r = parseBoard(raw)
-    expect(r.doc.items.length).toBeGreaterThan(0)
-    expect(r.warnings.some((w) => /300000/.test(w))).toBe(true)
+  it('a board section over 500,000 characters is read (and warned about), not refused; prose round it does not count', () => {
+    const limit = new RegExp(String(BOARD_LIMITS.noteTotal))
+    // The prose is the user's, outside the board (a blank line between): nothing to say about its size.
+    const prose = parseBoard(rawWith(10) + '\n' + 'x'.repeat(BOARD_LIMITS.noteTotal + 1))
+    expect(prose.doc.items).toHaveLength(10)
+    expect(prose.warnings).toEqual([])
+    // The same text touching the last item is a line the board keeps: it counts.
+    expect(parseBoard(rawWith(10) + 'x'.repeat(BOARD_LIMITS.noteTotal + 1)).warnings.some((w) => limit.test(w))).toBe(true)
+    const big = ['---', 'type: board', '---', '## Board', '', ...Array.from({ length: 140 }, (_, i) => `- note x=${i} y=0 w=300 size=18 color=ffffff fill= r=0 » ${'w'.repeat(3900)}`), ''].join('\n')
+    const r = parseBoard(big)
+    expect(r.doc.items).toHaveLength(140)
+    expect(r.warnings.some((w) => limit.test(w))).toBe(true)
   })
 })
 
@@ -893,19 +913,25 @@ describe('safeEmbedPath', () => {
     ]
     for (const p of names) {
       if (!safeEmbedPath(p)) continue
-      const n = parseNote({ path: 'Boards/b.md', content: serializeBoard(board([pic({ path: p })]), undefined, NOW) })
-      expect(n.links.map((l) => [l.kind, l.to]), p).toEqual([['embed', p]])
+      const raw = serializeBoard(board([pic({ path: p })]), undefined, NOW)
+      // The real markdown parser reads exactly that embed (a plain note), and so does the board's own reader.
+      for (const content of [plain(raw), raw]) {
+        const n = parseNote({ path: 'Boards/b.md', content })
+        expect(n.links.map((l) => [l.kind, l.to]), p).toEqual([['embed', p]])
+      }
     }
   })
 
-  it('writes an unsafe path as a pic line with no link, and a safe one as an embed', () => {
+  it('writes an unsafe path as a pic line (a link of its own kind), and a safe one as an embed', () => {
     const text = serializeBoard(board([pic({ path: 'Boards/a b.png' }), pic({ path: 'Boards/a#b [1].png' }), pic({ path: 'Boards/_a_.png' })]), undefined, NOW)
     const lines = boardLines(text).slice(1)
     expect(lines[0]).toBe('- ![[Boards/a b.png]] x=0 y=0 w=100 h=80')
     expect(lines[1]).toBe('- pic Boards/a\\#b\\ \\[1\\].png x=0 y=0 w=100 h=80')
     expect(lines[2]).toBe('- pic Boards/\\_a\\_.png x=0 y=0 w=100 h=80')
+    // The real markdown parser finds only the embed; the board's own reader finds the picture of the `pic` lines too, as the path it is.
+    expect(parseNote({ path: 'Boards/b.md', content: plain(text) }).links.map((l) => l.to)).toEqual(['Boards/a b.png'])
     const n = parseNote({ path: 'Boards/b.md', content: text })
-    expect(n.links.map((l) => l.to)).toEqual(['Boards/a b.png'])
+    expect(n.links.map((l) => [l.to, l.literal === true])).toEqual([['Boards/a b.png', false], ['Boards/a#b [1].png', true], ['Boards/_a_.png', true]])
     // And they read back as the same paths.
     expect(parseBoard(text).doc.items.map((i) => (i as PictureItem).path)).toEqual(['Boards/a b.png', 'Boards/a#b [1].png', 'Boards/_a_.png'])
   })
@@ -1041,15 +1067,23 @@ describe('what a board note does to the brain: imported text stays inert', () =>
     return board(items, { title: 'Hostile' })
   }
 
-  function checkInert(raw: string, embedded: string[]): void {
-    const n = parseNote({ path: 'Boards/Hostile.md', content: raw })
+  function checkInert(raw: string, embedded: string[], everyPicture: string[]): void {
+    // As a board, the item lines are read by the board's own reader: a link for every picture, nothing from the text.
+    const board = parseNote({ path: 'Boards/Hostile.md', content: raw })
+    expect(board.links.map((l) => [l.kind, l.to])).toEqual(everyPicture.map((p) => ['embed', p]))
+    expect(board.inlineTags).toEqual([])
+    expect(board.plain).not.toContain('Secret')
+    // As a plain note, they go through the real markdown parser: only the embeds the board wrote are links, and nothing else.
+    const n = parseNote({ path: 'Boards/Hostile.md', content: plain(raw) })
     expect(n.links.map((l) => [l.kind, l.to])).toEqual(embedded.map((p) => ['embed', p]))
     expect(n.inlineTags).toEqual([])
     expect(n.meta.tags).toEqual([])
     expect(extractTasks(raw)).toEqual([])
-    const graph = buildGraph(new Map([[n.meta.id, n]]))
-    expect(graph.nodes.filter((x) => x.ghost)).toEqual([])
-    expect(graph.nodes).toHaveLength(1)
+    for (const note of [board, n]) {
+      const graph = buildGraph(new Map([[note.meta.id, note]]))
+      expect(graph.nodes.filter((x) => x.ghost)).toEqual([])
+      expect(graph.nodes).toHaveLength(1)
+    }
 
     // The markdown tree: a title, the intro, "Board", and ONE list of single-paragraph items. No html, code, table, quote, break,
     // image, link, reference or heading came out of the text.
@@ -1080,14 +1114,14 @@ describe('what a board note does to the brain: imported text stays inert', () =>
     const raw = serializeBoard(doc, undefined, NOW)
     const embedded = doc.items.filter((i): i is PictureItem => i.kind === 'picture' && safeEmbedPath(i.path)).map((i) => i.path)
     expect(embedded).toHaveLength(HOSTILE.length)
-    checkInert(raw, embedded)
+    checkInert(raw, embedded, doc.items.filter((i): i is PictureItem => i.kind === 'picture').map((i) => i.path))
   })
 
   it('the same inside a CRLF note', () => {
     const doc = hostileDoc()
     const embedded = doc.items.filter((i): i is PictureItem => i.kind === 'picture' && safeEmbedPath(i.path)).map((i) => i.path)
     const crlf = newBoardNote('Hostile', NOW).replace(/\n/g, '\r\n')
-    checkInert(serializeBoard(doc, crlf, NOW), embedded)
+    checkInert(serializeBoard(doc, crlf, NOW), embedded, doc.items.filter((i): i is PictureItem => i.kind === 'picture').map((i) => i.path))
   })
 
   it('every line under the board heading is one list line; no raw line break or carriage return survives in the text', () => {
@@ -1104,9 +1138,10 @@ describe('what a board note does to the brain: imported text stays inert', () =>
     }
     // Back again, exactly.
     const back = parseBoard(raw)
-    expect(back.warnings.filter((w) => !/4000/.test(w))).toEqual([])
+    expect(back.warnings).toEqual([])
+    // (A file keeps what it holds up to its ceiling; the 4,000 characters are what a user can make.)
     expect(back.doc.items.map((i) => (i.kind === 'note' ? i.text : i.kind === 'picture' ? i.caption : ''))).toEqual(
-      doc.items.map((i) => (i.kind === 'note' ? i.text.slice(0, 4000) : i.kind === 'picture' ? i.caption.slice(0, 4000) : '')),
+      doc.items.map((i) => (i.kind === 'note' ? i.text : i.kind === 'picture' ? i.caption : '')),
     )
   })
 
@@ -1120,8 +1155,10 @@ describe('what a board note does to the brain: imported text stays inert', () =>
 
   it('a hostile caption is not a link target', () => {
     const raw = serializeBoard(board([pic({ caption: 'see [[Secret]] and #tag' })]), undefined, NOW)
-    const n = parseNote({ path: 'Boards/x.md', content: raw })
-    expect(n.links.map((l) => l.to)).toEqual(['Boards/a.png'])
+    for (const content of [raw, plain(raw)]) {
+      const n = parseNote({ path: 'Boards/x.md', content })
+      expect(n.links.map((l) => l.to)).toEqual(['Boards/a.png'])
+    }
   })
 })
 

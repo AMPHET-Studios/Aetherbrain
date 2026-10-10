@@ -13,10 +13,10 @@
  * the selection across the board. Positions closer than rounding noise to where they already are are left alone: arranging an arranged
  * selection again returns the same doc.
  */
-import { estimateTextMetrics } from './text'
+import { cutText, estimateTextMetrics } from './text'
 import { itemSize, itemsBounds } from './geometry'
 import { expandGroups, moveItems, resizePicture } from './ops'
-import type { BoardDoc, BoardItem, PictureItem, Rect, TextMetrics, Vec2 } from './types'
+import { BOARD_LIMITS, type BoardDoc, type BoardItem, type PictureItem, type Rect, type TextMetrics, type Vec2 } from './types'
 
 export type ArrangeMode = 'optimal' | 'row' | 'column' | 'grid' | 'stack'
 export type ArrangeOrder = 'current' | 'name' | 'added' | 'size' | 'shuffle'
@@ -128,8 +128,8 @@ function baseName(path: string): string {
 
 /** What the name order compares: a picture's file name, a note's text; null for a mark, which has no name. */
 function nameKey(item: BoardItem): string | null {
-  if (item.kind === 'picture') return baseName(item.path).slice(0, SORT_KEY_CHARS).toLowerCase()
-  if (item.kind === 'note') return item.text.trim().slice(0, SORT_KEY_CHARS).toLowerCase()
+  if (item.kind === 'picture') return cutText(baseName(item.path), SORT_KEY_CHARS).toLowerCase()
+  if (item.kind === 'note') return cutText(item.text.trim(), SORT_KEY_CHARS).toLowerCase()
   return null
 }
 
@@ -309,11 +309,11 @@ function rowLayout(sizes: readonly Size[], gap: number): Vec2[] {
 }
 
 /** Centres of the units one under the other, top to bottom, on one vertical line. */
-function columnLayout(sizes: readonly Size[], gap: number): Vec2[] {
+function columnLayout(sizes: readonly Size[], vgap: number): Vec2[] {
   let y = 0
   return sizes.map((s) => {
     const c = { x: 0, y: y + s.h / 2 }
-    y += s.h + gap
+    y += s.h + vgap
     return c
   })
 }
@@ -334,14 +334,14 @@ function tableOf(sizes: readonly Size[], cols: number): { colW: number[]; rowH: 
 const sum = (v: readonly number[]): number => v.reduce((a, b) => a + b, 0)
 
 /** The column count whose table comes closest to the wanted shape (on a log scale), the least area on a tie. */
-function chooseColumns(sizes: readonly Size[], gap: number, aspect: number): number {
+function chooseColumns(sizes: readonly Size[], gap: number, aspect: number, vgap: number): number {
   let best = 1
   let bestErr = Infinity
   let bestArea = Infinity
   for (let cols = 1; cols <= sizes.length; cols++) {
     const { colW, rowH } = tableOf(sizes, cols)
     const w = sum(colW) + gap * (colW.length - 1)
-    const h = sum(rowH) + gap * (rowH.length - 1)
+    const h = sum(rowH) + vgap * (rowH.length - 1)
     const err = Math.abs(Math.log(Math.max(w, TINY) / Math.max(h, TINY) / aspect))
     const area = w * h
     if (err < bestErr - 1e-12 || (Math.abs(err - bestErr) <= 1e-12 && area < bestArea)) {
@@ -354,7 +354,7 @@ function chooseColumns(sizes: readonly Size[], gap: number, aspect: number): num
 }
 
 /** Centres of the units in a table of `cols` columns, each unit in the middle of its cell. */
-function gridLayout(sizes: readonly Size[], gap: number, cols: number): Vec2[] {
+function gridLayout(sizes: readonly Size[], gap: number, cols: number, vgap: number): Vec2[] {
   const { colW, rowH } = tableOf(sizes, cols)
   const xs: number[] = []
   let x = 0
@@ -366,7 +366,7 @@ function gridLayout(sizes: readonly Size[], gap: number, cols: number): Vec2[] {
   let y = 0
   for (const h of rowH) {
     ys.push(y)
-    y += h + gap
+    y += h + vgap
   }
   return sizes.map((_, i) => {
     const c = i % cols
@@ -385,7 +385,7 @@ interface Pack {
   next: number
 }
 
-function packRows(sizes: readonly Size[], gap: number, limit: number): Pack {
+function packRows(sizes: readonly Size[], gap: number, limit: number, vgap: number): Pack {
   const starts = [0]
   let rowW = 0
   let rowH = 0
@@ -408,7 +408,7 @@ function packRows(sizes: readonly Size[], gap: number, limit: number): Pack {
     }
     if (grown < next) next = grown
     if (rowW > width) width = rowW
-    height += rowH + gap
+    height += rowH + vgap
     starts.push(i)
     rowW = s.w
     rowH = s.h
@@ -427,14 +427,14 @@ function packRows(sizes: readonly Size[], gap: number, limit: number): Pack {
  * the next, as long as there are not too many; past that the window is swept at evenly spread widths, which is a fine grid on a
  * board where the exact steps would be too many to try.
  */
-function optimalLayout(sizes: readonly Size[], gap: number, aspect: number): Vec2[] {
+function optimalLayout(sizes: readonly Size[], gap: number, aspect: number, vgap: number): Vec2[] {
   let area = 0
   let used = 0
   // The widest unit: no row is narrower, since a unit wider than the limit takes a row to itself.
   let widestUnit = 0
   let widest = 0
   sizes.forEach((s, i) => {
-    area += (s.w + gap) * (s.h + gap)
+    area += (s.w + gap) * (s.h + vgap)
     used += s.w * s.h
     if (s.w > widestUnit) widestUnit = s.w
     // Summed the way packRows sums a row, so a limit of `widest` really holds everything in one row.
@@ -455,11 +455,11 @@ function optimalLayout(sizes: readonly Size[], gap: number, aspect: number): Vec
       kept.score = score
     }
   }
-  consider(packRows(sizes, gap, widestUnit))
+  consider(packRows(sizes, gap, widestUnit, vgap))
   let limit = lo
   let covered = false
   for (let k = 0; k < EXACT_PACKS; k++) {
-    const p = packRows(sizes, gap, limit)
+    const p = packRows(sizes, gap, limit, vgap)
     consider(p)
     if (!(p.next <= hi)) {
       covered = true
@@ -470,10 +470,10 @@ function optimalLayout(sizes: readonly Size[], gap: number, aspect: number): Vec
   if (!covered && hi > lo) {
     for (let k = 1; k <= SWEEP_PACKS; k++) {
       const t = k / SWEEP_PACKS
-      consider(packRows(sizes, gap, lo > 0 ? lo * (hi / lo) ** t : lo + (hi - lo) * t))
+      consider(packRows(sizes, gap, lo > 0 ? lo * (hi / lo) ** t : lo + (hi - lo) * t, vgap))
     }
   }
-  consider(packRows(sizes, gap, widest))
+  consider(packRows(sizes, gap, widest, vgap))
 
   const starts = kept.pack!.starts
   const out: Vec2[] = new Array(sizes.length)
@@ -492,9 +492,61 @@ function optimalLayout(sizes: readonly Size[], gap: number, aspect: number): Vec
       out[i] = { x: x + sizes[i]!.w / 2, y: y + rowH / 2 }
       x += sizes[i]!.w + gap
     }
-    y += rowH + gap
+    y += rowH + vgap
   }
   return out
+}
+
+/** `centre` moved the least that keeps a span of half width `half` inside -room..room (centred when it cannot fit). */
+function clampCentre(centre: number, half: number, room: number): number {
+  if (half >= room) return 0
+  return Math.min(Math.max(centre, -room + half), room - half)
+}
+
+/** The width and height a layout of `sizes` at `centres` takes. */
+function layoutExtent(sizes: readonly Size[], centres: readonly Vec2[]): Size {
+  let x0 = Infinity
+  let y0 = Infinity
+  let x1 = -Infinity
+  let y1 = -Infinity
+  centres.forEach((c, i) => {
+    const s = sizes[i]!
+    x0 = Math.min(x0, c.x - s.w / 2)
+    y0 = Math.min(y0, c.y - s.h / 2)
+    x1 = Math.max(x1, c.x + s.w / 2)
+    y1 = Math.max(y1, c.y + s.h / 2)
+  })
+  return { w: x1 - x0, h: y1 - y0 }
+}
+
+/* ------------------------------------------------------------- captions --- */
+
+/** A caption hangs this far below its picture (CSS pixels) and is `font * 1.4 + 4` tall: the renderer's numbers (CAPTION_GAP, captionSize). */
+const CAPTION_GAP_PX = 4
+/** A picture shorter than this on the screen shows no caption. */
+const CAPTION_MIN_SIDE_PX = 48
+
+/**
+ * The room, in board units, the captions of the pictures in `units` need below them when the board shows captions: the tallest label at
+ * the board's own zoom (a caption has a fixed size in pixels), 0 without captions. Rows are set this much further apart.
+ */
+function captionRoom(doc: BoardDoc, units: readonly Unit[]): number {
+  if (!doc.captions) return 0
+  const zoom = Number.isFinite(doc.view.zoom) && doc.view.zoom > 0 ? doc.view.zoom : 1
+  const byId = new Map(doc.items.map((it) => [it.id, it]))
+  let px = 0
+  for (const u of units) {
+    for (const id of u.ids) {
+      const it = byId.get(id)
+      if (!it || it.kind !== 'picture') continue
+      const c = it.crop
+      const minSide = Math.min((c.r - c.l) * it.w, (c.b - c.t) * it.h) * zoom
+      if (!(minSide >= CAPTION_MIN_SIDE_PX)) continue
+      const font = Math.min(Math.max(minSide * 0.06, 10), 22)
+      px = Math.max(px, CAPTION_GAP_PX + font * 1.4 + 4)
+    }
+  }
+  return px / zoom
 }
 
 /** Moves the units so that the layout `centres` (of units of `sizes`) is centred on `middle`. */
@@ -512,10 +564,14 @@ function place(doc: BoardDoc, units: readonly Unit[], sizes: readonly Size[], ce
   })
   const lx = (x0 + x1) / 2
   const ly = (y0 + y1) / 2
+  // The whole layout stays inside the coordinate range (moving each unit to the edge on its own would pile them up there).
+  const room = BOARD_LIMITS.coordinate
+  const cx = clampCentre(middle.x, (x1 - x0) / 2, room)
+  const cy = clampCentre(middle.y, (y1 - y0) / 2, room)
   let scale = 0
   const moves = units.map((u, i): Move => {
     const now = centreOf(u.rect)
-    const to = { x: middle.x + centres[i]!.x - lx, y: middle.y + centres[i]!.y - ly }
+    const to = { x: cx + centres[i]!.x - lx, y: cy + centres[i]!.y - ly }
     scale = Math.max(scale, Math.abs(to.x), Math.abs(to.y))
     return { unit: u, dx: to.x - now.x, dy: to.y - now.y }
   })
@@ -561,29 +617,39 @@ export function arrange(doc: BoardDoc, ids: readonly number[], mode: ArrangeMode
   const middle = centreOf(unionRect(found))
   const units = orderUnits(doc, found, order, opts.seed, metrics)
   const sizes = units.map((u) => ({ w: u.rect.w, h: u.rect.h }))
+  // Captions hang below their pictures: rows are set further apart by their height (the horizontal gap is left as it is).
+  const vgap = gap + captionRoom(doc, units)
 
-  let centres: Vec2[]
-  switch (mode) {
-    case 'row':
-      centres = rowLayout(sizes, gap)
-      break
-    case 'column':
-      centres = columnLayout(sizes, gap)
-      break
-    case 'grid': {
-      const wanted = opts.columns !== undefined && Number.isFinite(opts.columns) ? Math.floor(opts.columns) : 0
-      const cols = wanted >= 1 ? Math.min(wanted, units.length) : chooseColumns(sizes, gap, aspect)
-      centres = gridLayout(sizes, gap, cols)
-      break
+  const lay = (m: ArrangeMode): Vec2[] => {
+    switch (m) {
+      case 'row':
+        return rowLayout(sizes, gap)
+      case 'column':
+        return columnLayout(sizes, vgap)
+      case 'grid': {
+        const wanted = opts.columns !== undefined && Number.isFinite(opts.columns) ? Math.floor(opts.columns) : 0
+        const cols = wanted >= 1 ? Math.min(wanted, units.length) : chooseColumns(sizes, gap, aspect, vgap)
+        return gridLayout(sizes, gap, cols, vgap)
+      }
+      case 'optimal':
+        return optimalLayout(sizes, gap, aspect, vgap)
+      default:
+        return sizes.map(() => ({ x: 0, y: 0 }))
     }
-    case 'optimal':
-      centres = optimalLayout(sizes, gap, aspect)
-      break
-    case 'stack':
-      centres = sizes.map(() => ({ x: 0, y: 0 }))
-      break
-    default:
-      return doc
+  }
+  if (mode !== 'row' && mode !== 'column' && mode !== 'grid' && mode !== 'optimal' && mode !== 'stack') return doc
+
+  let centres = lay(mode)
+  if (mode !== 'stack') {
+    // A layout wider or taller than the coordinate range cannot be placed without piling units up at its edge (they would overlap):
+    // a row, column or grid that long becomes the packed layout, and where even that does not fit nothing moves.
+    const room = 2 * BOARD_LIMITS.coordinate
+    let e = layoutExtent(sizes, centres)
+    if ((e.w > room || e.h > room) && mode !== 'optimal') {
+      centres = lay('optimal')
+      e = layoutExtent(sizes, centres)
+    }
+    if (e.w > room || e.h > room) return doc
   }
   const moved = place(doc, units, sizes, centres, middle)
   return mode === 'stack' && order !== 'current' ? restack(moved, units) : moved

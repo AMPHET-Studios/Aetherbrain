@@ -31,6 +31,21 @@ describe('the board view on a server', () => {
     expect(html).not.toContain('role="dialog"')
   })
 
+  it('the status bar shows how much of its character budget the board has used: amber from 90 percent, red past it', () => {
+    const empty = render(new FakeHost(boardRaw()), { initialRaw: boardRaw() })
+    expect(empty).toMatch(/>\d+ of 500k characters</)
+    expect(empty).not.toMatch(/class="[^"]*text-(inbox|danger)[^"]*" title="How much of the note[^>]*>/)
+    // A note of 700 characters takes about 760 in the board section.
+    const notes = (n: number) => boardRaw('Gate', [], Array.from({ length: n }, (_, i) => ['x'.repeat(700) + i, (i % 30) * 10, Math.floor(i / 30) * 10] as [string, number, number]))
+    const cell = (n: number): string => {
+      const h = render(new FakeHost(notes(n)), { initialRaw: notes(n) })
+      return /<span class="([^"]*)" title="How much of the note[^>]*>(\d+k) of 500k characters</.exec(h)?.slice(1).join(' ') ?? 'missing'
+    }
+    expect(cell(560)).toMatch(/^whitespace-nowrap tabular-nums 4[12]\dk$/)
+    expect(cell(600)).toMatch(/text-inbox 4[5-9]\dk$/)
+    expect(cell(680)).toMatch(/text-danger 5\d\dk$/)
+  })
+
   it('every tool is a button with its key in the tooltip', () => {
     const html = render(new FakeHost(boardRaw()), { initialRaw: boardRaw() })
     for (const c of BOARD_COMMANDS.filter((x) => x.group === 'Tools')) {

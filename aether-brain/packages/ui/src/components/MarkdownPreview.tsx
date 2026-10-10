@@ -11,6 +11,7 @@ import {
   imagePathOf,
   isMediaPath,
   isVideoPath,
+  remarkNoLateAutolinks,
   remarkWikilink,
   splitFrontmatter,
   tameDelimiters,
@@ -79,7 +80,7 @@ export function MarkdownPreview({ source, selfId = null, depth = 0, className }:
       const path = pictures.resolve(t, folder)
       return path === null ? null : imageKey(path)
     }
-    return [remarkGfm, [remarkWikilink, { resolve }]] as const
+    return [remarkGfm, remarkNoLateAutolinks, [remarkWikilink, { resolve }]] as const
   }, [resolver, assets, folder])
 
   // What the renderers read that changes with every keystroke or vault change: through a ref, so the

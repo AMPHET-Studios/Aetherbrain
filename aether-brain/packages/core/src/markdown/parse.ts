@@ -6,7 +6,8 @@ import { toString as mdToString } from 'mdast-util-to-string'
 import type { Root, Heading as MdHeading, Text } from 'mdast'
 import type { Heading, Link, NoteMeta, ParsedNote, VaultFile } from '../types'
 import { asIsoDate, asString, asStringArray, splitFrontmatter } from './frontmatter'
-import { textTags, textWikilinks } from './wikilink'
+import { boardNoteParts } from '../board/format'
+import { remarkNoLateAutolinks, textTags, textWikilinks } from './wikilink'
 import {
   areaFromFolder,
   basenameOf,
@@ -19,7 +20,7 @@ import {
   typeFromFolder,
 } from '../vault/paths'
 
-const processor = unified().use(remarkParse).use(remarkGfm)
+const processor = unified().use(remarkParse).use(remarkGfm).use(remarkNoLateAutolinks)
 
 /** Parse markdown into an mdast tree (cached processor, no stringify). */
 export function parseMarkdown(body: string): Root {
@@ -153,7 +154,12 @@ export function parseNote(file: VaultFile): ParsedNote {
   const path = normalizePath(file.path)
   const id = idFromPath(path)
   const { frontmatter, body } = splitFrontmatter(file.content)
-  const tree = parseMarkdown(body)
+  // A board's item lines are the board's data, not prose: the board's own line scan reads them (a few milliseconds for a full board),
+  // never the markdown parser (0.3 to 0.8 s, on every save), and none of their text becomes links, tags or search text. What the user
+  // wrote in the note and the lines the board keeps as extras are prose and go through the parser as before.
+  const board = frontmatter['type'] === 'board' ? boardNoteParts(body) : null
+  const text = board ? board.text : body
+  const tree = parseMarkdown(text)
 
   const headings: Heading[] = []
   let firstH1: string | null = null
@@ -177,9 +183,9 @@ export function parseNote(file: VaultFile): ParsedNote {
       const end = t.position?.end.offset
       // Links and tags are read from the markdown as written, so escaped
       // brackets and hashes (`[\[x]]`, `\#word`) stay plain text.
-      const source = start !== undefined && end !== undefined ? body.slice(start, end) : null
+      const source = start !== undefined && end !== undefined ? text.slice(start, end) : null
       for (const { tag } of textTags(t.value, source)) tagSet.add(tag)
-      const base = start ?? 0
+      const base = board ? board.original(start ?? 0) : (start ?? 0)
       for (const tok of textWikilinks(t.value, source)) {
         const link: Link = {
           from: id,
@@ -197,7 +203,7 @@ export function parseNote(file: VaultFile): ParsedNote {
   })
 
   // A paragraph `tameDelimiters` guarded holds look-alikes for its * and _ : links and search text get them back.
-  if (tameDelimiters(body) !== body) {
+  if (tameDelimiters(text) !== text) {
     const back = (x: string) => x.replace(/\u2217/g, '*').replace(/\uff3f/g, '_')
     for (const l of links) {
       l.to = back(l.to)
@@ -206,6 +212,21 @@ export function parseNote(file: VaultFile): ParsedNote {
       if (l.heading) l.heading = back(l.heading)
     }
     for (let i = 0; i < textChunks.length; i++) textChunks[i] = back(textChunks[i]!)
+  }
+
+  // The pictures of a board, from its lines (an embed is a link like any other; a `pic` line names a picture whose path cannot be
+  // written as a wikilink, so its link is marked to be read as the path it is). Merged in by position.
+  if (board && board.pictures.length > 0) {
+    const merged: Link[] = []
+    let k = 0
+    for (const p of board.pictures) {
+      while (k < links.length && links[k]!.offset <= p.offset) merged.push(links[k++]!)
+      const link: Link = { from: id, to: p.path, raw: p.path, kind: 'embed', resolved: false, offset: p.offset }
+      if (p.literal) link.literal = true
+      merged.push(link)
+    }
+    while (k < links.length) merged.push(links[k++]!)
+    links.splice(0, links.length, ...merged)
   }
 
   // Plain text for search/mentions: strip wikilink syntax but keep the words.

@@ -86,6 +86,9 @@ export class MemoryStorage {
   setItem(k: string, v: string): void {
     this.map.set(k, String(v))
   }
+  removeItem(k: string): void {
+    this.map.delete(k)
+  }
 }
 
 /* ----------------------------------------------------------------------- host --- */
@@ -118,13 +121,19 @@ export class FakeHost implements BoardHost {
   raw: string
   loads = 0
   loadError: Error | null = null
+  /** Set to make a load wait for the promise it returns (a slow disk). */
+  loadGate: (() => Promise<void>) | null = null
   saves: string[] = []
+  /** The `expectedBase` each save came with. */
+  bases: (string | undefined)[] = []
+  /** Set: a save whose `expectedBase` is not the text on disk is refused, as the real hosts do. */
+  strict = false
   /** Set to make a save take as long as the promise it returns. */
   saveGate: (() => Promise<void>) | null = null
   saveError: Error | null = null
   inFlight = 0
   maxInFlight = 0
-  toasts: { text: string; tone: BoardTone | undefined }[] = []
+  toasts: { text: string; tone: BoardTone | undefined; action?: { label: string; run(): void } | undefined }[] = []
   copied: string[] = []
   copyError: Error | null = null
   externalSubs = new Set<() => void>()
@@ -179,15 +188,21 @@ export class FakeHost implements BoardHost {
   async load(): Promise<string> {
     this.loads++
     if (this.loadError) throw this.loadError
-    return this.raw
+    const raw = this.raw
+    if (this.loadGate) await this.loadGate()
+    return raw
   }
 
-  async save(raw: string): Promise<void> {
+  async save(raw: string, expectedBase?: string): Promise<void> {
     this.inFlight++
     this.maxInFlight = Math.max(this.maxInFlight, this.inFlight)
     try {
       if (this.saveGate) await this.saveGate()
       if (this.saveError) throw this.saveError
+      if (this.strict && expectedBase !== undefined && expectedBase !== this.raw) {
+        throw new Error('The board was changed outside the board view, so this save was not written')
+      }
+      this.bases.push(expectedBase)
       this.saves.push(raw)
       this.raw = raw
     } finally {
@@ -200,8 +215,8 @@ export class FakeHost implements BoardHost {
     return () => void this.externalSubs.delete(cb)
   }
 
-  toast(text: string, tone?: BoardTone): void {
-    this.toasts.push({ text, tone })
+  toast(text: string, tone?: BoardTone, action?: { label: string; run(): void }): void {
+    this.toasts.push({ text, tone, action })
   }
 
   async copyText(text: string): Promise<void> {

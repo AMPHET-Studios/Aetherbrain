@@ -44,21 +44,31 @@ export function BoardCanvas({ session, onContextMenu, onPointer, focusTarget }: 
     if (!ctx) return
 
     /* ---- size and frames ---- */
-    const measure = () => {
-      const r = box.getBoundingClientRect()
-      c.setViewport(r.width, r.height)
+    // The box's layout size, not its rect: a rect carries the transforms of the page round it (the panel that holds the docked board
+    // scales in while it opens), and nothing tells a ResizeObserver that a transform ended.
+    const measure = (entry?: ResizeObserverEntry) => {
+      const size = entry?.contentBoxSize?.[0]
+      if (size && size.inlineSize > 0 && size.blockSize > 0) c.setViewport(size.inlineSize, size.blockSize)
+      else c.setViewport(box.clientWidth || box.getBoundingClientRect().width, box.clientHeight || box.getBoundingClientRect().height)
     }
     let raf = 0
     const frame = () => {
       raf = 0
       const st = c.state
       const dpr = window.devicePixelRatio > 0 ? window.devicePixelRatio : 1
-      const w = Math.max(1, Math.round(st.viewport.w * dpr))
-      const h = Math.max(1, Math.round(st.viewport.h * dpr))
+      // A whole number of device pixels, and the canvas's box pinned to exactly that many: a box of a fraction of a device pixel is
+      // snapped by the compositor to a different size than the bitmap, which then resamples the whole board (1-pixel lines go soft).
+      // The few hundredths of a pixel over the box are clipped by the wrapper.
+      const w = Math.max(1, Math.ceil(st.viewport.w * dpr - 1e-6))
+      const h = Math.max(1, Math.ceil(st.viewport.h * dpr - 1e-6))
       if (el.width !== w || el.height !== h) {
         el.width = w
         el.height = h
       }
+      const cssW = `${w / dpr}px`
+      const cssH = `${h / dpr}px`
+      if (el.style.width !== cssW) el.style.width = cssW
+      if (el.style.height !== cssH) el.style.height = cssH
       session.draw(ctx as unknown as Ctx2D, dpr)
     }
     const invalidate = () => {
@@ -66,7 +76,12 @@ export function BoardCanvas({ session, onContextMenu, onPointer, focusTarget }: 
     }
     measure()
     const offFrames = session.onFrameNeeded(invalidate)
-    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(measure) : null
+    const ro =
+      typeof ResizeObserver !== 'undefined'
+        ? new ResizeObserver((entries) => {
+            measure(entries[entries.length - 1])
+          })
+        : null
     ro?.observe(box)
 
     // The density changes when the window moves to another screen.
@@ -158,13 +173,29 @@ export function BoardCanvas({ session, onContextMenu, onPointer, focusTarget }: 
       if (batch.length > 1) for (const ev of batch) c.pointerMove(pointerInOf(ev, r))
       else c.pointerMove(pointerInOf(e, r))
     }
+    // Pointers whose release was heard: the capture that follows a release is not a loss.
+    const ended = new Set<number>()
     const onUp = (e: PointerEvent) => {
       clearLongPress()
+      ended.add(e.pointerId)
       c.pointerUp(pointerInOf(e, el.getBoundingClientRect()))
     }
     const onCancel = (e: PointerEvent) => {
       clearLongPress()
+      ended.add(e.pointerId)
       c.pointerCancel(pointerInOf(e, el.getBoundingClientRect()))
+    }
+    // A pointer that is gone without a release (the capture was taken away, the window lost the focus mid-drag) would hold its gesture
+    // for ever, or until some other pointer happens to end it: everything held is let go, nothing is committed.
+    const onLostCapture = (e: PointerEvent) => {
+      if (ended.delete(e.pointerId)) return
+      clearLongPress()
+      c.cancelPointers()
+    }
+    const onWindowBlur = () => {
+      clearLongPress()
+      ended.clear()
+      c.cancelPointers()
     }
     const onLeave = () => {
       callbacks.current.onPointer(null)
@@ -184,6 +215,9 @@ export function BoardCanvas({ session, onContextMenu, onPointer, focusTarget }: 
     // The browser's own answer to a press (the focus moving to the nearest focusable box, a text selection, the middle button's
     // auto-scroll) is not wanted: it would take the focus from a note box the press has just opened. The board takes the focus itself.
     const onMouseDown = (e: MouseEvent) => e.preventDefault()
+    function onContextLost(e: Event) {
+      e.preventDefault()
+    }
 
     el.addEventListener('pointerdown', onDown)
     el.addEventListener('pointermove', onMove)
@@ -193,6 +227,10 @@ export function BoardCanvas({ session, onContextMenu, onPointer, focusTarget }: 
     el.addEventListener('wheel', onWheel, { passive: false })
     el.addEventListener('contextmenu', onContext)
     el.addEventListener('mousedown', onMouseDown)
+    el.addEventListener('lostpointercapture', onLostCapture)
+    window.addEventListener('blur', onWindowBlur)
+    // A lost 2D context is only restored when the loss is cancelled; the board is drawn again once it is back.
+    el.addEventListener('contextlost', onContextLost)
     el.addEventListener('contextrestored', invalidate)
     invalidate()
     return () => {
@@ -204,6 +242,9 @@ export function BoardCanvas({ session, onContextMenu, onPointer, focusTarget }: 
       el.removeEventListener('wheel', onWheel)
       el.removeEventListener('contextmenu', onContext)
       el.removeEventListener('mousedown', onMouseDown)
+      el.removeEventListener('lostpointercapture', onLostCapture)
+      window.removeEventListener('blur', onWindowBlur)
+      el.removeEventListener('contextlost', onContextLost)
       el.removeEventListener('contextrestored', invalidate)
       clearLongPress()
       if (raf !== 0) cancelAnimationFrame(raf)

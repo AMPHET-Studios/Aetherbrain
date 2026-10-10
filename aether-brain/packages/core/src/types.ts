@@ -22,6 +22,7 @@ export type NoteType =
   | 'inbox'
   | 'concept'
   | 'moc'
+  | 'board'
 
 export type Area = 'inbox' | 'projects' | 'areas' | 'resources' | 'archive' | 'untagged'
 
@@ -36,6 +37,7 @@ export const NOTE_TYPES: readonly NoteType[] = [
   'inbox',
   'concept',
   'moc',
+  'board',
 ]
 
 export type NoteStatus = string
@@ -88,6 +90,11 @@ export interface Link {
   alias?: string
   /** Whether `to` points to an existing note. */
   resolved: boolean
+  /**
+   * `raw` is a vault path to be read as it is, not wikilink text (no `|alias`, no `#heading`): the picture of a reference board's
+   * `pic` line, whose path holds characters a wikilink cannot. Absent for every link read from `[[...]]`.
+   */
+  literal?: true
   /** Character offset of the link inside the body (post-frontmatter). */
   offset: number
 }

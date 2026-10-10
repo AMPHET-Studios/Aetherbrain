@@ -32,6 +32,7 @@ const ALL_IDS: Record<BoardCommandId, true> = {
   'edit.ungroup': true,
   'edit.lock': true,
   'edit.unlock': true,
+  'note.edit': true,
   'order.front': true,
   'order.forward': true,
   'order.backward': true,
@@ -130,7 +131,7 @@ describe('the command table', () => {
   })
 
   it('groups the rows the way the id prefix says', () => {
-    const want: Record<string, string> = { tool: 'Tools', edit: 'Edit', order: 'Order', transform: 'Transform', arrange: 'Arrange', sort: 'Arrange', align: 'Arrange', distribute: 'Arrange', normalize: 'Arrange', export: 'Pictures', picture: 'Pictures', window: 'Window', item: 'Appearance' }
+    const want: Record<string, string> = { tool: 'Tools', edit: 'Edit', note: 'Edit', order: 'Order', transform: 'Transform', arrange: 'Arrange', sort: 'Arrange', align: 'Arrange', distribute: 'Arrange', normalize: 'Arrange', export: 'Pictures', picture: 'Pictures', window: 'Window', item: 'Appearance' }
     for (const c of BOARD_COMMANDS) {
       const prefix = c.id.split('.')[0]!
       if (prefix === 'view') expect(['Appearance', 'View'], c.id).toContain(c.group)
@@ -279,12 +280,14 @@ describe('the keys', () => {
         if (id === null) continue
         found++
         const key = name === 'Escape' ? 'esc' : name === 'Backspace' ? '⌫' : name.toLowerCase()
-        const mod = e.ctrl || e.meta
-        const shiftFree = key === '+' || key === '=' || key === '-'
+        // Ctrl and Alt together with a bracket is AltGr on Windows: the bracket typed, bare.
+        const altGr = (key === '[' || key === ']') && e.ctrl && e.alt && !e.meta
+        const mod = (e.ctrl || e.meta) && !altGr
+        const shiftFree = key === '+' || key === '=' || key === '-' || /^\d$/.test(key)
         const row = commandInfo(id)
         expect(row.keys, `${JSON.stringify(e)} runs ${id}`).toBeDefined()
         const want = alternatives(row.keys!).map(canonical)
-        const mine = canonical([mod ? '⌘' : '', e.shift && !shiftFree ? '⇧' : '', e.alt ? '⌥' : '', key].filter(Boolean).join(' '))
+        const mine = canonical([mod ? '⌘' : '', e.shift && !shiftFree ? '⇧' : '', e.alt && !altGr ? '⌥' : '', key].filter(Boolean).join(' '))
         expect(want, `${JSON.stringify(e)} runs ${id}`).toContain(mine)
       }
     }

@@ -5,9 +5,12 @@
  * do another. Pure data and functions, no DOM. Design: docs/design/reference-board.md.
  *
  * Writing a key. `⌘` is Ctrl or Meta (whichever the platform's shortcut key is), `⇧` Shift, `⌥` Alt; the key comes last ("⌘ ⇧ Z",
- * "]", "Delete", "Esc"). Two keys for one command are joined by " / " ("Delete / ⌫"). Letters ignore case. Brackets are matched by
- * key code (Alt-[ is not a bracket on a Mac), `+`, `=` and `-` ignore Shift (Shift makes the plus), everything else must match its
- * modifiers exactly, so "H" (hand tool) and "⇧ H" (flip) never fire together.
+ * "]", "Delete", "Esc"). Two keys for one command are joined by " / " ("Delete / ⌫"). Letters ignore case. Brackets are the
+ * character the key types ('[' and ']'; AltGr is Ctrl+Alt on Windows and is dropped), and only where an Option key on a Mac turns the
+ * bracket key into another character does the key code stand in for it. A letter or digit typed in another script (Cyrillic, Greek,
+ * Hebrew ...) counts as the Latin letter on the same physical key, so Ctrl+Z is Ctrl+Z on every layout. `+`, `=`, `-` and the digits
+ * ignore Shift (Shift makes the plus; a French keyboard makes its 1 with Shift), everything else must match its modifiers exactly, so
+ * "H" (hand tool) and "⇧ H" (flip) never fire together.
  */
 import type { BoardCommandId, BoardCommandInfo, BoardTool, KeyIn } from './api'
 
@@ -54,6 +57,8 @@ export const BOARD_COMMANDS: BoardCommandInfo[] = [
   row('edit.ungroup', 'Ungroup', 'Edit', '⌘ ⇧ G', { needs: 1 }),
   row('edit.lock', 'Lock', 'Edit', '⌘ L', { needs: 1 }),
   row('edit.unlock', 'Unlock', 'Edit', '⌘ ⇧ L', { needs: 1 }),
+  // notes (Enter does the same as F2 when exactly one note is selected: the controller reads it, `picture.open` owns the key)
+  row('note.edit', 'Edit the selected note (Enter too)', 'Edit', 'F2', { needs: 1 }),
   // stacking
   row('order.front', 'Bring to front', 'Order', '⌘ ]', { needs: 1 }),
   row('order.forward', 'Bring forward', 'Order', ']', { needs: 1 }),
@@ -134,10 +139,10 @@ export function commandInfo(id: BoardCommandId): BoardCommandInfo {
 /* ------------------------------------------------------------------ keys --- */
 
 /** The names a key can have in a `keys` text, besides a single character. */
-const NAMED: Record<string, string> = { Esc: 'escape', Delete: 'delete', '⌫': 'backspace', Enter: 'enter', Tab: 'tab', Home: 'home' }
+const NAMED: Record<string, string> = { Esc: 'escape', Delete: 'delete', '⌫': 'backspace', Enter: 'enter', Tab: 'tab', Home: 'home', F2: 'f2' }
 
-/** Keys whose Shift state does not matter: Shift is how a keyboard makes a plus. */
-const SHIFT_FREE = new Set(['+', '=', '-'])
+/** Keys whose Shift state does not matter: Shift is how a keyboard makes a plus, and a French keyboard makes its digits with Shift. */
+const SHIFT_FREE = new Set(['+', '=', '-', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9'])
 
 /** Commands that make sense to fire again and again while a key is held. */
 const REPEATABLE = new Set<BoardCommandId>(['edit.undo', 'edit.redo', 'item.opacityUp', 'item.opacityDown', 'view.zoomIn', 'view.zoomOut'])
@@ -162,20 +167,45 @@ function signatureOfText(text: string): string {
   return signature(mod, shift, alt, key)
 }
 
-/** The signature of a key event, or null for a key no row can name (a modifier on its own, a dead key). */
+/**
+ * What an Option key on a Mac types on the bracket keys ('“', '‘', a dead key): not a letter and not ASCII. Only then does the key
+ * code stand in for the bracket; on every other layout the key's own character decides (a German `+` sits where `]` does on a US board).
+ */
+function isOptionGlyph(key: string): boolean {
+  if (key === 'Dead') return true
+  return key.length === 1 && key.charCodeAt(0) > 126 && !/\p{L}/u.test(key)
+}
+
+/** The signature of a key event, or null for a key no row can name (a modifier on its own, a dead key, an IME's 'Process'). */
 function signatureOfEvent(e: KeyIn): string | null {
   let key: string
-  if (e.code === 'BracketLeft') key = '['
-  else if (e.code === 'BracketRight') key = ']'
-  else if (e.key.length === 1) key = e.key.toLowerCase()
-  else if (e.key === 'Escape') key = 'escape'
+  let ctrl = e.ctrl
+  let alt = e.alt
+  if (e.key === '[' || e.key === ']') {
+    key = e.key
+    // Windows reports AltGr, which types a bracket on many layouts, as Ctrl+Alt: the bracket typed is then a bare one.
+    if (ctrl && alt && !e.meta) {
+      ctrl = false
+      alt = false
+    }
+  } else if (e.alt && (e.code === 'BracketLeft' || e.code === 'BracketRight') && isOptionGlyph(e.key)) {
+    key = e.code === 'BracketLeft' ? '[' : ']'
+  } else if (e.key.length === 1) {
+    key = e.key.toLowerCase()
+    if (key.charCodeAt(0) > 0x7f) {
+      // A letter or digit of another script: the one on the same place of a US keyboard.
+      const m = /^(?:Key([A-Z])|Digit([0-9]))$/.exec(e.code)
+      if (m) key = (m[1] ?? m[2]!).toLowerCase()
+    }
+  } else if (e.key === 'Escape') key = 'escape'
   else if (e.key === 'Delete') key = 'delete'
   else if (e.key === 'Backspace') key = 'backspace'
   else if (e.key === 'Enter') key = 'enter'
   else if (e.key === 'Tab') key = 'tab'
   else if (e.key === 'Home') key = 'home'
+  else if (e.key === 'F2') key = 'f2'
   else return null
-  return signature(e.ctrl || e.meta, e.shift, e.alt, key)
+  return signature(ctrl || e.meta, e.shift, alt, key)
 }
 
 const BINDINGS = new Map<string, BoardCommandId>()

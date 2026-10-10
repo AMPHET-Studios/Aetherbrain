@@ -7,6 +7,7 @@ import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboa
 import { cx, isMac, plural } from '../../util'
 import { scrollToReveal } from '../../windowing'
 import type { BoardHost } from '../api'
+import { isComposing, trapTab } from './dom'
 import { Icon } from './icons'
 import {
   EMPTY_PICKER_SELECTION,
@@ -119,6 +120,12 @@ export function Picker({ host, onBoard, onAdd, onClose, reducedMotion }: PickerP
   const onKeyDown = (e: ReactKeyboardEvent) => {
     // Nothing typed here reaches the board's or the app's own keys.
     e.stopPropagation()
+    // Tab goes round inside the picker, not out onto the toolbar behind it.
+    trapTab(e, panel.current)
+    // Esc and Enter belong to an input method that is composing text.
+    if (isComposing(e)) return
+    // Enter and Space on a button are the button's (Cancel and Close close, Add adds), not the list's.
+    if ((e.key === 'Enter' || e.key === ' ') && e.target instanceof Element && e.target.closest('button')) return
     const inInput = e.target === input.current
     const mod = e.ctrlKey || e.metaKey
     const step = (d: number) => {
@@ -173,10 +180,12 @@ export function Picker({ host, onBoard, onAdd, onClose, reducedMotion }: PickerP
       <div
         ref={panel}
         role="dialog"
+        aria-modal="true"
         aria-label="Add pictures to the board"
+        tabIndex={-1}
         data-board-overlay
         onKeyDown={onKeyDown}
-        className={cx('panel flex h-[min(620px,100%)] w-[min(700px,100%)] flex-col overflow-hidden', !reducedMotion && 'rise')}
+        className={cx('panel flex h-[min(620px,100%)] w-[min(700px,100%)] flex-col overflow-hidden outline-none', !reducedMotion && 'rise')}
       >
         <div className="flex items-center gap-2 border-b border-[var(--line)] px-3 py-2.5">
           <Icon name="search" />
@@ -186,6 +195,7 @@ export function Picker({ host, onBoard, onAdd, onClose, reducedMotion }: PickerP
             className="input !border-0 !bg-transparent !px-1 !py-1 !shadow-none"
             placeholder="Search the vault's pictures by name or folder"
             aria-label="Search pictures"
+            data-board-focus
             value={query}
             spellCheck={false}
             onChange={(e) => setQuery(e.target.value)}

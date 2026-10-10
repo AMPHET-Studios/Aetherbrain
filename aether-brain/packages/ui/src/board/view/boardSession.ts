@@ -11,18 +11,23 @@
  */
 import {
   BOARD_LIMITS,
+  boardChars,
   boardPictureName,
   boardPictures,
+  cutText,
   dominantColours,
   isBoardNote,
+  itemsBounds,
   parseBoard,
   screenToBoard,
   serializeBoard,
+  setProps,
   type BoardDoc,
   type TextMetrics,
   type Vec2,
 } from '@aether/core'
-import type { BoardCommandId, BoardEvent, BoardHost, BoardTone, ImageSlot, ImageSource, KeyIn, PointerIn } from '../api'
+import { isMac } from '../../util'
+import type { BoardCommandId, BoardEvent, BoardHost, BoardTone, BoardUiState, ImageSlot, ImageSource, KeyIn, PointerIn } from '../api'
 import { BoardController } from '../controller'
 import { keyToCommand } from '../commands'
 import { DEFAULT_RETRY_MS, ImageCache, type BitmapLike, type ImageCacheOptions } from '../imageCache'
@@ -31,21 +36,30 @@ import { drawBoard, exportBoard, visiblePictures, type Ctx2D, type ExportCanvas 
 import {
   DROP_CHUNK_BYTES,
   DROP_CHUNK_FILES,
+  FIT_BATCH_MIN,
   HINT_MS,
+  MAX_DROP_PIXELS,
+  MAX_FILE_BYTES,
   MAX_PALETTE_PICTURES,
   MESSAGES,
   PALETTE_COLOURS,
   PALETTE_PX,
   Saver,
   classifyTransfer,
+  clearRecovery,
   describePicture,
   exportFileName,
   exportScale,
   overCapMessage,
+  pasteHint,
+  readRecovery,
   readStoredView,
   tooBigMessage,
+  tooLargeMessage,
+  writeRecovery,
   writeStoredView,
   type PictureInfo,
+  type StorageLike,
   type Timers,
   type TransferSnapshot,
 } from './session'
@@ -69,7 +83,7 @@ export interface SessionEnv {
   timers: Timers
   /** Text measuring shared by the controller and the renderer (canvasTextMetrics over a canvas; the estimate without one). */
   metrics: TextMetrics
-  storage(): Pick<Storage, 'getItem' | 'setItem'> | null
+  storage(): StorageLike | null
   /** The picture decoder the cache uses (createImageBitmap); the default of createImageLoader when left out. */
   createBitmap?: CreateBitmap
   /** A picture file's own size in pixels (upright, as the loader decodes it), or null when it is no picture the browser can read. */
@@ -110,8 +124,36 @@ const PASTE_WAIT_MS = 150
 const SIZE_PREVIEW_PX = 1024
 /** Pictures held in the set of already-fed sizes before it is thrown away and learned again. */
 const MAX_FED = 4096
+/** An export made again at a smaller scale when its PNG is over the vault's limit: this many tries in all. */
+const EXPORT_ATTEMPTS = 3
+/** The failure of a save that is told again (a second toast with the escape hatch): this many failures in a row. */
+const STILL_FAILING = 4
+/** A board is brought into view after a batch of pictures when it landed this close to, or outside, the edge of the view (fraction of the view). */
+const FIT_MARGIN = 0.02
+
+/** The first line of a board's copy on the system clipboard (controller.ts makes it): text that starts so is items, never a note. */
+const COPY_PREFIX = /^\s*Aether Brain board: \d+ items? copied/
+
+/** Whether two note texts hold the same board (the camera and the date written do not count). */
+function sameWork(a: string, b: string): boolean {
+  if (a === b) return true
+  const key = (raw: string): string => {
+    const doc = parseBoard(raw).doc
+    return serializeBoard({ ...doc, view: { x: 0, y: 0, zoom: 1 } }, undefined, new Date(0))
+  }
+  try {
+    return key(a) === key(b)
+  } catch {
+    return false
+  }
+}
+
+/** Text with its line breaks as `\n` (a clipboard may bring them back as `\r\n`). */
+const normalLines = (text: string): string => text.replace(/\r\n?/g, '\n')
 
 const errorText = (err: unknown): string => (err instanceof Error ? err.message : String(err))
+/** A reason as a sentence part: the stops at its end are dropped, the text that follows brings its own. */
+const reasonOf = (err: unknown): string => errorText(err).replace(/[\s.]+$/, '')
 const baseName = (p: string): string => p.slice(p.lastIndexOf('/') + 1)
 
 /* ----------------------------------------------------------------- session --- */
@@ -132,6 +174,8 @@ export class BoardSession {
   private offs: (() => void)[] = []
   private readonly saver: Saver
   private rawBase = ''
+  /** The note exactly as the host last gave it or took it (`rawBase` is '' for a blank note): what a save must find on disk. */
+  private readText = ''
   private lastDoc: BoardDoc | null = null
   private gen = 0
   private lastFinal = true
@@ -147,10 +191,17 @@ export class BoardSession {
   private activityText: string | null = null
   private retryTimer: unknown = null
   private pasteTimer: unknown = null
-  private marker = ''
+  /** The text this session last put on the system clipboard for a copy of the board's items, once the write went through; '' when none. */
+  private copied = ''
+  private copySeq = 0
   private exporting = false
   private reloading = false
   private reloadAgain = false
+  /** The note changed outside while a gesture was held: judged again when the gesture ends. */
+  private externalPending = false
+  /** A save has carried the text of a note still being typed: when the typing ends the committed board must be written again. */
+  private draftWritten = false
+  private recoveryChecked = false
   /** What the note's reader had to say, kept until the view starts (a toast is no business of a render). */
   private pendingNotice: string | null = null
 
@@ -173,9 +224,11 @@ export class BoardSession {
     this.saver = new Saver({
       timers: this.env.timers,
       run: () => this.writeBoard(),
-      onError: (err, first) => {
-        // Once per run of failures: the indicator keeps saying so, and the retry is silent.
-        if (first) this.say(`The board could not be saved: ${errorText(err)}. It is kept here and tried again.`, 'error')
+      onError: (err, first, failures) => {
+        // Once per run of failures: the indicator keeps saying so, and the retry is silent. A failure that goes on is said once more,
+        // with the way out that always works: the text of the board on the clipboard.
+        if (first) this.say(`The board could not be saved: ${reasonOf(err)}. It is kept here and tried again.`, 'error', this.copyAction())
+        else if (failures === STILL_FAILING) this.say(`The board still cannot be saved: ${reasonOf(err)}. Copy its text to be safe.`, 'error', this.copyAction())
       },
       persistView: () => this.persistView(),
       onStatus: () => this.notify(),
@@ -224,6 +277,7 @@ export class BoardSession {
     const parsed = parseBoard(raw)
     const blank = raw.trim() === ''
     this.rawBase = blank ? '' : raw
+    this.readText = raw
     let doc = blank ? { ...parsed.doc, title: this.host.title || parsed.doc.title } : parsed.doc
     // The camera remembered in this browser is newer than the file's: the file is only written with real changes.
     const stored = readStoredView(this.env.storage(), this.host.path)
@@ -237,7 +291,10 @@ export class BoardSession {
       if (this.started) this.say(notice, 'info')
       else this.pendingNotice = notice
     }
-    if (this.started) this.wire()
+    if (this.started) {
+      this.wire()
+      this.offerRecovery()
+    }
     this.notify()
     this.invalidate()
     return true
@@ -261,17 +318,23 @@ export class BoardSession {
   start(): void {
     if (this.started) return
     this.started = true
-    if (this.ctrl) this.wire()
+    if (this.ctrl) {
+      this.wire()
+      // A strict-mode remount (or a view that came back) finds a board that failed to save with its retry cancelled.
+      if (this.saver.dirty) this.saver.retryNow()
+    }
     if (this.pendingNotice !== null) {
       const notice = this.pendingNotice
       this.pendingNotice = null
       this.say(notice, 'info')
     }
+    if (this.ctrl) this.offerRecovery()
   }
 
   /**
    * Lets everything go: flushes a pending save (the write is on its way before this returns), drops the cache and every listener.
-   * Resolves when the save has ended (or failed).
+   * Resolves when the save has ended (or failed). A board that could not be saved is not dropped in silence: a copy of its text is kept
+   * in the browser for the next time this board is opened, and the user is told so, with a way to copy the text.
    */
   async stop(): Promise<void> {
     if (!this.started) return
@@ -286,8 +349,10 @@ export class BoardSession {
     this.retryTimer = null
     this.cancelPasteWait()
     this.probeQueue.length = 0
-    await flushed
+    this.externalPending = false
+    const saved = await flushed
     this.saver.stop()
+    if (!saved && this.ctrl) this.leaveUnsaved()
   }
 
   private wire(): void {
@@ -295,7 +360,10 @@ export class BoardSession {
     this.cache = this.makeCache({ load: createImageLoader(this.host.pictures, this.env.createBitmap), onLoaded: () => this.invalidate() })
     this.fed.clear()
     this.offs.push(
-      c.subscribe(() => this.invalidate()),
+      c.subscribe((s) => {
+        this.invalidate()
+        this.onControllerState(s)
+      }),
       c.onChange((doc, why) => this.onChange(doc, why)),
       c.onEvent((e) => this.handleEvent(e)),
     )
@@ -369,8 +437,8 @@ export class BoardSession {
     this.notify()
   }
 
-  /** Tells the user: the host's toast, and the status bar remembers it for a few seconds. */
-  say(text: string, tone: BoardTone = 'info'): void {
+  /** Tells the user: the host's toast (with the action, when there is one), and the status bar remembers the text for a few seconds. */
+  say(text: string, tone: BoardTone = 'info', action?: { label: string; run(): void }): void {
     this.message = { text, tone }
     if (this.messageTimer !== null) this.env.timers.clear(this.messageTimer)
     this.messageTimer = this.env.timers.set(() => {
@@ -380,7 +448,8 @@ export class BoardSession {
     }, HINT_MS)
     this.notify()
     try {
-      this.host.toast(text, tone)
+      if (action) this.host.toast(text, tone, action)
+      else this.host.toast(text, tone)
     } catch {
       /* a host that cannot show a toast must not break the board */
     }
@@ -450,6 +519,8 @@ export class BoardSession {
     const cache = this.cache
     if (cache) cache.setVisible(visiblePictures(doc, doc.view, st.viewport, this.env.metrics))
     const arrived: [string, { w: number; h: number }][] = []
+    // The pictures drawn this time that could not be read: only these are worth a redraw when their retry is due.
+    let failedHere = 0
     const images: ImageSource = {
       get: (path, wantPx): ImageSlot => {
         const slot: ImageSlot = cache ? cache.get(path, wantPx) : { bitmap: null, natural: null, failed: false }
@@ -457,7 +528,10 @@ export class BoardSession {
           const known = this.fed.get(path)
           if (!known || known.w !== slot.natural.w || known.h !== slot.natural.h) arrived.push([path, slot.natural])
         }
-        if (slot.failed) this.failedSeen.add(path)
+        if (slot.failed) {
+          this.failedSeen.add(path)
+          failedHere++
+        }
         return slot
       },
     }
@@ -480,7 +554,7 @@ export class BoardSession {
       }
       this.notify()
     }
-    if (cache && cache.stats().failed > 0 && this.retryTimer === null) {
+    if (cache && failedHere > 0 && this.retryTimer === null) {
       this.retryTimer = this.env.timers.set(() => {
         this.retryTimer = null
         this.invalidate()
@@ -535,12 +609,30 @@ export class BoardSession {
     }
   }
 
+  /** The controller's state changed: an outside change that waited for a gesture to end is looked at again once none is held. */
+  private onControllerState(s: BoardUiState): void {
+    if (this.externalPending && !s.gesturing && this.started) {
+      this.externalPending = false
+      void this.onExternalChange()
+    }
+    // The text of a note that was being typed is in the note; if the typing ended without it (Esc, an emptied box), the board that was
+    // on screen all along is written over it.
+    if (this.draftWritten && s.editingNote === null) {
+      this.draftWritten = false
+      this.lastDoc = s.doc
+      this.gen++
+      this.lastFinal = true
+      this.saver.note({ final: true, viewOnly: false })
+    }
+  }
+
   private async reloadOnce(): Promise<void> {
     // A write of our own may be in flight: the change reported is probably its echo. Let it land, then judge.
     await this.saver.idle()
     if (!this.started || !this.ctrl) return
     // Unsaved work: a change not written yet, or a note still being typed (it is in nobody's history until it is committed).
-    const unsaved = this.saver.dirty || this.ctrl.state.editingNote !== null
+    const gen = this.gen
+    const unsavedBefore = this.saver.dirty || this.ctrl.state.editingNote !== null
     let raw: string
     try {
       raw = await this.host.load()
@@ -549,14 +641,28 @@ export class BoardSession {
       return
     }
     if (!this.started || !this.ctrl) return
-    if (raw === this.rawBase) return
+    if (raw === this.readText) return
+    // A gesture is held (a stroke, a drag, a pan): it is not cancelled for a change that may not even touch the board. Looked at
+    // again when it ends, with the real state: a stroke that was kept is then unsaved work, one that was not takes the new board.
+    if (this.ctrl.state.gesturing) {
+      this.externalPending = true
+      return
+    }
+    // Judged again NOW, after the read: whatever the user did while it was in flight (a finished gesture, a write started or refused,
+    // a note opened) is unsaved work too, and the outside board must not replace it.
+    const unsaved =
+      unsavedBefore || this.gen !== gen || this.saver.dirty || this.saver.running || this.saver.failing || this.ctrl.state.editingNote !== null
     // Whatever the note says outside the board section is the base from now on: our next save merges into it.
-    this.rawBase = raw
+    this.rawBase = raw.trim() === '' ? '' : raw
+    this.readText = raw
     if (unsaved) {
       this.say('The board was also changed outside this window. Your unsaved changes here are kept and will replace the board part of that change.', 'info')
+      // A save that was refused because the note moved on can be made now, from the new base; it need not wait for its retry.
+      void this.saver.idle().then(() => this.saver.retryNow())
       return
     }
     this.ctrl.replaceDoc(parseBoard(raw).doc)
+    this.lastDoc = this.ctrl.state.doc
   }
 
   /* ------------------------------------------------------------------- saving --- */
@@ -575,33 +681,154 @@ export class BoardSession {
     writeStoredView(this.env.storage(), this.host.path, this.ctrl.state.doc.view)
   }
 
+  /**
+   * The board with the text of the note being typed put in, or null when nobody is typing (or the text is nothing, or would not fit):
+   * the note is saved as it is typed, without ending the edit and without a step in the history. Nobody drags while a note is open, so
+   * the controller's own board is the last change plus that note.
+   */
+  private draftDoc(): BoardDoc | null {
+    const c = this.ctrl
+    const ed = this.editor
+    if (!c || !ed) return null
+    const st = c.state
+    if (st.editingNote === null || st.editingNote !== ed.id) return null
+    const note = st.doc.items.find((it) => it.id === ed.id)
+    if (!note || note.kind !== 'note' || note.locked) return null
+    const text = cutText(ed.get(), BOARD_LIMITS.noteChars)
+    if (text.trim() === '' || text === note.text) return null
+    const doc = setProps(st.doc, [ed.id], { text }, this.env.metrics)
+    // What the commit would refuse is not saved either (it stays in the box to be shortened).
+    const after = boardChars(doc)
+    return after <= BOARD_LIMITS.noteTotal || after <= boardChars(st.doc) ? doc : null
+  }
+
+  /** The note's text for this board: the camera as it is now, merged into the note as it was last read. */
+  private serializeWith(base: BoardDoc): string {
+    const doc: BoardDoc = { ...base, view: this.controller.state.doc.view }
+    const now = this.env.now()
+    return this.rawBase === '' ? serializeBoard(doc, undefined, now) : serializeBoard(doc, this.rawBase, now)
+  }
+
   /** One save: the board as the last change left it (with the camera as it is now) merged into the note; nothing is written when it is the same text. */
   private async writeBoard(): Promise<void> {
     const c = this.ctrl
-    const base = this.lastDoc
-    if (!c || !base) return
+    if (!c) return
+    const draft = this.draftDoc()
+    const base = draft ?? this.lastDoc
+    if (!base) return
     const gen = this.gen
     const final = this.lastFinal
-    const doc: BoardDoc = { ...base, view: c.state.doc.view }
-    const now = this.env.now()
-    const raw = this.rawBase === '' ? serializeBoard(doc, undefined, now) : serializeBoard(doc, this.rawBase, now)
+    const raw = this.serializeWith(base)
+    if (draft) this.draftWritten = true
     if (raw !== this.rawBase) {
-      await this.host.save(raw)
+      try {
+        // The text this one was made from goes with it: the host refuses it when the note is no longer that text, whatever the host
+        // itself read last (a reload that landed meanwhile must not make a stale text look fresh).
+        await this.host.save(raw, this.readText)
+      } catch (err) {
+        this.keepCopy(raw)
+        throw err
+      }
       this.rawBase = raw
+      this.readText = raw
     }
+    clearRecovery(this.env.storage(), this.host.path)
     // Only a finished change that nothing has followed is what the file now holds; a drag in progress is not.
     if (this.gen === gen && final) c.markSaved()
   }
 
-  /** Writes whatever is not written, a note being typed included (it is committed first). Resolves when it is on disk or the attempt failed; never rejects. */
-  async flush(): Promise<void> {
+  /**
+   * Writes whatever is not written, a note being typed included (it is committed first). Resolves when it is on disk or the attempt
+   * failed; never rejects. True only when nothing is left unsaved (a failed write, or a note the budget would not take, is false).
+   */
+  async flush(): Promise<boolean> {
     this.commitEditing()
-    await this.saver.flush()
+    const saved = await this.saver.flush()
+    return saved && (this.ctrl === null || this.ctrl.state.editingNote === null)
   }
 
   /** Writes what is pending without ending a note being typed (the window lost the focus: the text is still being written). */
-  async save(): Promise<void> {
-    await this.saver.flush()
+  async save(): Promise<boolean> {
+    return this.saver.flush()
+  }
+
+  /* ------------------------------------------------- a board that could not be saved --- */
+
+  /** Keeps the text of a board that could not be written, for this board's path, in place of the one kept before. */
+  private keepCopy(raw: string): void {
+    writeRecovery(this.env.storage(), this.host.path, raw, this.env.now().getTime())
+  }
+
+  /** The note's text as it would be written now: what is on screen, or null before the board is open. */
+  private unsavedText(): string | null {
+    const c = this.ctrl
+    if (!c) return null
+    return this.serializeWith(this.draftDoc() ?? this.lastDoc ?? c.state.doc)
+  }
+
+  /** The way out that always works: the board's text on the clipboard, to be pasted into a note by hand. */
+  private copyAction(): { label: string; run(): void } {
+    return { label: 'Copy board text', run: () => void this.copyBoardText() }
+  }
+
+  private async copyBoardText(): Promise<void> {
+    const text = this.unsavedText()
+    if (text === null) return
+    try {
+      await this.host.copyText(text)
+      this.toastNow('Copied the board’s text. Paste it into a new note to keep it.', 'success')
+    } catch (err) {
+      this.toastNow(`The board’s text could not be copied: ${errorText(err)}`, 'error')
+    }
+  }
+
+  /** A message that does not need the view to be up (no timer, no status bar): for a session that has stopped. */
+  private toastNow(text: string, tone: BoardTone, action?: { label: string; run(): void }): void {
+    if (this.started) return this.say(text, tone, action)
+    try {
+      if (action) this.host.toast(text, tone, action)
+      else this.host.toast(text, tone)
+    } catch {
+      /* a host that cannot show a toast must not break the board */
+    }
+  }
+
+  /** The view was left with a board that is not saved: a copy of it stays in the browser, and the user is told, not left to find out. */
+  private leaveUnsaved(): void {
+    const text = this.unsavedText()
+    if (text !== null) this.keepCopy(text)
+    this.toastNow(
+      'The board was closed with changes that could not be saved. A copy was kept here: open the board again to recover it, or copy its text now.',
+      'error',
+      this.copyAction(),
+    )
+  }
+
+  /** A copy kept after a failed save is offered when the board is opened again (once per opening), unless it holds nothing new. */
+  private offerRecovery(): void {
+    if (this.recoveryChecked || !this.ctrl) return
+    this.recoveryChecked = true
+    const storage = this.env.storage()
+    const found = readRecovery(storage, this.host.path)
+    if (!found) return
+    if (sameWork(found.text, this.readText)) {
+      clearRecovery(storage, this.host.path)
+      return
+    }
+    this.say('Changes made last time could not be saved. A copy was kept.', 'info', { label: 'Recover unsaved changes', run: () => this.recover(found.text) })
+  }
+
+  /** Takes back the board that could not be saved: it replaces the one on screen (the history starts from it) and is written now. */
+  private recover(text: string): void {
+    const c = this.ctrl
+    if (!c || !this.started) return
+    this.commitEditing()
+    c.replaceDoc(parseBoard(text).doc)
+    this.lastDoc = c.state.doc
+    this.gen++
+    this.lastFinal = true
+    this.saver.note({ final: true, viewOnly: false })
+    this.say('Took back the changes that could not be saved; saving them now.', 'success')
   }
 
   /* ---------------------------------------------------------------- note edits --- */
@@ -613,6 +840,16 @@ export class BoardSession {
     return () => {
       if (this.editor === entry) this.editor = null
     }
+  }
+
+  /**
+   * The note text box changed (every keystroke): the text reaches the saver now, not when the box loses the focus. It is written with
+   * the board by the usual throttle, as a draft: the note stays open, nothing enters the history, and the indicator says the board is
+   * not saved while the typing lasts.
+   */
+  draftNote(id: number): void {
+    if (!this.ctrl || this.ctrl.state.editingNote !== id || !this.editor || this.editor.id !== id) return
+    this.saver.note({ final: false, viewOnly: false })
   }
 
   /** Commits the note being typed, if there is one. Always called before a press on the canvas or a command is forwarded. */
@@ -636,27 +873,33 @@ export class BoardSession {
   /** Runs a command from a button, a menu or the palette. */
   exec(id: BoardCommandId, arg?: unknown): void {
     this.commitEditing()
-    const count = this.controller.state.selection.length
+    // The menu's Paste can only paste what the board itself copied; a picture or text on the system clipboard is the keyboard's (the
+    // sandbox has no way to read it from here): say so, instead of a Paste that does nothing.
+    if (id === 'edit.paste' && !this.controller.state.canPaste) {
+      this.say(pasteHint(isMac))
+      return
+    }
     this.controller.exec(id, arg)
-    if (id === 'edit.copy' || id === 'edit.cut') this.markClipboard(count)
+    if (id === 'edit.copy' || id === 'edit.cut') this.markClipboard()
   }
 
   /**
    * A key press or release (the shell has already left text fields alone). True when the board used it.
    * ⌘V is the browser's: the paste event decides between a picture on the system clipboard and the board's own items, so the key is
-   * not consumed; when no paste event follows, the board pastes its own items.
+   * not consumed; when no paste event follows, the board pastes its own items. A key held down repeats ⌘V, and the browser would paste
+   * once for each repeat: the repeats are taken here, so that one press is one paste.
    */
   key(k: KeyIn): boolean {
     const c = this.controller
     const st = c.state
     const id = k.down ? keyToCommand(k, { tool: st.tool, editing: st.editingNote !== null, cropping: st.cropping !== null }) : null
     if (id === 'edit.paste') {
+      if (k.repeat) return true
       this.expectPaste()
       return false
     }
-    const count = st.selection.length
     const used = c.key(k)
-    if (used && (id === 'edit.copy' || id === 'edit.cut')) this.markClipboard(count)
+    if (used && (id === 'edit.copy' || id === 'edit.cut')) this.markClipboard()
     return used
   }
 
@@ -664,7 +907,7 @@ export class BoardSession {
     this.cancelPasteWait()
     this.pasteTimer = this.env.timers.set(() => {
       this.pasteTimer = null
-      if (this.started) this.exec('edit.paste')
+      if (this.started) this.pasteOwn()
     }, PASTE_WAIT_MS)
   }
 
@@ -674,12 +917,31 @@ export class BoardSession {
     this.pasteTimer = null
   }
 
-  /** The board's own copy also leaves a line on the system clipboard, so that a paste can tell it from something copied since. */
-  private markClipboard(count: number): void {
+  /** The board's own items, from the controller's memory: what a paste does when the system clipboard has nothing a board can take. */
+  private pasteOwn(): void {
+    this.commitEditing()
+    if (this.controller.state.canPaste) this.controller.exec('edit.paste')
+    else this.say(MESSAGES.nothing)
+  }
+
+  /**
+   * The board's own copy also goes to the system clipboard, as text that any board, window or session can paste (the controller made
+   * it: `exportCopy`). A copy that stored nothing (nothing selected, only locked items) leaves the system clipboard alone. The session
+   * trusts the text as its own only once the write went through: until then, and when it fails, a paste reads what is really there.
+   */
+  private markClipboard(): void {
     const c = this.ctrl
-    if (!c || !c.state.canPaste) return
-    this.marker = `Aether Brain board: ${count} item${count === 1 ? '' : 's'} copied`
-    this.host.copyText(this.marker).catch(() => undefined)
+    if (!c) return
+    this.copied = ''
+    const seq = ++this.copySeq
+    const out = c.exportCopy()
+    if (!out) return
+    this.host.copyText(out.text).then(
+      () => {
+        if (seq === this.copySeq) this.copied = out.text
+      },
+      () => undefined,
+    )
   }
 
   /* ------------------------------------------------------------- events in --- */
@@ -850,27 +1112,37 @@ export class BoardSession {
       const paths = [...new Set(c.state.doc.items.flatMap((it) => (it.kind === 'picture' && (!wanted || wanted.has(it.id)) ? [it.path] : [])))]
       await this.learnNaturals(paths)
       const doc = c.state.doc
-      const scale = exportScale(doc, ids, (p) => this.naturalOf(p), this.env.metrics)
+      let scale = exportScale(doc, ids, (p) => this.naturalOf(p), this.env.metrics)
       const loader = createImageLoader(this.host.pictures, this.env.createBitmap)
-      const result = await exportBoard(
-        doc,
-        ids,
-        scale,
-        {
-          get: async (path) => (await loader(path, 8192))?.bitmap ?? null,
-          release: (_path, bitmap) => bitmap.close(),
-        },
-        (w, h) => this.env.makeCanvas(w, h),
-        this.env.metrics,
-      )
-      if (!result) {
-        this.say('There is nothing to export.', 'info')
-        return
+      let data: Uint8Array | null = null
+      let shrunk = false
+      // The vault takes a picture of at most MAX_FILE_BYTES, and a PNG of a detailed collage can be larger: it is made again, smaller
+      // (a PNG's size follows the pixels, which follow the square of the scale), rather than refused after all the work.
+      for (let attempt = 0; attempt < EXPORT_ATTEMPTS; attempt++) {
+        const result = await exportBoard(
+          doc,
+          ids,
+          scale,
+          {
+            get: async (path) => (await loader(path, 8192))?.bitmap ?? null,
+            release: (_path, bitmap) => bitmap.close(),
+          },
+          (w, h) => this.env.makeCanvas(w, h),
+          this.env.metrics,
+        )
+        if (!result) {
+          this.say('There is nothing to export.', 'info')
+          return
+        }
+        data = await this.env.canvasToPng(result.canvas)
+        // The canvas can be 8192 square: let go of it now.
+        result.canvas.width = 0
+        result.canvas.height = 0
+        if (!data || data.length <= MAX_FILE_BYTES || attempt === EXPORT_ATTEMPTS - 1) break
+        scale *= Math.max(0.3, Math.min(0.9, Math.sqrt((MAX_FILE_BYTES * 0.85) / data.length)))
+        shrunk = true
+        data = null
       }
-      const data = await this.env.canvasToPng(result.canvas)
-      // The canvas can be 8192 square: let go of it now.
-      result.canvas.width = 0
-      result.canvas.height = 0
       if (!data) {
         this.say('The picture could not be made.', 'error')
         return
@@ -878,7 +1150,7 @@ export class BoardSession {
       const name = exportFileName(c.state.doc.title || this.host.title, this.env.now())
       const [path] = await this.host.pictures.add([{ name, data }])
       if (!path) this.say('The vault refused the exported picture (too big?).', 'error')
-      else this.say(`Saved ${baseName(path)} in the board's folder`, 'success')
+      else this.say(`Saved ${baseName(path)} in the board's folder${shrunk ? ' (made smaller: at full size the picture was over the vault’s limit)' : ''}`, 'success')
     } catch (err) {
       this.say(`The export failed: ${errorText(err)}`, 'error')
     } finally {
@@ -895,6 +1167,11 @@ export class BoardSession {
    * Resolves 'nothing' when the transfer held nothing a board can use (a paste then falls back to the board's own items).
    */
   async handleTransfer(t: TransferSnapshot<File>, at: Vec2 | null): Promise<'handled' | 'nothing'> {
+    // Items copied on a board are items, never a note: this is checked on the whole text, before a note's length cuts it.
+    if (t.files.length === 0 && COPY_PREFIX.test(t.text)) {
+      this.pasteItems(t.text, at)
+      return 'handled'
+    }
     const plan = classifyTransfer(t)
     switch (plan.kind) {
       case 'files':
@@ -915,15 +1192,27 @@ export class BoardSession {
     }
   }
 
-  /** The paste event. Text that is the board's own copy marker (nothing copied since) pastes the board's items. */
+  /**
+   * The paste event. Text that is the board's own copy (this session's, nothing copied since) pastes the board's items from memory;
+   * anything else goes the way of a drop (below), and with nothing a board can take, the board's own items are pasted.
+   */
   async handlePaste(t: TransferSnapshot<File>, at: Vec2 | null): Promise<void> {
     this.cancelPasteWait()
-    const own = this.marker !== '' && t.files.length === 0 && t.text.trim() === this.marker
-    const result = own ? 'nothing' : await this.handleTransfer(t, at)
-    if (result === 'nothing') {
-      if (this.controller.state.canPaste) this.exec('edit.paste')
-      else this.say(MESSAGES.nothing)
+    const own = this.copied !== '' && t.files.length === 0 && normalLines(t.text) === normalLines(this.copied)
+    if (own && this.controller.state.canPaste) {
+      this.commitEditing()
+      this.controller.exec('edit.paste')
+      return
     }
+    const result = await this.handleTransfer(t, at)
+    if (result === 'nothing') this.pasteOwn()
+  }
+
+  /** Items copied from any board (the text `exportCopy` made) are read back into this one; `importCopy` tells the user when it could not. */
+  private pasteItems(text: string, at: Vec2 | null): void {
+    this.commitEditing()
+    // A number is an answer (0: the controller said why nothing was pasted); null is a text that only looks like a copy.
+    if (this.controller.importCopy(normalLines(text).replace(/^\s+/, ''), at ?? undefined) === null) this.say(MESSAGES.staleCopy, 'error')
   }
 
   /** A note with this text, top-left corner at `at` (the middle of the view when null). */
@@ -946,6 +1235,7 @@ export class BoardSession {
     const items: { path: string; w: number; h: number }[] = []
     let unreadable = 0
     let refused = 0
+    const tooLarge: File[] = []
     try {
       for (let i = 0; i < files.length; ) {
         const chunk: File[] = []
@@ -957,16 +1247,21 @@ export class BoardSession {
         const prepared = await Promise.all(
           chunk.map(async (f) => {
             try {
+              // The size comes from the file's header: nothing is decoded here, whatever the picture claims to hold.
               const size = await this.env.decodeSize(f)
               if (!size) return null
+              if (size.w * size.h > MAX_DROP_PIXELS) {
+                tooLarge.push(f)
+                return 'large' as const
+              }
               return { f, size, data: new Uint8Array(await f.arrayBuffer()) }
             } catch {
               return null
             }
           }),
         )
-        const ok = prepared.filter((p): p is NonNullable<typeof p> => p !== null)
-        unreadable += prepared.length - ok.length
+        const ok = prepared.filter((p): p is NonNullable<typeof p> & object => p !== null && p !== 'large')
+        unreadable += prepared.filter((p) => p === null).length
         if (ok.length === 0) continue
         let paths: (string | null)[]
         try {
@@ -984,12 +1279,37 @@ export class BoardSession {
           } else refused++
         })
       }
+      if (tooLarge.length > 0) this.say(tooLargeMessage(tooLarge), 'error')
       if (unreadable > 0) this.say(`${unreadable} file${unreadable === 1 ? '' : 's'} could not be read as ${unreadable === 1 ? 'a picture' : 'pictures'}.`, 'error')
-      if (refused > 0) this.say(`The vault refused ${refused} picture${refused === 1 ? '' : 's'} (a type it does not know, or over 40 MB).`, 'error')
-      if (items.length > 0 && this.started) this.controller.addPictures(items, at ?? undefined)
+      if (refused > 0) this.say(`The vault refused ${refused} picture${refused === 1 ? '' : 's'} (a type it does not know, or over ${Math.round(MAX_FILE_BYTES / 1024 / 1024)} MB).`, 'error')
+      if (items.length > 0 && this.started) this.addAndShow(items, at)
     } finally {
       this.setActivity(null)
     }
+  }
+
+  /** Puts pictures on the board and, when a batch is big enough to land off screen, brings the view to them (they are the selection). */
+  private addAndShow(items: { path: string; w: number; h: number }[], at: Vec2 | null): void {
+    const c = this.controller
+    const ids = c.addPictures(items, at ?? undefined)
+    if (ids.length >= FIT_BATCH_MIN && !this.inView(ids)) c.exec('view.fitSelection')
+  }
+
+  /** Whether these items lie inside the view, with a little margin. */
+  private inView(ids: readonly number[]): boolean {
+    const st = this.controller.state
+    const chosen = new Set(ids)
+    const bounds = itemsBounds(
+      st.doc.items.filter((it) => chosen.has(it.id)),
+      this.env.metrics,
+    )
+    if (!bounds) return true
+    const v = st.doc.view
+    const halfW = st.viewport.w / v.zoom / 2
+    const halfH = st.viewport.h / v.zoom / 2
+    const mx = halfW * FIT_MARGIN
+    const my = halfH * FIT_MARGIN
+    return bounds.x >= v.x - halfW + mx && bounds.y >= v.y - halfH + my && bounds.x + bounds.w <= v.x + halfW - mx && bounds.y + bounds.h <= v.y + halfH - my
   }
 
   /**
@@ -1006,7 +1326,7 @@ export class BoardSession {
       }
       if (!this.started) return
       const items = paths.map((path, k) => ({ path, w: sizes[k]?.w ?? 0, h: sizes[k]?.h ?? 0 }))
-      this.controller.addPictures(items, at ?? undefined)
+      this.addAndShow(items, at)
       paths.forEach((p, k) => sizes[k]?.exact && this.markExact(p))
       this.probe(paths.filter((_, k) => sizes[k] !== null && !sizes[k]!.exact))
     } finally {

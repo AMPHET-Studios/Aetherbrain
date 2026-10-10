@@ -163,7 +163,7 @@ export function isArea(v: unknown): v is Area {
 export function isNoteType(v: unknown): v is NoteType {
   return (
     typeof v === 'string' &&
-    ['note', 'daily', 'person', 'project', 'area', 'resource', 'inbox', 'concept', 'moc'].includes(v)
+    ['note', 'daily', 'person', 'project', 'area', 'resource', 'inbox', 'concept', 'moc', 'board'].includes(v)
   )
 }
 

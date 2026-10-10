@@ -127,11 +127,13 @@ w.mount = async (cfg: Json) => {
     path: 'Boards/Gate.md',
     title: 'Gate',
     async load() { return H.raw },
-    async save(raw: string) {
+    async save(raw: string, expectedBase?: string) {
       H.inFlight++
       H.maxInFlight = Math.max(H.maxInFlight, H.inFlight)
       try {
         if (H.saveDelay) await new Promise((r) => setTimeout(r, H.saveDelay))
+        // Like the real hosts: a text made from a note that is no longer the one on disk is refused.
+        if (expectedBase !== undefined && expectedBase !== H.raw) throw new Error('The board was changed outside the board view')
         H.saves.push(raw)
         H.raw = raw
       } finally { H.inFlight-- }
@@ -475,7 +477,8 @@ describe('the board view in Chromium', () => {
       await s.page.keyboard.press('Control+A')
       await s.page.keyboard.press('Control+C')
       await poll(async () => (await s.H<string[]>('H.copied')).length, 1)
-      expect((await s.H<string[]>('H.copied'))[0]).toBe('Aether Brain board: 3 items copied')
+      // A line to read, then the items as a small board: any board or window can paste them.
+      expect((await s.H<string[]>('H.copied'))[0]).toMatch(/^Aether Brain board: 3 items copied\n[\s\S]*## Board/)
       await s.page.keyboard.press('Control+V')
       await poll(async () => (await s.items()).length, 6)
       // The board's own keys never reached the page's listener; the paste key is the browser's (the page may see it, it uses none).
@@ -523,7 +526,7 @@ describe('the board view in Chromium', () => {
     }
   }, 60_000)
 
-  it('a window that loses the focus in the middle of a drag writes what is pending without waiting', async (ctx) => {
+  it('a window that loses the focus in the middle of a drag lets the drag go: the board is as it was and nothing half done is written', async (ctx) => {
     if (!browser || !js) return ctx.skip()
     const s = await scene({ raw: rawBoard([['Boards/Gate/rust.png', 0, 0, 200, 100]]) })
     try {
@@ -532,9 +535,14 @@ describe('the board view in Chromium', () => {
       await s.page.mouse.down()
       await s.page.mouse.move(start.x + 30, start.y, { steps: 3 })
       expect(await s.H('H.saves.length')).toBe(0)
+      expect(((await s.items())[0] as { x: number }).x).toBeGreaterThan(0)
       await s.page.evaluate(() => window.dispatchEvent(new Event('blur')))
-      await poll(() => s.H('H.saves.length'), 1, 1000)
+      await poll(async () => ((await s.items())[0] as { x: number }).x, 0)
+      // The release that never came: the button going up later commits nothing.
       await s.page.mouse.up()
+      await s.page.waitForTimeout(300)
+      expect(await s.H('H.saves.length')).toBe(0)
+      expect(((await s.items())[0] as { x: number }).x).toBe(0)
     } finally {
       await s.close()
     }
@@ -696,9 +704,11 @@ describe('the board view in Chromium', () => {
         H.raw = r
         for (const cb of [...H.external]) cb()
       }, rawBoard([[path, -300, -150, 200, 100]]))
-      await poll(async () => (await s.H<string[]>('H.toasts')).some((t) => /changed outside/.test(t)), true)
+      // The drag is held: the outside change waits for it and the drag goes on.
       expect(((await s.items())[0] as { x: number }).x).toBeLessThan(250)
       await s.page.mouse.up()
+      await poll(async () => (await s.H<string[]>('H.toasts')).some((t) => /changed outside/.test(t)), true)
+      expect(((await s.items())[0] as { x: number }).x).toBeLessThan(250)
       expect(s.errors).toEqual([])
     } finally {
       await s.close()

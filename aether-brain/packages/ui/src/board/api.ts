@@ -178,6 +178,13 @@ export interface BoardUiState {
   style: BoardStyle
   /** The controller's own clipboard holds items (the paste command has something to paste). */
   canPaste: boolean
+  /**
+   * How many characters the board's items take in the note (core `boardChars`) and the most a board may grow to
+   * (`BOARD_LIMITS.noteTotal`): the status bar's size cell. Growth past the limit is refused; shrinking is always allowed, so `chars`
+   * can read above `charsLimit` on a board that was loaded that big. While a drag is under way `chars` is the board's size when it began.
+   */
+  chars: number
+  charsLimit: number
 }
 
 /**
@@ -227,6 +234,8 @@ export type BoardCommandId =
   // edit
   | 'edit.undo' | 'edit.redo' | 'edit.selectAll' | 'edit.selectNone' | 'edit.invertSelection' | 'edit.duplicate' | 'edit.delete'
   | 'edit.copy' | 'edit.cut' | 'edit.paste' | 'edit.group' | 'edit.ungroup' | 'edit.lock' | 'edit.unlock'
+  // notes: Enter (and F2) on one selected note edits its text
+  | 'note.edit'
   // stacking
   | 'order.front' | 'order.forward' | 'order.backward' | 'order.back'
   // transform
@@ -268,6 +277,9 @@ export interface BoardCommandInfo {
 export const IMAGE_TIERS = [256, 1024, 8192] as const
 export type ImageTier = (typeof IMAGE_TIERS)[number]
 
+/** Why a picture cannot be shown: the file is gone, it is more pixels than a board decodes, or it did not decode (or was not readable). */
+export type ImageFailure = 'missing' | 'too-large' | 'unreadable'
+
 /** What the renderer draws for a picture right now. */
 export interface ImageSlot {
   /** A decoded picture, the best the cache holds for the requested size (maybe a smaller tier than wanted), or null while nothing is loaded. */
@@ -276,14 +288,18 @@ export interface ImageSlot {
   natural: { w: number; h: number } | null
   /** The picture could not be read (missing, too big, broken): draw a placeholder. */
   failed: boolean
+  /** Why, when `failed` (a placeholder with no reason is drawn as 'unreadable'). */
+  reason?: ImageFailure
 }
 
 export interface ImageSource {
   /**
    * The bitmap to draw `path` with when it is `wantPx` device pixels on its longer side, and — as a side effect — starts loading the
    * tier that size needs (and releases nothing). Cheap: called for every visible picture on every frame.
+   * `shownPx` is how big the part of the picture that is SHOWN is on the screen (a crop's size, in device pixels): when the cache
+   * cannot give every picture the tier it wants, the pictures shown biggest are served first. Default `wantPx`.
    */
-  get(path: string, wantPx: number): ImageSlot
+  get(path: string, wantPx: number, shownPx?: number): ImageSlot
 }
 
 /** The text measuring a canvas gives (real font metrics); the controller falls back to the estimate in @aether/core without one. */

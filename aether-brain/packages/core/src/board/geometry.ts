@@ -13,6 +13,7 @@ import {
   type BoardDoc,
   type BoardItem,
   type BoardView,
+  type LineItem,
   type MarkItem,
   type NoteItem,
   type Rect,
@@ -99,7 +100,47 @@ export function noteBox(note: NoteItem, metrics: TextMetrics): NoteBox {
   return { pad, layout, w: Math.max(0, note.w), h: layout.height + 2 * pad }
 }
 
-/** The bounding box of a mark including half its line width. An empty stroke is a speck at the origin. */
+/**
+ * The three corners of an arrow line's head, as the renderer draws it (renderer.ts, drawMark): the tip at (x2, y2), a head 4 line
+ * widths long (at most 0.8 of the line) and half as wide as long. Null for a line with no head or no length. (The renderer never draws a
+ * line thinner than one device pixel; the width here is the item's own.)
+ */
+function arrowHead(item: LineItem): [Vec2, Vec2, Vec2] | null {
+  if (!item.arrow) return null
+  const dx = item.x2 - item.x1
+  const dy = item.y2 - item.y1
+  const len = Math.hypot(dx, dy)
+  if (!(len > 1e-9)) return null
+  const head = Math.min(4 * Math.max(0, fin(item.width)), len * 0.8)
+  if (!(head > 0)) return null
+  const ux = dx / len
+  const uy = dy / len
+  const bx = item.x2 - ux * head
+  const by = item.y2 - uy * head
+  return [
+    { x: item.x2, y: item.y2 },
+    { x: bx - uy * head * 0.5, y: by + ux * head * 0.5 },
+    { x: bx + uy * head * 0.5, y: by - ux * head * 0.5 },
+  ]
+}
+
+/** Whether `p` is within `reach` of the triangle `t` (inside it, or near one of its sides). */
+function nearTriangle(t: readonly [Vec2, Vec2, Vec2], p: Vec2, reach: number): boolean {
+  const side = (a: Vec2, b: Vec2): number => (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x)
+  const d1 = side(t[0], t[1])
+  const d2 = side(t[1], t[2])
+  const d3 = side(t[2], t[0])
+  if (!((d1 < 0 || d2 < 0 || d3 < 0) && (d1 > 0 || d2 > 0 || d3 > 0))) return true
+  const r2 = reach * reach
+  for (let i = 0; i < 3; i++) {
+    const a = t[i]!
+    const b = t[(i + 1) % 3]!
+    if (segmentDistSq(p.x, p.y, a.x, a.y, b.x, b.y) <= r2) return true
+  }
+  return false
+}
+
+/** The bounding box of a mark including half its line width, and an arrow's head. An empty stroke is a speck at the origin. */
 function markExtent(item: MarkItem): Rect {
   let x0 = Infinity
   let y0 = Infinity
@@ -126,7 +167,21 @@ function markExtent(item: MarkItem): Rect {
     y0 = y1 = 0
   }
   const hw = Math.max(0, fin(item.width)) / 2
-  return { x: x0 - hw, y: y0 - hw, w: x1 - x0 + 2 * hw, h: y1 - y0 + 2 * hw }
+  const box = { x: x0 - hw, y: y0 - hw, w: x1 - x0 + 2 * hw, h: y1 - y0 + 2 * hw }
+  // The head of an arrow reaches further to the sides than the line is thick.
+  const head = item.kind === 'line' ? arrowHead(item) : null
+  if (!head) return box
+  let hx0 = box.x
+  let hy0 = box.y
+  let hx1 = box.x + box.w
+  let hy1 = box.y + box.h
+  for (const c of head) {
+    if (c.x < hx0) hx0 = c.x
+    if (c.x > hx1) hx1 = c.x
+    if (c.y < hy0) hy0 = c.y
+    if (c.y > hy1) hy1 = c.y
+  }
+  return { x: hx0, y: hy0, w: hx1 - hx0, h: hy1 - hy0 }
 }
 
 function boxOf(item: BoardItem, metrics: TextMetrics): Box {
@@ -333,8 +388,11 @@ export function pointInItem(item: BoardItem, p: Vec2, tol: number, metrics: Text
     }
     case 'stroke':
       return nearPolyline(item.points, p, Math.max(0, item.width) / 2 + t)
-    case 'line':
-      return nearPolyline([item.x1, item.y1, item.x2, item.y2], p, Math.max(0, item.width) / 2 + t)
+    case 'line': {
+      if (nearPolyline([item.x1, item.y1, item.x2, item.y2], p, Math.max(0, item.width) / 2 + t)) return true
+      const head = arrowHead(item)
+      return head !== null && nearTriangle(head, p, t)
+    }
     case 'rect': {
       const g = Math.max(0, item.width) / 2 + t
       const dx = p.x - (item.x1 + item.x2) / 2
@@ -447,6 +505,16 @@ function segmentRectDistance(ax: number, ay: number, bx: number, by: number, r: 
   return d
 }
 
+/** Whether a triangle and an upright rectangle share a point: a side crosses the rectangle, or the rectangle lies inside the triangle. */
+function triangleMeetsRect(t: readonly [Vec2, Vec2, Vec2], r: Rect): boolean {
+  for (let i = 0; i < 3; i++) {
+    const a = t[i]!
+    const b = t[(i + 1) % 3]!
+    if (segmentMeetsRect(a.x, a.y, b.x, b.y, r)) return true
+  }
+  return nearTriangle(t, { x: r.x, y: r.y }, 0)
+}
+
 function polylineMeetsRect(pts: readonly number[], hw: number, r: Rect): boolean {
   const n = pts.length >> 1
   if (n === 0) return false
@@ -506,8 +574,11 @@ function itemTouchesRect(item: BoardItem, r: Rect, metrics: TextMetrics): boolea
       return quadMeetsRect(quadOf(boxOf(item, metrics)), r)
     case 'stroke':
       return polylineMeetsRect(item.points, Math.max(0, item.width) / 2, r)
-    case 'line':
-      return polylineMeetsRect([item.x1, item.y1, item.x2, item.y2], Math.max(0, item.width) / 2, r)
+    case 'line': {
+      if (polylineMeetsRect([item.x1, item.y1, item.x2, item.y2], Math.max(0, item.width) / 2, r)) return true
+      const head = arrowHead(item)
+      return head !== null && triangleMeetsRect(head, r)
+    }
     case 'rect':
     case 'ellipse': {
       // The outline is a band of half width hw about the path; a filled shape adds everything inside. The rectangle touches an empty
