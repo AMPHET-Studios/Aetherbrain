@@ -13,8 +13,11 @@ export interface ActiveBoard {
   path: string
   exec(id: BoardCommandId, arg?: unknown): void
   state(): BoardUiState
-  /** Write any change not yet saved; resolves when it is on disk (or the save failed: it never rejects). */
-  flush(): Promise<void>
+  /**
+   * Write any change not yet saved (a note being typed included). Never rejects. Resolves true when everything is on disk, false when
+   * something could not be saved (the caller must then not move or close the board without telling the user).
+   */
+  flush(): Promise<boolean>
 }
 
 let active: ActiveBoard | null = null
@@ -58,8 +61,11 @@ export interface BoardWindowControl {
   setOpacity(opacity: number): Promise<void>
   /** Called with the path of a board whose window just closed (reload it from disk). Returns the unsubscribe. */
   onReturned(cb: (path: string) => void): () => void
-  /** The docked view registers how to flush its pending save, which popOut awaits first. Returns the unregister function. */
-  setFlush(fn: (() => Promise<void> | void) | null): () => void
+  /**
+   * The docked view registers how to flush its pending save, which popOut awaits first. A result of false (or a throw) means the board
+   * could not be saved: popOut then refuses. Returns the unregister function.
+   */
+  setFlush(fn: (() => Promise<boolean | void> | boolean | void) | null): () => void
 }
 
 let windowControl: BoardWindowControl | null = null

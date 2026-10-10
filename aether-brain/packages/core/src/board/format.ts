@@ -911,6 +911,33 @@ function viewLine(doc: BoardDoc): string {
   ].join(' ')}`
 }
 
+const charsOfItem = new WeakMap<BoardItem, number>()
+
+/**
+ * How many characters the item's line takes in the note (its line break included). Group labels are written as small numbers, so the
+ * count is made with a one-digit label: within a few characters of the real line and cheap enough for every edit. Cached per item
+ * (items are never mutated, only replaced).
+ */
+export function itemChars(item: BoardItem): number {
+  let n = charsOfItem.get(item)
+  if (n === undefined) {
+    n = itemLine(item, { group: (g) => (g > 0 && Number.isFinite(g) ? 1 : 0) }).length + 1
+    charsOfItem.set(item, n)
+  }
+  return n
+}
+
+/**
+ * How many characters the board section takes in the note: the budget `BOARD_LIMITS.noteTotal` is measured with this. The controller
+ * refuses to grow a board past it (shrinking is always allowed), the Boards code refuses to add pictures past it.
+ */
+export function boardChars(doc: BoardDoc): number {
+  let total = 160 // the heading, the view line and the blank lines
+  for (const item of doc.items) total += itemChars(item)
+  for (const entry of doc.extra) total += entry.length + 1
+  return total
+}
+
 /** The lines the board writes under its heading (the blank line after the heading included), without line breaks. */
 function sectionLines(doc: BoardDoc): string[] {
   const labels = new Map<number, number>()

@@ -25,8 +25,12 @@ export const BOARD_LIMITS = {
   pictureMax: 40000,
   /** Largest coordinate magnitude; items are kept inside so floating-point stays exact enough. */
   coordinate: 1_000_000,
-  /** Characters in the whole board note (the editor goes read-only at 400,000; a board stays far under it). */
-  noteTotal: 300_000,
+  /**
+   * Characters the board section may take in the note (`boardChars(doc)`). Enforced when the board GROWS (drawing, notes, pictures, paste:
+   * a refusal with the board-is-full message; shrinking is always allowed); parseBoard warns above it. The floating window refuses a whole
+   * note over `MAX_BOARD_TEXT` (apps/desktop/src/main/board-save.ts), which is set well above this so that prose around the board fits.
+   */
+  noteTotal: 500_000,
 } as const
 
 /** The board point at the centre of the viewport, and the zoom (screen pixels per board unit). */

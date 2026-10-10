@@ -887,6 +887,7 @@ export class BoardController {
       redoLabel: this.hist.redoLabel,
       dirty: this.isDirty(),
       moving: this.isMoving(),
+      gesturing: this.gesture !== null,
       style: this.style,
       canPaste: this.clipboard.length > 0,
     }

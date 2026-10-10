@@ -62,8 +62,13 @@ export interface BoardHost {
   readonly title: string
   /** Reads the whole note (the raw text, frontmatter included). */
   load(): Promise<string>
-  /** Writes the whole note. Callers debounce; the host serialises writes and never overwrites a newer outside change silently. */
-  save(raw: string): Promise<void>
+  /**
+   * Writes the whole note. Callers debounce; the host serialises writes and never overwrites a newer outside change silently.
+   * `expectedBase` is the text `raw` was made from: the host refuses (BoardChangedOutsideError) when the note on disk is no longer
+   * that text, whatever the host itself last read (a reload that landed in between must not make a stale text look fresh).
+   * The floating window's host sends it with the write in ONE call and main compares, so there is no read-then-write gap.
+   */
+  save(raw: string, expectedBase?: string): Promise<void>
   /** The note changed somewhere else (an editor, an AI, another window). Returns the unsubscribe. */
   onExternalChange?(cb: () => void): () => void
   pictures: BoardPictureHost
@@ -167,6 +172,8 @@ export interface BoardUiState {
   dirty: boolean
   /** A pan or zoom in progress (the renderer may draw coarser pictures while it lasts). */
   moving: boolean
+  /** Any gesture is held (a drag, a stroke being drawn, a marquee, a pan, a pinch): the session defers an outside reload while it lasts. */
+  gesturing: boolean
   /** What new marks and notes are made with, and what the toolbar's colour, width and size controls show. */
   style: BoardStyle
   /** The controller's own clipboard holds items (the paste command has something to paste). */

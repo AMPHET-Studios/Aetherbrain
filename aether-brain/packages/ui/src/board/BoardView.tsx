@@ -125,7 +125,10 @@ function ReadyView({ session, rootRef, reduced, menu, setMenu, picker, setPicker
       path: host.path,
       exec: (id, arg) => session.exec(id, arg),
       state: () => session.controller.state,
-      flush: () => session.flush(),
+      flush: async () => {
+        await session.flush()
+        return true
+      },
     }
     setActiveBoard(mine)
     return () => {
