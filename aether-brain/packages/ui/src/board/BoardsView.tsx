@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type RefObject } from 'react'
-import { idFromPath, type ParsedNote } from '@aether/core'
+import { basenameOf, idFromPath, type ParsedNote } from '@aether/core'
 import { ErrorBoundary } from '../components/ErrorBoundary'
 import { useAether } from '../store'
 import { cx, isTyping, plural, relativeTime, truncate } from '../util'
@@ -259,7 +259,7 @@ function BoardList({ drafts }: { drafts: Drafts }) {
 
   return (
     <div className="absolute inset-0 z-30 flex items-stretch justify-center bg-black/30 p-3 pt-16" onMouseDown={(e) => e.target === e.currentTarget && setView('graph')} role="dialog" aria-label="Boards">
-      <div className="panel rise flex w-full max-w-[1180px] flex-col overflow-hidden">
+      <div className="panel panel-solid rise flex w-full max-w-[1180px] flex-col overflow-hidden">
         <div className="flex items-center gap-2 border-b border-[var(--line)] px-4 py-2.5">
           <BoardGlyph className="text-[18px] text-accent2" />
           <span className="text-[13px] font-semibold text-white">Boards</span>
@@ -397,7 +397,7 @@ function useReturned(control: BoardWindowControl | null, path: string): number {
 
 function OpenBoard({ path }: { path: string }) {
   const id = idFromPath(path)
-  const note = useAether((s) => s.notes.get(id))
+  const found = useAether((s) => s.notes.get(id))
   const closeBoard = useAether((s) => s.closeBoard)
   const setView = useAether((s) => s.setView)
   const { control, status } = useWindowControl()
@@ -407,15 +407,21 @@ function OpenBoard({ path }: { path: string }) {
   // popOut saves what the view holds before the window opens on the note.
   useEffect(() => control?.setFlush(() => getActiveBoard()?.flush()), [control])
 
-  // The note went (deleted, moved by something else): back to the list.
+  // The note went (deleted or moved by a sync tool, git, another program): the board is NOT closed - whatever it holds and has not
+  // saved is the only copy - it stays up, says so once, and its saves are refused (with "Copy board text" to keep it). The title and
+  // the path are the ones the note had.
+  const was = useRef({ title: basenameOf(path), path })
+  if (found) was.current = { title: found.meta.title, path: found.meta.path }
+  const gone = !found
   useEffect(() => {
-    if (!note) closeBoard()
-  }, [note, closeBoard])
-  if (!note) return null
+    if (!gone) return
+    useAether.getState().toast(`The note of the board “${truncate(was.current.title, 60)}” was deleted or moved outside the app. The board is kept here.`, 'error')
+  }, [gone])
+  const note = { meta: was.current }
 
   return (
     <div className="absolute inset-0 z-30 flex items-stretch bg-black/30 p-3 pt-16" role="dialog" aria-label={`Board ${truncate(note.meta.title, MAX_TITLE_CHARS)}`}>
-      <div className="panel rise flex min-w-0 flex-1 flex-col overflow-hidden">
+      <div className="panel panel-solid rise flex min-w-0 flex-1 flex-col overflow-hidden">
         <div className="flex items-center gap-2 border-b border-[var(--line)] px-3 py-1.5">
           <button type="button" className="hud-btn !h-7" onClick={closeBoard} title="All boards (8)">
             ← Boards <kbd>8</kbd>
@@ -431,6 +437,11 @@ function OpenBoard({ path }: { path: string }) {
             ✕ <kbd>Esc</kbd>
           </button>
         </div>
+        {gone && (
+          <div className="border-b border-[var(--line)] bg-[rgba(255,62,108,0.1)] px-4 py-1.5 text-[12px] text-danger" role="status">
+            This board’s note was deleted or moved outside the app. It stays open here, but changes cannot be saved until the note is back (a refused save offers “Copy board text”).
+          </div>
+        )}
         <div className="relative min-h-0 flex-1">
           {out && control && status ? (
             <PoppedOut control={control} status={status} title={note.meta.title} />

@@ -3,6 +3,9 @@ import { MemoryVaultAdapter, imageKey, parseBoard, type VaultFile } from '@aethe
 import type { BoardWindowControl, BoardWindowStatus } from '../src/board/active'
 import { DesktopLikeVault, PNG, assetFiles, boardRaw, freshApp, tick, vaultFiles } from './board-integration-harness'
 
+// The first test loads the whole UI package, which takes seconds on a busy machine (the default 5 s timed out at 5.1 s and 8.1 s).
+vi.setConfig({ testTimeout: 60_000, hookTimeout: 60_000 })
+
 afterEach(() => {
   vi.useRealTimers()
   vi.unstubAllGlobals()

@@ -15,9 +15,12 @@
  * Units. Pointers arrive in CSS pixels; the board is in board units; `screenToBoard` turns one into the other. Distances the user
  * feels (a 6 px hit tolerance, a 3 px click, the rotate handle 28 px above the box, a mark's width) are CSS pixels and become
  * `px / zoom` board units. Nothing here is unbounded: strokes are cut to BOARD_LIMITS.strokePoints while they are drawn, the board to
- * BOARD_LIMITS.items and, whatever it holds, to BOARD_LIMITS.noteTotal characters of items (anything that would GROW it past that is
- * refused with the board-is-full message; shrinking or keeping its size is always allowed), notes to BOARD_LIMITS.noteChars, the
- * history to its own limit.
+ * BOARD_LIMITS.items and, whatever it holds, to BOARD_LIMITS.noteTotal characters of items (anything that ADDS to it - a mark, a note
+ * and its text, pictures, swatches, a paste, a duplicate - past that is refused with the board-is-full message; deleting or shortening
+ * is always allowed), notes to BOARD_LIMITS.noteChars, the history to its own limit. What only changes the items that are there (a
+ * move, a turn, arranging, a colour, a lock, a group) is never refused: it can change the digits of a coordinate by a few percent (the
+ * file keeps two decimals at most), which the room between the budget and the floating window's cap on the whole note absorbs, and
+ * "full" would be the wrong thing to tell someone who only locked a picture.
  */
 import {
   BOARD_ITEM_LIMITS,
@@ -619,8 +622,8 @@ export class BoardController {
   private lastImport: { x: number; y: number; n: number } | null = null
   /** The grid size to come back to when snapping is switched on again. */
   private lastGrid = 16
-  /** The BOARD size in characters, by the items it was counted for. */
-  private charsCache: { items: readonly BoardItem[]; extra: readonly string[]; n: number } | null = null
+  /** The items of the live board when a silent correction of shapes is all that separates it from the last step (see `noteSilent`). */
+  private silentItems: readonly BoardItem[] | null = null
 
   private readonly pointers = new Map<number, Tracked>()
   /** Pointers whose gesture was cancelled or cut short: ignored until they lift. */
@@ -907,7 +910,26 @@ export class BoardController {
   }
 
   private isDirty(): boolean {
-    return this.hist.current !== this.savedAt || differs(this.doc, this.hist.current)
+    if (this.hist.current !== this.savedAt) return true
+    const step = this.hist.current
+    if (!differs(this.doc, step)) return false
+    // Ahead of the last step by a silent correction of shapes only (the user did nothing): the work is as it was saved.
+    return !(this.silentItems === this.doc.items && !differs({ ...this.doc, items: step.items }, step))
+  }
+
+  /**
+   * After the live board was put to the last step plus the corrected shapes (a size arrived, an undo, a cancel): remembers which items
+   * those are, so that the board still counts as saved when a correction is all that separates it from the last step. With a drag under
+   * way or a note being typed the board is ahead of its step for real, and nothing is remembered.
+   */
+  private noteSilent(): void {
+    this.silentItems = this.gesture === null && this.pendingNote === null && this.doc.items !== this.hist.current.items ? this.doc.items : null
+  }
+
+  /** The live board back to the last history step, with the shapes the controller has learned since (a note being typed is gone). */
+  private restoreStep(): void {
+    this.doc = this.fixAspects(withView(this.hist.current, this.doc.view))
+    this.noteSilent()
   }
 
   /**
@@ -922,9 +944,10 @@ export class BoardController {
   /** The note being typed is dropped when something else wants to change the board (the shell should commit or cancel it first). */
   private cancelEditing(): void {
     if (this.editingNote === null) return
-    if (this.pendingNote !== null) this.doc = this.fixAspects(withView(this.hist.current, this.doc.view))
+    const pending = this.pendingNote !== null
     this.editingNote = null
     this.pendingNote = null
+    if (pending) this.restoreStep()
     this.reconcile()
   }
 
@@ -1032,18 +1055,19 @@ export class BoardController {
       gesturing: this.gesture !== null || this.pinch !== null,
       style: this.style,
       canPaste: this.clipboard.length > 0,
-      chars: this.charsOf(this.gesture ? this.gesture.base : this.doc),
+      chars: this.charsNow(),
       charsLimit: BOARD_LIMITS.noteTotal,
     }
   }
 
-  /** The size of the board's items in the note; counted once per set of items (a drag is shown at the size it began with: it changes no item count). */
-  private charsOf(doc: BoardDoc): number {
-    const c = this.charsCache
-    if (c && c.items === doc.items && c.extra === doc.extra) return c.n
-    const n = boardChars(doc)
-    this.charsCache = { items: doc.items, extra: doc.extra, n }
-    return n
+  /**
+   * The size of the board in the note, as core counts it (each item's line is counted once, whatever the number of states built). A drag
+   * is shown at the size the board had when it began: it adds nothing, and counting the moved items again on every pointer move would
+   * mean writing out every line of them.
+   */
+  private charsNow(): number {
+    const g = this.gesture
+    return boardChars(g ? withView(g.base, this.doc.view) : this.doc)
   }
 
   /* ------------------------------------------------------ outside changes --- */
@@ -1102,6 +1126,7 @@ export class BoardController {
     if (this.cropping !== null && !identical(this.cropping)) this.leaveCrop()
     this.doc = next
     this.hist.reset(next)
+    this.silentItems = null
     this.savedAt = this.hist.current
     if (next.grid > 0) this.lastGrid = next.grid
     this.rehover = true
@@ -1294,6 +1319,7 @@ export class BoardController {
     }
     if (next !== this.doc) {
       this.doc = next
+      this.noteSilent()
       this.changed('natural-size', false, true)
     }
     this.flush()
@@ -1469,6 +1495,8 @@ export class BoardController {
       this.toastLocked()
       return
     }
+    // Already being edited: starting again must not drop the note that is being typed (a new one is in no history step yet).
+    if (this.editingNote === id) return
     this.cancelGesture()
     this.cancelEditing()
     this.editingNote = id
@@ -1507,7 +1535,7 @@ export class BoardController {
       this.toastLocked()
     } else if (clean.trim() === '') {
       // An empty note is not worth keeping. One that was only being typed leaves no trace at all.
-      if (pending) this.doc = this.fixAspects(withView(this.hist.current, this.doc.view))
+      if (pending) this.restoreStep()
       else this.commit(removeItems(this.doc, [id]), 'Delete note', { reason: 'note' })
       this.reconcile()
     } else if (grown && pending) {
@@ -2113,6 +2141,7 @@ export class BoardController {
     this.marquee = null
     this.draft = null
     this.guides = NO_GUIDES
+    this.noteSilent()
     this.touch()
   }
 
@@ -2708,6 +2737,7 @@ export class BoardController {
   private stepHistory(snapshot: BoardDoc | null, reason: string): void {
     if (snapshot === null) return
     this.doc = this.fixAspects(withView(snapshot, this.doc.view))
+    this.noteSilent()
     this.reconcile()
     this.changed(reason, true)
   }

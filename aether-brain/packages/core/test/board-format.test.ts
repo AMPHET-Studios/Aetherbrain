@@ -1197,7 +1197,7 @@ describe('boardFolderName', () => {
     expect(boardFolderName('a\u0000b')).toBe('a b')
   })
 
-  it('has no trailing dots or spaces, no leading dot or $ (the vault skips those), at most 80 characters, and "Board" when empty', () => {
+  it('has no trailing dots or spaces, no leading dot or $ (the vault skips those), at most 120 characters (a note\'s longest file name), and "Board" when empty', () => {
     expect(boardFolderName('Gate...')).toBe('Gate')
     expect(boardFolderName('Gate . . ')).toBe('Gate')
     expect(boardFolderName('.hidden')).toBe('hidden')
@@ -1205,9 +1205,9 @@ describe('boardFolderName', () => {
     for (const empty of ['', '   ', '...', '. . .', '$']) expect(boardFolderName(empty), JSON.stringify(empty)).toBe('Board')
     expect(boardFolderName('///')).toBe('---')
     const long = boardFolderName('x'.repeat(200))
-    expect(long).toHaveLength(80)
-    expect(boardFolderName('a'.repeat(79) + '😀')).toBe('a'.repeat(79))
-    expect(boardFolderName('b'.repeat(78) + '. ' + 'c'.repeat(30))).toBe('b'.repeat(78))
+    expect(long).toHaveLength(120)
+    expect(boardFolderName('a'.repeat(119) + '😀')).toBe('a'.repeat(119))
+    expect(boardFolderName('b'.repeat(118) + '. ' + 'c'.repeat(30))).toBe('b'.repeat(118))
   })
 
   it('also keeps out of the way of Windows device names and the temp suffix of the vault', () => {

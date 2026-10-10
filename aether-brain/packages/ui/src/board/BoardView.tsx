@@ -161,7 +161,11 @@ function ReadyView({ session, rootRef, reduced, menu, setMenu, picker, setPicker
     const onHide = () => {
       if (document.visibilityState === 'hidden') void session.flush()
     }
-    const onPageHide = () => void session.flush()
+    // The page may be gone before a write is answered: a copy of what is not on disk is kept first (the window's close also waits for the flush).
+    const onPageHide = () => {
+      session.stash()
+      void session.flush()
+    }
     window.addEventListener('blur', onBlur)
     document.addEventListener('visibilitychange', onHide)
     window.addEventListener('pagehide', onPageHide)

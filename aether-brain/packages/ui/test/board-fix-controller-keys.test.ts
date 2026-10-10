@@ -4,7 +4,7 @@
  * key, and a French keyboard makes its 1 with Shift.
  */
 import { describe, expect, it } from 'vitest'
-import { BOARD_COMMANDS, commandInfo, keyToCommand } from '../src/board/commands'
+import { BOARD_COMMANDS, commandInfo, keyToCommand, latinKey } from '../src/board/commands'
 import type { BoardCommandId, KeyIn } from '../src/board/api'
 import { Rig, at, build, threeThings } from './board-controller-harness'
 
@@ -143,6 +143,22 @@ describe('letters and digits of other scripts', () => {
     expect(r.doc.items.find((i) => i.id === id.a)).toMatchObject({ x: -299 })
     expect(r.c.key(key('я', 'KeyZ', { ctrl: true }))).toBe(true)
     expect(r.doc.items.find((i) => i.id === id.a)).toMatchObject({ x: -300 })
+  })
+})
+
+describe('latinKey, for the shortcuts of the whole app', () => {
+  it('names a key as a US keyboard would, whatever script it types', () => {
+    expect(latinKey('я', 'KeyZ')).toBe('z')
+    expect(latinKey('Я', 'KeyZ')).toBe('z')
+    expect(latinKey('ζ', 'KeyZ')).toBe('z')
+    expect(latinKey('١', 'Digit1')).toBe('1')
+    // ASCII is what the layout types: Dvorak, AZERTY and Colemak keep their letters.
+    expect(latinKey('z', 'KeyW')).toBe('z')
+    expect(latinKey('K', 'KeyK')).toBe('k')
+    // Nothing on a letter or digit key to fall back on: the character stays.
+    expect(latinKey('ö', 'Semicolon')).toBe('ö')
+    expect(latinKey('я', 'BracketLeft')).toBe('я')
+    expect(latinKey('Process', 'KeyA')).toBe('process')
   })
 })
 

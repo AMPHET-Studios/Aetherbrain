@@ -418,21 +418,16 @@ describe('drawBoard: placeholders', () => {
     expect(ctx.texts()).toHaveLength(0)
   })
 
-  it('draws a dashed outline, a crossed box and the file name for a picture that failed', () => {
+  it('draws a dashed outline, a warning sign, the words "can\'t be read" and the file name for a picture that failed with no reason given', () => {
+    // (The kinds of placeholder, one per reason, are in board-fix-images-renderer.test.ts.)
     const { ctx } = run(docOf([big]), { slots: { 'Boards/Gate/rust.png': { failed: true } } })
     expect(ctx.drawImages()).toHaveLength(0)
     const dashed = ctx.rects('strokeRect').filter((r) => r.w === 400 && r.h === 300)
     expect(dashed).toHaveLength(1)
     expect(dashed[0]!.s.lineDash.length).toBeGreaterThan(0)
-    // The cross: two diagonals corner to corner.
-    const cross = ctx.paths('stroke').find((p) => p.path.length === 4)!
-    const [m1, l1, m2, l2] = cross.path as { x: number; y: number }[]
-    const quad = itemQuad(big, estimateTextMetrics).map((p) => dev(VIEW, VP, 1, p))
-    closePt(m1!, quad[0]!)
-    closePt(l1!, quad[2]!)
-    closePt(m2!, quad[1]!)
-    closePt(l2!, quad[3]!)
-    expect(ctx.texts().map((t) => t.text)).toEqual(['rust.png'])
+    // No cross corner to corner: that is a file the vault has lost.
+    expect(ctx.paths('stroke').some((p) => p.path.length === 4)).toBe(false)
+    expect(ctx.texts().map((t) => t.text)).toEqual(["can't be read", 'rust.png'])
   })
 
   it('draws its outlines with square caps and mitred joins whatever the context had before', () => {
@@ -445,11 +440,19 @@ describe('drawBoard: placeholders', () => {
     expect([ctx.lineCap, ctx.lineJoin]).toEqual(['round', 'bevel'])
   })
 
-  it('treats a picture the vault has lost as failed without asking the cache for it', () => {
+  it('treats a picture the vault has lost as missing without asking the cache for it: a dashed box with a cross, "file missing" and the file name', () => {
     const { ctx, images } = run(docOf([big, pic({ path: 'ok.png', x: 400 })]), { slots: { 'ok.png': { bitmap: makeBitmap(4, 4) } }, missing: (p) => p === 'Boards/Gate/rust.png' })
     expect(images.calls.map((c) => c.path)).toEqual(['ok.png'])
     expect(ctx.rects('strokeRect').some((r) => r.s.lineDash.length > 0)).toBe(true)
-    expect(ctx.texts().map((t) => t.text)).toEqual(['rust.png'])
+    // The cross: two diagonals corner to corner.
+    const cross = ctx.paths('stroke').find((p) => p.path.length === 4)!
+    const [m1, l1, m2, l2] = cross.path as { x: number; y: number }[]
+    const quad = itemQuad(big, estimateTextMetrics).map((p) => dev(VIEW, VP, 1, p))
+    closePt(m1!, quad[0]!)
+    closePt(l1!, quad[2]!)
+    closePt(m2!, quad[1]!)
+    closePt(l2!, quad[3]!)
+    expect(ctx.texts().map((t) => t.text)).toEqual(['file missing', 'rust.png'])
   })
 
   it('leaves the file name out of a placeholder too small to hold it and draws the box turned with the picture', () => {

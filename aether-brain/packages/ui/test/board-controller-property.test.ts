@@ -360,8 +360,9 @@ describe('a random walk through the controller', () => {
     w.check()
   }
 
-  // Seed 32 presses an arrow key in the middle of a drag: the board used to end up ahead of its history.
-  for (const seed of [1, 2, 3, 4, 5, 6, 7, 8, 32]) {
+  // Seed 32 presses an arrow key in the middle of a drag: the board used to end up ahead of its history. Seed 343 asks to edit the note
+  // that is being typed: the new note was dropped and the editor was left on nothing.
+  for (const seed of [1, 2, 3, 4, 5, 6, 7, 8, 32, 343]) {
     it(`300 steps, seed ${seed}: sane throughout, the selection on the board, and undo returns the first board`, () => {
       run(seed, 300, startBoard())
     })

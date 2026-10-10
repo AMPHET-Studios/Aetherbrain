@@ -12,8 +12,12 @@
  *   - onBoardReturned(cb)           cb(path) when the window stops showing a board (closed, or moved on to another): reload that note,
  *                                   the window may have saved it since the docked view read it.
  *   - popOutBoard(path) / dockBoard()   what the control's `popOut` / `dock` do. Pop-out first awaits the flush below.
- *   - setBoardFlush(fn)             the docked view says how to save its pending change; pop-out awaits it (and stops if it fails), so
- *                                   the window opens on the latest text and the two never hold different boards.
+ *   - setBoardFlush(fn)             the docked view says how to save its pending change; pop-out awaits it and stops when it throws or
+ *                                   answers false (the board could not be saved), so the window opens on the latest text and the two
+ *                                   never hold different boards, and a failed save is never left to a view that is about to unmount.
+ *
+ * Main also asks THIS window (the brain window) to save before it closes or the app quits (`board:flush`): a board open in the docked
+ * view is flushed then (`getActiveBoard()?.flush()`) and the ask is answered, so a note still being typed is written, not lost.
  *
  * The palette acts on the board of the docked view, `store.boardPath`: "Board: Pop out to its own window", "Board: Bring the board back
  * from its window" (both also on the key `w`), "Board: Always on top" and "Board: Window opacity…" (Windows and macOS only). Commands,
@@ -25,7 +29,7 @@
  */
 import { useSyncExternalStore } from 'react'
 import { idFromPath } from '@aether/core'
-import { registerCommands, registerHelpRows, registerKey, setBoardWindowControl, useAether, type BoardWindowControl } from '@aether/ui'
+import { getActiveBoard, registerCommands, registerHelpRows, registerKey, setBoardWindowControl, useAether, type BoardWindowControl } from '@aether/ui'
 import type { BoardConfigureDto, BoardStatusDto } from '../shared/ipc'
 import { errorText, samePath } from './panels'
 import { ElectronVaultAdapter } from './vault/electron'
@@ -44,7 +48,7 @@ const CLOSED: BoardStatusDto = { open: false, path: null, alwaysOnTop: true, opa
 let status: BoardStatusDto = CLOSED
 const subs = new Set<() => void>()
 const returned = new Set<(path: string) => void>()
-let flush: (() => Promise<void> | void) | null = null
+let flush: (() => Promise<boolean | void> | boolean | void) | null = null
 
 function sameStatus(a: BoardStatusDto, b: BoardStatusDto): boolean {
   return a.open === b.open && a.path === b.path && a.alwaysOnTop === b.alwaysOnTop && a.opacity === b.opacity && a.supportsOpacity === b.supportsOpacity
@@ -93,8 +97,8 @@ export function onBoardReturned(cb: (path: string) => void): () => void {
   return () => void returned.delete(cb)
 }
 
-/** The docked view's way to save what it has not saved yet; null when it has none. Returns the unregister function. */
-export function setBoardFlush(fn: (() => Promise<void> | void) | null): () => void {
+/** The docked view's way to save what it has not saved yet (true, or nothing, when it is all on disk; false or a throw when it could not be); null when it has none. Returns the unregister function. */
+export function setBoardFlush(fn: (() => Promise<boolean | void> | boolean | void) | null): () => void {
   flush = fn
   return () => {
     if (flush === fn) flush = null
@@ -116,7 +120,10 @@ export async function popOutBoard(path: string): Promise<boolean> {
     return false
   }
   try {
-    await flush?.()
+    // False is the session saying a change could not be written (the note is locked, a sync tool holds it ...): it stays in the docked
+    // view, which is still on screen, and is tried again there - the window would open on the old text, and the docked view's last
+    // write, made as it unmounts, would land behind the window's back.
+    if ((await flush?.()) === false) throw new Error('the changes are kept in the board view and tried again there')
   } catch (err) {
     toast(`Board window: the board could not be saved first, so it was not moved (${errorText(err)})`, 'error')
     return false
@@ -280,6 +287,18 @@ function toggleWindow(): void {
 }
 
 if (bridge) {
+  // Main asks this window to save before it closes or the app quits: a board in the docked view writes what it has first.
+  bridge.onBoardFlush((token) => {
+    void (async () => {
+      try {
+        await getActiveBoard()?.flush()
+      } catch {
+        /* the close goes on */
+      } finally {
+        bridge.boardFlushed(token)
+      }
+    })()
+  })
   bridge.onBoardState(setStatus)
   bridge.onBoardClosed((path) => {
     // One view's failure must not keep the others from taking their board back.

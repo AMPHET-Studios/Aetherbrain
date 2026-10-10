@@ -5,7 +5,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import { BOARD_LIMITS, addMark, addNote, boardChars, emptyBoard, parseBoard, serializeBoard, type BoardDoc, type StrokeItem } from '@aether/core'
-import { Rig, at, build, fatBoard } from './board-controller-harness'
+import { Rig, at, build, fatBoard, rng } from './board-controller-harness'
 
 const LIMIT = BOARD_LIMITS.noteTotal
 
@@ -34,6 +34,17 @@ describe('the character budget', () => {
     r.drag(at(0, 0), at(80, 60))
     expect(r.s.chars).toBeGreaterThan(before)
     expect(r.s.chars).toBe(boardChars(r.doc))
+    // The camera and the settings are part of the board's lines too: the figure is the same as core's whatever happened to them.
+    r.c.setView({ x: -12345.678, y: 98765.4321, zoom: 0.123456 })
+    expect(r.s.chars).toBe(boardChars(r.doc))
+    r.c.exec('view.background')
+    r.c.exec('view.gray')
+    expect(r.s.chars).toBe(boardChars(r.doc))
+    // ... also in the middle of a pan, when the board is shown at the size it began with.
+    r.down(at(0, 300), { button: 1 })
+    r.move(at(40, 310), { button: 1 })
+    expect(r.s.chars).toBe(boardChars(r.doc))
+    r.up(at(40, 310), { button: 1 })
   })
 
   it('shows a drag at the size the board had when it began (it adds nothing) and the new size when it ends', () => {
@@ -230,6 +241,24 @@ describe('the character budget', () => {
     expect(none.s.canUndo).toBe(false)
   })
 
+  it('does not refuse what only changes the items that are there: a lock, a group, a turn, a colour, a move', () => {
+    const r = new Rig(fatBoard(LIMIT - 5))
+    r.forget()
+    r.c.exec('edit.selectAll')
+    r.c.exec('edit.lock')
+    expect(r.s.undoLabel).toBe('Lock')
+    r.c.exec('edit.unlock')
+    r.c.exec('edit.group')
+    expect(r.s.undoLabel).toBe('Group')
+    r.c.exec('transform.rotateCw')
+    expect(r.s.undoLabel).toBe('Rotate')
+    r.c.setStyle({ color: '123456' })
+    expect(r.s.undoLabel).toBe('Style')
+    r.key('ArrowRight')
+    expect(r.s.undoLabel).toBe('Nudge')
+    expect(limitToasts(r)).toHaveLength(0)
+  })
+
   it('refuses colour swatches with no room', () => {
     const r = new Rig(fatBoard(LIMIT - 100))
     const items = r.doc.items.length
@@ -272,3 +301,85 @@ describe('the character budget', () => {
     expect(Math.abs(section.length - r.s.chars)).toBeLessThan(200)
   })
 })
+
+describe('everything that adds, in any order, near the budget', () => {
+  /** One random way to add something: a pen stroke, a shape, a note, pictures, swatches, a paste, a duplicate, a copy from another board. */
+  function addSomething(r: Rig, rand: () => number, foreign: string): string {
+    const roll = rand()
+    if (roll < 0.2) {
+      r.c.exec('tool.pen')
+      r.down(at(-400, -300 + rand() * 50))
+      const n = 2 + Math.floor(rand() * 150)
+      for (let i = 1; i <= n; i++) r.move(at(-400 + i * 5, -300 + (i % 2) * 20 + rand() * 30))
+      r.up(at(-400 + n * 5, -300))
+      return 'pen'
+    }
+    if (roll < 0.3) {
+      r.c.exec(['tool.line', 'tool.rect', 'tool.ellipse'][Math.floor(rand() * 3)] as 'tool.line')
+      r.drag(at(0, 0), at(30 + rand() * 300, 30 + rand() * 200))
+      return 'shape'
+    }
+    if (roll < 0.45) {
+      r.c.exec('tool.select')
+      const id = r.c.addNoteAt({ x: rand() * 400, y: rand() * 400 })
+      if (id !== 0) r.c.commitNoteText(id, 'word '.repeat(Math.floor(rand() * 400)) + 'x')
+      r.c.cancelNoteEdit()
+      return 'note'
+    }
+    if (roll < 0.55) {
+      r.c.addPictures(Array.from({ length: 1 + Math.floor(rand() * 12) }, (_, i) => ({ path: `Boards/Walk/p${Math.floor(rand() * 1e6)}-${i}.png`, w: 800, h: 600 })))
+      return 'pictures'
+    }
+    if (roll < 0.62) {
+      r.c.addSwatches(['ff0000', '00ff00', '0000ff'].slice(0, 1 + Math.floor(rand() * 3)), { x: 0, y: 0 })
+      return 'swatches'
+    }
+    if (roll < 0.75) {
+      r.c.exec('tool.select')
+      r.c.exec(rand() < 0.5 ? 'edit.selectAll' : 'edit.invertSelection')
+      r.c.exec('edit.copy')
+      r.c.exec('edit.paste')
+      return 'paste'
+    }
+    if (roll < 0.87) {
+      r.c.exec('tool.select')
+      r.c.exec('edit.selectAll')
+      r.c.exec('edit.duplicate')
+      return 'duplicate'
+    }
+    r.c.importCopy(foreign, { x: rand() * 300, y: rand() * 300 })
+    return 'import'
+  }
+
+  for (const seed of [1, 2, 3, 4, 5, 6, 7, 8]) {
+    it(`never takes the board past the budget by adding (seed ${seed}), and a refusal leaves no step behind`, () => {
+      const rand = rng(seed)
+      const source = new Rig(build((b) => b.stroke('s', Array.from({ length: 60 }, (_, i) => (i % 2 === 0 ? i * 9 : 40 + (i % 7))), 3).note('n', 0, 100, 200, 'hello there')).doc)
+      source.c.exec('edit.selectAll')
+      source.c.exec('edit.copy')
+      const foreign = source.c.exportCopy()!.text
+      const r = new Rig(fatBoard(LIMIT - 12_000 + seed * 700), { history: { limit: 10_000 } })
+      let refused = 0
+      let added = 0
+      for (let step = 0; step < 120; step++) {
+        const before = boardChars(r.doc)
+        const items = r.doc.items.length
+        const steps = r.s.undoLabel
+        const toasts = r.toasts('limit').length
+        const what = addSomething(r, rand, foreign)
+        const after = boardChars(r.doc)
+        // Past the budget only by what was there already: adding never grows the board beyond it.
+        expect(after <= LIMIT || after <= before, `seed ${seed} step ${step} (${what}): ${before} -> ${after}`).toBe(true)
+        if (r.doc.items.length > items) added++
+        // A refusal is a toast, and the board and its history are as they were.
+        if (r.toasts('limit').length > toasts && r.doc.items.length === items) {
+          refused++
+          expect(r.s.undoLabel, `seed ${seed} step ${step} (${what})`).toBe(steps)
+        }
+      }
+      expect(added).toBeGreaterThan(0)
+      expect(refused).toBeGreaterThan(0)
+    })
+  }
+})
+

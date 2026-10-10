@@ -47,10 +47,14 @@ picture or save it, then paste or drop), the click-through window (no safe way b
    the **docked** host wraps the store (`readBoard` / `saveBoard`, `importBoardPictures`, `preview`), the **floating** host wraps the bridge in a second
    window. A board is open in one place at a time: popping out leaves a placeholder docked, closing the window gives it back. That
    avoids two writers (the vault watcher does not echo a window's own writes, so a live two-window sync would need its own bus).
-6. **The floating window is a second HTML entry** (`board.html`) loading only the board view, with the same preload and default
-   session as the brain window (same security: no network in production, every permission refused). It never boots a vault: it
-   must not call `openVault`, `listFiles` or anything that restarts the watcher. Its saves go through `board:save`, which writes
-   the note *without* telling the watcher to ignore it, so the brain window sees the change like any outside edit.
+6. **The floating window is a second HTML entry** (`board.html`) loading only the board view, in the default session as the brain
+   window (same security: no network in production, every permission refused) but with a **preload of its own** (`board-preload.cts`:
+   the board calls, the pictures, the clipboard, the flush handshake, nothing else; main also answers it no other channel,
+   `BOARD_PAGE_CHANNELS`, so a page that sends one by hand is refused). The page decodes pictures from the user's folders, so it is the
+   page to give the least: a bridge with the whole vault would turn a broken decoder into a way to read, change and delete the
+   vault. It never boots a vault: it must not call `openVault`, `listFiles` or anything that restarts the watcher. Its saves go
+   through `board:save`, which compares the note with the text the save was made from and writes in one step in main, *without*
+   telling the watcher to ignore it, so the brain window sees the change like any outside edit.
 7. **Window opacity, not transparency.** `BrowserWindow.setOpacity` works on Windows and macOS with a normal frame; a transparent
    frameless window cannot be resized on Windows without custom handles, and click-through strands the user.
 8. **Keys.** The board is an overlay view with its own capture-phase key handling (it consumes the keys it uses, so `b`, `z`, `t`
@@ -88,27 +92,41 @@ Rules:
   byte for byte; frontmatter is patched with the existing in-place helpers (`title`, `type`, `updated`).
 - One item per list line, back to front. First token after `- ` is the kind: `view`, an embed `![[path]]`, `pic` (a picture whose
   path cannot be embedded), `note`, `stroke`, `line`, `rect`, `ellipse`. Then `key=value` pairs separated by single spaces and bare
-  flags (`gray`, `lock`, `arrow`). Numbers are written with at most 2 decimals (crop with 3), trimmed. Colours are 6 hex digits
+  flags (`gray`, `lock`, `arrow`). Numbers are written with at most 2 decimals (crop edges and mark widths with 3, the zoom with 4), trimmed. Colours are 6 hex digits
   with **no `#`** (a `#ff8800` in the body would become a vault tag). `g=` is a group label (renumbered from 1 on every write).
   `flip=` is `h`, `v` or `hv`. `r=` is the rotation in degrees. `op=` is opacity.
 - Text (a note's text, a picture's caption) follows the first ` » ` on the line. It is escaped so the line stays inert markdown
   and one line: `\` → `\\`, a newline → `\n`, and `\` before each of `[ ] # < > | * _ ~ ! \``. No link, tag, task or HTML can
   come out of a note. Reading reverses it exactly.
-- A picture is written as an embed `![[path]]` (so the brain links the board to the picture) when its path is safe to embed (no
-  `#`, `|`, `[`, `]`, `<`, `>`, no leading or trailing space, none of `*`/`_`/`~` flanking a name part); otherwise as `pic path`
-  with the path escaped and no graph link. Paths are the vault's own picture paths. A picture that is missing from the vault keeps
+- A picture is written as an embed `![[path]]` (so the brain links the board to the picture) when its path is safe to embed
+  (`safeEmbedPath`): a picture extension; no control character, `#`, `|`, `[`, `]`, `<`, `>`, `\` or backtick; no leading or trailing
+  space; no `&...;` character reference; no web address or e-mail address (what a markdown parser turns into its own link); none
+  of `*`/`_`/`~` that could pair into emphasis; otherwise as `pic path` with the path escaped and no graph link. Paths are the vault's own picture paths. A picture that is missing from the vault keeps
   its line and its place, and is drawn as a placeholder.
 - Lines under `## Board` the reader does not understand (a hand-written remark, an item kind of a newer version) go to `doc.extra`
-  and are written back after the items. Nothing is dropped. A bad number or an unknown flag on a known line is ignored for that
-  attribute with a warning, never the line.
-- Limits (`BOARD_LIMITS`): 1,500 items, 4,000 characters per note, 3,000 points per stroke, 300,000 characters for the note. Reading
-  a board over a limit keeps the first items and warns; the view refuses to add past it.
+  and are written back after the items; an attribute it does not know on a line it does is kept on the item (`unknown`) and written
+  back as it was, with a warning. A bad number on a known line is ignored for that attribute with a warning, never the line: the
+  default is used, and the next save writes the default in its place.
+- Everything outside the board's span (the frontmatter apart from the patched keys, the text above, the text below up to the end of
+  the note) is returned byte for byte.
+- Limits (`BOARD_LIMITS`): 1,500 items, 4,000 characters per note, 3,000 points per stroke, and a **size budget** of 500,000 characters
+  for the board's items, measured by `boardChars(doc)` / `itemChars(item)` (a cached count per item, within a few characters of what
+  `serializeBoard` writes, no serialising per pointer move). Reading a board over a limit keeps the first items and warns. The budget is
+  enforced **when the board grows**: any operation that would make `boardChars(next)` exceed it AND exceed `boardChars(current)` is
+  refused with the 'limit' toast (*The board is full ...*, naming the budget) by the controller (a stroke, a note, pictures, a paste) and
+  by `addPicturesToBoardText` (pictures onto a closed board: as many as fit, the rest counted in `over`). An operation that keeps or
+  shrinks the size is always allowed, so a board loaded over the budget can be thinned, never grown. The floating window's whole-note cap
+  `MAX_BOARD_TEXT` (`apps/desktop/src/main/board-save.ts`) is 1,000,000 characters, well above it (the prose around the board counts
+  there), and `board:open` refuses an over-cap note up front.
 - The reader never fails: a note without a board section is an empty board; broken YAML in the frontmatter is not touched and the
   board is treated as an ordinary note (`isBoardNote` is false) so nothing is overwritten.
 
-Saving costs a full re-parse of the note and a graph rebuild on the main thread, so the view saves **at most once per second while
-changing and once at the end of a gesture**, never per pointer move, and not at all for a pan or zoom alone (the view goes to
-`localStorage` per board path and is written into the file with the next real change).
+Saving costs a re-parse of the note and a graph rebuild on the main thread. `parseNote` is board-aware (a board's item lines are read by
+the board's own line scan, 6 to 7 ms for a 1,500-picture or a 300-stroke board against 215 to 290 ms through the markdown parser, and
+none of their text becomes links, tags or search text; the picture embeds are still the note's links), so what is left of a save in a
+big vault is the graph rebuild (a save of a 242 KB board in a vault of 5,000 notes measured about 80 ms on a loaded test machine). The view saves **at most once per second while changing and
+once at the end of a gesture**, never per pointer move, and not at all for a pan or zoom alone (the view goes to `localStorage` per
+board and vault and is written into the file with the next real change).
 
 ## Core (`packages/core/src/board/`)
 
@@ -184,14 +202,20 @@ Pure TypeScript, no DOM. Exported from `@aether/core`.
   reload. The engine behind it is `view/boardSession.ts` (load, controller, cache, saving, events); a test pins each part.
 - `boardRegistry.ts`: pure helpers of the app side: `listBoards(notes)` (notes whose frontmatter type is `board`, newest first), `boardStem`
   / `uniqueBoardStem` (a new board's name), `boardFolderOf(path)` (a board's own picture folder, the same one the floating window uses),
-  `summarizeBoard(path, raw)` (what a card shows), `addPicturesToBoardText(raw, items)` (pictures onto a board that is not open),
-  `fitPictureSize`, `pictureAspect`, `PreviewUrls` (bounded object URLs of the list's previews), `BoardChangedOutsideError`.
+  `summarizeBoard(path, raw)` (what a card shows), `addPicturesToBoardText(raw, items)` (pictures onto a board that is not open: the most whose
+  arranged board fits the size budget, found by halving, with `added`, `skipped`, `full` (item limit) and `over` (budget) counted; `BOARD_BUDGET_TEXT` is
+  the budget as the messages say it), `fitPictureSize`, `pictureAspect`, `PreviewUrls` (bounded object URLs of the list's previews),
+  `BoardChangedOutsideError`.
 - `dockedHost.ts`: `createDockedBoardHost(path): BoardHost & { dispose() }` — the host over the store (see below).
 - `BoardsView.tsx`: the Boards view. A wrapper that renders nothing while the view is closed; the list of boards (cards in pages of 24, a
   collage of up to 4 pictures per card loaded only while the card is in view, a search box, a *New board* tile, an empty state); and an
   open board: a breadcrumb over `<BoardView host={createDockedBoardHost(path)} />` inside an `ErrorBoundary`, or, while the floating window
   has that board, a card with *Bring it back* and the window's on-top and opacity state. It registers the active board's `flush` with the
-  window control (`setFlush`) so that popping out waits for the pending save.
+  window control (`setFlush`) so that popping out waits for the pending save (a `false` answer, a save that could not be made, stops the
+  pop-out). *Built as:* a board whose note disappears (deleted or moved by a sync tool or git) is **not** closed: the view keeps it
+  open with the title and path the note had, a notice (`role="status"`) and one toast, its saves are refused (the session offers *Copy
+  board text*), and it takes the note back when it returns. The panels of the list and of an open board are `.panel-solid` (the 3D view
+  behind them is not drawn, see the store).
 
 ### The docked host
 
@@ -200,7 +224,8 @@ Pure TypeScript, no DOM. Exported from `@aether/core`.
 | `BoardHost` | Docked |
 | --- | --- |
 | `load()` | `store.readBoard(path)`: the file as it is on disk (a pending editor draft is saved first, a change the watcher has not reported is applied). Resets "changed outside". |
-| `save(raw)` | `store.saveBoard(path, raw, lastKnown)`: runs in the note's exclusive queue; refuses with `BoardChangedOutsideError` (message contains "changed outside") when the file holds neither the text last read or written nor `raw`; the host then refuses every save until `load()` reads the note again. Also refuses when the editor holds unsaved edits of the note, the vault is read-only, the note is gone or `raw` is not a board. Saves are serialised. Never toasts (the view does). |
+| `save(raw, expectedBase?)` | `store.saveBoard(path, raw, expectedBase ?? lastKnown)`: runs in the note's exclusive queue; `expectedBase` is the text `raw` was made from, so a reload that landed in between cannot make a stale text look fresh. Refuses with `BoardChangedOutsideError` (message contains "changed outside") when the file holds neither that text nor `raw`; the host then refuses every save until `load()` reads the note again, and **every refusal tells the external-change callbacks again** (a reload that failed because the note was edited into a non-board can succeed once it is put right). Also refuses when the editor holds unsaved edits of the note, the vault is read-only, the note is gone, `raw` is not a board, or (when nothing was expected) the note on disk is not a board. Saves are serialised. Never toasts (the view does). |
+| `stateKey` | the vault's location and the path: what the browser's memory of the board (its camera, the copy of an unsaved board) is kept under, so a board of the same path in another vault is another board. |
 | `onExternalChange(cb)` | follows the store's copy of the note; ignores the last 4 texts it read or wrote (its own saves, and a slow watcher's late echo of them); a deleted note is reported too. Listens only while somebody is subscribed. |
 | `pictures.preview` / `original` | `store.preview(path, px)` / `store.readPicture(path)` (`VaultAdapter.readAsset`) |
 | `pictures.add(files)` | `store.importBoardPictures(path, files)`: create-only into `boardFolderOf(path)`, one graph rebuild for the batch, nothing selected, no success toast, one answer per file (`null`: refused or failed); a folder the vault refuses (`excluded from the vault`) is replaced by `<folder> pictures` from then on. |
@@ -212,13 +237,15 @@ Pure TypeScript, no DOM. Exported from `@aether/core`.
 
 ### Store (`packages/ui/src/store.ts`)
 
-`View` gains `'boards'` (also in `COVERING_VIEWS`). State: `boardPath` (the board open in the view; kept when the view is left so `8` returns to
+`View` gains `'boards'` (also in `COVERING_VIEWS`, exported with `FULL_PANEL_VIEWS`: `projects` and `boards`, the views that fill the window; `App.tsx` calls `controller.setCovered` from the view alone, so a crashed or closed panel always lets go, and the scene's Canvas frame loop is `'never'` while it is set (`frameloopFor`); the layout keeps running and the first frame after is a plain redraw). State: `boardPath` (the board open in the view; kept when the view is left so `8` returns to
 it), `lastBoardPath` (also in `localStorage` per vault). Actions: `boards()`, `openBoards()`, `openBoard(path)`, `closeBoard()`, `newBoard(title?,
 { open? })` (`<home>Boards/<Title>.md` through the create-only note path; title and file name unique: `Title 2`), `addPicturesToBoard(paths,
-boardPath?)`, `boardFolderOf(path)`, `readBoard`, `saveBoard`, `readPicture`, `importBoardPictures`, `showPicture`; `importImages(files,
+boardPath?)`, `boardFolderOf(path)`, `readBoard`, `saveBoard`, `readPicture`, `importBoardPictures`, `showPicture`, `showNode(id)` (select and fly, leaving any covering view); `importImages(files,
 folder, { quiet })`; `requestForm('board')` asks the list for its new-board form. *Built as:* a board's pictures folder is named like the
 note's **file** (what the floating window computes from the path alone), not like its title; `addPicturesToBoard` skips a picture the board
-already shows, and on an empty board sets the view to fit the new pictures. Keys: `8`, `⇧B` (inside the view: up); `Esc` is the board's
+already shows, adds as many as fit the size budget (the message names it), stops with a message when the board open in the view could not
+be flushed (`ActiveBoard.flush()` resolves `false`), and on an empty board sets the view to fit the new pictures. `saveBoard` also
+refuses to write a board text over a note on disk that is not a board. The board last open (`aether:board:<location>`) follows a rename. Keys: `8`, `⇧B` (inside the view: up); `Esc` is the board's
 ladder first, then closes the view; the global handler ignores every other single key while the view is up. The inspector of a picture
 has *Add to board*. Palette: *Boards: open*, *show list*, *new board*, *open the selected note as a board*, *add the selected picture to
 the last board* / *to a new board*, and every row of `BOARD_COMMANDS` but the window's as *Board: …* (offered while a board is open and
@@ -234,15 +261,20 @@ enough is selected; the window rows are registered by the desktop app, so no tit
   a dropped or pasted address (text/uri-list, text/html with an `<img src>`) cannot be fetched (no network) and says so in a toast.
 - **`src/main/board-window.ts`**: `BoardWindowHost` in the style of `ForgeHost` (no runtime electron import; takes `BrowserWindow`,
   `screen`, the brain window getter, preload path, settings and a save callback). One window, lazily opened, reused, closed with the
-  brain window. Options: `alwaysOnTop` (`'floating'` level), `opacity`, normal frame, same preload, **no partition**, per-webContents
+  brain window. Options: `alwaysOnTop` (`'floating'` level), `opacity`, normal frame, its own preload (`board-preload.cts`), **no partition**, per-webContents
   guards copied from `createWindow` (`setWindowOpenHandler`, `will-navigate`, `render-process-gone`, reveal on `ready-to-show`).
   Pure helpers: `boardWindowOptions(settings, display)`, `clampBoardBounds`, `boardSettings(raw)` sanitizer (opacity 0.2–1, sizes within
   the display). Settings: `settings.board = { x?, y?, width, height, alwaysOnTop, opacity }` in `settings.json`.
 - **IPC** (both `ipc.ts` and `preload.cts`): `board:open(path)`, `board:close()`, `board:status()` → `{ open, path, alwaysOnTop, opacity,
   supportsOpacity }`, `board:configure({ alwaysOnTop?, opacity? })` (applies to the board window; callable from either window),
-  `board:save(path, text)` (see below), events `board:state` (to both windows) and `board:closed(path)` (to the brain window).
+  `board:save(path, text, expectedBase?)` (see below), `board:read`, `board:assets`, the close handshake `board:flush` (main to page, with a
+  token) / `board:flushed` (page to main), events `board:state` (to both windows) and `board:closed(path)` (to the brain window).
   `board:save` accepts only a vault `.md` path whose current file (or empty) is a board note (`type: board` in the first 4 KB),
-  text ≤ 400,000 characters, written with `FsVault.write` and **without** `noteSelfWrite`.
+  text ≤ 1,000,000 characters (`MAX_BOARD_TEXT`), compares the note with `expectedBase` and writes in one call (no read-then-write gap
+  between the window and main), with `FsVault.write` and **without** `noteSelfWrite`. `board:open` refuses a note over the cap up front
+  with a message, so a window is never opened on a board it cannot read. A window's close (and a move to another board, a vault
+  switch, quitting) is held while its page is asked to write what it has not written (`FlushGate`, 1.5 s at most). The window's page
+  may use only `BOARD_PAGE_CHANNELS`; main refuses every other channel from it.
 - **`src/renderer/board.html` + `board.tsx`**: mounts `BoardView` with the floating host (reads `?path=`; loads with `readFile`,
   saves with `board:save`; pictures through `thumbnail`, `readAsset`, `createAsset` into the board folder, `listAssets`). Vite
   builds two inputs (`index`, `board`); the CSP meta (with the `%VITE_CSP_*%` placeholders) is repeated. Never calls `boot()` /
@@ -288,9 +320,17 @@ enough is selected; the window rows are registered by the desktop app, so no tit
   `board-keys` (the global key handler pressed with every key while the view is up, the way in and out, docs/KEYBOARD.md and
   docs/REFERENCE-BOARD.md against the table of keys, the cheatsheet), `apps/desktop/test/board-ui-wiring` (the window control, the
   palette entries and `w` against a fake bridge).
-- **Chromium (local, skipped without a browser):** the canvas renderer draws a known board and pixels are checked; pointer drags through
+- **Review fixes (node):** `board-fix-integration-registry` (pictures onto a board close to or over its size budget), `board-fix-integration-store`
+  (the budget message, a view that could not flush, a board text over an ordinary note, the last-board key through a rename, `showNode`, no
+  videos on a board), `board-fix-integration-host` (a save judged against its own base text, a repeated refusal asks for the reload
+  again), `board-fix-integration-statekey` (the camera per vault), `packages/graph/test/board-fix-integration-covered` (the scene's frame
+  rule and the controller's switch).
+- **Chromium (local, skipped without a browser):** `board-fix-integration-chromium` mounts the whole app on software GL with the compiled
+  stylesheet and counts WebGL draw calls: none behind the Boards view and the Projects board, drawing again when they close, still
+  drawing behind review and capture; the panels over a paused scene are solid; Shift+Enter in the palette steps out of the Boards view;
+  the top bar is one line from 1100 px to 1920 px. And: the canvas renderer draws a known board and pixels are checked; pointer drags through
   `page.mouse`; the BoardView with a fake host (drop, paste, picker, note editing, save debounce); `board-integration-dom` the Boards
   view with the real store and keys (lazy previews that scroll away, open and leave by key, the new-board form, the placeholder and
-  the return, an outside change, the flush before a window opens).
+  the return, an outside change, a deleted note that keeps its board open, the flush before a window opens).
 - **Real Electron (by hand / the harness in the scratchpad):** the floating window opens on top, opacity applies, a drop adds pictures,
   a save is seen by the brain window.

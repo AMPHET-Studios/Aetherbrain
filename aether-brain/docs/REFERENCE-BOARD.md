@@ -22,11 +22,13 @@ If you have used PureRef, this is that, built into Aether Brain. The difference 
 
 Press **`8`** (or **`⇧ B`**). You see your boards as cards, each with a little collage of its pictures. Press **`n`** (or click **＋ New board**), type a name, press `Enter`: the board opens, empty.
 
-Boards live in a `Boards` folder at the top of your vault (`Boards/Gate reference.md`). A board's own pictures go in a folder next to its note with the same name (`Boards/Gate reference/`).
+Boards live in a `Boards` folder at the top of your vault (`Boards/Gate reference.md`). A board's own pictures go in a folder next to its note with the same name (`Boards/Gate reference/`; a name the vault would skip, like `Library` or `Temp`, gets ` pictures` added).
 
 Press `8` again inside a board to go back to the list, `Esc` to close the view. The board you were on is remembered: from anywhere in the app, `8` comes back to it.
 
 Everything also has a palette command: press `⌘ K` (`Ctrl K`) and type "board".
+
+While the Boards view is open, the 3D brain behind it is not drawn (it is paused, and the panel over it is solid), so the board has all of the window's attention; the brain carries on where it was when you close the view. The Projects board does the same.
 
 ## Adding pictures
 
@@ -56,7 +58,7 @@ Good to know:
 | Fit the selection | `⇧ F` or `Z` | | |
 | 100% | `1` | | |
 
-Zoom goes from 0.5% to 6400%. The status bar at the bottom shows the zoom (click it for 100%), how many items the board has, and whether it is saved.
+Zoom goes from 0.5% to 6400%. The status bar at the bottom shows the zoom (click it for 100%), what is selected, how many pictures and items the board has, how much of its size budget the items use (see [Limits](#limits)), and a hint for the tool in your hand. Whether the board is saved is shown in the toolbar (*Saved*, *Saving…*, *Unsaved*, *Not saved*).
 
 ## Working with pictures
 
@@ -66,7 +68,7 @@ Zoom goes from 0.5% to 6400%. The status bar at the bottom shows the zoom (click
 
 **Scale** by dragging a corner; the shape stays. Hold `Alt` to scale from the centre.
 
-**Rotate** with the handle above the box; hold `⇧` to snap to 15 degrees. `⌘ R` and `⌘ ⇧ R` turn by 90 degrees.
+**Rotate** with the handle above the box; hold `⇧` to snap to 15 degrees. `⌘ R` and `⌘ ⇧ R` turn by 90 degrees. Pictures, notes, pen strokes and lines turn at any angle. A rectangle or ellipse is always upright: `⌘ R` / `⌘ ⇧ R` turn it a quarter (it swaps its width and height about its new centre, so a frame drawn round a picture still encloses the picture after a quarter turn), but rotating by hand, or by a free angle, only moves its centre round with the group and leaves its shape upright.
 
 **Flip** with `⇧ H` (left to right) and `⇧ V` (top to bottom). A mirrored picture is a good way to spot what is wrong with your own drawing.
 
@@ -76,9 +78,9 @@ Zoom goes from 0.5% to 6400%. The status bar at the bottom shows the zoom (click
 
 **Order**: `]` forward, `[` backward, `⌘ ]` to the front, `⌘ [` to the back.
 
-**Group** pictures that belong together with `⌘ G`; a group moves, scales and rotates as one. `⌘ ⇧ G` ungroups. **Lock** with `⌘ L` so nothing moves by accident.
+**Group** pictures that belong together with `⌘ G`; a group moves and scales as one, and turns as one except for the free-angle rule for rectangles and ellipses above. `⌘ ⇧ G` ungroups. **Lock** with `⌘ L` so nothing moves by accident.
 
-**Duplicate** (`⌘ D`), **copy** and **paste** (`⌘ C`, `⌘ V`) work within the board; **delete** with `Delete`.
+**Duplicate** (`⌘ D`), **copy** and **paste** (`⌘ C`, `⌘ V`) work between boards too, and between windows (a board in the app and one in the floating window): what you copy goes on the system clipboard as text that starts with *Aether Brain board: 3 items copied* followed by the items, so you can paste it into another board or look at it in any text editor. A paste is held to the same limits as anything you add. **Delete** with `Delete`.
 
 **Captions** (`N`) show each picture's name under it. **Smooth or crisp pixels** (`S`) matters for pixel art: crisp keeps the squares sharp when you zoom in.
 
@@ -86,7 +88,7 @@ Zoom goes from 0.5% to 6400%. The status bar at the bottom shows the zoom (click
 
 ## Arranging
 
-Select some pictures (or none, for the whole board) and press **`A`**, or use the **Arrange** menu:
+Select two or more items (or none, for the whole board) and press **`A`**, or use the **Arrange** menu. With exactly one item selected, arranging and sorting do nothing and say so: they would rearrange everything you did not point at.
 
 | | |
 | --- | --- |
@@ -104,13 +106,13 @@ Arranging never throws the group across the board: the result is centred on wher
 
 ## Notes and drawing
 
-- **Note tool** (`T`): click on the canvas and type. `⌘ Enter` or clicking away finishes, `Esc` cancels. Double-click a note to edit it again. Notes have a size, a colour and an optional background in the style panel.
+- **Note tool** (`T`): click on the canvas and type. `⌘ Enter` or clicking away finishes, `Esc` cancels. Double-click a note, or select it and press `F2` (or `Enter`), to edit it again. Notes have a size, a colour and an optional background in the style panel.
 - **Pen** (`P`): freehand. On a tablet, pressure makes the line thicker.
 - **Line and arrow** (`L`), **rectangle** (`R`), **ellipse** (`O`): drag. `⇧` snaps a line to 45 degree steps and a shape to equal sides; `Alt` draws from the middle. Turn *arrow* on in the style panel for an arrowhead. Shapes can be filled.
 - **Eraser** (`E`): removes a whole mark with one touch. It does not touch pictures or notes.
 - The **style panel** (the colour swatch in the toolbar) sets colour, width, fill and note size for the next thing you make, and restyles whatever is selected.
 
-A line is as thick on screen as the style panel says when you draw it, whatever the zoom is at that moment: a 3 pixel pen line is 3 pixels wide when drawn zoomed out and when drawn zoomed in.
+A line is as thick on screen as the style panel says when you draw it, whatever the zoom is at that moment: a 3 pixel pen line is 3 pixels wide when drawn zoomed out and when drawn zoomed in. This holds at every zoom for widths from about half a pixel to 200 pixels (a mark's width is kept between 0.005 and 40,000 board units, which is what that range needs between the lowest and the highest zoom).
 
 ## Colour and value studies
 
@@ -121,11 +123,11 @@ A line is as thick on screen as the style panel says when you draw it, whatever 
 
 ## Saving, undo and the file
 
-You never save by hand. The board writes itself into its note at the end of each gesture (when you let go of a drag, finish a command), and at most once a second while you are in the middle of one. The status bar says *Saved*, *Saving…* or *Not saved* (it tries again). Panning and zooming alone do not rewrite the note: your view is remembered by the app and written into the file with the next real change.
+You never save by hand. The board writes itself into its note at the end of each gesture (when you let go of a drag, finish a command), and at most once a second while you are in the middle of one. The toolbar says *Saved*, *Saving…*, *Unsaved* or *Not saved*. When a save fails the board keeps your work on screen, tries again, and says so in a message with a *Copy board text* button: the board's text on the clipboard, to paste into a note by hand, so nothing is lost even if the note can never be written. Panning and zooming alone do not rewrite the note: your view is remembered by the app (per board and vault, in this browser) and written into the file with the next real change.
 
 **Undo** (`⌘ Z`) and **redo** (`⌘ ⇧ Z`) go back 200 steps. A run of arrow-key nudges is one step.
 
-If something else changes the note while the board is open (you edit it in the editor, an AI helper writes to it, git pulls a new version), the board reloads it. If you have unsaved changes of your own at that moment, yours are kept and the board warns you, and it refuses to save over the newer text until you reload the board. Nothing is overwritten without a word.
+If something else changes the note while the board is open (you edit it in the editor, an AI helper writes to it, git pulls a new version), the board reads it again by itself. With nothing unsaved, the board in the note replaces the one on your screen (your undo steps are kept). If you have unsaved changes at that moment, **yours win, and the board says so**: it keeps what is on your screen and writes it over the *board part* of the note, while whatever the other change did elsewhere in the note (the frontmatter, the text above and below the board) stays. A save is never written over a note it did not read: if the note changed between the board's last read and the write, the write is refused, the board reads the note again and saves again from that. If the note is deleted or moved while its board is open, the board is not closed (it holds the only copy of your latest work): it stays up with a notice and cannot save until the note is back, and *Copy board text* in the message keeps what you did.
 
 ### The file, in plain words
 
@@ -150,25 +152,26 @@ Reference board. Open it from the Boards view (8). Everything under "Board" is r
 - line x1=0 y1=0 x2=100 y2=40 color=ffffff width=2 arrow
 ```
 
-- `type: board` is what makes it a board. Only the lines under the first `## Board` heading belong to the board; write whatever you like above and below (a heading, a to-do list, links to the project this board is for). It is kept byte for byte.
+- `type: board` is what makes it a board. Only the lines under the first `## Board` heading, up to the next heading of level 1 or 2, belong to the board; write whatever you like above and below (a heading, a to-do list, links to the project this board is for). Everything outside that span, the text below the board included, is kept exactly as you wrote it, byte for byte, when the board saves.
 - One line per item, back to front: the view first, then pictures as `![[path]]` embeds (which is how the brain draws the link between the board and its pictures), notes, pen strokes, lines, rectangles and ellipses.
 - Colours are six hex digits without the `#`. Positions and sizes are in board units, y growing downward. `r` is rotation in degrees, `op` opacity, `g` a group number, `flip` is `h`, `v` or `hv`, `crop` the part of the picture shown (left, top, right, bottom as fractions).
-- A line the board does not understand (something you wrote by hand, an item from a newer version) is kept and written back after the items. Nothing is dropped.
-- You can edit the lines by hand. A bad number is ignored with a warning, never the whole line.
+- A line the board does not understand (something you wrote by hand, an item kind from a newer version) is kept and written back after the items, and so is an attribute it does not know on a line it does (`weird=1`): the board says so once and writes it back as it was.
+- You can edit the lines by hand. A bad number is ignored with a warning, never the whole line: the board uses the default for that one attribute, and the next save writes the default in its place.
 
 ## The floating window
 
 On the desktop app a board can leave the app window and float on top of everything else, so it stays visible while you paint.
 
 - **Pop out**: the *Pop out* button in the board's toolbar, the **`w`** key, a card's ⧉ button in the list, or the palette command *Board: Pop out to its own window*. The board saves first, then opens in its window and the app shows a card: *This board is open in its window*.
-- **Bring it back**: the *Dock* button in the window's toolbar, `w` again, closing the window, or the *Bring it back* button on the card in the app. The board reloads from its note, with whatever you did in the window.
+- **Bring it back**: the *Dock* button in the window's toolbar, `w` again (pressed in the window or in the app), closing the window, or the *Bring it back* button on the card in the app. The board reloads from its note, with whatever you did in the window.
 - **Always on top**: on by default; the pin button in the window's toolbar (or *Stays on top* on the card in the app) and the palette command *Board: Always on top* turn it off.
 - **Opacity** (Windows and macOS): the − and + buttons dim the window in steps of 10%, down to 20%, so the program under it shows through. The percentage is shown. (Linux windows cannot be dimmed reliably, so the buttons are not there.)
 - The window remembers its place, its size, its opacity and whether it stays on top.
 - Only one board is in the window at a time. Opening another board in it sends the first back to the app.
-- The window saves as you work, at the end of every gesture. If the window is closed (even by a crash), the board in the note is the last gesture you finished.
+- The window saves as you work, at the end of every gesture. Closing it (or docking it, switching vaults, quitting) is held for a moment, 1.5 seconds at most, while its page writes what it has not written yet, a note you are still typing included; only then does it go. If the window dies without a word, the board in the note is the last gesture you finished.
+- A board whose note is longer than 1,000,000 characters (the text around the board counts) is not opened in the window: *Pop out* says so and the board stays in the app.
 
-The window shows only the board: it never opens your vault and can't reach other notes.
+The window shows only the board. It never opens your vault, and it cannot reach other notes: its page has a bridge with only what a board needs (reading and saving a note that is a board, a note that is not one is refused; reading, adding and opening pictures; its own window settings; the clipboard), and the app answers it no other request, even one sent by hand. A picture that turns out to be a broken file therefore has no way to the rest of your vault.
 
 ## Using a board with your drawing program
 
@@ -227,6 +230,7 @@ The same table is the cheatsheet in the board (the **?** button), the palette (`
 | `+` · `=` · `-` | Zoom in, zoom in, zoom out |
 | `Tab` | Hide or show the toolbar |
 | `⌘ O` | Add pictures… |
+| `F2` | Edit the selected note's text (`Enter` does the same when a note is the only thing selected) |
 | `Enter` | Open the selected picture in your image program |
 | `⌘ E` · `⌘ ⇧ E` | Export the selection, the board |
 | `← ↑ → ↓` | Nudge the selection |
@@ -245,8 +249,10 @@ Not on a key, but in the menus and the palette: arrange, sort, align and distrib
 | Items on a board | 1,500 (pictures, notes and marks together). Past that the board says it is full. |
 | Text in a note | 4,000 characters |
 | Points in one pen stroke | 3,000 (a longer stroke is simplified) |
-| Size of the board note | 300,000 characters |
+| What the board's items take in the note | 500,000 characters (the status bar shows how much is used: amber from 90%, red when it is full). This is enforced when the board **grows**: a stroke, a note, pictures or a paste that would take it past the limit is refused with *The board is full*; pictures put on a board that is not open are added as many as fit, and the message says how many did not and names the limit. Anything that keeps the size or makes it smaller is always allowed, so you can always delete your way out. A board that is already over the limit when it is opened (a hand-edited or older one) says so once and can still be edited and thinned, never grown. |
+| The whole note in the floating window | 1,000,000 characters (the text around the board counts too). A longer note is not opened in the window; it stays in the app. |
 | Picture files | png, jpg, webp, gif, bmp, avif; 40 MB each when added; 40 files per drop |
+| Pictures shown | Up to 150 megapixels and 64 MiB. A picture over either stays on the board as a placeholder that says *too large to show*; one the file system cannot read says *can't be read*, and one that is gone says *file missing*. |
 | Zoom | 0.5% to 6400% |
 | Undo | 200 steps |
 | Pictures kept ready in memory | About 128 megapixels of decoded pictures in total. The picture you are looking at is always kept; ones off screen are let go first and loaded again when you come back. Big pictures load at the size the screen needs and sharpen as you zoom in. |

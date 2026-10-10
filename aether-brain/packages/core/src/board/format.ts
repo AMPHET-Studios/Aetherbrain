@@ -275,9 +275,30 @@ interface Scan {
   openFence: Fence | null
 }
 
-/** Whether `text` is a list line the reader understands: a view line, or an item (an embed, `pic`, `note`, `stroke`, `line`, `rect`, `ellipse`). */
-function isBoardLine(text: string): boolean {
-  return text.startsWith('- ') && lineHead(text.slice(2)).ok
+/**
+ * Whether a line the reader understands looks like one the board WRITES: attributes (`x=1`), text after ` » `, or a picture file. The
+ * user's own bullets that start with the name of a kind (`- note the colours`, `- line 3 is wrong`, `- view from the north`) do not.
+ */
+function writtenLike(head: Extract<Head, { ok: true }>): boolean {
+  if (head.kind === 'pic') return isMediaPath(head.path)
+  const after = head.after
+  if (after.endsWith(' »') || after.includes(' » ')) return true
+  for (let i = after.indexOf('='); i >= 0; i = after.indexOf('=', i + 1)) {
+    if (i > 0 && after.charCodeAt(i - 1) !== 32) return true
+  }
+  return false
+}
+
+/**
+ * Whether `text` is a list line of the board: a view line, or an item (an embed, `pic`, `note`, `stroke`, `line`, `rect`, `ellipse`).
+ * `loose` is a line that follows a blank line once the board has begun: it must look like one the board writes (`writtenLike`), so that
+ * a bullet of the user's under the board is not taken for an item. Lines right under the board's lines, and the first ones, are read as
+ * hand-written (`- note » hi`, `- view smooth`).
+ */
+function isBoardLine(text: string, loose: boolean): boolean {
+  if (!text.startsWith('- ')) return false
+  const head = lineHead(text.slice(2))
+  return head.ok && (!loose || writtenLike(head))
 }
 
 /**
@@ -322,7 +343,7 @@ function scan(raw: string, from: number): Scan {
       touching = false
       continue
     }
-    if (!held && isBoardLine(text)) {
+    if (!held && isBoardLine(text, section.lines && !touching)) {
       section.lines = true
       touching = true
     }
@@ -843,6 +864,9 @@ function readBoard(raw: string, warn: Warnings): BoardDoc {
   let overflow = 0
   let fence: Fence | null = null
   let no = lineNumberAt(raw, section.heading.start)
+  // As in `scan`: whether the board has begun, and whether the last line seen is directly under a line of the board.
+  let begun = false
+  let touching = false
   for (let pos = section.heading.next; pos < section.end; ) {
     const line = lineAt(raw, pos)
     pos = line.next
@@ -853,13 +877,28 @@ function readBoard(raw: string, warn: Warnings): BoardDoc {
       if (closesFence(t, fence)) fence = null
       continue
     }
-    if (isBlank(t)) continue
+    if (isBlank(t)) {
+      touching = false
+      continue
+    }
     fence = opensFence(t)
     if (fence || !t.startsWith('- ')) {
       extra.push(t)
       continue
     }
+    // A bullet of the user's after a blank line (`- note the colours`) is a remark, not an item.
+    if (begun && !touching) {
+      const head = lineHead(t.slice(2))
+      if (head.ok && !writtenLike(head)) {
+        extra.push(t)
+        continue
+      }
+    }
     const parsed = parseItemLine(t.slice(2), no, (text) => warn.add(text))
+    if (parsed.type !== 'extra') {
+      begun = true
+      touching = true
+    }
     if (parsed.type === 'view') {
       if (viewSeen) {
         extra.push(t)
@@ -916,6 +955,8 @@ export function boardNoteParts(body: string): BoardNoteParts | null {
   let items = 0
   let viewSeen = false
   let fence: Fence | null = null
+  let begun = false
+  let touching = false
   for (let pos = section.heading.next; pos < section.end; ) {
     const line = lineAt(body, pos)
     pos = line.next
@@ -923,11 +964,16 @@ export function boardNoteParts(body: string): BoardNoteParts | null {
     let take = true
     if (fence) {
       if (closesFence(t, fence)) fence = null
-    } else if (!isBlank(t)) {
+    } else if (isBlank(t)) {
+      touching = false
+    } else {
       fence = opensFence(t)
       if (!fence && t.startsWith('- ')) {
         const head = lineHead(t.slice(2))
-        if (head.ok) {
+        // The same lines as `readBoard` takes for the board's own (a bullet of the user's after a blank line is not one).
+        if (head.ok && !(begun && !touching && !writtenLike(head))) {
+          begun = true
+          touching = true
           take = false
           if (head.kind === 'view' && !viewSeen) viewSeen = true
           else if (head.kind !== 'view') {
@@ -1300,10 +1346,13 @@ function trimEnds(s: string, chars: string, start = true, end = true): string {
   return s.slice(a, b)
 }
 
+/** The longest folder name: as long as a note's file name may be (`slugifyTitle` cuts at 120), so a board's folder carries its note's name. */
+const FOLDER_NAME_MAX = 120
+
 /**
  * The name of the folder a board keeps its pictures in: the title with `\ / : * ? " < > | # [ ]` made `-`, white space collapsed,
- * no dots, spaces or `$` in front (the vault skips such folders) and no dots or spaces behind, at most 80 characters, `Board` when
- * nothing is left. A name the vault ignores (`Library`, `Temp`, `Cache`, `Out` ... or a game library's: `Steam`, `Ubisoft` ...), a name
+ * no dots, spaces or `$` in front (the vault skips such folders) and no dots or spaces behind, at most 120 characters (the note's own
+ * longest name), `Board` when nothing is left. A name the vault ignores (`Library`, `Temp`, `Cache`, `Out` ... or a game library's: `Steam`, `Ubisoft` ...), a name
  * ending in `.aether-tmp` and a Windows device name get ` pictures` after them.
  */
 export function boardFolderName(title: string): string {
@@ -1311,7 +1360,7 @@ export function boardFolderName(title: string): string {
     .replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
     .replace(/[\\/:*?"<>|#[\]]/g, '-')
     .replace(/\s+/g, ' ')
-  name = trimEnds(cutText(trimEnds(name, '.$ ', true, false), 80), '. ', false, true)
+  name = trimEnds(cutText(trimEnds(name, '.$ ', true, false), FOLDER_NAME_MAX), '. ', false, true)
   if (name === '') return 'Board'
   const bare = name.toLowerCase()
   if (IGNORED_FOLDERS.has(bare) || GAME_FOLDERS.has(bare) || DEVICE_NAMES.test(name) || bare.endsWith('.aether-tmp')) return `${name} pictures`

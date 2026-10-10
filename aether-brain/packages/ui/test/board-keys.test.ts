@@ -4,6 +4,9 @@ import { MemoryVaultAdapter } from '@aether/core'
 import { BOARD_COMMANDS, boardHelpRows } from '../src/board/commands'
 import { assetFiles, freshApp, vaultFiles } from './board-integration-harness'
 
+// The first test loads the whole UI package, which takes seconds on a busy machine (the default 5 s timed out at 5.1 s and 8.1 s).
+vi.setConfig({ testTimeout: 60_000, hookTimeout: 60_000 })
+
 afterEach(() => {
   vi.unstubAllGlobals()
 })
@@ -119,7 +122,8 @@ describe('the global keys while the Boards view is up', () => {
         if (calls.length) fired.push(name(p))
       }
       expect(fired.sort()).toEqual(['/', '2', '3', '4', '5', '6', '7', '8', 'Shift+?', 'Shift+B'].sort())
-    })
+      // The first of these loads the whole app: more than the default five seconds when the machine is busy with other test files.
+    }, 30_000)
   }
 
   it('fires them all outside it (so the test above bites): the same presses do plenty in the graph', async () => {

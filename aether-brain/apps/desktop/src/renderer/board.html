@@ -4,10 +4,12 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="dark" />
-    <!-- The same policy as index.html, word for word (its two VITE_CSP variables come from .env.development / .env.production). -->
+    <!-- The policy of index.html, but for connect-src: this page fetches nothing (its notes, pictures and settings all come over the bridge), so in the
+         built app no address is reachable by script (fetch of a file: address read local files, since 'self' matches the page's own file: origin).
+         In development the dev server's own address stays (hot reload). The two VITE_CSP variables come from .env.development / .env.production. -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self' %VITE_CSP_SCRIPT%; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; worker-src 'self' blob:; connect-src 'self' %VITE_CSP_CONNECT%; object-src 'none'; base-uri 'none'"
+      content="default-src 'self'; script-src 'self' %VITE_CSP_SCRIPT%; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; worker-src 'self' blob:; connect-src 'none' %VITE_CSP_CONNECT%; object-src 'none'; base-uri 'none'"
     />
     <title>Aether Brain — Board</title>
   </head>

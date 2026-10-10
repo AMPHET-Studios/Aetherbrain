@@ -4,11 +4,13 @@
  * previews, `readPicture` and `importBoardPictures`, and the floating window's controls through the registry the desktop app fills
  * (`getBoardWindowControl`, active.ts), so on the web, where there is none, `window` is absent and the board has no pop-out.
  *
- * Saving. The host remembers the text it last read or wrote. A save when the file holds anything else (and not the very text to be
- * written) is refused with `BoardChangedOutsideError` ("changed outside") and the external-change callbacks are told, so the view reloads
- * or warns; the host then refuses every save until `load()` reads the note again, so a view that keeps trying cannot overwrite a
- * newer edit. The store's own report of a write (it applies every write as an outside change) is told apart from somebody else's by the
- * texts this host read or wrote: it keeps the last few, like the floating window's host.
+ * Saving. A save carries the text it was made from (`expectedBase`, else the text this host last read or wrote): when the file holds
+ * anything else (and not the very text to be written) it is refused with `BoardChangedOutsideError` ("changed outside") and the
+ * external-change callbacks are told, so the view reloads or warns; the host then refuses every save until `load()` reads the note
+ * again, so a view that keeps trying cannot overwrite a newer edit, and every refusal asks for that reload once more (a reload that
+ * failed because the note was edited into something that is no board can succeed once the note is put right). The store's own report of
+ * a write (it applies every write as an outside change) is told apart from somebody else's by the texts this host read or wrote: it
+ * keeps the last few, like the floating window's host.
  *
  * No React, no DOM here: a store, timers and Blobs. Design: docs/design/reference-board.md.
  */
@@ -54,12 +56,16 @@ export function createDockedBoardHost(path: string): DockedBoardHost {
   /** Saves run one after the other. */
   let writing: Promise<unknown> = Promise.resolve()
 
-  async function write(raw: string): Promise<void> {
-    if (stale) throw new BoardChangedOutsideError()
+  async function write(raw: string, expectedBase?: string): Promise<void> {
+    if (stale) {
+      // Still not read again: ask again (the view may have given up on a reload that could not read the note).
+      changedOutside()
+      throw new BoardChangedOutsideError()
+    }
     // Before the write: the store reports it to its subscribers (this host's among them) while it is still under way.
     remember(raw)
     try {
-      await store().saveBoard(path, raw, lastKnown)
+      await store().saveBoard(path, raw, expectedBase ?? lastKnown)
     } catch (err) {
       if (err instanceof BoardChangedOutsideError) {
         stale = true
@@ -147,6 +153,10 @@ export function createDockedBoardHost(path: string): DockedBoardHost {
     get title() {
       return title
     },
+    // The camera and the copy of an unsaved board are kept per vault: a board of the same path in another vault is another board.
+    get stateKey() {
+      return `${store().adapter?.location ?? ''}\n${path}`
+    },
     async load() {
       const text = await store().readBoard(path)
       if (text === null) throw new Error('This note is not a board, is gone, or could not be read')
@@ -156,8 +166,8 @@ export function createDockedBoardHost(path: string): DockedBoardHost {
       title = parseBoard(text).doc.title.trim() || store().notes.get(id)?.meta.title || fileTitle
       return text
     },
-    save(raw) {
-      const run = writing.then(() => write(raw))
+    save(raw, expectedBase) {
+      const run = writing.then(() => write(raw, expectedBase))
       writing = run.catch(() => undefined)
       return run
     },

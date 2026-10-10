@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { CRASH_RELOADS, CRASH_WINDOW_MS, crashMessage, shouldReload } from '../src/main/crash'
+import { BOARD_WINDOW_NAME, BRAIN_WINDOW_NAME, CRASH_RELOADS, CRASH_WINDOW_MS, crashMessage, shouldReload } from '../src/main/crash'
 
 describe('a window whose page died', () => {
   it('is opened again, but not when it keeps dying right after', () => {
@@ -30,5 +30,17 @@ describe('a window whose page died', () => {
     expect(crashMessage('oom', true).detail).toContain('not touched')
     expect(crashMessage('oom', false).detail).toContain('left closed')
     expect(crashMessage('oom', false).detail).not.toContain('opening again')
+  })
+
+  it('names the window that died: the brain window by default, the board window when it says so (desktop-m8)', () => {
+    expect(BRAIN_WINDOW_NAME).toBe('Aether Brain window')
+    expect(crashMessage('crashed', true).message).toBe(crashMessage('crashed', true, BRAIN_WINDOW_NAME).message)
+    expect(crashMessage('oom', true, BOARD_WINDOW_NAME).message).toBe('The board window ran out of memory.')
+    // The board window's reassurance is about its board, not "your notes": a note still being typed is not in it.
+    expect(crashMessage('oom', true, BOARD_WINDOW_NAME).detail).toContain('A note you were still typing is not in it')
+    expect(crashMessage('oom', true, BOARD_WINDOW_NAME).detail).not.toContain('Your notes are the files on disk')
+    // Crashes 20 to 30 seconds apart are not "right after opening".
+    expect(crashMessage('oom', false).detail).toContain('several times within a minute')
+    expect(crashMessage('oom', false).detail).not.toContain('right after opening')
   })
 })

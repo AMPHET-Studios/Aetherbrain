@@ -28,7 +28,7 @@ import {
   type TextMetrics,
   type Vec2,
 } from '@aether/core'
-import type { BoardUiState, ImageSlot, ImageSource } from './api'
+import type { BoardUiState, ImageFailure, ImageSlot, ImageSource } from './api'
 import type { BitmapLike } from './imageCache'
 
 /* ------------------------------------------------------------------ context -- */
@@ -441,13 +441,16 @@ function drawPicture(f: Frame, it: PictureItem, bounds: Rect): void {
   const ctx = f.ctx
 
   let slot: ImageSlot | null = null
-  if (!(f.missing && f.missing(it.path))) {
-    // The cache holds the WHOLE picture whatever the crop shows, so the size it must be sharp at is the whole picture's.
-    slot = f.images.get(it.path, Math.max(it.w, it.h) * f.k)
+  const gone = !!f.missing && f.missing(it.path)
+  if (!gone) {
+    // The cache holds the WHOLE picture whatever the crop shows, so the size it must be sharp at is the whole picture's. How big the
+    // part that is SHOWN is goes with it: when the budget cannot give every picture what it wants, the biggest on the screen come first.
+    slot = f.images.get(it.path, Math.max(it.w, it.h) * f.k, Math.max(w, h) * f.k)
   }
   const bmp = slot ? slot.bitmap : null
   if (!bmp || !(bmp.width > 0 && bmp.height > 0)) {
-    drawPlaceholder(f, it, w, h, !slot || slot.failed)
+    // The vault says the file is gone; else the cache says why it could not be read; a picture with no slot at all is unreadable.
+    drawPlaceholder(f, it, w, h, gone ? 'missing' : !slot || slot.failed ? (slot?.reason ?? 'unreadable') : null)
   } else {
     const { sin, cos } = sinCos(it.rotation)
     const gray = (it.gray || f.doc.gray) && f.filterOk
@@ -455,7 +458,16 @@ function drawPicture(f: Frame, it: PictureItem, bounds: Rect): void {
     try {
       if (setItemTransform(f, it.x, it.y, sin, cos, it.flipH ? -1 : 1, it.flipV ? -1 : 1)) {
         ctx.globalAlpha = clamp(fin(it.opacity, 1), 0, 1)
-        if (gray) ctx.filter = 'grayscale(1)'
+        if (gray) {
+          // A canvas filter is applied over a layer as big as the clip, which is the whole canvas unless something smaller is set: 300
+          // grey pictures took seconds a frame. The clip is the picture's own rectangle, outset by a device pixel so that the edge's
+          // anti-aliasing is the picture's (an exact clip multiplies its own into it and leaves seams between pictures side by side).
+          const u = 1 / f.k
+          ctx.beginPath()
+          ctx.rect(-w / 2 - u, -h / 2 - u, w + 2 * u, h + 2 * u)
+          ctx.clip()
+          ctx.filter = 'grayscale(1)'
+        }
         ctx.imageSmoothingEnabled = f.doc.smooth
         // A pan or zoom in progress is redrawn every frame: the cheap filter will do until it stops.
         if (f.doc.smooth) ctx.imageSmoothingQuality = f.moving ? 'low' : 'high'
@@ -471,9 +483,22 @@ function drawPicture(f: Frame, it: PictureItem, bounds: Rect): void {
   if (f.doc.captions) drawCaption(f, it, w, h, bounds)
 }
 
-/** The fill of a picture that is loading, or the dashed crossed box of one that cannot be shown (missing, unreadable). */
-function drawPlaceholder(f: Frame, it: PictureItem, w: number, h: number, failed: boolean): void {
+/** What a placeholder says of a picture that cannot be shown. */
+const FAILURE_LABEL: Record<ImageFailure, string> = { missing: 'file missing', 'too-large': 'too large to show', unreadable: "can't be read" }
+/** A placeholder shorter than this on the screen (CSS px) draws no icon; no words below the next, no file name below the last. */
+const PLACEHOLDER_ICON_PX = 28
+const PLACEHOLDER_LABEL_PX = 60
+const PLACEHOLDER_NAME_PX = 110
+
+/**
+ * The fill of a picture that is loading (`reason` null), or the dashed box of one that cannot be shown, which says why: a cross and
+ * "file missing" for a file the vault has lost, the corners of a frame pushed outwards and "too large to show" for a picture with more
+ * pixels than a board decodes, a warning sign and "can't be read" for anything else. Big enough, the file name sits at the bottom.
+ */
+function drawPlaceholder(f: Frame, it: PictureItem, w: number, h: number, shown: ImageFailure | null): void {
   const ctx = f.ctx
+  // A reason this file does not know (a host from another build) is one the user can do nothing about either.
+  const reason = shown === null ? null : Object.prototype.hasOwnProperty.call(FAILURE_LABEL, shown) ? shown : 'unreadable'
   const u = 1 / f.zoom
   const minSide = Math.min(w, h) * f.zoom
   const { sin, cos } = sinCos(it.rotation)
@@ -484,9 +509,9 @@ function drawPlaceholder(f: Frame, it: PictureItem, w: number, h: number, failed
     ctx.restore()
     return
   }
-  ctx.fillStyle = failed ? '#241a1f' : '#1b1e29'
+  ctx.fillStyle = reason ? '#241a1f' : '#1b1e29'
   ctx.fillRect(-hw, -hh, w, h)
-  if (!failed) {
+  if (!reason) {
     if (minSide >= 28) {
       // A frame with a sun and two hills, no bigger than 40 px.
       const g = Math.min(minSide * 0.4, 40) * u
@@ -511,13 +536,65 @@ function drawPlaceholder(f: Frame, it: PictureItem, w: number, h: number, failed
     ctx.lineWidth = Math.max(1.5 * u, 1 / f.k)
     ctx.setLineDash([6 * u, 4 * u])
     ctx.strokeRect(-hw, -hh, w, h)
-    ctx.beginPath()
-    ctx.moveTo(-hw, -hh)
-    ctx.lineTo(hw, hh)
-    ctx.moveTo(hw, -hh)
-    ctx.lineTo(-hw, hh)
-    ctx.stroke()
-    if (minSide >= 60) {
+    const named = minSide >= PLACEHOLDER_NAME_PX
+    const labelled = minSide >= PLACEHOLDER_LABEL_PX
+    // The icon and the words are one stack at the middle (a little above it when the file name takes the bottom).
+    const g = Math.min(minSide * 0.14, 16) * u
+    const middle = named ? -12 * u : 0
+    const top = middle - (reason === 'missing' ? 18 * u : 2 * g + 24 * u) / 2
+    const iconY = labelled ? top + g : 0
+    if (reason === 'missing') {
+      // The cross corner to corner is the icon.
+      ctx.beginPath()
+      ctx.moveTo(-hw, -hh)
+      ctx.lineTo(hw, hh)
+      ctx.moveTo(hw, -hh)
+      ctx.lineTo(-hw, hh)
+      ctx.stroke()
+    } else if (minSide >= PLACEHOLDER_ICON_PX) {
+      ctx.setLineDash([])
+      ctx.lineJoin = 'round'
+      ctx.lineCap = 'round'
+      ctx.beginPath()
+      if (reason === 'too-large') {
+        // The four corners of a frame, each an elbow: a picture bigger than the frame.
+        const arm = g * 0.8
+        for (const sx of [-1, 1]) {
+          for (const sy of [-1, 1]) {
+            ctx.moveTo(sx * g - sx * arm, iconY + sy * g)
+            ctx.lineTo(sx * g, iconY + sy * g)
+            ctx.lineTo(sx * g, iconY + sy * g - sy * arm)
+          }
+        }
+      } else {
+        // A warning sign: a triangle with an exclamation mark.
+        ctx.moveTo(0, iconY - g)
+        ctx.lineTo(g * 1.1, iconY + g * 0.85)
+        ctx.lineTo(-g * 1.1, iconY + g * 0.85)
+        ctx.closePath()
+        ctx.moveTo(0, iconY - g * 0.3)
+        ctx.lineTo(0, iconY + g * 0.25)
+        ctx.moveTo(0, iconY + g * 0.55)
+        ctx.lineTo(0, iconY + g * 0.56)
+      }
+      ctx.stroke()
+      ctx.lineCap = 'butt'
+    }
+    if (labelled) {
+      ctx.setLineDash([])
+      ctx.font = noteFont(12 * u)
+      ctx.textAlign = 'center'
+      ctx.textBaseline = 'middle'
+      const words = fitText(ctx, FAILURE_LABEL[reason], w - 16 * u)
+      const tw = ctx.measureText(words).width
+      // The words sit on a plate too, so that the cross does not run through them.
+      const y = reason === 'missing' ? middle : top + 2 * g + 15 * u
+      ctx.fillStyle = 'rgba(20,16,20,0.85)'
+      ctx.fillRect(-tw / 2 - 4 * u, y - 9 * u, tw + 8 * u, 18 * u)
+      ctx.fillStyle = 'rgba(255,255,255,0.8)'
+      ctx.fillText(words, 0, y)
+    }
+    if (named) {
       ctx.setLineDash([])
       ctx.font = noteFont(12 * u)
       ctx.textAlign = 'center'

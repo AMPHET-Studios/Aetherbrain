@@ -93,6 +93,14 @@ body,
     inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
 
+/* A panel over a covered scene (the Boards view, the Projects board: the 3D view is not drawn behind them): nothing to see through,
+   so no backdrop blur for the compositor to repeat against the canvas. */
+.panel.panel-solid {
+  background: var(--panel-solid);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
 .hud-btn {
   display: inline-flex;
   align-items: center;
@@ -111,6 +119,18 @@ body,
     color 120ms ease,
     border-color 120ms ease;
 }
+/* Top bar room (TopBar.tsx): a narrow window gives up words before buttons. Not utilities: .hud-btn's display is not in a layer. */
+@media (max-width: 1609.98px) {
+  .topbar-wide {
+    display: none;
+  }
+}
+@media (max-width: 1359.98px) {
+  .topbar-roomy {
+    display: none;
+  }
+}
+
 .hud-btn:hover {
   color: var(--text);
   background: rgba(140, 160, 255, 0.08);

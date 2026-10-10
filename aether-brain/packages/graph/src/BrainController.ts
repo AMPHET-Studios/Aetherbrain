@@ -561,6 +561,19 @@ export class BrainController {
     this.touch()
   }
 
+  /**
+   * While on, the 3D view is not drawn: a full-window panel (the Boards view, the Projects board) covers it, so every frame (bloom
+   * included) would be paid for by a board's pans and a list's scrolling and seen by nobody. The layout keeps running (positions are
+   * not drawing), and the first frame after it goes off again is a plain redraw.
+   */
+  covered = false
+
+  setCovered(on: boolean): void {
+    if (this.covered === on) return
+    this.covered = on
+    this.touch()
+  }
+
   setHubLabels(v: boolean): void {
     this.hubLabels = v
     this.touch()

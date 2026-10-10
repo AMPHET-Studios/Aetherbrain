@@ -1,14 +1,19 @@
 /**
  * The reference board's host for the floating window: `BoardHost` (packages/ui/src/board/api.ts) over the bridge. The window shows
  * one board note and never opens a vault, so everything it needs is a bridge call: the note through `boardRead` / `boardSave`,
- * pictures through `thumbnail`, `readAsset`, `createAsset`, `openAsset`, the vault's list of pictures through `boardAssets` kept
+ * pictures through `thumbnail`, `readAssetChecked`, `createAsset`, `openAsset`, the vault's list of pictures through `boardAssets` kept
  * right by the picture changes main sends this window (`onChanges`), and the window's own settings through the `board*` calls.
+ * The bridge here is the board page's own (BoardBridge, board-preload.cts): nothing outside this list exists on it.
+ *
+ * A save is ONE call, `boardSave(path, text, expectedBase)`: main compares the note on disk with the text the save was made from and
+ * writes, so a save that begins as the window closes is complete once main has the message (the two-step read-then-write it
+ * replaced was cut off when the page went between the steps).
  *
  * No React and no DOM here (Blob and timers only), so it is tested in node with a fake bridge.
  */
 import { boardFolderName, boardPictureName, isImagePath, mimeOf, parseBoard, type VaultAsset } from '@aether/core'
 import type { BoardHost, BoardWindowHost as BoardWindowControls } from '@aether/ui'
-import type { AetherBridge, BoardStatusDto, VaultChangeDto } from '../shared/ipc'
+import type { BoardBridge, BoardStatusDto, VaultChangeDto } from '../shared/ipc'
 
 /** How long picture changes are gathered before the picker and the missing-picture marks hear of them (ms). */
 export const PICTURE_CHANGE_MS = 150
@@ -58,13 +63,13 @@ export function numberedName(name: string, n: number): string {
   return dot > 0 ? `${name.slice(0, dot)} ${n}${name.slice(dot)}` : `${name} ${n}`
 }
 
-export function createFloatingBoardHost(bridge: AetherBridge, path: string, opts: FloatingBoardOptions = {}): FloatingBoardHost {
+export function createFloatingBoardHost(bridge: BoardBridge, path: string, opts: FloatingBoardOptions = {}): FloatingBoardHost {
   const toast = opts.toast ?? (() => undefined)
   const now = opts.now ?? (() => new Date())
   const caseSensitive = bridge.platform === 'linux'
   const key = (p: string): string => (caseSensitive ? p : p.toLowerCase())
   const folder = boardFolderOfPath(path)
-  /** Where new pictures go: the board's own folder, or `<name> pictures` once the vault has refused the first as excluded. */
+  /** Where new pictures go: the board's own folder, or `<name> pictures` once a picture has been placed there because the vault leaves the first out. */
   let pictureFolder = folder
   let title = nameOf(path).replace(/\.md$/i, '')
 
@@ -75,7 +80,7 @@ export function createFloatingBoardHost(bridge: AetherBridge, path: string, opts
   /**
    * The last few texts this window read or wrote, newest last. The watcher reports each save a moment after it (and a slow report
    * can arrive after the next save has begun), so a change carrying one of these is our own echo, not somebody else's edit. Bounded:
-   * a note is at most 400,000 characters.
+   * a note is at most 1,000,000 characters.
    */
   const echoes: string[] = []
   const remember = (text: string): void => {
@@ -91,19 +96,22 @@ export function createFloatingBoardHost(bridge: AetherBridge, path: string, opts
     for (const cb of [...externalSubs]) cb()
   }
 
-  async function write(raw: string): Promise<void> {
-    const current = await bridge.boardRead(path)
-    if (current === null) throw new Error('The board note is gone, or is no longer a board: nothing was saved')
-    if (lastKnown !== null && current !== lastKnown && current !== raw) {
-      // The note changed since this window read it (an editor, the AI link): writing now would erase that edit without a word.
-      // It stays refused until the note is read again (load), however often the view tries.
-      changedOutside()
-      throw new Error('The board was changed outside this window: it has been left as it is. Reload to see the change.')
-    }
+  /**
+   * One call: main compares the note on disk with `base` (the text `raw` was made from: the view's, else the last this host read or
+   * wrote) and writes. A note that changed since (an editor, the AI link, a sync tool) is refused with `changed`: writing would erase
+   * that edit without a word, and the refusal stays until the note is read again (load), however often the view tries.
+   */
+  async function write(raw: string, expectedBase?: string): Promise<void> {
     // Before the call: the watcher may report the write before the answer to it gets back here.
     remember(raw)
-    const res = await bridge.boardSave(path, raw)
-    if (!res.ok) throw new Error(res.reason)
+    const res = await bridge.boardSave(path, raw, expectedBase ?? lastKnown ?? undefined)
+    if (!res.ok) {
+      // Refused, so nothing of it is on disk: it is no echo of ours.
+      const at = echoes.lastIndexOf(raw)
+      if (at >= 0) echoes.splice(at, 1)
+      if (res.changed) changedOutside()
+      throw new Error(res.reason)
+    }
     lastKnown = raw
   }
 
@@ -178,32 +186,48 @@ export function createFloatingBoardHost(bridge: AetherBridge, path: string, opts
     if (pictures) pictureChanged()
   })
 
-  /** Creates one picture in the board's folder under the first free name; its vault path, or null when main refuses the picture. */
-  async function addOne(file: { name: string; data: Uint8Array }): Promise<string | null> {
-    const base = boardPictureName(file.name, sniffMime(file.data), now())
+  /** Creates one picture in `dir` under the first free name: its vault path, or why the vault refused it (a taken name is not a refusal, the next number is tried). */
+  async function putIn(dir: string, base: string, data: Uint8Array): Promise<string | { why: string }> {
     for (let n = 1; n <= MAX_NAME_TRIES; n++) {
-      const target = `${pictureFolder}/${numberedName(base, n)}`
+      const target = `${dir}/${numberedName(base, n)}`
       if (assets?.has(key(target))) continue
       try {
-        await bridge.createAsset(target, file.data)
+        await bridge.createAsset(target, data)
       } catch (err) {
         const why = errorText(err)
         // A name the list did not know was taken (a picture added since): the next number.
         if (/EEXIST/.test(why)) continue
-        // The folder is one the user leaves out of the vault (a name in their exclude list): once, move to a folder beside it.
-        if (pictureFolder === folder && /excluded from the vault/i.test(why)) {
-          pictureFolder = `${folder} pictures`
-          n = 0
-          continue
-        }
-        return null
+        return { why }
       }
       if (assets) {
-        assets.set(key(target), { path: target, mtime: now().getTime(), size: file.data.length })
+        assets.set(key(target), { path: target, mtime: now().getTime(), size: data.length })
         pictureChanged()
       }
       return target
     }
+    return { why: `More than ${MAX_NAME_TRIES} pictures already have that name` }
+  }
+
+  /** What a refusal from main means for the user (the generic "a type it does not know, or over 40 MB" is right for the other two). */
+  const EXCLUDED = /excluded from the vault/i
+  const generic = (why: string): boolean => /too big|Not a picture|empty/i.test(why)
+
+  /**
+   * Creates one picture in the board's folder; its vault path, or null when main refuses the picture. The folder is one the vault may
+   * leave out (a name in the user's exclude list): then, once, beside it in `<name> pictures` - and that folder becomes the board's
+   * only when the picture really went there, so a file name the vault refuses in either folder (`$R1A2.png`) never moves the folder.
+   */
+  async function addOne(file: { name: string; data: Uint8Array }, said: string[]): Promise<string | null> {
+    const base = boardPictureName(file.name, sniffMime(file.data), now())
+    let got = await putIn(pictureFolder, base, file.data)
+    if (typeof got !== 'string' && pictureFolder === folder && EXCLUDED.test(got.why)) {
+      const beside = `${folder} pictures`
+      const second = await putIn(beside, base, file.data)
+      if (typeof second === 'string') pictureFolder = beside
+      got = second
+    }
+    if (typeof got === 'string') return got
+    if (!generic(got.why)) said.push(EXCLUDED.test(got.why) ? `${nameOf(base)} was not added: the vault leaves out names like that (one that starts with $ or a dot, or a folder you excluded)` : `${nameOf(base)} was not added: ${got.why}`)
     return null
   }
 
@@ -249,15 +273,18 @@ export function createFloatingBoardHost(bridge: AetherBridge, path: string, opts
       return title
     },
     async load() {
-      const text = await bridge.boardRead(path)
-      if (text === null) throw new Error('This note is not a board, is gone, or is too long to open in the board window')
+      // A note too long for the window rejects with its own sentence; null is a note that is gone or no longer a board.
+      const text = await bridge.boardRead(path).catch((err: unknown) => {
+        throw new Error(errorText(err))
+      })
+      if (text === null) throw new Error('This note is gone, or is no longer a board (type: board in its frontmatter)')
       lastKnown = text
       remember(text)
       title = parseBoard(text).doc.title.trim() || title
       return text
     },
-    save(raw) {
-      const run = writing.then(() => write(raw))
+    save(raw, expectedBase) {
+      const run = writing.then(() => write(raw, expectedBase))
       writing = run.catch(() => undefined)
       return run
     },
@@ -277,17 +304,23 @@ export function createFloatingBoardHost(bridge: AetherBridge, path: string, opts
       async original(p) {
         // A video is a vault asset but not a picture to read whole: no round trip for it.
         if (!isImagePath(p)) return null
+        let res: Awaited<ReturnType<BoardBridge['readAssetChecked']>>
         try {
-          const bytes = await bridge.readAsset(p)
-          return bytes?.length ? new Blob([bytes as Uint8Array<ArrayBuffer>], { type: mimeOf(p) }) : null
+          res = await bridge.readAssetChecked(p)
         } catch {
           return null
         }
+        if (res.ok) return res.bytes.length ? new Blob([res.bytes as Uint8Array<ArrayBuffer>], { type: mimeOf(p) }) : null
+        // Main says why there are no bytes (a verdict about the file, or a file that is gone); the picture cache keeps it.
+        throw Object.assign(new Error(res.detail), { reason: res.reason })
       },
       async add(files) {
         const out: (string | null)[] = []
+        const said: string[] = []
         // One after the other: two pictures with the same name must not both take the same number.
-        for (const f of files) out.push(await addOne(f))
+        for (const f of files) out.push(await addOne(f, said))
+        // A refusal that is not a type or a size: the view's own line ("a type it does not know, or over 40 MB") would be wrong, so say what it was.
+        if (said.length) toast(said.length === 1 ? said[0]! : `${said[0]!} (and ${said.length - 1} more)`, 'error')
         return out
       },
       async list() {

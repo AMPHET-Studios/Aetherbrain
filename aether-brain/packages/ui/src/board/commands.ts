@@ -176,6 +176,19 @@ function isOptionGlyph(key: string): boolean {
   return key.length === 1 && key.charCodeAt(0) > 126 && !/\p{L}/u.test(key)
 }
 
+/**
+ * The lower-case name of a one-character key as a US keyboard would type it: the character itself when it is ASCII (a Dvorak, AZERTY
+ * or Colemak layout types what it types), else - a letter or digit of another script (Cyrillic, Greek, Hebrew, Arabic ...) - the Latin
+ * letter or digit on the same physical key, read from the key code, so that Ctrl+Z is Ctrl+Z on every layout. A character that no
+ * letter or digit code names stays as it is. For the shortcuts of the app too (`useKeyboard`).
+ */
+export function latinKey(key: string, code: string): string {
+  const k = key.toLowerCase()
+  if (k.length !== 1 || k.charCodeAt(0) <= 0x7f) return k
+  const m = /^(?:Key([A-Z])|Digit([0-9]))$/.exec(code)
+  return m ? (m[1] ?? m[2]!).toLowerCase() : k
+}
+
 /** The signature of a key event, or null for a key no row can name (a modifier on its own, a dead key, an IME's 'Process'). */
 function signatureOfEvent(e: KeyIn): string | null {
   let key: string
@@ -191,12 +204,7 @@ function signatureOfEvent(e: KeyIn): string | null {
   } else if (e.alt && (e.code === 'BracketLeft' || e.code === 'BracketRight') && isOptionGlyph(e.key)) {
     key = e.code === 'BracketLeft' ? '[' : ']'
   } else if (e.key.length === 1) {
-    key = e.key.toLowerCase()
-    if (key.charCodeAt(0) > 0x7f) {
-      // A letter or digit of another script: the one on the same place of a US keyboard.
-      const m = /^(?:Key([A-Z])|Digit([0-9]))$/.exec(e.code)
-      if (m) key = (m[1] ?? m[2]!).toLowerCase()
-    }
+    key = latinKey(e.key, e.code)
   } else if (e.key === 'Escape') key = 'escape'
   else if (e.key === 'Delete') key = 'delete'
   else if (e.key === 'Backspace') key = 'backspace'

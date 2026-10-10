@@ -151,8 +151,8 @@ w.items = () => (getActiveBoard()?.state().doc.items ?? []) as any[]
 w.state = () => getActiveBoard()?.state()
 `
 
-/** A w x h 8-bit RGB PNG of one flat colour (a real, decodable picture; its pixels cost w * h * 4 bytes once decoded). */
-function flatPng(width: number, height: number): Buffer {
+/** The bytes of a PNG: signature, header, one data chunk (already deflated rows), end. */
+function pngOf(width: number, height: number, idat: Buffer): Buffer {
   const crc = (buf: Buffer): number => {
     let crcv = 0xffffffff
     for (let n = 0; n < buf.length; n++) {
@@ -175,12 +175,33 @@ function flatPng(width: number, height: number): Buffer {
   ihdr.writeUInt32BE(height, 4)
   ihdr[8] = 8
   ihdr[9] = 2
+  return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', ihdr), chunk('IDAT', idat), chunk('IEND', Buffer.alloc(0))])
+}
+
+/** A w x h 8-bit RGB PNG of one flat colour (a real, decodable picture; its pixels cost w * h * 4 bytes once decoded). */
+function flatPng(width: number, height: number): Buffer {
   const row = Buffer.alloc(1 + width * 3, 0x7f)
   row[0] = 0
   const raw = Buffer.alloc(row.length * height)
   for (let y = 0; y < height; y++) row.copy(raw, y * row.length)
-  const idat = zlib.deflateSync(raw, { level: 1 })
-  return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', ihdr), chunk('IDAT', idat), chunk('IEND', Buffer.alloc(0))])
+  return pngOf(width, height, zlib.deflateSync(raw, { level: 1 }))
+}
+
+/**
+ * The same, made row by row through a deflate stream: a 16000 x 16000 picture is 768 MB of rows and a few hundred KB of file, and the
+ * rows are never all in memory at once (the file is the kind of thing a user can drop, and the decoder would need a gigabyte).
+ */
+async function streamedFlatPng(width: number, height: number): Promise<Buffer> {
+  const deflate = zlib.createDeflate({ level: 1 })
+  const parts: Buffer[] = []
+  deflate.on('data', (d: Buffer) => parts.push(d))
+  const ended = new Promise<void>((resolve) => deflate.once('end', () => resolve()))
+  const row = Buffer.alloc(1 + width * 3, 0x7f)
+  row[0] = 0
+  for (let y = 0; y < height; y++) if (!deflate.write(row)) await new Promise<void>((resolve) => deflate.once('drain', () => resolve()))
+  deflate.end()
+  await ended
+  return pngOf(width, height, Buffer.concat(parts))
 }
 
 /** The first bytes of a PNG that claims 16000 x 16000 and is not a picture at all: reading its header is all that can be done with it. */
@@ -809,6 +830,48 @@ describe('the board view in Chromium: the fixes of the shell', () => {
       await context.close()
     }
   }, 120_000)
+
+  it('a real 16000 x 16000 PNG (a few hundred KB, a gigabyte decoded) dropped on the board: refused with the reason, and the renderer does not grow', async (ctx) => {
+    if (!browser || !js || !exe || !chromiumLib) return ctx.skip()
+    const png = await streamedFlatPng(16000, 16000)
+    // A real picture, small as a file: it is the pixels that cost.
+    expect(png.length).toBeLessThan(5 * 1024 * 1024)
+    const ud = mkdtempSync(path.join(os.tmpdir(), 'board-mem-'))
+    extraDirs.push(ud)
+    const context = await chromiumLib.chromium.launchPersistentContext(ud, { executablePath: exe, viewport: { width: 1180, height: 760 } })
+    try {
+      const page = await context.newPage()
+      const s = await open(page, { raw: rawBoard() })
+      await page.waitForTimeout(800)
+      const before = rendererMb(ud)
+      let peak = before
+      let sampling = true
+      const sampler = (async () => {
+        while (sampling) {
+          peak = Math.max(peak, rendererMb(ud))
+          await new Promise((r) => setTimeout(r, 40))
+        }
+      })()
+      await page.evaluate(async (data) => {
+        const bytes = Uint8Array.from(atob(data), (c) => c.charCodeAt(0))
+        const dt = new DataTransfer()
+        for (let i = 0; i < 2; i++) dt.items.add(new File([bytes], 'wall ' + i + '.png', { type: 'image/png' }))
+        document.querySelector('[data-board-root]')!.dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true, clientX: 500, clientY: 400 }))
+      }, png.toString('base64'))
+      await expect.poll(async () => (await s.H<{ text: string }[]>('H.toasts')).map((t) => t.text).join('|')).toMatch(/2 pictures are over 150 megapixels/)
+      await page.waitForTimeout(600)
+      sampling = false
+      await sampler
+      // Decoded, one of them is a gigabyte (two at once, two): the header read costs nothing.
+      expect(peak - before).toBeLessThan(150)
+      expect(await s.H('H.added')).toEqual([])
+      expect((await s.items()).length).toBe(0)
+      expect((await page.evaluate(() => (window as any).__decodes as number[])).filter((n) => n > 50_000)).toEqual([])
+      expect(s.errors).toEqual([])
+    } finally {
+      await context.close()
+    }
+  }, 180_000)
 
   it('a picture whose header claims 16000 x 16000 is refused with the reason, and nothing of it is decoded or read', async (ctx) => {
     if (!browser || !js) return ctx.skip()

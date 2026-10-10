@@ -1,8 +1,9 @@
 /**
  * The checks behind the reference board's floating window saving and reading its note (`board:save`, `board:read`, and the check
- * `board:open` makes). The window is a second page with the whole bridge, but it exists to edit a board: it may overwrite a board
- * note that is already there, never create a note, never touch a note that is not a board, and never write more than a board can
- * hold. Pure Node (no electron import), tested against a temp vault.
+ * `board:open` makes). The window's page has a bridge of its own (board-preload.cts: these calls, the pictures, nothing else) and
+ * main answers no other channel to it; what this file guarantees is about the calls it does make: `board:save` may overwrite a board
+ * note that is already there, never create a note, never touch a note that is not a board (or a link to one), and never write more
+ * than a board can hold. Pure Node (no electron import), tested against a temp vault.
  *
  * Main cannot import @aether/core at runtime (tsc compiles it as plain Node ESM, the package is TypeScript source), so "is this a
  * board" is a small local check of the note's head. `isBoardHead` follows `isBoardNote` of core: the test pins the two to each other.
@@ -11,8 +12,12 @@ import { promises as fs } from 'node:fs'
 import { readHead } from './assets.js'
 import type { BoardSaveResult } from '../shared/ipc.js'
 
-/** The most characters one board note may hold in a save (the editor goes read-only at 400,000; a board note stays far under it). */
-export const MAX_BOARD_TEXT = 400_000
+/**
+ * The most characters the floating window handles of one board NOTE (the whole note: the prose around the board counts, not only
+ * the board section, which core's BOARD_LIMITS.noteTotal holds to 500,000). `board:open` refuses a longer note up front, so that a
+ * window is never opened on a board it cannot read.
+ */
+export const MAX_BOARD_TEXT = 1_000_000
 /** How much of the head of a note decides whether it is a board (its frontmatter is a few lines). */
 export const BOARD_HEAD_BYTES = 4096
 /** Longest vault path taken (the same bound the Forge window's ids have). */
@@ -60,6 +65,10 @@ const ENTRY = /^(?:([^\s#\-?:{}[\],&*!|>'"%@`<][^:]*?)|"([^"\\]*)"|'([^']*)')[ \
 const DASH_ITEM = /^( *)-(?: (.*))?$/
 const MAX_KEY = 512
 
+/** Spaces and tabs off both ends: YAML's own idea of white space (JS `trim()` also takes the no-break spaces, which YAML keeps). */
+const trimBlanks = (v: string): string => v.replace(/^[ \t]+|[ \t]+$/g, '')
+const isBlank = (v: string): boolean => /^[ \t]*$/.test(v)
+
 type Value = { kind: 'empty' | 'block' | 'flow' } | { kind: 'scalar'; text: string } | null
 
 /** A one-line list `[a, "b", 'c']`; trailing comma allowed, nothing nested. */
@@ -90,10 +99,13 @@ function readValue(v: string): Value {
   // Flow mappings, anchors, aliases, tags, directives, reserved indicators, and `?` `:` `-` that open something rather than a word.
   if ('{&*!%@`,]}?:'.includes(first) || (first === '-' && !/^-[0-9.]/.test(v))) return null
   const cut = v.search(/[ \t]#/)
-  const text = (cut < 0 ? v : v.slice(0, cut)).trimEnd()
+  const text = trimBlanks(cut < 0 ? v : v.slice(0, cut))
   // A `: ` inside a plain scalar is a mapping where YAML wants none.
   return /:(?:[ \t]|$)/.test(text) ? null : { kind: 'scalar', text }
 }
+
+/** What the grammar says of a head: it is a board; it is not (no frontmatter, another type); or it could not be judged (a line outside the grammar, a block that runs past the head). */
+export type HeadVerdict = 'yes' | 'no' | 'unsure'
 
 /**
  * Whether the head of a note is a frontmatter block with `type: board` at its top level: a `---` line first (a byte-order mark may
@@ -106,11 +118,20 @@ function readValue(v: string): Value {
  * frontmatters, the unreadable ones included.
  */
 export function isBoardHead(head: string): boolean {
+  return judgeBoardHead(head, false) === 'yes'
+}
+
+/**
+ * `isBoardHead` with the reason for a no: 'no' for a note that is plainly no board (no frontmatter, no `type`, another type),
+ * 'unsure' for a frontmatter this grammar cannot follow or that goes on past the head (`truncated`: the head is all the file was
+ * read up to). The window tells the two apart, because "it needs type: board" is wrong to say of a board with a nested mapping.
+ */
+export function judgeBoardHead(head: string, truncated: boolean): HeadVerdict {
   const open = FM_OPEN.exec(head)
-  if (!open) return false
+  if (!open) return 'no'
   const rest = head.slice(open[0].length)
   const close = FM_CLOSE_EMPTY.exec(rest) ?? FM_CLOSE.exec(rest)
-  if (!close) return false
+  if (!close) return truncated ? 'unsure' : 'no'
   const keys = new Set<string>()
   let type: string | null = null
   // After a key with no value a list may follow; after a block scalar header, its text.
@@ -119,46 +140,46 @@ export function isBoardHead(head: string): boolean {
   let textIndent = -1
   for (const raw of rest.slice(0, close.index).split('\n')) {
     const line = raw.replace(/\r$/, '')
-    if (BAD_CHARS.test(line)) return false
-    if (line.trim() === '') {
+    if (BAD_CHARS.test(line)) return 'unsure'
+    if (isBlank(line)) {
       // Spaces on an empty line before a block's text would have to be no longer than the text's own indentation: not worth reading.
-      if (mode === 'text' && textIndent < 0 && line !== '') return false
+      if (mode === 'text' && textIndent < 0 && line !== '') return 'unsure'
       continue
     }
     const indent = /^ */.exec(line)![0].length
     if (mode === 'text' && indent > 0) {
       if (textIndent < 0) textIndent = indent
-      else if (indent < textIndent) return false
+      else if (indent < textIndent) return 'unsure'
       continue
     }
     const body = line.slice(indent)
-    if (body.startsWith('\t')) return false
+    if (body.startsWith('\t')) return 'unsure'
     if (body.startsWith('#')) {
       if (mode === 'text') mode = 'entries'
       continue
     }
     if (indent > 0 || /^-(?: |$)/.test(body)) {
       const item = mode === 'list' ? DASH_ITEM.exec(line) : null
-      if (!item) return false
+      if (!item) return 'unsure'
       if (dashColumn < 0) dashColumn = item[1]!.length
-      else if (item[1]!.length !== dashColumn) return false
-      const value = readValue((item[2] ?? '').trim())
-      if (value?.kind !== 'scalar' && value?.kind !== 'empty') return false
+      else if (item[1]!.length !== dashColumn) return 'unsure'
+      const value = readValue(trimBlanks(item[2] ?? ''))
+      if (value?.kind !== 'scalar' && value?.kind !== 'empty') return 'unsure'
       continue
     }
     const entry = ENTRY.exec(body)
-    if (!entry) return false
+    if (!entry) return 'unsure'
     const key = entry[1] ?? entry[2] ?? entry[3]!
-    if (key.length > MAX_KEY || /[ \t]#/.test(key) || keys.has(key)) return false
+    if (key.length > MAX_KEY || /[ \t]#/.test(key) || keys.has(key)) return 'unsure'
     keys.add(key)
-    const value = readValue((entry[4] ?? '').trim())
-    if (!value) return false
+    const value = readValue(trimBlanks(entry[4] ?? ''))
+    if (!value) return 'unsure'
     if (key === 'type') type = value.kind === 'scalar' ? value.text : null
     mode = value.kind === 'empty' ? 'list' : value.kind === 'block' ? 'text' : 'entries'
     dashColumn = -1
     textIndent = -1
   }
-  return type === 'board'
+  return type === 'board' ? 'yes' : 'no'
 }
 
 /**
@@ -166,9 +187,16 @@ export function isBoardHead(head: string): boolean {
  * judged by the same head the next read will see, so a long non-ASCII title cannot push the closing `---` out of the window the
  * check looks at after the write (the note would then save fine and never open again).
  */
-function headOf(text: string): string {
+function headOf(text: string): { head: string; truncated: boolean } {
   // At most 4,096 characters can matter, whatever they weigh in bytes.
-  return new TextDecoder().decode(new TextEncoder().encode(text.slice(0, BOARD_HEAD_BYTES)).subarray(0, BOARD_HEAD_BYTES))
+  const bytes = new TextEncoder().encode(text.slice(0, BOARD_HEAD_BYTES))
+  return { head: new TextDecoder().decode(bytes.subarray(0, BOARD_HEAD_BYTES)), truncated: text.length > BOARD_HEAD_BYTES || bytes.length > BOARD_HEAD_BYTES }
+}
+
+/** What the grammar says of a whole note's text (its head as it would be read from disk): the verdict `board:save` and `board:open` would reach. */
+export function boardNoteVerdict(text: string): HeadVerdict {
+  const { head, truncated } = headOf(text)
+  return judgeBoardHead(head, truncated)
 }
 
 /** A path as a short line for a message. */
@@ -176,11 +204,24 @@ function shown(p: string): string {
   return p.length > 120 ? `${p.slice(0, 117)}...` : p
 }
 
+const grouped = (n: number): string => n.toLocaleString('en-US')
+
+/** Said of a note whose frontmatter is a board's but outside what main can read line by line (a nested mapping, a very long block ...). */
+const unsureReason = (p: string): string =>
+  `The board window cannot read the frontmatter of ${shown(p)} (it is longer than ${grouped(BOARD_HEAD_BYTES)} bytes or has more than plain \`key: value\` lines), so it cannot be opened there. Open this board in the app instead`
+
+/** Said of a note that is longer than the window handles. `chars` is null when only its size in bytes is known (it cannot be that few characters). */
+function tooLong(p: string, chars: number | null): string {
+  const length = chars === null ? `over ${grouped(MAX_BOARD_TEXT)} characters` : `${grouped(chars)} characters`
+  return `${shown(p)} is ${length} long; the board window opens notes of up to ${grouped(MAX_BOARD_TEXT)} characters (the text around the board counts too). It stays in the app`
+}
+
 type Inspected = { ok: true; abs: string } | { ok: false; reason: string }
 
 /**
  * The note at `path` if it is a board note that is there: a text vault path of a `.md` file, inside the vault (the same refusals
- * the note writer gives: a path that leaves it, an excluded folder), a plain file, whose head says `type: board`. Never throws.
+ * the note writer gives: a path that leaves it, an excluded folder), a plain file (a link is refused: a write would replace the link
+ * with a copy and the real note would not change), whose head says `type: board`. Never throws.
  */
 async function inspect(path: unknown, vault: BoardVault | null): Promise<Inspected> {
   if (!vault) return { ok: false, reason: 'No vault is open' }
@@ -195,34 +236,71 @@ async function inspect(path: unknown, vault: BoardVault | null): Promise<Inspect
   }
   const st = await vault.stat(path)
   if (!st?.isFile) return { ok: false, reason: `There is no note at ${shown(path)}` }
-  let head: string
+  const link = await fs.lstat(abs).then(
+    (l) => l.isSymbolicLink(),
+    () => false,
+  )
+  if (link) return { ok: false, reason: `${shown(path)} is a link to a note: open the board it points to instead` }
+  let head: Uint8Array
   try {
-    head = new TextDecoder().decode(await readHead(abs, BOARD_HEAD_BYTES))
+    head = await readHead(abs, BOARD_HEAD_BYTES)
   } catch {
     return { ok: false, reason: `The note could not be read: ${shown(path)}` }
   }
-  if (!isBoardHead(head)) return { ok: false, reason: `${shown(path)} is not a board note (it needs type: board in its frontmatter)` }
+  const verdict = judgeBoardHead(new TextDecoder().decode(head), head.length >= BOARD_HEAD_BYTES)
+  if (verdict === 'unsure') return { ok: false, reason: unsureReason(path) }
+  if (verdict === 'no') return { ok: false, reason: `${shown(path)} is not a board note (it needs type: board in its frontmatter)` }
   return { ok: true, abs }
 }
 
-/** Whether `path` is a board note that is there (what `board:open` asks before it opens a window). */
-export async function checkBoard(path: unknown, vault: BoardVault | null): Promise<BoardSaveResult> {
-  const found = await inspect(path, vault)
-  return found.ok ? { ok: true } : found
+/** Why the note at `abs` is longer than the window can hold, or null when it fits. Reads the note only when its size does not settle it. */
+async function lengthProblem(path: string, abs: string, vault: BoardVault): Promise<string | null> {
+  // A character takes at most 4 bytes in UTF-8 and at least 1: the size settles every note but those in between.
+  const size = await fs.stat(abs).then(
+    (st) => st.size,
+    () => -1,
+  )
+  if (size < 0 || size <= MAX_BOARD_TEXT) return null
+  if (size > MAX_BOARD_TEXT * 4) return tooLong(path, null)
+  const text = await vault.read(path)
+  return text !== null && text.length > MAX_BOARD_TEXT ? tooLong(path, text.length) : null
 }
 
-/**
- * A save as the floating window sent it: the path of a board note that is already there, and the new text (at most 400,000
- * characters, and itself a board note). Creating a board is the docked view's job, through the store; this only overwrites.
- */
-export async function validateBoardSave(dto: { path: unknown; text: unknown }, vault: BoardVault | null): Promise<BoardSaveResult> {
+/** Whether `path` is a board note that is there and short enough for the window (what `board:open` asks before it opens a window). */
+export async function checkBoard(path: unknown, vault: BoardVault | null): Promise<BoardSaveResult> {
+  const found = await inspect(path, vault)
+  if (!found.ok || !vault) return found
+  const problem = await lengthProblem(path as string, found.abs, vault)
+  return problem ? { ok: false, reason: problem } : { ok: true }
+}
+
+/** What a save carries: the path, the new text, and the text it was made from (see `saveBoard`). */
+export interface BoardSaveDto {
+  path: unknown
+  text: unknown
+  expectedBase?: unknown
+}
+
+/** Judges a save without writing: the note it names must be a board note that is there, and the text must be a board note of a size the window handles. */
+async function validate(dto: BoardSaveDto, vault: BoardVault | null): Promise<Inspected> {
   const found = await inspect(dto.path, vault)
   if (!found.ok) return found
   if (typeof dto.text !== 'string') return { ok: false, reason: 'The board text must be text' }
-  if (dto.text.length > MAX_BOARD_TEXT) return { ok: false, reason: `The board is longer than ${MAX_BOARD_TEXT.toLocaleString('en-US')} characters` }
+  if (dto.text.length > MAX_BOARD_TEXT) return { ok: false, reason: `The board is longer than ${grouped(MAX_BOARD_TEXT)} characters` }
   // A page that lost the frontmatter would leave a note nobody can open as a board again.
-  if (!isBoardHead(headOf(dto.text))) return { ok: false, reason: 'The text is not a board note (type: board is missing from its frontmatter)' }
-  return { ok: true }
+  const verdict = boardNoteVerdict(dto.text)
+  if (verdict === 'unsure') return { ok: false, reason: 'The text is a board note the board window could not read again (its frontmatter has more than plain `key: value` lines, or is long), so it was not saved' }
+  if (verdict === 'no') return { ok: false, reason: 'The text is not a board note (type: board is missing from its frontmatter)' }
+  return found
+}
+
+/**
+ * A save as the floating window sent it: the path of a board note that is already there, and the new text (at most 1,000,000
+ * characters, and itself a board note). Creating a board is the docked view's job, through the store; this only overwrites.
+ */
+export async function validateBoardSave(dto: BoardSaveDto, vault: BoardVault | null): Promise<BoardSaveResult> {
+  const found = await validate(dto, vault)
+  return found.ok ? { ok: true } : found
 }
 
 /** Why a write failed, in words for the window (an absolute path in an fs message stays out). */
@@ -234,27 +312,59 @@ function writeFailure(err: unknown): string {
   return `The board could not be written: ${msg.split('\n')[0]!.slice(0, 160)}`
 }
 
+/** Saves of one note run one after the other (two windows, or a retry that overtakes a slow write, must not interleave their compare and their write). */
+const lines = new Map<string, Promise<unknown>>()
+function inLine<T>(key: string, job: () => Promise<T>): Promise<T> {
+  const run = (lines.get(key) ?? Promise.resolve()).then(job, job)
+  const tail = run.then(
+    () => undefined,
+    () => undefined,
+  )
+  lines.set(key, tail)
+  void tail.then(() => {
+    if (lines.get(key) === tail) lines.delete(key)
+  })
+  return run
+}
+
+const CHANGED_OUTSIDE = 'The board was changed outside this window: it has been left as it is. Reload to see the change.'
+
 /**
- * `board:save`: validate, then write with the vault's atomic write. The watcher is NOT told that this write was ours
- * (`noteSelfWrite`), on purpose: it then reports the change like any edit made outside the app, and the brain window rebuilds its
- * graph (the board's links to its pictures) from it. The note writer of the brain window does the opposite, because it already
- * knows what it wrote.
+ * `board:save`: validate, compare, then write with the vault's atomic write, all in this one call. `expectedBase` is the text the new
+ * text was made from: when the note on disk is neither that nor already the new text (a retry whose answer was lost), the save is
+ * refused with `changed` and nothing is written; the page asks again after it has read the note. Without `expectedBase` the note is
+ * overwritten. The watcher is NOT told that this write was ours (`noteSelfWrite`), on purpose: it then reports the change like any
+ * edit made outside the app, and the brain window rebuilds its graph (the board's links to its pictures) from it. The note writer of
+ * the brain window does the opposite, because it already knows what it wrote.
  */
-export async function saveBoard(dto: { path: unknown; text: unknown }, vault: BoardVault | null): Promise<BoardSaveResult> {
-  const check = await validateBoardSave(dto, vault)
-  if (!check.ok || !vault) return check
-  try {
-    await vault.write(dto.path as string, dto.text as string)
-  } catch (err) {
-    return { ok: false, reason: writeFailure(err) }
-  }
-  return { ok: true }
+export async function saveBoard(dto: BoardSaveDto, vault: BoardVault | null): Promise<BoardSaveResult> {
+  const found = await validate(dto, vault)
+  if (!found.ok || !vault) return found
+  const { expectedBase } = dto
+  if (expectedBase !== undefined && typeof expectedBase !== 'string') return { ok: false, reason: 'The text the save was made from must be text' }
+  const path = dto.path as string
+  const text = dto.text as string
+  return inLine(found.abs, async (): Promise<BoardSaveResult> => {
+    if (expectedBase !== undefined) {
+      const current = await vault.read(path)
+      if (current === null) return { ok: false, reason: 'The board note is gone, or is no longer a board: nothing was saved' }
+      // Already what is being saved: an earlier try got through and its answer did not come back.
+      if (current === text) return { ok: true }
+      if (current !== expectedBase) return { ok: false, reason: CHANGED_OUTSIDE, changed: true }
+    }
+    try {
+      await vault.write(path, text)
+    } catch (err) {
+      return { ok: false, reason: writeFailure(err) }
+    }
+    return { ok: true }
+  })
 }
 
 /**
- * `board:read`: the text of a board note for the floating window, or null when the path is not a board note that is there, or it
- * is too long for the window to save back (more than MAX_BOARD_TEXT characters: the file is not read at all when its size cannot
- * fit, whatever its encoding).
+ * `board:read`: the text of a board note for the floating window, or null when the path is not a board note that is there. Rejects
+ * with the reason when the note is too long for the window to hold (`board:open` refuses those before a window exists, so this is a
+ * note that grew since): that is neither a missing note nor a note that is no board.
  */
 export async function readBoard(path: unknown, vault: BoardVault | null): Promise<string | null> {
   const found = await inspect(path, vault)
@@ -264,7 +374,10 @@ export async function readBoard(path: unknown, vault: BoardVault | null): Promis
     (st) => st.size,
     () => -1,
   )
-  if (size < 0 || size > MAX_BOARD_TEXT * 4) return null
+  if (size < 0) return null
+  if (size > MAX_BOARD_TEXT * 4) throw new Error(tooLong(path as string, null))
   const text = await vault.read(path as string)
-  return text !== null && text.length <= MAX_BOARD_TEXT ? text : null
+  if (text === null) return null
+  if (text.length > MAX_BOARD_TEXT) throw new Error(tooLong(path as string, text.length))
+  return text
 }

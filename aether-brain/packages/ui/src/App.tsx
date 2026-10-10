@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { imagePathOf, isFolderId, isImageId, isTodayId, isVideoPath } from '@aether/core'
 import { BrainScene } from '@aether/graph'
-import { useAether, type AetherState } from './store'
+import { FULL_PANEL_VIEWS, useAether, type AetherState } from './store'
 import { useKeyboard } from './hooks/useKeyboard'
 import { TopBar } from './components/TopBar'
 import { Legend } from './components/Legend'
@@ -112,6 +112,14 @@ export function AetherApp({ sources, onPickVault, autoOpen }: AetherAppProps) {
   useEffect(() => {
     controller.setViewShift(showEditor ? 0.3 : 0)
   }, [controller, showEditor])
+
+  // A full-window panel (the Boards view, the Projects board) hides the 3D view: stop drawing it while the panel is up. Driven by the
+  // view alone, so a panel that crashes (the error boundary unmounts it), closes or gives way to a jump to a note always lets go.
+  const coveredByPanel = FULL_PANEL_VIEWS.has(view)
+  useEffect(() => {
+    controller.setCovered(coveredByPanel)
+    return () => controller.setCovered(false)
+  }, [controller, coveredByPanel])
 
   return (
     <div className="relative h-full w-full overflow-hidden bg-cosmos text-ink" data-view={view}>

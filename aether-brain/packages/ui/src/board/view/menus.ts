@@ -99,9 +99,10 @@ export const COMMAND_HOME: Record<BoardCommandId, MenuHome> = {
 
 /** What the menus need to know to enable, check and hide entries. */
 export interface MenuContext {
-  /** Items selected, and of those the pictures. */
+  /** Items selected, and of those the pictures and the notes. */
   selected: number
   pictures: number
+  notes: number
   /** Some selected item belongs to a group; how many of the selected items are locked. */
   grouped: boolean
   locked: number
@@ -121,6 +122,7 @@ export interface MenuContext {
 export const EMPTY_MENU_CONTEXT: MenuContext = Object.freeze({
   selected: 0,
   pictures: 0,
+  notes: 0,
   grouped: false,
   locked: 0,
   canPaste: false,
@@ -139,17 +141,20 @@ export const EMPTY_MENU_CONTEXT: MenuContext = Object.freeze({
 export function menuContextOf(state: BoardUiState, can: MenuContext['can']): MenuContext {
   const chosen = new Set(state.selection)
   let pictures = 0
+  let notes = 0
   let locked = 0
   let grouped = false
   for (const it of state.doc.items) {
     if (!chosen.has(it.id)) continue
     if (it.kind === 'picture') pictures++
+    if (it.kind === 'note') notes++
     if (it.locked) locked++
     if (it.group > 0) grouped = true
   }
   return {
     selected: state.selection.length,
     pictures,
+    notes,
     grouped,
     locked,
     canPaste: state.canPaste,
@@ -220,6 +225,9 @@ export function commandDisabled(id: BoardCommandId, ctx: MenuContext): boolean {
       return !ctx.canUndo
     case 'edit.redo':
       return !ctx.canRedo
+    // Editing a note's text is for one note (the controller does nothing for anything else).
+    case 'note.edit':
+      return ctx.selected !== 1 || ctx.notes !== 1
     case 'tool.crop':
     // Paste is always offered: with nothing of the board's own to paste it says how to paste what is on the system clipboard (⌘ V).
     case 'edit.paste':

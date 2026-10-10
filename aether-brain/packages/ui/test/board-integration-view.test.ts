@@ -4,6 +4,9 @@ import type { BoardHost } from '../src/board/api'
 import type { BoardWindowControl, BoardWindowStatus } from '../src/board/active'
 import { assetFiles, boardRaw, freshApp, vaultFiles } from './board-integration-harness'
 
+// The first test loads the whole UI package, which takes seconds on a busy machine (the default 5 s timed out at 5.1 s and 8.1 s).
+vi.setConfig({ testTimeout: 60_000, hookTimeout: 60_000 })
+
 afterEach(() => {
   vi.doUnmock('../src/board/BoardView')
   vi.unstubAllGlobals()
@@ -174,12 +177,22 @@ describe('an open board', () => {
     expect(r.hosts[0]!.className).toContain('absolute')
   })
 
-  it('draws nothing for a board whose note is gone', async () => {
+  // live-docked-m3: a board whose note disappears (a sync tool, git) is the only copy of what the user did since the last save:
+  // it is kept open with a notice, never closed behind their back (it used to drop to the list without a word).
+  it('keeps a board whose note is gone, with a notice and the title and path it had', async () => {
     const r = await renderer()
     const v = await r.open(vault())
     r.s().openBoard('Boards/Armour.md')
+    expect(r.html()).not.toContain('deleted or moved outside the app')
     await v.remove('Boards/Armour.md')
-    expect(r.html()).toBe('')
+    expect(r.s().boardPath).toBe('Boards/Armour.md')
+    const html = r.html()
+    expect(html).toContain('role="status"')
+    expect(html).toContain('This board’s note was deleted or moved outside the app')
+    expect(html).toContain('Copy board text')
+    expect(html).toContain('aria-label="Board Armour"')
+    expect(html).toContain('Boards/Armour.md')
+    expect(html).toContain('data-board-view="Boards/Armour.md"')
   })
 
   it('has no pop-out placeholder where the window does not exist', async () => {

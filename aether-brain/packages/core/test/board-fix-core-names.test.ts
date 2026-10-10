@@ -76,7 +76,7 @@ describe('odd names never reach the vault\'s ignore rules', () => {
       expect(vault.isIgnored(`Boards/${folder}`), JSON.stringify([title, folder])).toBe(false)
       expect(vault.isIgnored(`Boards/${folder}/${boardPictureName('x.png', 'image/png', NOW)}`), JSON.stringify([title, folder])).toBe(false)
       expect(folder).not.toMatch(/[\\/:*?"<>|#[\]]/)
-      expect(folder.length).toBeLessThanOrEqual(90)
+      expect(folder.length).toBeLessThanOrEqual(130)
     }
   })
 

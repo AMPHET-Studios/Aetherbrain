@@ -32,6 +32,8 @@ function fakeBridge(first: BoardStatusDto = CLOSED) {
   let status = first
   const stateSubs = new Set<(s: BoardStatusDto) => void>()
   const closedSubs = new Set<(path: string) => void>()
+  const flushSubs = new Set<(token: number) => void>()
+  const acks: number[] = []
   const calls: string[] = []
   const bridge = {
     platform: 'win32',
@@ -59,6 +61,8 @@ function fakeBridge(first: BoardStatusDto = CLOSED) {
     }),
     onBoardState: vi.fn((cb: (s: BoardStatusDto) => void) => (stateSubs.add(cb), () => void stateSubs.delete(cb))),
     onBoardClosed: vi.fn((cb: (path: string) => void) => (closedSubs.add(cb), () => void closedSubs.delete(cb))),
+    onBoardFlush: vi.fn((cb: (token: number) => void) => (flushSubs.add(cb), () => void flushSubs.delete(cb))),
+    boardFlushed: vi.fn((token: number) => void acks.push(token)),
   }
   return {
     bridge: bridge as unknown as AetherBridge,
@@ -69,6 +73,11 @@ function fakeBridge(first: BoardStatusDto = CLOSED) {
       status = next
       for (const cb of stateSubs) cb(next)
     },
+    /** Main asks this window to save before it closes (the page answers with `boardFlushed`). */
+    flush(token: number) {
+      for (const cb of [...flushSubs]) cb(token)
+    },
+    acks,
     /** Main says the window stopped showing a board. */
     closed(path: string) {
       for (const cb of closedSubs) cb(path)

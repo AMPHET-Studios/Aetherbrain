@@ -27,7 +27,7 @@ import { parseMarkdown, parseNote } from '../src/markdown/parse'
 import { splitFrontmatter } from '../src/markdown/frontmatter'
 import { remarkNoLateAutolinks, remarkWikilink } from '../src/markdown/wikilink'
 import { isProjectNote } from '../src/markdown/projects'
-import { isNoteType } from '../src/vault/paths'
+import { isNoteType, slugifyTitle } from '../src/vault/paths'
 import { renderChatNote } from '../src/chats/notes'
 import type { ChatConversation } from '../src/chats/exports'
 
@@ -265,12 +265,53 @@ describe('format-3: the user\'s text under the board stays byte for byte, where 
     expect(parseMarkdown(bodyOf(saved(raw('\nSome thoughts.\n\n---\n\nMore.\n')))).children.map((c) => c.type)).not.toEqual(setext)
   })
 
-  it('"- [ ] task" lines under the board are the user\'s: no warning, no extra', () => {
-    const { doc, warnings } = parseBoard(raw('- [ ] right under the items\n- [x] done\n\n- [ ] after a blank line\n'))
+  it('"- [ ] task" lines under the board are the user\'s: no warning, whether they touch the items (the board keeps them) or not', () => {
+    const touching = parseBoard(raw('- [ ] right under the items\n- [x] done\n\n- [ ] after a blank line\n'))
+    expect(touching.warnings).toEqual([])
+    // The first two touch the items: lines the board kept, written back right after them. The third is the user's.
+    expect(touching.doc.extra).toEqual(['- [ ] right under the items', '- [x] done'])
+    const apart = parseBoard(raw('\n- [ ] after a blank line\n- [X] done too\n'))
+    expect(apart.warnings).toEqual([])
+    expect(apart.doc.extra).toEqual([])
+    // A newer version's unknown kind is still said so.
+    expect(parseBoard(raw('- gizmo x=1\n')).warnings.some((w) => /gizmo/.test(w))).toBe(true)
+  })
+
+  it('a bullet of the user\'s that starts with the name of a kind, after a blank line, is theirs: "- note the colours", "- line 3 is wrong", "- view from the north"', () => {
+    const tail = '\n- note the colours\n- line 3 is wrong\n- view from the north\n- pic of the gate\n- ![[Some Note]]\n- rect\n\nand a paragraph\n'
+    const text = raw(tail)
+    const { doc, warnings } = parseBoard(text)
+    expect(doc.items).toHaveLength(2)
+    expect(doc.extra).toEqual([])
     expect(warnings).toEqual([])
-    expect(doc.extra).toEqual(raw('- [ ] right under the items\n- [x] done\n').includes('x') ? doc.extra : [])
-    // (the first two touch the items, so the board keeps them as lines it did not understand; they are not warned about)
-    expect(warnings.some((w) => /\[/.test(w))).toBe(false)
+    expect(serializeBoard(doc, text, NOW)).toBe(text)
+    expect(saved(text).endsWith(tail)).toBe(true)
+    // The brain reads them as the note's own prose (and the embed of a note as a link), not as items of the board.
+    const n = parseNote({ path: 'Boards/Gate.md', content: text })
+    expect(n.plain).toContain('note the colours')
+    expect(n.plain).toContain('line 3 is wrong')
+    expect(n.links.map((l) => l.to)).toEqual(['Some Note'])
+    // Between two lines of the board, after a blank line, such a bullet is a line the board keeps (an extra), for the brain as well.
+    const between = raw('\n- note the colours\n- note x=9 y=9 w=300 size=18 color=ffffff fill= r=0 » real\n')
+    const mixed = parseBoard(between)
+    expect(mixed.doc.items).toHaveLength(3)
+    expect(mixed.doc.extra).toEqual(['- note the colours'])
+    expect(parseNote({ path: 'Boards/Gate.md', content: between }).plain).toContain('note the colours')
+  })
+
+  it('lines that look written by the board are its own wherever they come, after a blank line too (hand-written items, a loose list)', () => {
+    const text = raw('\n- note » hand-written, no attributes\n\n- stroke pts=1,2 3,4\n\n- pic Boards/a.png\n- ![[Boards/b.png]]\n\nafter\n')
+    const { doc, warnings } = parseBoard(text)
+    expect(warnings).toEqual([])
+    expect(doc.items.map((i) => i.kind)).toEqual(['note', 'note', 'note', 'stroke', 'picture', 'picture'])
+    const out = serializeBoard(doc, text, NOW)
+    expect(out.endsWith('\nafter\n')).toBe(true)
+    expect(out).not.toContain('hand-written, no attributes\n\n')
+    // And the brain, which reads the same lines without the markdown parser, agrees on which ones they are.
+    const n = parseNote({ path: 'Boards/Gate.md', content: text })
+    expect(n.links.map((l) => l.to)).toEqual(['Boards/a.png', 'Boards/b.png'])
+    expect(n.plain).toContain('after')
+    expect(n.plain).not.toContain('hand-written')
   })
 
   it('text that touches the last item is a line the board keeps (written back right after the items); a blank line makes it the user\'s', () => {
@@ -505,6 +546,32 @@ describe('format-5 / integration-1 / integration-m5: parseNote reads a board fro
     expect(n.body.slice(n.links[1]!.offset).startsWith('[[Tail Link]]')).toBe(true)
   })
 
+  it('a gesture that only moves, draws or edits board items changes nothing the brain keeps of the note (links by target, plain text, word count, tags, headings) but its stamp', () => {
+    const items = [pic({ path: 'Boards/a.png' }), pic({ path: 'Boards/a#b.png' }), note({ text: 'some words [[X]] #y' }), stroke()]
+    const first = boardNote(items)
+    const doc0 = parseBoard(first).doc
+    const edits: BoardDoc[] = [
+      moveItems(doc0, [1, 3], 40, -20),
+      setProps(doc0, [3], { text: 'completely different words' }),
+      addMark(doc0, { kind: 'stroke', points: [0, 0, 5, 5, 9, 1], color: 'ff0000', width: 3 }).doc,
+      addNote(doc0, { text: 'a new note' }).doc,
+    ]
+    const keep = (raw: string): unknown => {
+      const n = parseNote({ path: 'Boards/Gate.md', content: raw })
+      const { updated: _stamp, ...meta } = n.meta
+      // (A link's offset is where it sits in the text, which moves with the length of the numbers before it: not compared.)
+      return { links: n.links.map(({ offset: _at, ...l }) => l), plain: n.plain, tags: n.inlineTags, meta, frontmatter: { ...n.frontmatter, updated: null } }
+    }
+    for (const edited of edits) {
+      const next = serializeBoard(edited, first, LATER)
+      expect(next).not.toBe(first)
+      expect(keep(next)).toEqual(keep(first))
+    }
+    // Adding or removing a picture is a change of links, and only that.
+    const more = serializeBoard(addPicture(doc0, { path: 'Boards/new.png', w: 10, h: 10 }).doc, first, LATER)
+    expect(parseNote({ path: 'Boards/Gate.md', content: more }).links.map((l) => l.to)).toEqual(['Boards/a.png', 'Boards/a#b.png', 'Boards/new.png'])
+  })
+
   it('a note that says type: board but has no board section is parsed as ordinary markdown', () => {
     const n = parseNote({ path: 'B.md', content: '---\ntype: board\n---\n# T\n\nSee [[X]] #y\n' })
     expect(n.links.map((l) => l.to)).toEqual(['X'])
@@ -699,6 +766,13 @@ describe('boardFolderName and boardPictureName keep to what the vault accepts', 
     expect(boardPictureName('-$.a.png', 'image/png', NOW)).toBe('a.png')
     expect(boardPictureName('a$b.png', 'image/png', NOW)).toBe('a$b.png')
     expect(boardPictureName('c:\\Recycle\\$R9.png', 'image/png', NOW)).toBe('R9.png')
+  })
+
+  it('a board\'s folder carries its note\'s name, up to the longest file name a note gets (live-docked-m7)', () => {
+    const stem = slugifyTitle('Gate reference '.repeat(2) + 'x'.repeat(130))
+    expect(stem).toHaveLength(120)
+    expect(boardFolderName(stem)).toBe(stem)
+    expect(boardFolderName('y'.repeat(300))).toHaveLength(120)
   })
 
   it('the names of game libraries get " pictures" after them, like the other names the vault leaves out', () => {

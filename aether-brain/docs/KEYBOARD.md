@@ -92,8 +92,8 @@ The picture inspector has *Open*, *Reveal* (desktop), *Copy embed* (`![[gate.png
 | Key         | Action                                      |
 | ----------- | ------------------------------------------- |
 | `↑` `↓`     | Move                                        |
-| `Enter`     | Open note / fly to folder (over the Projects board: back to the graph first) / run command |
-| `⇧ Enter`   | Select + fly, keep the editor closed         |
+| `Enter`     | Open note / fly to folder (over the Projects board or the Boards view: back to the graph first) / run command |
+| `⇧ Enter`   | Select + fly, keep the editor closed (over the Boards view, the Projects board, review or capture: back to the graph first, or nothing would be seen to happen) |
 | `⌘ Enter`   | Turn the query into a graph filter          |
 | `Tab`       | Toggle `>` command mode                     |
 | `Esc`       | Close the palette (only the palette: the board under it stays open) |
@@ -193,9 +193,10 @@ A **board** is a note of the vault (`type: board`) shown as an open canvas of pi
 | `⌘ I` | Invert the selection |
 | `⌘ D` | Duplicate |
 | `Delete` · `⌫` | Delete |
-| `⌘ C` · `⌘ X` · `⌘ V` | Copy · cut · paste (a paste with nothing of the board's own on the clipboard adds the picture or text the system clipboard holds) |
+| `⌘ C` · `⌘ X` · `⌘ V` | Copy · cut · paste. Copied items go on the system clipboard as text that starts with *Aether Brain board: N items copied*, so they paste into another board or window as well; a paste of anything else adds the picture or text the system clipboard holds |
 | `⌘ G` · `⌘ ⇧ G` | Group · ungroup |
 | `⌘ L` · `⌘ ⇧ L` | Lock · unlock |
+| `F2` | Edit the selected note's text (`Enter` does the same when a note is the only thing selected) |
 
 **Order and transform**
 
@@ -233,7 +234,7 @@ A **board** is a note of the vault (`type: board`) shown as an open canvas of pi
 | Key | Action |
 | --- | --- |
 | `⌘ O` | Add pictures… (the vault's pictures, with a search box) |
-| `Enter` | Open the selected picture in your image program |
+| `Enter` | Open the selected picture in your image program (with a note as the only selection it edits the note, as `F2` does) |
 | `⌘ E` · `⌘ ⇧ E` | Export the selection · the whole board as a picture, saved in the board's folder |
 
 **Gestures**
@@ -268,7 +269,7 @@ Palette only, no key: reset rotation / size / crop / everything, arrange row / c
 | `v`   | Vault folders panel: add folders or whole drives (`D:\`, `F:\` …), skip folders, bring back folders you left out, see the games and programs skipped, rescan |
 | `⇧ H` | Leave the selected folder out of the brain (nothing on disk changes; Undo on the toast, or Bring back in `v`) |
 | `a`   | AI link panel: let Claude and ChatGPT read and write this brain (see [AI-LINK.md](AI-LINK.md)) |
-| `w`   | Reference board: pop the board you have open out into its own window that stays on top of other windows, or bring it back (palette: *Board: Pop out to its own window*, *Always on top*, *Window opacity…*; see [REFERENCE-BOARD.md](REFERENCE-BOARD.md)) |
+| `w`   | Reference board: pop the board you have open out into its own window that stays on top of other windows, or bring it back (`w` in the floating window brings it back too; palette: *Board: Pop out to its own window*, *Always on top*, *Window opacity…*; see [REFERENCE-BOARD.md](REFERENCE-BOARD.md)) |
 | `q`   | Chat with your brain: it reads your notes, checks in, remembers what you tell it to (see [BRAIN-CHAT.md](BRAIN-CHAT.md)); `Enter` sends, `Esc` on an empty box closes |
 | `⇧ P` | Find projects: looks through the vault's folders (names only) for your projects — Unreal, Unity and Godot projects, git repositories, code projects, folders of Blender, ZBrush, Photoshop … files — and makes the ticked ones ★ stars in one go; in the panel `a` ticks all, `s` the sure ones, `n` none |
 | `⇧ L` | Librarian: copy every picture of a folder or drive (`D:\`) into one library (`F:\MASTERIMAGES`) sorted by type, genre and year, tagged by taste, linked into the brain as a star; shows the plan before it copies anything (see [LIBRARIAN.md](LIBRARIAN.md)) |

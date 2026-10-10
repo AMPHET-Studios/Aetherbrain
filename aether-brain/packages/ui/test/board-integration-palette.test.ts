@@ -6,6 +6,9 @@ import type { BoardCommandId, BoardUiState } from '../src/board/api'
 import { BOARD_COMMANDS } from '../src/board/commands'
 import { assetFiles, freshApp, vaultFiles } from './board-integration-harness'
 
+// The first test loads the whole UI package, which takes seconds on a busy machine (the default 5 s timed out at 5.1 s and 8.1 s).
+vi.setConfig({ testTimeout: 60_000, hookTimeout: 60_000 })
+
 afterEach(() => {
   vi.unstubAllGlobals()
 })
@@ -17,7 +20,7 @@ async function palette() {
   await app.open(new MemoryVaultAdapter(vaultFiles(), { assets: assetFiles() }))
   const selection: number[] = []
   const exec = vi.fn()
-  const board: ActiveBoard = { path: 'Boards/Armour.md', exec, state: () => ({ selection }) as unknown as BoardUiState, flush: async () => undefined }
+  const board: ActiveBoard = { path: 'Boards/Armour.md', exec, state: () => ({ selection }) as unknown as BoardUiState, flush: async () => true }
   return {
     ...app,
     commands,
@@ -113,7 +116,7 @@ describe('the palette with a board open', () => {
       async reveal(): Promise<void> {}
     }
     await app.open(new Reveals(vaultFiles(), { assets: assetFiles() }))
-    app.active.setActiveBoard({ path: 'Boards/Armour.md', exec: () => undefined, state: () => ({ selection: [1] }) as unknown as BoardUiState, flush: async () => undefined })
+    app.active.setActiveBoard({ path: 'Boards/Armour.md', exec: () => undefined, state: () => ({ selection: [1] }) as unknown as BoardUiState, flush: async () => true })
     app.s().openBoard('Boards/Armour.md')
     expect(commands.findCommands('', app.s()).map((c) => c.id)).toContain('board-picture.reveal')
   })

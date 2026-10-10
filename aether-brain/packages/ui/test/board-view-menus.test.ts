@@ -21,6 +21,7 @@ const full = (over: Partial<MenuContext> = {}, can: Partial<MenuContext['can']> 
   ...EMPTY_MENU_CONTEXT,
   selected: 3,
   pictures: 2,
+  notes: 0,
   grouped: false,
   locked: 0,
   canPaste: true,
@@ -178,7 +179,7 @@ describe('the context menu', () => {
   })
 
   it('on a note: no picture commands, but Edit text when it is the only thing selected', () => {
-    const note = contextMenu(full({ selected: 1, pictures: 0 }), 'item', true)
+    const note = contextMenu(full({ selected: 1, pictures: 0, notes: 1 }), 'item', true)
     const ids = commands(note).map((e) => e.id)
     expect(ids).not.toContain('picture.open')
     expect(ids).not.toContain('tool.crop')
@@ -186,5 +187,13 @@ describe('the context menu', () => {
     expect(note.find((e) => e.kind === 'command' && e.id === 'note.edit')).toMatchObject({ label: 'Edit text', keys: 'F2' })
     expect(ids).toContain('note.edit')
     expect(contextMenu(full({ selected: 2, pictures: 0 }), 'item', false).some((e) => e.kind === 'command' && e.id === 'note.edit')).toBe(false)
+  })
+
+  it('Edit > Edit text is enabled for one selected note and for nothing else (the controller does nothing for the rest)', () => {
+    const disabled = (over: Partial<MenuContext>) => commandDisabled('note.edit', full(over))
+    expect(disabled({ selected: 1, notes: 1, pictures: 0 })).toBe(false)
+    expect(disabled({ selected: 1, notes: 0, pictures: 1 })).toBe(true)
+    expect(disabled({ selected: 2, notes: 2, pictures: 0 })).toBe(true)
+    expect(disabled({ selected: 0, notes: 0, pictures: 0 })).toBe(true)
   })
 })

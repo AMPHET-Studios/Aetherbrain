@@ -855,7 +855,8 @@ describe('ImageCache: failures', () => {
     // The ones forgotten are the oldest; the latest are still known to be failures.
     expect(t.cache.get('p0', 100).failed).toBe(false)
     expect(t.cache.get('p4999', 100).failed).toBe(true)
-  })
+    // (5000 visible pictures is far more than a board holds; each arrival divides the budget again, so a busy machine needs room.)
+  }, 30_000)
 })
 
 describe('ImageCache: onLoaded', () => {

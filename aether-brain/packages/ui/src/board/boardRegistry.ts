@@ -11,6 +11,7 @@ import {
   boardFolderName,
   boardPictures,
   addPicture,
+  boardChars,
   estimateTextMetrics,
   fitView,
   folderOf,
@@ -20,6 +21,7 @@ import {
   parseBoard,
   serializeBoard,
   slugifyTitle,
+  type BoardDoc,
   type NoteId,
   type ParsedNote,
 } from '@aether/core'
@@ -222,55 +224,94 @@ export interface AddedToBoard {
   skipped: number
   /** Pictures left out because the board holds BOARD_LIMITS.items already. */
   full: number
+  /** Pictures left out because the board would pass its size budget (BOARD_LIMITS.noteTotal characters of items). */
+  over: number
 }
+
+/** The size budget as the messages say it ("it holds at most about 500,000 characters of items"); the controller's wording. */
+export const BOARD_BUDGET_TEXT = `it holds at most about ${BOARD_LIMITS.noteTotal.toLocaleString('en-US')} characters of items`
 
 /**
  * Puts pictures on a board that is not open: written into the note's text, parsed and serialised like every board save (so
  * everything the board section does not own stays byte for byte, and hand-written lines survive). A picture the board already shows is
  * skipped. The new ones are packed into one tidy block (the 'optimal' arrangement) to the right of what is on the board, level with
  * its top; on an empty board the block is centred on the origin and the view is set to show it whole. Throws when `raw` is not a board.
+ * The board never grows past its size budget here (`BOARD_LIMITS.noteTotal`, core's `boardChars`, the controller's rule): as many
+ * pictures are added as fit, the rest are counted in `over`; a board already over it takes none (it can be thinned, never grown).
  */
 export function addPicturesToBoardText(raw: string, items: readonly PictureToAdd[], now: Date = new Date()): AddedToBoard {
   if (!isBoardNote(raw)) throw new Error('This note is not a board (its frontmatter has no type: board)')
   const { doc } = parseBoard(raw)
   const have = new Set(boardPictures(doc))
-  let next = doc
-  const ids: number[] = []
-  const paths: string[] = []
+  /** The pictures that are new and fit the item limit, in the order given. */
+  const take: PictureToAdd[] = []
   let skipped = 0
   let full = 0
+  let room = doc
   for (const it of items) {
     if (have.has(it.path)) {
       skipped++
       continue
     }
-    const res = addPicture(next, { path: it.path, w: it.w, h: it.h, x: 0, y: 0 })
+    const res = addPicture(room, { path: it.path, w: it.w, h: it.h, x: 0, y: 0 })
     if (res.id === null) {
       full++
       continue
     }
-    next = res.doc
-    ids.push(res.id)
-    paths.push(it.path)
+    room = res.doc
+    take.push(it)
     have.add(it.path)
   }
-  if (ids.length === 0) return { text: raw, added: 0, paths, skipped, full }
 
-  next = arrange(next, ids, 'optimal', { gap: ADDED_GAP })
-  const mine = next.items.filter((i) => ids.includes(i.id))
-  const block = itemsBounds(mine, estimateTextMetrics)
-  const before = doc.items.length > 0 ? itemsBounds(doc.items, estimateTextMetrics) : null
-  if (block) {
-    // Right of what is there, level with its top; on an empty board, the block's middle on the origin.
-    const dx = before ? before.x + before.w + ADDED_GAP * 4 - block.x : -(block.x + block.w / 2)
-    const dy = before ? before.y - block.y : -(block.y + block.h / 2)
-    next = moveItems(next, ids, dx, dy)
+  /** The board with the first `count` of them on it: packed to the right of what is there (or centred, with the view fitted, on an empty board). */
+  const place = (count: number): BoardDoc => {
+    let next = doc
+    const ids: number[] = []
+    for (const it of take.slice(0, count)) {
+      const res = addPicture(next, { path: it.path, w: it.w, h: it.h, x: 0, y: 0 })
+      if (res.id === null) break
+      next = res.doc
+      ids.push(res.id)
+    }
+    if (ids.length === 0) return doc
+    next = arrange(next, ids, 'optimal', { gap: ADDED_GAP })
+    const mine = next.items.filter((i) => ids.includes(i.id))
+    const block = itemsBounds(mine, estimateTextMetrics)
+    const before = doc.items.length > 0 ? itemsBounds(doc.items, estimateTextMetrics) : null
+    if (block) {
+      // Right of what is there, level with its top; on an empty board, the block's middle on the origin.
+      const dx = before ? before.x + before.w + ADDED_GAP * 4 - block.x : -(block.x + block.w / 2)
+      const dy = before ? before.y - block.y : -(block.y + block.h / 2)
+      next = moveItems(next, ids, dx, dy)
+    }
+    if (doc.items.length === 0) {
+      const all = itemsBounds(next.items, estimateTextMetrics)
+      next = { ...next, view: fitView(all, { w: 1200, h: 760 }, 60) }
+    }
+    return next
   }
-  if (doc.items.length === 0) {
-    const all = itemsBounds(next.items, estimateTextMetrics)
-    next = { ...next, view: fitView(all, { w: 1200, h: 760 }, 60) }
+
+  // The size is judged on the board as it will be written (the arrangement gives every picture its coordinates): the most pictures
+  // whose board fits the budget, or is no bigger than the board is now. More pictures never make a smaller board, so a halving finds it.
+  const start = boardChars(doc)
+  const fits = (n: number): boolean => {
+    const after = boardChars(place(n))
+    return after <= BOARD_LIMITS.noteTotal || after <= start
   }
-  return { text: serializeBoard(next, raw, now), added: ids.length, paths, skipped, full }
+  let count = take.length
+  if (count > 0 && !fits(count)) {
+    let lo = 0
+    let hi = count - 1
+    while (lo < hi) {
+      const mid = Math.ceil((lo + hi) / 2)
+      if (fits(mid)) lo = mid
+      else hi = mid - 1
+    }
+    count = lo
+  }
+  const over = take.length - count
+  if (count === 0) return { text: raw, added: 0, paths: [], skipped, full, over }
+  return { text: serializeBoard(place(count), raw, now), added: count, paths: take.slice(0, count).map((it) => it.path), skipped, full, over }
 }
 
 /** The most pictures one call puts on a board (a whole folder at once would be a board nobody can read; the board holds BOARD_LIMITS.items). */

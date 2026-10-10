@@ -53,6 +53,7 @@ import {
   createRingMaterial,
   createStarMaterial,
 } from './materials'
+import { frameloopFor } from './frameloop'
 import { shiftTarget } from './follow'
 import { todayLabel } from './labels'
 import { ThumbLayer, thumbTargets, type ThumbTargets } from './thumbLayer'
@@ -90,6 +91,10 @@ export function BrainScene({ controller, maxDpr = 1.5, className }: BrainScenePr
     (cb) => controller.subscribe(cb),
     () => controller.restBehind,
   )
+  const covered = useSyncExternalStore(
+    (cb) => controller.subscribe(cb),
+    () => controller.covered,
+  )
   const [front, setFront] = useState(() => typeof document === 'undefined' || document.hasFocus())
   useEffect(() => {
     const on = () => setFront(true)
@@ -104,7 +109,7 @@ export function BrainScene({ controller, maxDpr = 1.5, className }: BrainScenePr
   return (
     <div className={className ?? 'absolute inset-0'} style={{ background: BG }}>
       <Canvas
-        frameloop={restBehind && !front ? 'never' : 'always'}
+        frameloop={frameloopFor({ covered, restBehind, front })}
         dpr={[1, maxDpr]}
         gl={{ antialias: false, powerPreference: 'high-performance', alpha: false, stencil: false }}
         camera={{ fov: FOV, near: 1, far: DEFAULT_FAR, position: HOME_POS }}

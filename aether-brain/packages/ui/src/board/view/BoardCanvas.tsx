@@ -136,8 +136,13 @@ export function BoardCanvas({ session, onContextMenu, onPointer, focusTarget }: 
       callbacks.current.onContextMenu({ x, y })
     }
 
+    // Pointers whose release was heard: the capture that follows a release is not a loss.
+    const ended = new Set<number>()
+
     const onDown = (e: PointerEvent) => {
       lastType = e.pointerType
+      // A pointer pressing again is a new one (a release whose capture never came back must not excuse a later loss).
+      ended.delete(e.pointerId)
       focusTarget.current?.focus({ preventScroll: true })
       try {
         el.setPointerCapture(e.pointerId)
@@ -173,8 +178,6 @@ export function BoardCanvas({ session, onContextMenu, onPointer, focusTarget }: 
       if (batch.length > 1) for (const ev of batch) c.pointerMove(pointerInOf(ev, r))
       else c.pointerMove(pointerInOf(e, r))
     }
-    // Pointers whose release was heard: the capture that follows a release is not a loss.
-    const ended = new Set<number>()
     const onUp = (e: PointerEvent) => {
       clearLongPress()
       ended.add(e.pointerId)

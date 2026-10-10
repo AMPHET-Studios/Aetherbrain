@@ -54,7 +54,7 @@ export function BoardView({ host, className }: { host: { path: string; load(): P
     w.mounted = (w.mounted ?? 0) + 1
     host.load().then((raw) => live && setText(raw.length + ' chars'), (e: Error) => live && setText('failed ' + e.message))
     const off = host.onExternalChange?.(() => live && setText((t) => t + ' +changed'))
-    const mine = { path: host.path, exec: () => undefined, state: () => ({ selection: [] }) as never, flush: async () => void (w.flushed = (w.flushed ?? 0) + 1) }
+    const mine = { path: host.path, exec: () => undefined, state: () => ({ selection: [] }) as never, flush: async () => ((w.flushed = (w.flushed ?? 0) + 1), true) }
     setActiveBoard(mine)
     return () => {
       live = false
@@ -417,6 +417,38 @@ describe('the Boards view in Chromium', () => {
       await page.waitForFunction(() => document.querySelector('[data-board-stub]') == null)
       await page.evaluate(() => (window as unknown as { control: { popOut(p: string): Promise<boolean> } }).control.popOut('Boards/B03.md'))
       expect(await page.evaluate(() => (window as unknown as Record<string, number>).flushed)).toBe(1)
+      expect(errors).toEqual([])
+    } finally {
+      await page.close()
+    }
+  }, 120_000)
+
+  it('keeps a board open when its note is deleted outside, says so once, and takes the note back when it returns', async (ctx) => {
+    if (!browser || !js) return ctx.skip()
+    const { page, errors } = await appPage()
+    try {
+      await page.keyboard.press('8')
+      await cards(page).first().waitFor()
+      await cards(page).nth(1).click()
+      await stub(page).waitFor()
+      await page.waitForFunction(() => /\d+ chars/.test(document.querySelector('[data-board-stub]')?.textContent ?? ''), undefined, { timeout: 10_000 })
+      const toasts = () => page.evaluate(() => (window as unknown as { app: { useAether: { getState(): { toasts: { text: string }[] } } } }).app.useAether.getState().toasts.map((t) => t.text))
+      const raw = await page.evaluate(async () => (await (window as unknown as { vault: { read(p: string): Promise<string | null> } }).vault.read('Boards/B01.md'))!)
+      // A sync tool deletes the file: the board is not dropped to the list, it stays with a notice and one message.
+      await page.evaluate(async () => (window as unknown as { vault: { remove(p: string): Promise<void> } }).vault.remove('Boards/B01.md'))
+      await page.getByRole('status').filter({ hasText: 'deleted or moved outside the app' }).waitFor()
+      await page.waitForTimeout(300)
+      expect(await stub(page).count()).toBe(1)
+      expect(await stub(page).getAttribute('data-board-stub')).toBe('Boards/B01.md')
+      expect(await state(page)).toEqual({ view: 'boards', boardPath: 'Boards/B01.md' })
+      expect((await toasts()).filter((t) => /B01/.test(t) && /deleted or moved outside the app/.test(t))).toHaveLength(1)
+      // The title and path in the header are the ones the note had.
+      await expect(page.getByRole('dialog', { name: 'Board B01' }).count()).resolves.toBe(1)
+      // The file comes back: the notice goes, and the board hears of the note again.
+      await page.evaluate(async (text) => (window as unknown as { vault: { write(p: string, c: string): Promise<void> } }).vault.write('Boards/B01.md', text), raw)
+      await page.getByRole('status').filter({ hasText: 'deleted or moved outside the app' }).waitFor({ state: 'detached' })
+      expect(await stub(page).count()).toBe(1)
+      expect(await state(page)).toEqual({ view: 'boards', boardPath: 'Boards/B01.md' })
       expect(errors).toEqual([])
     } finally {
       await page.close()

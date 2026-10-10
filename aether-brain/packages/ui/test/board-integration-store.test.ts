@@ -2,6 +2,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { MemoryVaultAdapter, boardPictures, isBoardNote, parseBoard, imageKey, type VaultFile } from '@aether/core'
 import { DesktopLikeVault, PNG, TwoRoots, assetFiles, boardRaw, freshApp, vaultFiles } from './board-integration-harness'
 
+// The first test loads the whole UI package, which takes seconds on a busy machine (the default 5 s timed out at 5.1 s and 8.1 s).
+vi.setConfig({ testTimeout: 60_000, hookTimeout: 60_000 })
+
 afterEach(() => {
   vi.useRealTimers()
   vi.unstubAllGlobals()
@@ -388,6 +391,7 @@ describe('putting pictures on a board that is not open', () => {
         const disk = (await v.read('Boards/Armour.md'))!
         await v.write('Boards/Armour.md', disk + '\nWritten by the view while open.\n')
         order.push('flushed')
+        return true
       },
     })
     const n = await app.s().addPicturesToBoard(['Art/sky.png'], 'Boards/Armour.md')

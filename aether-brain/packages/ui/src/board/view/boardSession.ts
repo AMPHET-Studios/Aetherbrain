@@ -202,6 +202,10 @@ export class BoardSession {
   /** A save has carried the text of a note still being typed: when the typing ends the committed board must be written again. */
   private draftWritten = false
   private recoveryChecked = false
+  /** What the browser's memory of this board (the camera, the copy of an unsaved board) is kept under: the host's key, else the note's path. */
+  private get stateKey(): string {
+    return this.host.stateKey ?? this.host.path
+  }
   /** What the note's reader had to say, kept until the view starts (a toast is no business of a render). */
   private pendingNotice: string | null = null
 
@@ -280,7 +284,7 @@ export class BoardSession {
     this.readText = raw
     let doc = blank ? { ...parsed.doc, title: this.host.title || parsed.doc.title } : parsed.doc
     // The camera remembered in this browser is newer than the file's: the file is only written with real changes.
-    const stored = readStoredView(this.env.storage(), this.host.path)
+    const stored = readStoredView(this.env.storage(), this.stateKey)
     if (stored) doc = { ...doc, view: stored }
     this.ctrl = new BoardController({ doc, metrics: this.env.metrics, now: () => this.env.timers.now() })
     this.phase = 'ready'
@@ -351,6 +355,8 @@ export class BoardSession {
     this.probeQueue.length = 0
     this.externalPending = false
     const saved = await flushed
+    // A view that came back while the write was out (a strict-mode remount) has the session again: nothing is let go of.
+    if (this.started) return
     this.saver.stop()
     if (!saved && this.ctrl) this.leaveUnsaved()
   }
@@ -522,8 +528,8 @@ export class BoardSession {
     // The pictures drawn this time that could not be read: only these are worth a redraw when their retry is due.
     let failedHere = 0
     const images: ImageSource = {
-      get: (path, wantPx): ImageSlot => {
-        const slot: ImageSlot = cache ? cache.get(path, wantPx) : { bitmap: null, natural: null, failed: false }
+      get: (path, wantPx, shownPx): ImageSlot => {
+        const slot: ImageSlot = cache ? cache.get(path, wantPx, shownPx) : { bitmap: null, natural: null, failed: false }
         if (slot.natural) {
           const known = this.fed.get(path)
           if (!known || known.w !== slot.natural.w || known.h !== slot.natural.h) arrived.push([path, slot.natural])
@@ -678,7 +684,7 @@ export class BoardSession {
 
   private persistView(): void {
     if (!this.ctrl) return
-    writeStoredView(this.env.storage(), this.host.path, this.ctrl.state.doc.view)
+    writeStoredView(this.env.storage(), this.stateKey, this.ctrl.state.doc.view)
   }
 
   /**
@@ -732,7 +738,7 @@ export class BoardSession {
       this.rawBase = raw
       this.readText = raw
     }
-    clearRecovery(this.env.storage(), this.host.path)
+    clearRecovery(this.env.storage(), this.stateKey)
     // Only a finished change that nothing has followed is what the file now holds; a drag in progress is not.
     if (this.gen === gen && final) c.markSaved()
   }
@@ -754,9 +760,23 @@ export class BoardSession {
 
   /* ------------------------------------------------- a board that could not be saved --- */
 
-  /** Keeps the text of a board that could not be written, for this board's path, in place of the one kept before. */
-  private keepCopy(raw: string): void {
-    writeRecovery(this.env.storage(), this.host.path, raw, this.env.now().getTime())
+  /** Keeps the text of a board that could not be written, for this board's path, in place of the one kept before. False when it could not be kept. */
+  private keepCopy(raw: string): boolean {
+    return writeRecovery(this.env.storage(), this.stateKey, raw, this.env.now().getTime())
+  }
+
+  /**
+   * The page is going away (the window closes): the write `flush` starts may never get its answer back, so a copy of a board that is not
+   * on disk yet is kept now, at once, in the browser's storage. A save that goes through takes it away again; one that did land before
+   * the page went is found equal to the note on the next opening and forgotten then.
+   */
+  stash(): void {
+    const c = this.ctrl
+    if (!c) return
+    this.commitEditing()
+    if (this.saveState === 'saved') return
+    const text = this.unsavedText()
+    if (text !== null && text !== this.readText) this.keepCopy(text)
   }
 
   /** The note's text as it would be written now: what is on screen, or null before the board is open. */
@@ -796,9 +816,11 @@ export class BoardSession {
   /** The view was left with a board that is not saved: a copy of it stays in the browser, and the user is told, not left to find out. */
   private leaveUnsaved(): void {
     const text = this.unsavedText()
-    if (text !== null) this.keepCopy(text)
+    const kept = text !== null && this.keepCopy(text)
     this.toastNow(
-      'The board was closed with changes that could not be saved. A copy was kept here: open the board again to recover it, or copy its text now.',
+      kept
+        ? 'The board was closed with changes that could not be saved. A copy was kept here: open the board again to recover it, or copy its text now.'
+        : 'The board was closed with changes that could not be saved, and no copy could be kept here. Copy its text now to keep it.',
       'error',
       this.copyAction(),
     )
@@ -809,10 +831,10 @@ export class BoardSession {
     if (this.recoveryChecked || !this.ctrl) return
     this.recoveryChecked = true
     const storage = this.env.storage()
-    const found = readRecovery(storage, this.host.path)
+    const found = readRecovery(storage, this.stateKey)
     if (!found) return
     if (sameWork(found.text, this.readText)) {
-      clearRecovery(storage, this.host.path)
+      clearRecovery(storage, this.stateKey)
       return
     }
     this.say('Changes made last time could not be saved. A copy was kept.', 'info', { label: 'Recover unsaved changes', run: () => this.recover(found.text) })

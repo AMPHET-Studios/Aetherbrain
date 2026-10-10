@@ -138,7 +138,7 @@ describe('putting pictures on a board that is not open', () => {
     const res = addPicturesToBoardText(raw, pics('a.png', 'b.png', 'b.png'), NOW)
     expect(res).toMatchObject({ added: 1, skipped: 2, paths: ['b.png'] })
     const none = addPicturesToBoardText(raw, pics('a.png'), NOW)
-    expect(none).toEqual({ text: raw, added: 0, paths: [], skipped: 1, full: 0 })
+    expect(none).toEqual({ text: raw, added: 0, paths: [], skipped: 1, full: 0, over: 0 })
   })
 
   it('puts them right of everything that is there, level with its top, and clear of it', () => {

@@ -7,7 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { newBoardNote } from '@aether/core'
-import { IPC, type AetherBridge, type BoardStatusDto, type VaultAssetDto, type VaultChangeDto } from '../src/shared/ipc.js'
+import { IPC, type AetherBridge, type BoardStatusDto, type ReadAssetResult, type VaultAssetDto, type VaultChangeDto } from '../src/shared/ipc.js'
 import { ECHO_TEXTS, MAX_NAME_TRIES, PICTURE_CHANGE_MS, boardFolderOfPath, createFloatingBoardHost, numberedName, sniffMime } from '../src/renderer/board-host.js'
 import { FsVault } from '../src/main/fsvault.js'
 import { CRASH_WINDOW_MS } from '../src/main/crash.js'
@@ -41,7 +41,7 @@ import {
 } from '../src/main/board-window.js'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
-const PRELOAD = '/app/dist/preload/preload.cjs'
+const PRELOAD = '/app/dist/preload/board-preload.cjs'
 const PAGE = path.join(path.sep === '\\' ? 'C:\\app\\dist\\renderer' : '/app/dist/renderer', 'board.html')
 const DEV = 'http://localhost:5174'
 const NOW = new Date('2026-10-09T12:00:00Z')
@@ -52,9 +52,17 @@ const OTHER = 'Boards/Rust.md'
 /* Fake windows                                                       */
 /* ------------------------------------------------------------------ */
 
+let nextContentsId = 1
 class FakeContents extends EventEmitter {
+  readonly id = nextContentsId++
   sent: [string, unknown][] = []
   destroyed = false
+  /**
+   * A page still loading has nothing to save, so the close handshake does not wait for it (FlushGate.askable): the tests of this file
+   * that are about something else close windows at once. The handshake's own tests (board-fix-desktop-close.test.ts) have their own fakes.
+   */
+  loading = true
+  crashed = false
   reloads = 0
   openHandler: ((d: { url: string }) => { action: string }) | null = null
   /** Set to make `send` throw like a webContents that went away mid-send. */
@@ -71,6 +79,12 @@ class FakeContents extends EventEmitter {
   }
   isDestroyed(): boolean {
     return this.destroyed
+  }
+  isLoading(): boolean {
+    return this.loading
+  }
+  isCrashed(): boolean {
+    return this.crashed
   }
   /** What was sent on one channel. */
   on_(channel: string): unknown[] {
@@ -124,12 +138,17 @@ class FakeWindow extends EventEmitter {
   getNormalBounds(): { x: number; y: number; width: number; height: number } {
     return { ...this.bounds }
   }
-  /** Electron: 'close' first, then the window is destroyed and 'closed' follows. */
+  /** Electron: 'close' first (a listener may prevent it), then the window is destroyed and 'closed' follows. */
   close(): void {
     if (this.gone) return
     this.closeCalls++
-    this.emit('close', { preventDefault() {} })
-    this.destroy()
+    let prevented = false
+    this.emit('close', { preventDefault: () => void (prevented = true) })
+    if (!prevented) this.destroy()
+  }
+  allWorkspaces: [boolean, unknown][] = []
+  setVisibleOnAllWorkspaces(on: boolean, options?: unknown): void {
+    this.allWorkspaces.push([on, options])
   }
   destroy(): void {
     if (this.gone) return
@@ -995,16 +1014,14 @@ describe('BoardWindowHost: closing', () => {
 })
 
 describe('BoardWindowHost: guards on the page', () => {
-  it('denies every window the page opens, and sends only web addresses to the browser', async () => {
+  it('denies every window the page opens, and sends no address to the browser (the page has no links)', async () => {
     const t = setup()
     await t.host.open(BOARD)
     const open = t.win.webContents.openHandler!
-    expect(open({ url: 'https://example.com/x' })).toEqual({ action: 'deny' })
-    expect(open({ url: 'http://example.com/y' })).toEqual({ action: 'deny' })
-    for (const url of ['file:///etc/passwd', 'javascript:alert(1)', 'data:text/html,hi', 'about:blank', 'aether-vision://app/x', 'HTTPS://upper.example', 'ftp://x.example', '']) {
+    for (const url of ['https://example.com/x', 'http://example.com/y', 'file:///etc/passwd', 'javascript:alert(1)', 'data:text/html,hi', 'about:blank', 'aether-vision://app/x', 'HTTPS://upper.example', 'ftp://x.example', '']) {
       expect(open({ url }), url).toEqual({ action: 'deny' })
     }
-    expect(t.shell.openExternal.mock.calls.map((c) => (c as unknown[])[0])).toEqual(['https://example.com/x', 'http://example.com/y'])
+    expect(t.shell.openExternal).not.toHaveBeenCalled()
   })
 
   it('stops the window navigating away from its page (a picture dropped outside the board would otherwise open in it)', async () => {
@@ -1204,7 +1221,8 @@ describe('boardHandlers', () => {
     expect(FakeWindow.made).toHaveLength(0)
     expect(await handlers.read('Boards/Gate.md')).toBeNull()
     expect(await handlers.save('Boards/Gate.md', board())).toEqual({ ok: false, reason: 'No vault is open' })
-    expect(handlers.assets()).toEqual({ assets: [], truncated: false })
+    // No finished scan: the list is not known, and says so (the window then draws no picture as missing).
+    expect(handlers.assets()).toEqual({ assets: [], truncated: true })
   })
 
   it('closes, reports, and configures through the host, whatever it is sent', async () => {
@@ -1246,9 +1264,10 @@ describe('boardHandlers', () => {
     })
     const capped = wire({ assets: [{ path: 'a.png' }], assetsTruncated: true })
     expect(capped.handlers.assets().truncated).toBe(true)
+    // Before the first scan finishes (a vault just reopened rescans for minutes): what was reported since, and "partial".
     const nothing = wire(null)
     nothing.ledger.add('x.png')
-    expect(nothing.handlers.assets()).toEqual({ assets: [{ path: 'x.png' }], truncated: false })
+    expect(nothing.handlers.assets()).toEqual({ assets: [{ path: 'x.png' }], truncated: true })
     const overflow = wire({ assets: [], assetsTruncated: false })
     for (let i = 0; i <= LEDGER_MAX; i++) overflow.ledger.add(`p/${i}.png`)
     expect(overflow.handlers.assets().truncated).toBe(true)
@@ -1279,7 +1298,7 @@ describe('main.ts wiring', () => {
       ['boardClose', 'h.close()'],
       ['boardStatus', 'h.status()'],
       ['boardConfigure', 'h.configure(patch)'],
-      ['boardSave', 'h.save(p, text)'],
+      ['boardSave', 'h.save(p, text, base)'],
       ['boardRead', 'h.read(p)'],
       ['boardAssets', 'h.assets()'],
     ] as const) {
@@ -1289,20 +1308,20 @@ describe('main.ts wiring', () => {
     }
     // Every argument arrives as `unknown`, to be checked by the handler.
     expect(wiring).not.toMatch(/\bany\b/)
-    expect(src).toMatch(/ipcMain\.handle\(IPC\.readAsset, \(_e, p: unknown\) => \(vault && typeof p === 'string' \? within\(readAssetBytes\(vault, p\)/)
+    expect(src).toMatch(/ipc\.handle\(IPC\.readAsset, \(_e, p: unknown\) => \(vault && typeof p === 'string' \? within\(readAssetBytes\(vault, p\)/)
   })
 
-  it('never makes the board window the brain window, and gives it the brain window\'s own preload and no session of its own', () => {
+  it('never makes the board window the brain window, and gives it a preload of its own (the board\'s calls) and no session of its own', () => {
     // `win` is assigned in createWindow and cleared when it closes: nowhere else.
     expect(src.match(/^\s*win = .*$/gm)?.map((l) => l.trim())).toEqual(['win = new BrowserWindow({', 'win = null'])
     const make = /function createBoardWindow[\s\S]*?\n}\n/.exec(src)?.[0] ?? ''
     expect(make).toContain('brain: () => win')
-    expect(make).toContain("preload: path.join(__dirname, '..', 'preload', 'preload.cjs')")
+    expect(make).toContain("preload: path.join(__dirname, '..', 'preload', 'board-preload.cjs')")
     expect(make).toContain("pageFile: path.join(__dirname, '..', 'renderer', 'board.html')")
     expect(make).toContain("devUrl: process.env['VITE_DEV_SERVER_URL'] ?? null")
     expect(make.replace(/\/\/.*$/gm, '')).not.toMatch(/partition|session/)
-    // The same preload file as the brain window's.
-    expect(src.match(/preload: path\.join\(__dirname, '\.\.', 'preload', 'preload\.cjs'\)/g)).toHaveLength(2)
+    // The brain window keeps the full preload, once; the board window's is another file.
+    expect(src.match(/preload: path\.join\(__dirname, '\.\.', 'preload', 'preload\.cjs'\)/g)).toHaveLength(1)
     // The board window is made by the host, never by main.
     expect(src.match(/new BrowserWindow\(/g)).toHaveLength(1)
   })
@@ -1356,8 +1375,13 @@ function fakeBridge(init: { note?: string | null; assets?: VaultAssetDto[]; trun
   const bridge = {
     platform: init.platform ?? 'linux',
     boardRead: vi.fn(async (_p: string) => st.note),
-    boardSave: vi.fn(async (_p: string, text: string) => {
+    /** Main's side of `board:save` in miniature: ONE call that compares the note with the text the save was made from, then writes. */
+    boardSave: vi.fn(async (_p: string, text: string, expectedBase?: string) => {
       if (st.saveFails) return { ok: false as const, reason: st.saveFails }
+      if (st.note === null) return { ok: false as const, reason: 'The board note is gone, or is no longer a board: nothing was saved' }
+      if (expectedBase !== undefined && st.note !== text && st.note !== expectedBase) {
+        return { ok: false as const, reason: 'The board was changed outside this window: it has been left as it is. Reload to see the change.', changed: true as const }
+      }
       st.note = text
       st.saves.push(text)
       return { ok: true as const }
@@ -1382,6 +1406,10 @@ function fakeBridge(init: { note?: string | null; assets?: VaultAssetDto[]; trun
     },
     thumbnail: vi.fn(async (_p: string, _px: number): Promise<Uint8Array | null> => new Uint8Array([1, 2])),
     readAsset: vi.fn(async (_p: string): Promise<Uint8Array | null> => new Uint8Array([3, 4])),
+    readAssetChecked: vi.fn(async (_p: string): Promise<ReadAssetResult> => ({ ok: true, bytes: new Uint8Array([3, 4]) })),
+    onBoardFlush: vi.fn((_cb: (token: number) => void) => () => undefined),
+    boardFlushed: vi.fn((_token: number) => undefined),
+    onBoardGone: vi.fn((_cb: (why: string) => void) => () => undefined),
     createAsset: vi.fn(async (p: string, data: Uint8Array) => {
       const folder = p.slice(0, p.lastIndexOf('/'))
       if (st.excluded.has(folder)) reject(`Path is excluded from the vault: ${p}`)
@@ -1446,21 +1474,30 @@ describe('floating host: the note', () => {
     expect(host.title).toBe('Gate ref')
     expect(f.calls.boardRead).toHaveBeenCalledWith(BOARD)
     f.st.note = null
-    await expect(host.load()).rejects.toThrow(/not a board, is gone, or is too long/)
+    await expect(host.load()).rejects.toThrow(/gone, or is no longer a board/)
+    // A note too long for the window rejects with its own sentence, which is not "gone".
+    f.calls.boardRead.mockRejectedValueOnce(new Error('Boards/Gate.md is 1,200,000 characters long; the board window opens notes of up to 1,000,000 characters'))
+    await expect(host.load()).rejects.toThrow(/1,200,000 characters long/)
     host.dispose()
   })
 
-  it('saves through board:save after checking the note is as it was read', async () => {
+  it('saves in ONE board:save call that carries the text the save was made from (main compares; nothing is read first)', async () => {
     const f = fakeBridge()
     const host = createFloatingBoardHost(f.bridge, BOARD)
-    await host.load()
+    const read = await host.load()
+    f.calls.boardRead.mockClear()
     const next = newBoardNote('Gate', NOW).replace('Reference board.', 'Edited.')
     await host.save(next)
-    expect(f.calls.boardSave).toHaveBeenCalledWith(BOARD, next)
+    expect(f.calls.boardSave).toHaveBeenCalledWith(BOARD, next, read)
+    expect(f.calls.boardRead).not.toHaveBeenCalled()
     expect(f.st.note).toBe(next)
+    // The view's own base wins over what the host last read: a reload that landed in between must not make a stale text look fresh.
+    f.st.note = 'what a reload read'
+    await host.save(next + 'x', 'what a reload read')
+    expect(f.calls.boardSave).toHaveBeenLastCalledWith(BOARD, next + 'x', 'what a reload read')
     // The next save starts from what this window wrote.
     await host.save(next + '\nmore\n')
-    expect(f.st.saves).toHaveLength(2)
+    expect(f.st.saves).toHaveLength(3)
     host.dispose()
   })
 
@@ -1474,10 +1511,10 @@ describe('floating host: the note', () => {
     f.st.note = theirs
     await expect(host.save(original + 'mine')).rejects.toThrow(/changed outside this window/)
     expect(heard).toHaveBeenCalledTimes(1)
-    expect(f.calls.boardSave).not.toHaveBeenCalled()
+    expect(f.st.saves).toEqual([])
     // Still refused however often the view tries.
     await expect(host.save(original + 'mine again')).rejects.toThrow(/changed outside/)
-    expect(f.calls.boardSave).not.toHaveBeenCalled()
+    expect(f.st.saves).toEqual([])
     expect(f.st.note).toBe(theirs)
     // After the view reloads (load), the new text is the base.
     await host.load()
@@ -1494,6 +1531,8 @@ describe('floating host: the note', () => {
     await expect(host.save('identical')).resolves.toBeUndefined()
     const fresh = createFloatingBoardHost(fakeBridge().bridge, BOARD)
     await expect(fresh.save(newBoardNote('Gate', NOW))).resolves.toBeUndefined()
+    // A fresh window sends no base at all: main overwrites, as board:save always did.
+    expect(fresh.save).toBeDefined()
     host.dispose()
     fresh.dispose()
   })
@@ -1552,7 +1591,7 @@ describe('floating host: the note', () => {
     host.dispose()
   })
 
-  it('remembers only the last few texts it wrote (a note can be 400,000 characters)', async () => {
+  it('remembers only the last few texts it wrote (a note can be 1,000,000 characters)', async () => {
     const f = fakeBridge()
     const host = createFloatingBoardHost(f.bridge, BOARD)
     await host.load()
@@ -1754,16 +1793,29 @@ describe('floating host: pictures', () => {
     expect(blob).toBeInstanceOf(Blob)
     expect(blob!.type).toBe('image/jpeg')
     expect(blob!.size).toBe(2)
-    f.calls.readAsset.mockClear()
+    f.calls.readAssetChecked.mockClear()
     expect(await host.pictures.original('Art/clip.mp4')).toBeNull()
     expect(await host.pictures.original('Art/notes.md')).toBeNull()
-    expect(f.calls.readAsset).not.toHaveBeenCalled()
-    f.calls.readAsset.mockResolvedValueOnce(null)
+    expect(f.calls.readAssetChecked).not.toHaveBeenCalled()
+    f.calls.readAssetChecked.mockResolvedValueOnce({ ok: true, bytes: new Uint8Array() })
     expect(await host.pictures.original('Art/a.png')).toBeNull()
-    f.calls.readAsset.mockResolvedValueOnce(new Uint8Array())
+    f.calls.readAssetChecked.mockRejectedValueOnce(new Error('ipc closed'))
     expect(await host.pictures.original('Art/a.png')).toBeNull()
-    f.calls.readAsset.mockRejectedValueOnce(new Error('too big'))
-    expect(await host.pictures.original('Art/a.png')).toBeNull()
+    host.dispose()
+  })
+
+  it('says why a picture is not served: a refusal from main rejects with its reason (the picture cache keeps the verdict)', async () => {
+    const f = fakeBridge()
+    const host = createFloatingBoardHost(f.bridge, BOARD)
+    for (const reason of ['missing', 'too-large', 'unreadable'] as const) {
+      f.calls.readAssetChecked.mockResolvedValueOnce({ ok: false, reason, detail: `because ${reason}` })
+      const err = await host.pictures.original('Art/a.png').then(
+        () => null,
+        (e: unknown) => e as Error & { reason?: string },
+      )
+      expect(err?.message, reason).toBe(`because ${reason}`)
+      expect(err?.reason, reason).toBe(reason)
+    }
     host.dispose()
   })
 
@@ -1856,7 +1908,16 @@ describe('floating host: the window\'s own controls', () => {
     const host = createFloatingBoardHost(f.bridge, BOARD, { status: STATUS })
     await host.load()
     let finish!: () => void
-    f.calls.boardRead.mockImplementationOnce(() => new Promise<string | null>((r) => (finish = () => r(f.st.note))))
+    f.calls.boardSave.mockImplementationOnce(
+      (_p: string, text: string) =>
+        new Promise<{ ok: true }>((r) => {
+          finish = () => {
+            f.st.note = text
+            f.st.saves.push(text)
+            r({ ok: true })
+          }
+        }),
+    )
     const saving = host.save('last words')
     host.window!.dock()
     await settle()
@@ -1904,7 +1965,8 @@ describe('board.ts: the brain window\'s side of the floating window', () => {
     status: vi.fn(async (): Promise<BoardStatusDto> => CLOSED),
     configure: vi.fn(async (_patch: object): Promise<BoardStatusDto> => CLOSED),
   }
-  const listeners = { state: [] as ((s: BoardStatusDto) => void)[], closed: [] as ((p: string) => void)[] }
+  const listeners = { state: [] as ((s: BoardStatusDto) => void)[], closed: [] as ((p: string) => void)[], flush: [] as ((t: number) => void)[] }
+  const acks: number[] = []
   const emitState = (s: BoardStatusDto): void => listeners.state.forEach((cb) => cb(s))
   const emitClosed = (p: string): void => listeners.closed.forEach((cb) => cb(p))
   const toasts = (): string[] => ui.useAether.getState().toasts.map((t) => t.text)
@@ -1922,6 +1984,8 @@ describe('board.ts: the brain window\'s side of the floating window', () => {
       platform: 'linux',
       onBoardState: (cb: (s: BoardStatusDto) => void) => (listeners.state.push(cb), () => undefined),
       onBoardClosed: (cb: (p: string) => void) => (listeners.closed.push(cb), () => undefined),
+      onBoardFlush: (cb: (token: number) => void) => (listeners.flush.push(cb), () => undefined),
+      boardFlushed: (token: number) => void acks.push(token),
       boardStatus: () => impl.status(),
       boardOpen: (p: string) => impl.open(p),
       boardClose: () => impl.close(),

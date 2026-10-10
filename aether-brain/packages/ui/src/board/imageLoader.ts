@@ -18,15 +18,13 @@
  */
 import { IMAGE_HEADER_BYTES, MAX_DECODE_PIXELS, readImageHeader } from '@aether/core'
 import { IMAGE_TIERS, type BoardPictureHost, type ImageFailure, type ImageTier } from './api'
-import type { BitmapLike, LoadFailure, LoadedImage } from './imageCache'
+import { FULL_MAX_PIXELS, type BitmapLike, type LoadFailure, type LoadedImage } from './imageCache'
 
 /** `createImageBitmap` as the loader uses it (a Blob in, a bitmap out), so that tests can pass a fake. */
 export type CreateBitmap = (source: Blob, options?: ImageBitmapOptions) => Promise<BitmapLike>
 
 /** The longer side of the full tier. */
 const FULL_PX = IMAGE_TIERS[2]
-/** The most pixels (width x height) the full tier holds: a picture with more is scaled down to it. A quarter of the cache's budget. */
-export const FULL_MAX_PIXELS = 32e6
 /** A picture with more pixels than this is not decoded at all (150 megapixels: 600 MB as RGBA). */
 export const MAX_LOAD_PIXELS = 150e6
 /** Pictures over this many pixels decode one at a time (the host does not make thumbnails of them either). */
@@ -48,15 +46,28 @@ function closeQuietly(b: BitmapLike | null | undefined): void {
   }
 }
 
+/** The longest a decode may hold the line: after this the next one goes (the cache gave up on that load long before). */
+const SOLO_GIVE_UP_MS = 45_000
+
 /** Decodes that must not overlap, one after another, for the whole page: every loader made by createImageLoader shares the line. */
 let solo: Promise<void> = Promise.resolve()
 function alone<T>(job: () => Promise<T>): Promise<T> {
-  const run = solo.then(job, job)
-  solo = run.then(
-    () => undefined,
-    () => undefined,
-  )
-  return run
+  let release: () => void = () => {}
+  const mine = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const turn = solo
+  solo = mine
+  return turn.then(async () => {
+    // A decode that never ends must not hold every big picture of the page back for good.
+    const timer = setTimeout(release, SOLO_GIVE_UP_MS)
+    try {
+      return await job()
+    } finally {
+      clearTimeout(timer)
+      release()
+    }
+  })
 }
 
 /** The picture's size as it is shown (upright), from the first bytes of the file; null when the header is not there or not understood. */

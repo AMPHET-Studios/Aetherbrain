@@ -1,5 +1,5 @@
 import { isImagePath, isMediaPath, mimeOf, type VaultAdapter, type VaultAsset, type VaultChange, type VaultFile, type VaultRootInfo } from '@aether/core'
-import type { AetherBridge, VaultChangeDto, VaultInfo } from '../../shared/ipc'
+import type { AetherBridge, ReadAssetFailure, VaultChangeDto, VaultInfo } from '../../shared/ipc'
 
 /** A change as main reported it (a picture's comes without content, with its size). */
 function toChange(c: VaultChangeDto): VaultChange {
@@ -213,6 +213,22 @@ export class ElectronVaultAdapter implements VaultAdapter {
       return bytes?.length ? new Blob([bytes as Uint8Array<ArrayBuffer>], { type: mimeOf(path) }) : null
     } catch {
       return null
+    }
+  }
+
+  /**
+   * `readAsset` with the reason when there is no picture: main says 'missing', 'too-large' (over 64 MB, or a header that claims more
+   * than 150 million pixels: it reads the first 256 KB and judges them) or 'unreadable'. Never rejects. For the docked board, which
+   * draws a different placeholder for each.
+   */
+  async readAssetChecked(path: string): Promise<{ blob: Blob } | { blob: null; reason: ReadAssetFailure; detail: string }> {
+    if (!isImagePath(path)) return { blob: null, reason: 'missing', detail: 'That is not a picture of the vault' }
+    try {
+      const res = await this.bridge.readAssetChecked(path)
+      if (res.ok) return res.bytes.length ? { blob: new Blob([res.bytes as Uint8Array<ArrayBuffer>], { type: mimeOf(path) }) } : { blob: null, reason: 'unreadable', detail: 'The picture file is empty' }
+      return { blob: null, reason: res.reason, detail: res.detail }
+    } catch {
+      return { blob: null, reason: 'unreadable', detail: 'The picture could not be read' }
     }
   }
 

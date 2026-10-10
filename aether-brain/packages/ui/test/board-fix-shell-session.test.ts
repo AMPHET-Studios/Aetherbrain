@@ -234,6 +234,23 @@ describe('a note being typed reaches the saver without waiting for the box to lo
     expect(noteTexts(r.host.raw).some((t) => t.length === BOARD_LIMITS.noteChars)).toBe(true)
   })
 
+  it('a picture whose shape is corrected while a new note is open never takes the empty note into the file', async () => {
+    const r = rig(RAW)
+    r.session.controller.addNoteAt({ x: 0, y: 100 })
+    r.session.controller.setNaturalSize('Boards/Gate/rust.png', 400, 100)
+    await settle()
+    await r.timers.advance(1500)
+    for (const raw of r.host.saves) expect(noteTexts(raw)).not.toContain('')
+    r.session.controller.cancelNoteEdit()
+    await settle()
+    await r.timers.advance(1500)
+    for (const raw of r.host.saves) expect(noteTexts(raw)).toEqual(['hello'])
+    // And once the board is saved for any other reason, the file has no empty note either.
+    r.session.exec('view.gray')
+    await settle()
+    expect(noteTexts(r.host.saves.at(-1)!)).toEqual(['hello'])
+  })
+
   it('a flush does not claim success while a note the budget refused is still open', async () => {
     const r = rig(RAW)
     const c = r.session.controller
@@ -313,6 +330,25 @@ describe('a save that failed is not dropped in silence', () => {
     expect(r.timers.pending).toBe(0)
   })
 
+  it('a view that comes back while the write of its stop is out (a strict-mode remount) keeps the session: no farewell, no timer let go', async () => {
+    const r = rig()
+    r.host.saveError = new Error('read-only volume')
+    r.session.exec('view.gray')
+    await settle()
+    const before = r.host.toasts.length
+    const stopping = r.session.stop()
+    r.session.start()
+    await stopping
+    expect(r.host.toasts.slice(before).some((t) => /closed with changes/.test(t.text))).toBe(false)
+    expect(readRecovery(r.env.storageMap, 'Boards/Gate.md')?.text).toContain('gray=1')
+    // The retry of the failed save is still waiting, and runs when the disk comes back.
+    expect(r.timers.pending).toBeGreaterThan(0)
+    r.host.saveError = null
+    await r.timers.advance(11_000)
+    expect(r.session.saveState).toBe('saved')
+    expect(parseBoard(r.host.saves.at(-1)!).doc.gray).toBe(true)
+  })
+
   it('a clean stop keeps nothing and says nothing; a save that goes through clears the copy', async () => {
     const r = rig()
     r.host.saveError = new Error('read-only volume')
@@ -337,8 +373,6 @@ describe('a save that failed is not dropped in silence', () => {
     await settle()
     await first.session.stop()
     // The next opening of the same board in the same browser: a new session over the note as it is on disk.
-    const second = rig(RAW === first.host.raw ? RAW : first.host.raw)
-    second.env.storageMap.map = new Map(first.env.storageMap.map)
     // A session that was loaded and then started finds the copy at start.
     const r = rig(first.host.raw, {}, { start: false })
     r.env.storageMap.map = new Map(first.env.storageMap.map)
@@ -364,14 +398,53 @@ describe('a save that failed is not dropped in silence', () => {
     expect(readRecovery(r.env.storageMap, 'Boards/Gate.md')).toBeNull()
   })
 
-  it('a storage that refuses is no failure: nothing is kept and nothing breaks', async () => {
+  it('a storage that refuses is no failure: nothing is kept, the toast says so, and the way out is the copy of the text', async () => {
     const r = rig()
     r.env.storageBroken = true
     r.host.saveError = new Error('read-only volume')
     r.session.exec('view.gray')
     await settle()
     await r.session.stop()
-    expect(r.host.toasts.at(-1)!.text).toMatch(/closed with changes that could not be saved/)
+    const last = r.host.toasts.at(-1)!
+    expect(last.text).toMatch(/closed with changes that could not be saved/)
+    // It does not promise a copy it could not keep.
+    expect(last.text).toMatch(/no copy could be kept/)
+    expect(last.text).not.toMatch(/A copy was kept here/)
+    expect(last.action?.label).toBe('Copy board text')
+  })
+
+  it('the page going away keeps a copy of what is not on disk before the write is answered; what did land is forgotten at the next opening', async () => {
+    const r = rig()
+    // A write that never answers: the window is gone before it does.
+    r.host.saveGate = () => new Promise<void>(() => undefined)
+    r.session.exec('view.gray')
+    await settle()
+    expect(r.session.saveState).toBe('saving')
+    r.session.stash()
+    const kept = readRecovery(r.env.storageMap, 'Boards/Gate.md')
+    expect(kept?.text).toContain('gray=1')
+    // The next opening finds the note as it was (the write never landed): the copy is offered.
+    const again = rig(RAW, {}, { start: false })
+    again.env.storageMap.map = new Map(r.env.storageMap.map)
+    again.session.start()
+    expect(again.host.toasts.some((t) => t.action?.label === 'Recover unsaved changes')).toBe(true)
+    // Or the write did land in main although its answer never came back: the copy is the note, and is forgotten without a word.
+    const landed = rig(kept!.text, {}, { start: false })
+    landed.env.storageMap.map = new Map(r.env.storageMap.map)
+    landed.session.start()
+    expect(landed.host.toasts.some((t) => t.action?.label === 'Recover unsaved changes')).toBe(false)
+    expect(readRecovery(landed.env.storageMap, 'Boards/Gate.md')).toBeNull()
+  })
+
+  it('stash keeps nothing for a board that is saved, and commits a note being typed before it copies', async () => {
+    const r = rig()
+    r.session.stash()
+    expect(readRecovery(r.env.storageMap, 'Boards/Gate.md')).toBeNull()
+    r.host.saveGate = () => new Promise<void>(() => undefined)
+    const id = r.session.controller.addNoteAt({ x: 0, y: 100 })
+    r.session.registerEditor(id, () => 'typed when the window went')
+    r.session.stash()
+    expect(readRecovery(r.env.storageMap, 'Boards/Gate.md')?.text).toContain('» typed when the window went')
   })
 
   it('the stored copy: round trip, a bad value is none, a copy that is too long is not kept', () => {

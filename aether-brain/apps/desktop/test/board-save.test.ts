@@ -200,6 +200,8 @@ describe('isBoardHead', () => {
       'ls: \u2028', 'cr: a\rb', 'tags:', '  - a', '  - "b"', '- b', 'meta:', '  type: board', '  a: 1', "s: 'it''s'", 'long: ' + 'y'.repeat(100),
       `${'k'.repeat(600)}: v`, 'a: [x, "]", y]', 'a: ["x', 'a: [x] y', 'a: [x]#y', 'a: [x] #y', 'a: [,]', 'a: [a,,b]', 'a: [{x}]', 'a: [[x]]', 'a: [- x]',
       'a\rb: c', '# remark\rtype: note', 'k: "x\ry"', 'k: x\r', 'k:\r', '\ufeffkey: v', 'k: \ufeff', 'x: |\r', 'type: board\u2028', 'type: board\u0085',
+      // White space YAML does not trim but JavaScript's trim() does (desktop-m1): no-break, narrow no-break, ideographic, em, a line of only such.
+      'type: board\u00a0', 'type: board\u202f', 'type:\u00a0board', 'type: \u00a0board', 'type: board \u3000', 'type: board\u2003', '\u00a0', '\u202f', 'type: "board"\u00a0', 'tags: [a]\u00a0',
     ]
     let readable = 0
     let boards = 0
@@ -334,15 +336,15 @@ describe('checkBoard and validateBoardSave', () => {
     expect(await fs.readFile(path.join(outside, 'Secret.md'), 'utf8')).toBe(board('Secret'))
   })
 
-  it('takes a save of at most 400,000 characters whose own head is a board', async () => {
+  it('takes a save of at most 1,000,000 characters (the whole note) whose own head is a board', async () => {
     const v = vault()
     const pad = (n: number): string => board() + 'x'.repeat(n - board().length)
-    expect(MAX_BOARD_TEXT).toBe(400_000)
+    expect(MAX_BOARD_TEXT).toBe(1_000_000)
     expect(pad(MAX_BOARD_TEXT).length).toBe(MAX_BOARD_TEXT)
     await expect(validateBoardSave({ path: 'Boards/Gate.md', text: pad(MAX_BOARD_TEXT) }, v)).resolves.toEqual({ ok: true })
     const over = await validateBoardSave({ path: 'Boards/Gate.md', text: pad(MAX_BOARD_TEXT + 1) }, v)
     expect(over.ok).toBe(false)
-    expect(over.ok ? '' : over.reason).toMatch(/longer than 400,000 characters/)
+    expect(over.ok ? '' : over.reason).toMatch(/longer than 1,000,000 characters/)
     const refused: [string, unknown][] = [
       ['a note that lost its frontmatter', '# Gate\n\n## Board\n- view x=0 y=0 zoom=1\n'],
       ['a note of another type', PLAIN],
@@ -514,7 +516,7 @@ describe('saveBoard', () => {
     const win = await fs.readFile(path.join(here, '..', 'src', 'main', 'board-window.ts'), 'utf8')
     const wiring = /function registerBoardIpc[\s\S]*?\n}\n/.exec(src)?.[0] ?? ''
     expect(wiring).toContain('IPC.boardSave')
-    expect(wiring).toContain('h.save(p, text)')
+    expect(wiring).toContain('h.save(p, text, base)')
     expect(wiring).toContain('h.read(p)')
     expect(wiring).not.toMatch(/noteSelfWrite|readNote|writeNote|createNote|vault\.write/)
     // The handlers get no watcher to announce anything to, and go through board-save.ts for every vault access.
@@ -546,17 +548,17 @@ describe('readBoard', () => {
     for (const p of nothing) expect(await readBoard(p, v), String(p)).toBeNull()
   })
 
-  it('does not serve a board the window could not save back: over 400,000 characters, or too many bytes to be that few', async () => {
+  it('does not serve a board the window could not save back: over 1,000,000 characters, or too many bytes to be that few (it says so, it is not "gone")', async () => {
     const v = vault()
     const pad = (n: number): string => board() + 'x'.repeat(n - board().length)
     await put('Boards/Exact.md', pad(MAX_BOARD_TEXT))
     expect((await readBoard('Boards/Exact.md', v))?.length).toBe(MAX_BOARD_TEXT)
     await put('Boards/Over.md', pad(MAX_BOARD_TEXT + 1))
-    expect(await readBoard('Boards/Over.md', v)).toBeNull()
+    await expect(readBoard('Boards/Over.md', v)).rejects.toThrow(/1,000,001 characters long.*up to 1,000,000/)
     // Far more bytes than 4 per character of the cap: refused from its size, without being read.
     await put('Boards/Huge.md', Buffer.concat([Buffer.from(board()), Buffer.alloc(MAX_BOARD_TEXT * 4 + 10, 0x78)]))
     const spy = vi.spyOn(v, 'read')
-    expect(await readBoard('Boards/Huge.md', v)).toBeNull()
+    await expect(readBoard('Boards/Huge.md', v)).rejects.toThrow(/over 1,000,000 characters long/)
     expect(spy).not.toHaveBeenCalled()
   })
 

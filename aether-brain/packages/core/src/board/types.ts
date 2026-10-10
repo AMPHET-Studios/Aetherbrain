@@ -9,7 +9,11 @@
 
 export const BOARD_VERSION = 1
 
-/** Hard limits: a board that passes them is cut on load (with a warning) and refuses more. Nothing a view draws is unbounded. */
+/**
+ * Hard limits. Nothing a view draws is unbounded. Items past `items` stay in the file as lines the board keeps (with a warning); a note
+ * or a stroke longer than the FILE ceilings is cut on load (with a warning); the size of the board section is a budget (`noteTotal`):
+ * reading a board over it warns, growing a board past it is refused, shrinking one is always allowed.
+ */
 export const BOARD_LIMITS = {
   /** Items on one board (pictures, notes and marks together). */
   items: 1500,

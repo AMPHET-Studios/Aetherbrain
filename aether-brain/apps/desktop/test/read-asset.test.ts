@@ -3,7 +3,7 @@ import { promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { FsVault } from '../src/main/fsvault.js'
-import { READ_ASSET_MAX_BYTES, readAssetBytes, type AssetReader } from '../src/main/read-asset.js'
+import { READ_ASSET_MAX_BYTES, readAssetBytes, readAssetChecked, type AssetReader } from '../src/main/read-asset.js'
 import { ElectronVaultAdapter } from '../src/renderer/vault/electron.js'
 import type { AetherBridge, VaultInfo } from '../src/shared/ipc.js'
 
@@ -164,16 +164,17 @@ describe('readAssetBytes: a picture of the vault, whole and undecoded', () => {
     expect(await readAssetBytes({ assetAbs: () => null }, 'plain.png')).toBeNull()
   })
 
-  it('does not look inside the bytes: no signature check, no size check, nothing decoded', async () => {
+  it('checks no signature and decodes nothing, but reads the header: a file that is not a picture is the decoder\'s to refuse, one that claims too many pixels is refused here', async () => {
     // Not a real picture at all: main hands it over and the renderer's decoder refuses it.
     await put('Art/notreally.png', 'this is text, not a png')
-    // A header that claims 60000 x 60000 pixels (the thumbnail path refuses it; reading does not decode, so it must not look).
+    // A header that claims 60000 x 60000 pixels (3.6 billion): over the cap, refused before the rest of the file is read.
     const huge = pngBytes(0)
     const claim = Uint8Array.from([...huge, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52, 0, 0, 0xea, 0x60, 0, 0, 0xea, 0x60, 8, 6, 0, 0, 0])
     await put('Art/claims-huge.png', claim)
     const v = new FsVault([tmp])
     expect(await readAssetBytes(v, 'Art/notreally.png')).toEqual(new TextEncoder().encode('this is text, not a png'))
-    expect(await readAssetBytes(v, 'Art/claims-huge.png')).toEqual(claim)
+    expect(await readAssetBytes(v, 'Art/claims-huge.png')).toBeNull()
+    expect(await readAssetChecked(v, 'Art/claims-huge.png')).toMatchObject({ ok: false, reason: 'too-large' })
   })
 })
 

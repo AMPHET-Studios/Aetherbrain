@@ -1,4 +1,4 @@
-import { folderPathOf, imageFileName, imagePathOf, isFolderId, isImageId, type NoteId } from '@aether/core'
+import { folderPathOf, imageFileName, imagePathOf, isFolderId, isImageId, isVideoPath, type NoteId } from '@aether/core'
 import { PICTURE_SIZES, PICTURE_SIZE_NAMES } from '@aether/graph'
 import { getActiveBoard } from './board/active'
 import { BOARD_COMMANDS } from './board/commands'
@@ -32,6 +32,12 @@ export function selectedFolder(s: AetherState): string | null {
 /** Vault path of the selected picture, or null when the selection is not a picture. */
 export function selectedImage(s: AetherState): string | null {
   return s.selectedId && isImageId(s.selectedId) ? imagePathOf(s.selectedId) : null
+}
+
+/** Vault path of the selected picture when a board can take it (a video is shown in the brain, never put on a board), else null. */
+function selectedBoardPicture(s: AetherState): string | null {
+  const path = selectedImage(s)
+  return path !== null && !isVideoPath(path) ? path : null
 }
 
 /** The selected folder when it is a folder on disk (not the vault root that joins several drives). */
@@ -214,16 +220,16 @@ export const COMMANDS: Command[] = [
     title: 'Boards: add the selected picture to the last board',
     hint: 'the board open or last open',
     group: 'view',
-    when: (s) => writable(s) && selectedImage(s) !== null && targetBoard(s) !== null,
-    run: (s) => s.addPicturesToBoard([selectedImage(s)!]),
+    when: (s) => writable(s) && selectedBoardPicture(s) !== null && targetBoard(s) !== null,
+    run: (s) => s.addPicturesToBoard([selectedBoardPicture(s)!]),
   },
   {
     id: 'boards-add-picture-new',
     title: 'Boards: add the selected picture to a new board',
     group: 'view',
-    when: (s) => writable(s) && selectedImage(s) !== null,
+    when: (s) => writable(s) && selectedBoardPicture(s) !== null,
     run: async (s) => {
-      const path = selectedImage(s)!
+      const path = selectedBoardPicture(s)!
       const board = await s.newBoard(`${imageFileName(path).replace(/\.[^.]+$/, '')} reference`, { open: false })
       if (board) await s.addPicturesToBoard([path], board)
     },

@@ -13,9 +13,16 @@ import type { BoardDoc, BoardItem, Rect, TextMetrics, Vec2, VaultAsset } from '@
 
 /** Where a board's pictures come from and go to. Implemented over the store (docked) or the bridge (floating window). */
 export interface BoardPictureHost {
-  /** A PNG or JPEG of at most `px` on its longer side (never enlarged), or null when there is none. */
+  /**
+   * A PNG or JPEG of at most `px` on its longer side (never enlarged), or null when there is none (a picture over the host's own
+   * pixel cap has none: the loader then makes the preview from `original`). A host that knows why it cannot answer may REJECT with an
+   * error carrying `reason: ImageFailure` ('missing', 'too-large': the placeholder then says so); any other rejection is 'unreadable'.
+   */
   preview(path: string, px: number): Promise<Blob | null>
-  /** The picture file itself (at most 64 MB), or null when it cannot be read. */
+  /**
+   * The picture file itself (at most 64 MB), or null when it cannot be read. May reject with a `reason` like `preview`: a file over the
+   * host's byte limit is 'too-large'. The loader reads the pixel size from the first bytes and decodes nothing above 150 megapixels.
+   */
   original(path: string): Promise<Blob | null>
   /**
    * Writes pictures into this board's own folder (create-only, a taken name gets " 2"). Resolves with the vault path of each, in the
@@ -60,6 +67,11 @@ export interface BoardHost {
   readonly path: string
   /** The board's title. */
   readonly title: string
+  /**
+   * What tells this board from a board of the same path in another vault, for what the browser remembers about it (the camera, the copy
+   * of a board that could not be saved): the vault's location and the path. Defaults to `path`.
+   */
+  readonly stateKey?: string
   /** Reads the whole note (the raw text, frontmatter included). */
   load(): Promise<string>
   /**

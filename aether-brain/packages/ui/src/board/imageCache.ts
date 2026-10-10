@@ -95,7 +95,11 @@ const MAX_ENTRIES = 4096
  */
 const TIER_SLACK = 1.25
 /** What a bitmap of each tier is guessed to hold of a picture whose size is not known yet: a 4:3 photo, the full tier a 16 megapixel one. */
-const GUESS_PIXELS = [256 * 192, 1024 * 768, 16e6] as const
+const GUESS_PIXELS: readonly number[] = [256 * 192, 1024 * 768, 16e6]
+const GUESS_TOP = 16e6
+
+/** The reasons a picture can have nothing to draw (a loader that says anything else is taken to mean 'unreadable'). */
+const FAILURES: readonly ImageFailure[] = ['missing', 'too-large', 'unreadable']
 
 /** Index into IMAGE_TIERS. */
 type Idx = number
@@ -251,12 +255,12 @@ function costAt(e: Entry, idx: Idx): number {
       if (o) shape = { w: o.bitmap.width, h: o.bitmap.height }
     }
   }
-  if (!shape) return GUESS_PIXELS[idx] ?? GUESS_PIXELS[TOP]
+  if (!shape) return GUESS_PIXELS[idx] ?? GUESS_TOP
   const long = Math.max(shape.w, shape.h)
   // The size of the picture itself is known only when `natural` is: a held bitmap's shape says nothing about how big the picture is.
   let s = e.natural ? Math.min(1, t / long) : t / long
   if (idx === TOP) {
-    if (!e.natural) return GUESS_PIXELS[TOP]
+    if (!e.natural) return GUESS_TOP
     s = Math.min(s, Math.sqrt(FULL_MAX_PIXELS / (shape.w * shape.h)))
   }
   return Math.max(1, Math.round(shape.w * s)) * Math.max(1, Math.round(shape.h * s))
@@ -535,8 +539,9 @@ export class ImageCache implements ImageSource {
       this.pump()
       return
     }
-    if (img && usable(img.bitmap)) {
-      this.adopt(e, idx, img)
+    const bitmap = img?.bitmap
+    if (img && usable(bitmap)) {
+      this.adopt(e, idx, bitmap, img.natural)
       // What this picture now wants may be something else (its size was learned): so may what waits for it.
       const waiting = this.queue.get(e.path)
       if (waiting) this.request(e, wantedIdx(e.want, e.natural), waiting.need)
@@ -544,7 +549,7 @@ export class ImageCache implements ImageSource {
     } else {
       closeQuietly(img?.bitmap)
       const first = !hasFailure(e) && bestHeld(e, 0) === null
-      const kind: ImageFailure = img?.failure ?? 'unreadable'
+      const kind: ImageFailure = img?.failure && FAILURES.includes(img.failure) ? img.failure : 'unreadable'
       const prev = e.fail[idx]
       const fail: Fail = { at: this.now(), n: (prev?.n ?? 0) + 1, kind, permanent: kind === 'too-large' }
       // A verdict on the file holds for every tier of it.
@@ -558,14 +563,13 @@ export class ImageCache implements ImageSource {
     this.schedule()
   }
 
-  private adopt(e: Entry, idx: Idx, img: LoadedImage): void {
-    const bitmap = img.bitmap
+  private adopt(e: Entry, idx: Idx, bitmap: BitmapLike, natural: { w: number; h: number } | undefined): void {
     this.drop(e, idx)
     const px = bitmap.width * bitmap.height
     e.held[idx] = { bitmap, px, long: Math.max(bitmap.width, bitmap.height) }
     this.pixels += px
     e.fail[idx] = null
-    const n = img.natural
+    const n = natural
     if (validSize(n)) {
       e.natural = Object.freeze({ w: n.w, h: n.h })
     } else if (Math.max(bitmap.width, bitmap.height) < tierAt(idx)) {

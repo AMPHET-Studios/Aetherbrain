@@ -1,28 +1,33 @@
 /**
  * The reference board's floating window: one window, opened on a board note, that stays on top of the user's painting program, can
- * be dimmed (Windows, macOS), and remembers where it was. It shows the same app (`board.html`, the board view only) with the same
- * preload and the default session as the brain window, so it has the brain window's security: no network in production, every
- * permission refused. It never opens a vault: it reads and saves the one board note through `board:read` / `board:save` (see
- * board-save.ts) and its pictures through the bridge's picture calls.
+ * be dimmed (Windows, macOS), and remembers where it was. It shows `board.html` (the board view only) with a preload of its own
+ * (board-preload.cts: the board calls, the pictures, nothing else) in the default session as the brain window, so it has the brain
+ * window's network block and permission refusals. It never opens a vault: it reads and saves the one board note through `board:read`
+ * / `board:save` (see board-save.ts) and its pictures through the picture calls; main answers it no other channel (BOARD_PAGE_CHANNELS,
+ * guardIpc).
  *
  * The window belongs to the brain window: it closes with it, and tells it (`board:closed`, with the board's path) when it closes
  * or moves on to another board, so the docked view takes the board back. Both windows hear `board:state` whenever the window
  * opens, closes or changes its settings.
+ *
+ * Nothing the user did is lost to a close. A window's first `close` is held while its page is asked to save what it has not saved
+ * (FlushGate: `board:flush`, answered with `board:flushed`, 1.5 s at most; a page that died or does not answer holds nothing), then
+ * the close goes through. The same wait precedes moving the window to another board, a vault switch and quitting.
  *
  * No electron import at runtime (types only), like ForgeHost and Thumbnailer: main.ts hands in the Electron modules, and the checks
  * (settings, bounds, options, navigation) are pure functions.
  */
 import type { BrowserWindow, BrowserWindowConstructorOptions, Dialog, Display, Screen, Shell, WebContents } from 'electron'
 import { IPC, type AssetListDto, type BoardConfigureDto, type BoardSaveResult, type BoardStatusDto, type VaultAssetDto, type VaultChangeDto } from '../shared/ipc.js'
-import { checkBoard, readBoard, saveBoard, type BoardVault } from './board-save.js'
-import { CRASH_WINDOW_MS, crashMessage, shouldReload } from './crash.js'
+import { boardNoteVerdict, checkBoard, readBoard, saveBoard, type BoardVault } from './board-save.js'
+import { BOARD_WINDOW_NAME, CRASH_WINDOW_MS, crashMessage, shouldReload } from './crash.js'
 import { forgeNavigation } from './forge.js'
 import { isImageName } from './fsvault.js'
 
 export const BOARD_TITLE = 'Aether Brain — Board'
-/** Smallest window: a board you cannot see is no board. */
-export const BOARD_MIN_WIDTH = 320
-export const BOARD_MIN_HEIGHT = 240
+/** Smallest window: a board you cannot see is no board (at 320 x 240 the toolbar wrapped to three rows and left 72 px of canvas). */
+export const BOARD_MIN_WIDTH = 480
+export const BOARD_MIN_HEIGHT = 320
 /** The size of the first window (a landscape sheet, like most pictures), before the user has resized it. */
 export const BOARD_DEFAULT_WIDTH = 640
 export const BOARD_DEFAULT_HEIGHT = 480
@@ -35,6 +40,11 @@ export const BOARD_MIN_OPACITY = 0.2
 export const BOARD_SAVE_MS = 500
 /** A window that has not said it is ready to show after this long (ms) is shown anyway (the brain window does the same). */
 export const BOARD_REVEAL_MS = 1200
+/** The longest a close, a quit or a move waits for a page to save what it has (ms). */
+export const FLUSH_WAIT_MS = 1500
+/** A page that navigated away is brought back at most this many times within NAV_FIX_WINDOW_MS (ms). */
+const NAV_FIXES = 3
+const NAV_FIX_WINDOW_MS = 10_000
 /** Longest board path taken from the bridge. */
 const MAX_PATH = 4096
 
@@ -114,7 +124,7 @@ function overlap(a: Area, b: Area): number {
 }
 
 /**
- * Where the window goes: wholly inside the work area of one display, and at least 320 × 240. The display is the one the saved
+ * Where the window goes: wholly inside the work area of one display, and at least 480 × 320. The display is the one the saved
  * window overlaps most; a window saved off every display (a monitor that is gone) is centred on the first one, and so is one
  * that was never placed. A saved size larger than the display is cut to it. `areas` lists the displays' work areas, the primary
  * first. With no display at all the saved numbers come back as they are.
@@ -153,8 +163,8 @@ export function clampBoardBounds(saved: { x?: number; y?: number; width: number;
 
 /**
  * The options of the window: placed by `clampBoardBounds`, a normal frame, on top and dimmed as the settings say (dimmed only where
- * the platform can), hidden until it is ready, and the brain window's web preferences: the same preload, no partition (the default
- * session, so its network block and permission refusals apply), sandboxed and isolated, no Node.
+ * the platform can), hidden until it is ready, and the brain window's web preferences but for the preload (the board's own): no
+ * partition (the default session, so its network block and permission refusals apply), sandboxed and isolated, no Node.
  */
 export function boardWindowOptions(
   settings: BoardSettings,
@@ -227,6 +237,189 @@ export function cleanConfigure(raw: unknown, platform: NodeJS.Platform): BoardCo
   const opacity = clampOpacity(r['opacity'])
   if (opacity !== null && supportsOpacity(platform)) out.opacity = opacity
   return out
+}
+
+/* ------------------------------------------------------------------ */
+/* Who may call what                                                  */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The only channels main answers to the board window's page: the board note (read, save, assets), the window's own settings and
+ * close, the pictures (previews, whole pictures, new pictures, open and show in the folder), the clipboard, and the answer to a flush.
+ * Everything else (the vault's notes, folders and roots, the chat, the librarian, the AI link, the Forge, opening another board)
+ * is refused to that window whatever its preload exposes: a page that was taken over by a picture that breaks the decoder
+ * can still send any channel name by hand, and this list is what stops it. board-preload.cts exposes exactly these (a test pins
+ * the two lists together).
+ */
+export const BOARD_PAGE_CHANNELS: ReadonlySet<string> = new Set<string>([
+  IPC.boardClose,
+  IPC.boardStatus,
+  IPC.boardConfigure,
+  IPC.boardSave,
+  IPC.boardRead,
+  IPC.boardAssets,
+  IPC.boardFlushed,
+  IPC.thumb,
+  IPC.readAsset,
+  IPC.readAssetChecked,
+  IPC.createAsset,
+  IPC.openAsset,
+  IPC.reveal,
+  IPC.copy,
+])
+
+/** Whether a message on `channel` from a page may be answered: the brain window (and every other sender) keeps everything, the board window gets its own list. */
+export function channelAllowed(fromBoardWindow: boolean, channel: string): boolean {
+  return !fromBoardWindow || BOARD_PAGE_CHANNELS.has(channel)
+}
+
+/** What guardIpc needs of Electron's `ipcMain` and of the sender of a message. */
+export interface IpcLike {
+  handle(channel: string, listener: (event: { sender: WebContents }, ...args: unknown[]) => unknown): void
+  on(channel: string, listener: (event: { sender: WebContents }, ...args: unknown[]) => void): void
+}
+
+/**
+ * `ipcMain` with the check in front of every handler: a message from the board window's page (`isBoardPage`) on a channel outside
+ * BOARD_PAGE_CHANNELS is refused (a `handle` call rejects with the reason, a `send` is dropped) before the handler runs. main.ts
+ * registers every channel through this and through nothing else.
+ */
+export function guardIpc(ipc: IpcLike, isBoardPage: (sender: WebContents) => boolean): IpcLike {
+  return {
+    handle(channel, listener) {
+      ipc.handle(channel, (e, ...args) => {
+        if (!channelAllowed(isBoardPage(e.sender), channel)) throw new Error(`The board window may not use ${channel}`)
+        return listener(e, ...args)
+      })
+    },
+    on(channel, listener) {
+      ipc.on(channel, (e, ...args) => {
+        if (channelAllowed(isBoardPage(e.sender), channel)) listener(e, ...args)
+      })
+    },
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Saving before a window goes                                        */
+/* ------------------------------------------------------------------ */
+
+/** What the gate needs of a window's page (an Electron WebContents has all of it; `isCrashed` and `isLoading` may be absent). */
+export interface FlushPage {
+  readonly id: number
+  isDestroyed(): boolean
+  isCrashed?(): boolean
+  isLoading?(): boolean
+  send(channel: string, ...args: unknown[]): void
+  once(event: 'destroyed' | 'render-process-gone', listener: () => void): unknown
+  off?(event: 'destroyed' | 'render-process-gone', listener: () => void): unknown
+}
+
+/** What the gate needs of a window. */
+export interface GatedWindow {
+  isDestroyed(): boolean
+  readonly webContents: FlushPage
+  on(event: 'close', listener: (event: { preventDefault(): void }) => void): unknown
+  close(): void
+}
+
+/**
+ * The close handshake. A page that has something it has not saved (a note being typed commits only when its box loses the focus) cannot
+ * be trusted to finish a save while it is torn down: the write is a message to main and its answer, and a page that is gone sends
+ * nothing more. So a window's first `close` is held (`guardClose`): main sends the page `board:flush` with a token, the page saves
+ * (`await getActiveBoard()?.flush()`) and answers `board:flushed` with the token, and only then is the close let through. It waits
+ * `ms` (1.5 s) at most, and not at all for a page that is gone, crashed or still loading, so a broken page never holds a window
+ * or the app.
+ */
+export class FlushGate {
+  private seq = 0
+  private waiting = new Map<number, { page: number; done: (ok: boolean) => void }>()
+  /** Closes pass until this time (ms): the app is quitting and has just had every page save. */
+  private openUntil = 0
+
+  constructor(
+    private readonly ms: number = FLUSH_WAIT_MS,
+    private readonly clock: () => number = Date.now,
+  ) {}
+
+  /** Whether a page can be asked to save at all. */
+  askable(page: FlushPage): boolean {
+    try {
+      return !page.isDestroyed() && !(page.isCrashed?.() ?? false) && !(page.isLoading?.() ?? false)
+    } catch {
+      return false
+    }
+  }
+
+  /** Ask `page` to save; resolves true when it said it had, false when it could not be asked, died, or did not answer in time. */
+  ask(page: FlushPage): Promise<boolean> {
+    if (!this.askable(page)) return Promise.resolve(false)
+    const token = ++this.seq
+    return new Promise<boolean>((resolve) => {
+      const gone = (): void => finish(false)
+      const timer = setTimeout(() => finish(false), this.ms)
+      const finish = (ok: boolean): void => {
+        clearTimeout(timer)
+        this.waiting.delete(token)
+        try {
+          page.off?.('destroyed', gone)
+          page.off?.('render-process-gone', gone)
+        } catch {
+          /* the page is gone */
+        }
+        resolve(ok)
+      }
+      this.waiting.set(token, { page: page.id, done: finish })
+      try {
+        page.once('destroyed', gone)
+        page.once('render-process-gone', gone)
+        page.send(IPC.boardFlush, token)
+      } catch {
+        finish(false)
+      }
+    })
+  }
+
+  /** `board:flushed`: the page `senderId` saved. A token that is not waiting, or that another page was asked, does nothing. */
+  ack(senderId: number, token: unknown): void {
+    const wait = typeof token === 'number' ? this.waiting.get(token) : undefined
+    if (wait && wait.page === senderId) wait.done(true)
+  }
+
+  /** Let closes through for the next few seconds (every page was just asked to save, because the app is quitting). */
+  openFor(ms: number): void {
+    this.openUntil = this.clock() + ms
+  }
+
+  private open(): boolean {
+    return this.clock() < this.openUntil
+  }
+
+  /**
+   * Hold the first `close` of `win` until its page has saved; the close that follows goes through. A second close while it waits
+   * changes nothing. `before` runs on every close event (the board window keeps its place there).
+   */
+  guardClose(win: GatedWindow, before?: () => void): void {
+    let waiting = false
+    // Set when the page has saved and the window is closed again: that close (and only that one) goes through.
+    let released = false
+    win.on('close', (e) => {
+      before?.()
+      if (released) {
+        released = false
+        return
+      }
+      if (this.open() || !this.askable(win.webContents)) return
+      e.preventDefault()
+      if (waiting) return
+      waiting = true
+      void this.ask(win.webContents).then(() => {
+        waiting = false
+        released = true
+        if (!win.isDestroyed()) win.close()
+      })
+    })
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -317,10 +510,11 @@ export interface BoardIpcContext {
 /** The handler behind each `board:*` channel. Every argument arrives as `unknown`: it came over IPC and is checked here. */
 export interface BoardHandlers {
   open(path: unknown): Promise<BoardStatusDto>
-  close(): void
+  /** Resolves once the window is gone (its page has saved first). */
+  close(): Promise<void>
   status(): BoardStatusDto
   configure(patch: unknown): BoardStatusDto
-  save(path: unknown, text: unknown): Promise<BoardSaveResult>
+  save(path: unknown, text: unknown, expectedBase?: unknown): Promise<BoardSaveResult>
   read(path: unknown): Promise<string | null>
   assets(): AssetListDto
 }
@@ -328,14 +522,15 @@ export interface BoardHandlers {
 /**
  * The handlers of `board:open`, `:close`, `:status`, `:configure`, `:save`, `:read` and `:assets`, as plain functions (main.ts only
  * wires them to the channels, so what they accept is tested without Electron). They are given no file watcher on purpose: a save
- * must be reported by it like any outside edit, and nothing here can tell it otherwise. The floating page has the whole bridge but
- * writes one thing, an existing board note (board-save.ts); it opens boards, never notes.
+ * must be reported by it like any outside edit, and nothing here can tell it otherwise. The floating page's one write to a note is
+ * `save`, over an existing board note (board-save.ts); it opens boards, never notes.
  */
 export function boardHandlers(ctx: BoardIpcContext): BoardHandlers {
   return {
     async open(raw) {
       const path = cleanBoardPath(raw)
-      // The window is made only for a board note that is there: it would otherwise be an empty page with a path.
+      // The window is made only for a board note that is there and short enough to be read in it: it would otherwise be an empty
+      // page with a path, or a window with an error and one button.
       const found = await checkBoard(path, ctx.vault())
       if (!found.ok) throw new Error(found.reason)
       return ctx.host.open(path)
@@ -343,13 +538,15 @@ export function boardHandlers(ctx: BoardIpcContext): BoardHandlers {
     close: () => ctx.host.close(),
     status: () => ctx.host.status(),
     configure: (patch) => ctx.host.configure(patch),
-    save: (path, text) => saveBoard({ path, text }, ctx.vault()),
+    save: (path, text, expectedBase) => saveBoard({ path, text, ...(expectedBase !== undefined ? { expectedBase } : {}) }, ctx.vault()),
     read: (path) => readBoard(path, ctx.vault()),
     // The last scan's list plus what changed since: `listAssets` is the scan's snapshot, and a picture dropped into a board a minute
-    // ago would be drawn in the window as a missing one. No stat: the board needs names, and the list can be 200,000 long.
+    // ago would be drawn in the window as a missing one. No stat: the board needs names, and the list can be 200,000 long. While
+    // there is no finished scan (a vault just reopened rescans for minutes) the list is not known: it says it is partial, and the
+    // window then draws no picture as missing.
     assets() {
       const scan = ctx.scan()
-      return { assets: ctx.ledger.list(scan?.assets ?? []), truncated: (scan?.assetsTruncated ?? false) || ctx.ledger.overflowed }
+      return { assets: ctx.ledger.list(scan?.assets ?? []), truncated: scan === null || scan.assetsTruncated || ctx.ledger.overflowed }
     },
   }
 }
@@ -373,13 +570,15 @@ export interface BoardHostOptions {
   save(settings: BoardSettings): Promise<void> | void
   /** The brain window, which the board window belongs to; null when closed. */
   brain(): BrowserWindow | null
-  /** Absolute path of the built preload.cjs: the brain window's own. */
+  /** Absolute path of the built board-preload.cjs: the board page's own bridge (not the brain window's). */
   preload: string
   /** The Vite dev server's address in development (VITE_DEV_SERVER_URL), else null. */
   devUrl?: string | null
   /** Absolute path of the built board.html (dist/renderer/board.html), loaded when there is no dev server. */
   pageFile: string
   platform?: NodeJS.Platform
+  /** The close handshake, shared with main.ts (which also guards the brain window and the quit with it); the host makes its own when none is given. */
+  gate?: FlushGate
 }
 
 export class BoardWindowHost {
@@ -393,14 +592,27 @@ export class BoardWindowHost {
   /** Opens run one after the other, so a second call never races the window the first is still making. */
   private queue: Promise<unknown> = Promise.resolve()
   private crashes: number[] = []
+  /** When the page was last brought back after a navigation away (see `did-navigate`). */
+  private navFixes: number[] = []
   /** Brain windows already hooked (closing one closes this window). */
   private hooked = new WeakSet<object>()
   private readonly platform: NodeJS.Platform
+  readonly gate: FlushGate
+  /** The ids of the board windows' pages (a message from one of them is judged against BOARD_PAGE_CHANNELS). Ids are never reused. */
+  private pageIds = new Set<number>()
+  /** The window shows over full-screen apps (macOS: setVisibleOnAllWorkspaces is set only when this changes, it hides the window for a moment). */
+  private overFullScreen = false
 
   constructor(private opts: BoardHostOptions) {
     this.settings = boardSettings(opts.settings)
     this.persisted = JSON.stringify(this.settings)
     this.platform = opts.platform ?? process.platform
+    this.gate = opts.gate ?? new FlushGate()
+  }
+
+  /** Whether `wc` is the page of a board window (main.ts judges every message against it). */
+  isBoardPage(wc: { id: number }): boolean {
+    return this.pageIds.has(wc.id)
   }
 
   status(): BoardStatusDto {
@@ -424,9 +636,67 @@ export class BoardWindowHost {
     return this.serial(() => this.show(path))
   }
 
-  /** `board:close`. */
-  close(): void {
-    if (this.win && !this.win.isDestroyed()) this.win.close()
+  /**
+   * `board:close`: close the window. Its page is asked to save first (FlushGate), so this resolves once the window is gone and
+   * whatever the user did in it is in the note (the window hands the board back to the docked view only then).
+   */
+  close(): Promise<void> {
+    const w = this.live()
+    if (!w) return Promise.resolve()
+    return new Promise<void>((resolve) => {
+      // A close that something else keeps from happening must not leave the caller waiting for ever.
+      const timer = setTimeout(resolve, FLUSH_WAIT_MS * 2)
+      w.once('closed', () => {
+        clearTimeout(timer)
+        resolve()
+      })
+      w.close()
+    })
+  }
+
+  /** Ask the window's page to save what it has not saved, and wait for its answer (the app is quitting; main.ts then lets the closes of the quit through, `FlushGate.openFor`). */
+  async flushPage(): Promise<void> {
+    const w = this.live()
+    if (w) await this.gate.ask(w.webContents)
+  }
+
+  /** The vault path of the note the window shows, or null. */
+  shownPath(): string | null {
+    return this.live() ? this.shown : null
+  }
+
+  private isShown(path: string): boolean {
+    const shown = this.live() ? this.shown : null
+    if (shown === null) return false
+    return this.platform === 'linux' ? path === shown : path.toLowerCase() === shown.toLowerCase()
+  }
+
+  /** The note the window shows is about to be renamed away: its page saves first (to the note as it is called now). */
+  async beforeMove(from: string): Promise<void> {
+    const w = this.live()
+    if (w && this.isShown(from)) await this.gate.ask(w.webContents)
+  }
+
+  /** The note the window shows was renamed to `to`: the window follows it (the page is loaded again on the new name). */
+  async followMove(from: string, to: string): Promise<void> {
+    const w = this.live()
+    if (!w || !this.isShown(from)) return
+    this.shown = to
+    try {
+      await this.load(w, to)
+    } catch {
+      this.tellGone(w, `The note was renamed to ${to}, and the window could not follow it. Close this window and open the board again.`)
+      return
+    }
+    this.broadcast()
+  }
+
+  private tellGone(w: BrowserWindow, why: string): void {
+    try {
+      if (!w.isDestroyed()) w.webContents.send(IPC.boardGone, why)
+    } catch {
+      /* the board window went away mid-send */
+    }
   }
 
   /** `board:configure`: new settings (from either window), applied to the window if it is open and remembered. Returns the status. */
@@ -463,7 +733,15 @@ export class BoardWindowHost {
     const shown = this.shown
     if (shown !== null) {
       const same = (p: string) => (this.platform === 'linux' ? p === shown : p.toLowerCase() === shown.toLowerCase())
-      for (const c of changes) if (c.kind !== 'addDir' && c.kind !== 'unlinkDir' && same(c.path)) out.push(c)
+      for (const c of changes) {
+        if (c.kind === 'addDir' || c.kind === 'unlinkDir' || !same(c.path)) continue
+        out.push(c)
+        // The note is gone, or is no longer one the window could save to: say so for good (a toast of a few seconds is not enough).
+        if (c.kind === 'unlink') this.tellGone(w, 'The note of this board was deleted or moved away, so nothing done in this window is saved any more. Bring the board back to leave it.')
+        else if (c.content !== undefined && boardNoteVerdict(c.content) !== 'yes') {
+          this.tellGone(w, 'This note was edited so that it no longer reads as a board (type: board in its frontmatter), so the window can no longer save to it.')
+        }
+      }
     }
     if (!out.length) return
     try {
@@ -510,8 +788,11 @@ export class BoardWindowHost {
       return this.status()
     }
     const previous = this.shown
+    // The window moves on from the old board: its page saves what it has first, and the docked view takes the board back before
+    // this one is drawn.
+    if (previous !== null) await this.gate.ask(w.webContents)
+    if (w.isDestroyed()) throw new Error('The board window was closed')
     this.shown = path
-    // The window moves on from the old board: the docked view takes it back before this one is drawn.
     if (previous !== null) this.toBrain(IPC.boardClosed, previous)
     try {
       await this.load(w, path)
@@ -536,22 +817,40 @@ export class BoardWindowHost {
   }
 
   private createWindow(): BrowserWindow {
-    const { BrowserWindow: Win, shell, screen, dialog } = this.opts.electron
+    const { BrowserWindow: Win, screen, dialog } = this.opts.electron
     const w = new Win(boardWindowOptions(this.settings, this.platform, workAreasOf(screen), this.opts.preload))
     this.win = w
+    this.overFullScreen = false
+    this.keepOverFullScreen(w, this.settings.alwaysOnTop)
     const reveal = () => {
       if (!w.isDestroyed() && !w.isVisible()) w.show()
     }
     w.once('ready-to-show', reveal)
     const revealTimer = setTimeout(reveal, BOARD_REVEAL_MS)
     const wc = w.webContents
-    wc.setWindowOpenHandler(({ url }) => {
-      if (/^https?:/.test(url)) void shell.openExternal(url)
-      return { action: 'deny' }
-    })
-    // The window never needs to leave its page.
+    const pageId = wc.id
+    this.pageIds.add(pageId)
+    wc.once('destroyed', () => this.pageIds.delete(pageId))
+    // The page has no links and opens nothing: a window it asks for is denied, and no address goes to the browser.
+    wc.setWindowOpenHandler(() => ({ action: 'deny' }))
+    // The window never needs to leave its page: any navigation away is stopped, and one that got through (about:blank, set by
+    // script, raises no `will-navigate`) brings the board page back.
+    const away = (url: string): boolean => !boardNavigationAllowed(url, { devUrl: this.opts.devUrl, file: this.opts.pageFile })
     wc.on('will-navigate', (e) => {
-      if (!boardNavigationAllowed(e.url, { devUrl: this.opts.devUrl, file: this.opts.pageFile })) e.preventDefault()
+      if (away(e.url)) e.preventDefault()
+    })
+    wc.on('will-frame-navigate', (e) => {
+      if (away(e.url)) e.preventDefault()
+    })
+    wc.on('did-navigate', (_e, url) => {
+      if (this.win !== w || w.isDestroyed() || this.shown === null || !away(url)) return
+      // A few times and no more: a page address this check cannot recognise (an odd install path) must not make the window load
+      // itself for ever.
+      const now = Date.now()
+      this.navFixes = this.navFixes.filter((t) => now - t < NAV_FIX_WINDOW_MS)
+      if (this.navFixes.length >= NAV_FIXES) return
+      this.navFixes.push(now)
+      void this.load(w, this.shown).catch(() => undefined)
     })
     // A page that asks before unloading would keep the window from closing, silently; a board saves as it goes.
     wc.on('will-prevent-unload', (e) => e.preventDefault())
@@ -564,7 +863,7 @@ export class BoardWindowHost {
       this.crashes.push(now)
       const reload = shouldReload(this.crashes, now)
       if (reload) wc.reload()
-      const text = crashMessage(details.reason, reload)
+      const text = crashMessage(details.reason, reload, BOARD_WINDOW_NAME)
       const box = { type: 'error' as const, title: BOARD_TITLE, message: text.message, detail: text.detail }
       void (w.isDestroyed() ? dialog.showMessageBox(box) : dialog.showMessageBox(w, box))
         .catch(() => undefined)
@@ -574,7 +873,8 @@ export class BoardWindowHost {
     })
     w.on('move', () => this.scheduleSave())
     w.on('resize', () => this.scheduleSave())
-    w.on('close', () => {
+    // Where the window was is remembered on every close event; the first close is held until the page has saved (FlushGate).
+    this.gate.guardClose(w, () => {
       this.captureBounds(w)
       this.persist()
     })
@@ -594,6 +894,22 @@ export class BoardWindowHost {
     const on = this.settings.alwaysOnTop
     // 'floating': above ordinary windows (and below the dock / task bar), the level a reference window wants.
     w.setAlwaysOnTop(on, on ? 'floating' : undefined)
+    this.keepOverFullScreen(w, on)
+  }
+
+  /**
+   * macOS: a window on top of the others still stays on the desktop it was made in; over a full-screen painting program it needs to
+   * be visible on every Space, full-screen ones included. Set only when it changes (it hides the window and the Dock for a moment),
+   * and never anywhere else or where the method is missing.
+   */
+  private keepOverFullScreen(w: BrowserWindow, on: boolean): void {
+    if (this.platform !== 'darwin' || on === this.overFullScreen || typeof w.setVisibleOnAllWorkspaces !== 'function') return
+    this.overFullScreen = on
+    try {
+      w.setVisibleOnAllWorkspaces(on, on ? { visibleOnFullScreen: true } : undefined)
+    } catch {
+      /* a platform that cannot: the window is on top all the same */
+    }
   }
 
   /** The window's position and size as it would reopen (the normal state: a maximized or minimized window keeps its restored bounds). */

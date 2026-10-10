@@ -15,6 +15,12 @@ const VIEWS: { id: View; label: string; key: string }[] = [
   { id: 'boards', label: 'Boards', key: '8' },
 ]
 
+/*
+ * Room. The bar must fit a laptop window (1366 px, down to 1100): a narrow window gives up words before it gives up buttons. Under
+ * 1610 px the key hints on the tabs, the Today chip and the search button go (`topbar-wide`; the tooltips keep them and the cheatsheet
+ * lists them), under 1360 px the brand name goes too and the search button itself, which the Search tab does as well (`topbar-roomy`);
+ * the counts need 1750. Both classes are in styles.css. What is left never wraps: only the vault's name gives way (it is cut short).
+ */
 export function TopBar({ onPickVault }: { onPickVault?: (() => void) | undefined }) {
   const view = useAether((s) => s.view)
   const setView = useAether((s) => s.setView)
@@ -49,16 +55,16 @@ export function TopBar({ onPickVault }: { onPickVault?: (() => void) | undefined
 
   return (
     <header className="panel flex items-center gap-1 px-2 py-1.5" role="banner">
-      <div className="mr-2 flex items-center gap-2 pl-1">
+      <div className="mr-2 flex shrink-0 items-center gap-2 pl-1">
         <span
           className="inline-block h-3 w-3 rounded-full"
           style={{ background: 'radial-gradient(circle at 35% 35%, #fff, #8f7cff 45%, #4de2ff 100%)', boxShadow: '0 0 14px #8f7cff' }}
           aria-hidden
         />
-        <span className="text-[13px] font-semibold tracking-wide text-white">Aether Brain</span>
+        <span className="topbar-roomy whitespace-nowrap text-[13px] font-semibold tracking-wide text-white">Aether Brain</span>
       </div>
 
-      <nav className="flex items-center gap-0.5" aria-label="Views">
+      <nav className="flex shrink-0 items-center gap-0.5" aria-label="Views">
         {VIEWS.map((v) => (
           <button
             type="button"
@@ -69,7 +75,7 @@ export function TopBar({ onPickVault }: { onPickVault?: (() => void) | undefined
             title={`${v.label} (${v.key})`}
           >
             {v.label}
-            <kbd>{v.key}</kbd>
+            <kbd className="topbar-wide">{v.key}</kbd>
           </button>
         ))}
       </nav>
@@ -88,14 +94,14 @@ export function TopBar({ onPickVault }: { onPickVault?: (() => void) | undefined
           Today
           <span className="tabular-nums text-ink">{brief.total}</span>
           {late > 0 && <span className="h-1.5 w-1.5 rounded-full bg-danger" style={{ boxShadow: '0 0 6px var(--danger)' }} aria-label={`${late} overdue`} role="img" />}
-          <kbd>y</kbd>
+          <kbd className="topbar-wide">y</kbd>
         </button>
       )}
 
       <span className="flex-1" />
 
-      <button type="button" className="hud-btn" onClick={() => setPalette(true)} title={`Search (${MOD}+K)`}>
-        ⌕ Search <kbd>{MOD} K</kbd>
+      <button type="button" className="hud-btn topbar-roomy" onClick={() => setPalette(true)} title={`Search (${MOD}+K)`}>
+        ⌕ Search <kbd className="topbar-wide">{MOD} K</kbd>
       </button>
       <button type="button" className="hud-btn" aria-pressed={settings.layoutMode !== 'constellation'} onClick={toggleLayout} title="Layout: constellation → orbit (time) → system (folders) (t)">
         {LAYOUT_LABEL[settings.layoutMode] ?? LAYOUT_LABEL.system}
@@ -110,14 +116,14 @@ export function TopBar({ onPickVault }: { onPickVault?: (() => void) | undefined
         ?
       </button>
 
-      <div className="ml-2 flex items-center gap-2 border-l border-[var(--line)] pl-3 text-[11px] text-faint">
-        <button type="button" className={cx('hud-btn !h-7 !px-2', onPickVault && 'hover:text-ink')} onClick={onPickVault} title={adapter?.location ?? ''} disabled={!onPickVault}>
-          <span className="max-w-[160px] truncate">{adapter?.name ?? 'No vault'}</span>
+      <div className="ml-2 flex min-w-0 items-center gap-2 border-l border-[var(--line)] pl-3 text-[11px] text-faint">
+        <button type="button" className={cx('hud-btn !h-7 min-w-0 !px-2', onPickVault && 'hover:text-ink')} onClick={onPickVault} title={adapter?.location ?? ''} disabled={!onPickVault}>
+          <span className="max-w-[96px] min-w-0 truncate min-[1200px]:max-w-[160px]">{adapter?.name ?? 'No vault'}</span>
           {adapter?.readOnly && <span className="text-inbox">·ro</span>}
         </button>
         {/* The counts need room: on narrower windows they give way to the views and the Today chip (the legend has them too). */}
         <span
-          className="hidden whitespace-nowrap min-[1600px]:inline"
+          className="hidden whitespace-nowrap min-[1750px]:inline"
           title={`Neurons (notes) / synapses / missing${settings.layoutMode === 'system' ? ' / folders shown' : ''} / pictures shown`}
         >
           {status === 'ready'

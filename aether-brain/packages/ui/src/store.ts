@@ -90,6 +90,7 @@ import {
 import { getActiveBoard, getBoardWindowControl } from './board/active'
 import {
   BOARDS_FOLDER,
+  BOARD_BUDGET_TEXT,
   BoardChangedOutsideError,
   MAX_ADDED_AT_ONCE,
   addPicturesToBoardText,
@@ -176,7 +177,12 @@ const EXPANDED_KEY = 'aether:expanded:'
 const LAST_BOARD_KEY = 'aether:board:'
 const SETTINGS_VERSION = 2
 /** Views drawn over the graph: flying to something there shows nothing until they close. */
-const COVERING_VIEWS: ReadonlySet<View> = new Set<View>(['projects', 'review', 'capture', 'search', 'boards'])
+export const COVERING_VIEWS: ReadonlySet<View> = new Set<View>(['projects', 'review', 'capture', 'search', 'boards'])
+/**
+ * The views that fill the window with a panel: the 3D view behind them is not drawn (`controller.setCovered`) and the panel is solid.
+ * Review and quick capture are small dialogs over a scene that stays visible and alive.
+ */
+export const FULL_PANEL_VIEWS: ReadonlySet<View> = new Set<View>(['projects', 'boards'])
 /** Previews read at once to learn the shapes of pictures going onto a board that is not open. */
 const ASPECT_PARALLEL = 4
 /** What the vault says when it will not take pictures in a folder (the desktop's exclude list, an ignored folder name). */
@@ -618,6 +624,8 @@ export interface AetherState {
   refreshBrief(): void
   /** Turn the Today hub on if needed, select it and fly to it (its brief shows in the Inspector). */
   showToday(): void
+  /** Select a node and fly to it without opening it, leaving any view that covers the graph (the palette's Shift+Enter). */
+  showNode(id: NoteId): void
   /** Open a picture in the OS default app (desktop), else explain why not. */
   openImage(path: string): Promise<void>
   /**
@@ -1513,6 +1521,8 @@ export const useAether = create<AetherState>()((set, get) => {
         history: now.history.map((h) => (h === id ? newId : h)),
         ...(open ? { editorId: newId, draft: content, dirty: false } : {}),
       }))
+      // The key that 8 reads after a restart follows the board to its new name.
+      if (board || lastBoard) saveLastBoard(get().adapter?.location, to)
       if (selected) get().select(newId)
     }
   }
@@ -2813,6 +2823,10 @@ export const useAether = create<AetherState>()((set, get) => {
       rebuildGraph()
     },
 
+    showNode(id) {
+      showNode(id)
+    },
+
     showToday() {
       if (get().status !== 'ready') return
       if (!get().settings.todayHub) {
@@ -3078,7 +3092,12 @@ export const useAether = create<AetherState>()((set, get) => {
       // A board open in the view saves what it holds first, so this edit starts from what the view shows (and the view reloads after).
       const open = getActiveBoard()
       const inView = !!open && samePath(open.path, note.meta.path)
-      if (inView) await open.flush()
+      // The view's unsaved changes are written first, or this rewrite would meet them as an outside change and the next save of the view
+      // would take the pictures off again: when they cannot be written, nothing is added.
+      if (inView && !(await open.flush())) {
+        get().toast(`${note.meta.title} could not be saved first, so the pictures were not added. Save the board (see its message), then add them again.`, 'error')
+        return 0
+      }
       // Their shapes, read from small previews a few at a time (the desktop makes each in a helper window).
       const aspects: (number | null)[] = wanted.map(() => null)
       let nextShape = 0
@@ -3105,15 +3124,18 @@ export const useAether = create<AetherState>()((set, get) => {
       if (!r) return 0
       const title = note.meta.title
       if (r.added === 0) {
-        if (r.full > 0) get().toast(`${title} is full: a board holds at most 1,500 items`, 'error')
+        if (r.over > 0) get().toast(`${title} is full: ${BOARD_BUDGET_TEXT}`, 'error')
+        else if (r.full > 0) get().toast(`${title} is full: a board holds at most 1,500 items`, 'error')
         else if (r.skipped > 0) get().toast(`${r.skipped === 1 ? 'That picture is' : 'Those pictures are'} already on ${title}`)
         return 0
       }
       if (!done) return 0
       const what = r.added === 1 ? imageFileName(r.paths[0] ?? '') : plural(r.added, 'picture')
-      const notes = [r.skipped ? `${r.skipped} already there` : '', r.full ? `${r.full} did not fit` : ''].filter(Boolean)
-      const text = `Added ${what} to ${title}${notes.length ? ` (${notes.join(', ')})` : ''}`
-      get().toast(text, 'success', inView ? undefined : { label: 'Open', run: () => get().openBoard(note.meta.path) })
+      const notes = [r.skipped ? `${r.skipped} already there` : '', r.full + r.over ? `${r.full + r.over} did not fit` : ''].filter(Boolean)
+      const show = inView ? undefined : { label: 'Open', run: () => get().openBoard(note.meta.path) }
+      // Some were left out for the size budget: said as the error it is, with the budget.
+      if (r.over > 0) get().toast(`${title} is full: added ${what} (${notes.join(', ')}); ${BOARD_BUDGET_TEXT}`, 'error', show)
+      else get().toast(`Added ${what} to ${title}${notes.length ? ` (${notes.join(', ')})` : ''}`, 'success', show)
       return r.added
     },
 
@@ -3159,6 +3181,8 @@ export const useAether = create<AetherState>()((set, get) => {
         if (disk === null) throw new Error(`The board note ${note.meta.path} is no longer on disk: nothing was saved`)
         if (disk !== text) {
           if (expected !== null && disk !== expected) throw new BoardChangedOutsideError()
+          // A save that did not read the note first (expected null) still never turns an ordinary note into a board.
+          if (!isBoardNote(disk)) throw new Error(`${note.meta.title} is not a board (its frontmatter has no type: board): nothing was saved`)
           await adapter.write(note.meta.path, text)
         }
         if (get().editorId === id && !get().dirty) set({ draft: text })
