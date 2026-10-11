@@ -608,10 +608,6 @@ void AAetherVoyageActor::PollBakes()
 				S.SkyBall = VoyNewMeshComponent(this, Root, SphereMesh, Mid);
 				Held.Add(S.SkyBall);
 				bSkyReady = true;
-				if (AAetherSpaceActor* Sky = Space.Get())
-				{
-					Sky->SetBackdropVisible(false);
-				}
 			}
 		}
 		else if (Done == FAetherVoyageState::EJob::Sun && R->Image.IsValid())
@@ -793,6 +789,15 @@ void AAetherVoyageActor::Tick(float DeltaSeconds)
 	Clock += static_cast<double>(DeltaSeconds);
 	FindBrainAndSpace();
 	PollBakes();
+	// The flat backdrop steps aside once the photographic sky is up, whichever of the two actors found the other first.
+	if (bSkyReady && !bBackdropHandled)
+	{
+		if (AAetherSpaceActor* Sky = Space.Get())
+		{
+			Sky->SetBackdropVisible(false);
+			bBackdropHandled = true;
+		}
+	}
 
 	FVector Camera = FVector::ZeroVector;
 	if (GetWorld() && GetWorld()->GetFirstPlayerController() && GetWorld()->GetFirstPlayerController()->PlayerCameraManager)

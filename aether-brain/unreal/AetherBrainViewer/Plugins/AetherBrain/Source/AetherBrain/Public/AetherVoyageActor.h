@@ -213,6 +213,8 @@ private:
 	TWeakObjectPtr<AAetherBrainActor> Brain;
 	TWeakObjectPtr<AAetherSpaceActor> Space;
 	bool bSkyReady = false;
+	/** The space actor has been told to hide its flat backdrop. */
+	bool bBackdropHandled = false;
 	bool bMaterialsMissing = false;
 	double Clock = 0.0;
 };
