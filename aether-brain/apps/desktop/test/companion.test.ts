@@ -20,7 +20,10 @@ import {
   type CompanionHostOptions,
   type CompanionSettings,
 } from '../src/main/companion.js'
-import { companionKind, companionScene } from '../src/renderer/companion-scene.js'
+import { companionKind, companionScene, folderCovers, sceneSignature } from '../src/renderer/companion-scene.js'
+import { MAX_THUMBS_AT_ONCE } from '../src/main/companion.js'
+import { FolderCovers } from '../src/main/folder-cover.js'
+import type { ScanResult } from '../src/main/fsvault.js'
 
 const TOKEN = 'tok_0123456789abcdefghijKLMN'
 
@@ -66,6 +69,16 @@ describe('companion checks', () => {
       { ...graph(), selected: 7 },
     ]) {
       expect(() => cleanGraph(bad)).toThrow()
+    }
+  })
+
+  it('keeps a folder\'s cover and picture count when they are well-formed, and drops them quietly when not', () => {
+    const folder = { id: 'folder:Art', title: 'Art', kind: 'planet' as const, color: '#aabbcc', radius: 3, parent: -1 }
+    const good = cleanGraph({ ...graph(), nodes: [{ ...folder, cover: 'image:Art/gate.png', pictures: 12, extra: 1 }], edges: [] })
+    expect(good.nodes[0]).toEqual({ ...folder, cover: 'image:Art/gate.png', pictures: 12 })
+    for (const bad of [{ cover: 'Art/gate.png' }, { cover: '../../etc/passwd' }, { cover: 5 }, { cover: 'image:' + 'x'.repeat(5000) }, { pictures: 0 }, { pictures: -3 }, { pictures: 1.5 }, { pictures: '9' }, { pictures: 2e9 }]) {
+      const n = cleanGraph({ ...graph(), nodes: [{ ...folder, ...bad }], edges: [] }).nodes[0]!
+      expect(n).toEqual(folder)
     }
   })
 
@@ -129,6 +142,91 @@ describe('the scene the brain window publishes', () => {
     expect(() => cleanGraph(dto)).not.toThrow()
     expect(companionKind({ kind: 'today' } as never)).toBe('today')
     expect(companionKind({ kind: 'image' } as never)).toBe('picture')
+  })
+})
+
+describe('the picture that stands for a folder', () => {
+  const node = (id: string, parent: string | null, image?: { path: string; mtime: number | null; video?: boolean }, folder = false) =>
+    ({
+      id,
+      title: id,
+      area: 'inbox',
+      type: 'note',
+      tags: [],
+      kind: image ? 'image' : 'folder',
+      ghost: false,
+      parent,
+      ...(image ? { image: { size: null, embeddedBy: 0, ...image } } : {}),
+      ...(folder ? { folder: { path: id.slice(7), role: 'folder', depth: 1, projectId: null, inProject: false, childFolders: 0, hiddenFolders: 0, notes: 0, totalNotes: 0, images: 3, shownImages: 3 } } : {}),
+      inDegree: 0,
+      outDegree: 0,
+      degree: 0,
+      created: null,
+      updated: null,
+      wordCount: 0,
+    }) as never
+
+  it('is the newest still picture drawn for the folder, a video only when there is nothing else', () => {
+    const g = {
+      nodes: [
+        node('folder:Art', null, undefined, true),
+        node('image:Art/old.png', 'folder:Art', { path: 'Art/old.png', mtime: 100 }),
+        node('image:Art/new.png', 'folder:Art', { path: 'Art/new.png', mtime: 900 }),
+        node('image:Art/clip.mp4', 'folder:Art', { path: 'Art/clip.mp4', mtime: 5000, video: true }),
+        node('folder:Film', null, undefined, true),
+        node('image:Film/a.mp4', 'folder:Film', { path: 'Film/a.mp4', mtime: 10, video: true }),
+        node('image:Film/b.mp4', 'folder:Film', { path: 'Film/b.mp4', mtime: 30, video: true }),
+        node('folder:Empty', null, undefined, true),
+      ],
+      edges: [],
+      index: new Map(),
+    }
+    const covers = folderCovers(g as never)
+    expect(covers.get('folder:Art')).toBe('image:Art/new.png')
+    expect(covers.get('folder:Film')).toBe('image:Film/b.mp4')
+    expect(covers.has('folder:Empty')).toBe(false)
+  })
+
+  it('goes into the published scene next to the picture count, and changes the scene\'s signature when it changes', () => {
+    const base = {
+      nodes: [node('folder:Art', null, undefined, true), node('image:Art/a.png', 'folder:Art', { path: 'Art/a.png', mtime: 5 })],
+      edges: [],
+      index: new Map([['folder:Art', 0], ['image:Art/a.png', 1]]),
+    }
+    const opts = { version: 1, vault: 'V', layout: 'system' as const, colorMode: 'area' as const, activeTag: null, selectedId: null }
+    const dto = companionScene(base as never, opts)
+    expect(dto.nodes[0]).toMatchObject({ id: 'folder:Art', pictures: 3, cover: 'image:Art/a.png' })
+    expect(dto.nodes[1]?.cover).toBeUndefined()
+    expect(dto.nodes[1]?.pictures).toBeUndefined()
+    expect(() => cleanGraph(dto)).not.toThrow()
+    const other = companionScene({ ...base, nodes: [base.nodes[0], node('image:Art/b.png', 'folder:Art', { path: 'Art/b.png', mtime: 9 })] } as never, opts)
+    expect(sceneSignature(other)).not.toBe(sceneSignature(dto))
+  })
+
+  it('is found by name in a scan, for folders whose pictures are not drawn: the last name, a still before a video', () => {
+    const scan = {
+      assets: [
+        { path: 'Art/2024-01-01.png', abs: '/v/Art/2024-01-01.png' },
+        { path: 'Art/2024-03-09.png', abs: '/v/Art/2024-03-09.png' },
+        { path: 'Art/zzz.mp4', abs: '/v/Art/zzz.mp4' },
+        { path: 'Art/Deep/one.jpg', abs: '/v/Art/Deep/one.jpg' },
+        { path: 'Film/a.webm', abs: '/v/Film/a.webm' },
+        { path: 'Film/b.webm', abs: '/v/Film/b.webm' },
+        { path: 'top.png', abs: '/v/top.png' },
+      ],
+    } as unknown as ScanResult
+    const c = new FolderCovers()
+    expect(c.coverFor(scan, 'Art')).toBe('Art/2024-03-09.png')
+    expect(c.coverFor(scan, 'Art/')).toBe('Art/2024-03-09.png')
+    expect(c.coverFor(scan, 'Art\\Deep')).toBe('Art/Deep/one.jpg')
+    expect(c.coverFor(scan, 'Film')).toBe('Film/b.webm')
+    expect(c.coverFor(scan, '')).toBe('top.png')
+    expect(c.coverFor(scan, 'Nowhere')).toBeNull()
+    expect(c.size(scan)).toBe(4)
+    // A new scan is indexed again.
+    const next = { assets: [{ path: 'Art/x.png', abs: '/v/Art/x.png' }] } as unknown as ScanResult
+    expect(c.coverFor(next, 'Art')).toBe('Art/x.png')
+    expect(c.coverFor(next, 'Film')).toBeNull()
   })
 })
 
@@ -323,6 +421,139 @@ describe('the companion link server', () => {
     // A new graph drops positions of the old one.
     h.publishGraph(42, graph({ version: 2 }))
     expect((await fetch(url(h, '/v1/positions'), { headers: auth })).status).toBe(503)
+  })
+
+  describe('/v1/thumb', () => {
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3, 4])
+    const artGraph = () =>
+      graph({
+        nodes: [
+          { id: 'folder:', title: 'Vault', kind: 'sun', color: '#fff1d6', radius: 8, parent: -1 },
+          { id: 'folder:Art', title: 'Art', kind: 'planet', color: '#ffcf6b', radius: 3, parent: 0, pictures: 4, cover: 'image:Art/gate.png' },
+          { id: 'folder:Misc', title: 'Misc', kind: 'planet', color: '#ffcf6b', radius: 3, parent: 0, pictures: 2 },
+          { id: 'folder:Bare', title: 'Bare', kind: 'planet', color: '#ffcf6b', radius: 3, parent: 0 },
+          { id: 'image:Art/gate.png', title: 'gate', kind: 'picture', color: '#ffffff', radius: 1, parent: 1 },
+          { id: 'Notes/Plan', title: 'Plan', kind: 'moon', color: '#ff5cc8', radius: 1.2, parent: 0 },
+        ],
+        edges: [],
+      })
+    const get = (h: CompanionHost, q: string, headers: Record<string, string> = auth) => fetch(url(h, `/v1/thumb${q}`), { headers })
+    let calls: { path: string; px: number }[]
+
+    beforeEach(() => {
+      calls = []
+    })
+
+    const withThumbs = async (more: Partial<CompanionHostOptions> = {}) => {
+      const h = await started({
+        thumb: async (p, px) => {
+          calls.push({ path: p, px })
+          return p.includes('broken') ? null : png
+        },
+        folderCover: (f) => (f === 'Misc' ? 'Misc/last.jpg' : f === 'Broken' ? 'Misc/broken.png' : null),
+        ...more,
+      })
+      await fetch(url(h, '/v1/hello'), { headers: auth })
+      h.publishGraph(42, artGraph())
+      return h
+    }
+
+    it('serves the picture of a picture node, a folder\'s cover, and a folder\'s own pick, as PNG', async () => {
+      const h = await withThumbs()
+      const direct = await get(h, '?id=' + encodeURIComponent('image:Art/gate.png') + '&size=800')
+      expect(direct.status).toBe(200)
+      expect(direct.headers.get('content-type')).toBe('image/png')
+      expect(direct.headers.get('cache-control')).toMatch(/private/)
+      expect([...new Uint8Array(await direct.arrayBuffer())]).toEqual([...png])
+      // The folder asks for its cover; the one without a cover asks the vault.
+      expect((await get(h, '?id=' + encodeURIComponent('folder:Art') + '&size=1024')).status).toBe(200)
+      expect((await get(h, '?id=' + encodeURIComponent('folder:Misc'))).status).toBe(200)
+      expect(calls).toEqual([
+        { path: 'Art/gate.png', px: 800 },
+        { path: 'Art/gate.png', px: 1024 },
+        { path: 'Misc/last.jpg', px: 512 },
+      ])
+    })
+
+    it('clamps the size and falls back to the default for nonsense', async () => {
+      const h = await withThumbs()
+      const id = encodeURIComponent('image:Art/gate.png')
+      for (const q of ['&size=5', '&size=99999', '&size=abc', '&size=-40', '']) await get(h, `?id=${id}${q}`)
+      expect(calls.map((c) => c.px)).toEqual([64, 1024, 512, 64, 512])
+    })
+
+    it('asks for the token, and for a GET', async () => {
+      const h = await withThumbs()
+      const id = encodeURIComponent('image:Art/gate.png')
+      expect((await fetch(url(h, `/v1/thumb?id=${id}`))).status).toBe(401)
+      expect((await fetch(url(h, `/v1/thumb?id=${id}`), { method: 'POST', headers: auth })).status).toBe(405)
+      expect(calls).toEqual([])
+    })
+
+    it('serves only what the scene names: no arbitrary path, no note, no folder that is not in it', async () => {
+      const h = await withThumbs()
+      for (const id of ['image:../../etc/passwd.png', 'image:Art/other.png', 'Art/gate.png', 'C:\\Windows\\win.png', 'Notes/Plan', 'folder:Nowhere', 'folder:../..', '']) {
+        const r = await get(h, '?id=' + encodeURIComponent(id))
+        expect([400, 404]).toContain(r.status)
+      }
+      // A folder with no cover and no pick from the vault, and one whose pick cannot be decoded.
+      expect((await get(h, '?id=' + encodeURIComponent('folder:Bare'))).status).toBe(404)
+      expect((await get(h, '?id=' + encodeURIComponent('folder:Misc'))).status).toBe(200)
+      expect(calls.map((c) => c.path)).toEqual(['Misc/last.jpg'])
+      // A very long id is refused before anything is looked up.
+      expect((await get(h, '?id=' + 'x'.repeat(9000))).status).toBe(400)
+    })
+
+    it('says 404 for a picture that cannot be read, 503 before a scene, 501 without a thumbnailer', async () => {
+      const h = await started({ thumb: async () => null })
+      await fetch(url(h, '/v1/hello'), { headers: auth })
+      expect((await get(h, '?id=image:x.png')).status).toBe(503)
+      h.publishGraph(42, artGraph())
+      expect((await get(h, '?id=' + encodeURIComponent('image:Art/gate.png'))).status).toBe(404)
+      const none = await started()
+      await fetch(url(none, '/v1/hello'), { headers: auth })
+      none.publishGraph(42, artGraph())
+      expect((await get(none, '?id=' + encodeURIComponent('image:Art/gate.png'))).status).toBe(501)
+      // A thumbnailer that throws is a 404, not a hung request or a dead link.
+      const bad = await started({
+        thumb: async () => {
+          throw new Error('helper died')
+        },
+        folderCover: () => {
+          throw new Error('scan gone')
+        },
+      })
+      await fetch(url(bad, '/v1/hello'), { headers: auth })
+      bad.publishGraph(42, artGraph())
+      expect((await get(bad, '?id=' + encodeURIComponent('image:Art/gate.png'))).status).toBe(404)
+      expect((await get(bad, '?id=' + encodeURIComponent('folder:Misc'))).status).toBe(404)
+      expect((await fetch(url(bad, '/v1/hello'), { headers: auth })).status).toBe(200)
+    })
+
+    it('makes only a few at once and tells the rest to come back, then lets them in as the first finish', async () => {
+      const release: (() => void)[] = []
+      const h = await withThumbs({
+        thumb: (p) => {
+          calls.push({ path: p, px: 0 })
+          return new Promise((resolve) => release.push(() => resolve(png)))
+        },
+      })
+      const id = encodeURIComponent('image:Art/gate.png')
+      const pending = Array.from({ length: MAX_THUMBS_AT_ONCE }, () => get(h, `?id=${id}`))
+      // Wait until all of them reached the thumbnailer.
+      for (let i = 0; i < 200 && release.length < MAX_THUMBS_AT_ONCE; i++) await new Promise((r) => setTimeout(r, 5))
+      expect(release).toHaveLength(MAX_THUMBS_AT_ONCE)
+      const extra = await get(h, `?id=${id}`)
+      expect(extra.status).toBe(429)
+      expect(extra.headers.get('retry-after')).toBe('1')
+      release.forEach((r) => r())
+      expect((await Promise.all(pending)).map((r) => r.status)).toEqual(Array(MAX_THUMBS_AT_ONCE).fill(200))
+      release.length = 0
+      const later = get(h, `?id=${id}`)
+      for (let i = 0; i < 200 && release.length < 1; i++) await new Promise((r) => setTimeout(r, 5))
+      release.forEach((r) => r())
+      expect((await later).status).toBe(200)
+    })
   })
 
   it('relays a select or an open of a node in the scene to the brain window', async () => {

@@ -27,6 +27,10 @@ struct AETHERBRAIN_API FAetherNode
 	float Radius = 1.f;
 	/** Index of its structural parent (the star of a planet, the planet of a moon), INDEX_NONE for none. */
 	int32 Parent = INDEX_NONE;
+	/** A folder: how many pictures lie directly in it (0 when none). Only these get a thumbnail card. */
+	int32 Pictures = 0;
+	/** A folder: the picture node (image:<vault path>) the brain draws for it, or empty. /v1/thumb takes the folder's own id either way. */
+	FString Cover;
 };
 
 struct AETHERBRAIN_API FAetherGraph

@@ -19,13 +19,93 @@ function compiler(): string | null {
 const cxx = process.platform === 'win32' ? null : compiler()
 
 describe.skipIf(!cxx)('the Unreal space world, Niagara layer and brain viewer maths, run as plain C++', () => {
-  it('passes the maths tests and the actor harnesses (strict warnings, six stages)', () => {
-    const run = spawnSync('sh', [path.join(unreal, 'tests/run.sh')], { env: { ...process.env, CXX: cxx! }, encoding: 'utf8', timeout: 280_000 })
+  it('passes the maths tests and the actor harnesses (strict warnings, twelve stages)', () => {
+    const run = spawnSync('sh', [path.join(unreal, 'tests/run.sh')], { env: { ...process.env, CXX: cxx! }, encoding: 'utf8', timeout: 560_000 })
     const out = `${run.stdout}${run.stderr}`
-    expect(out.match(/\d+ checks, 0 failed/g)).toHaveLength(6)
+    expect(out.match(/\d+ checks, 0 failed/g)).toHaveLength(12)
     expect(out).not.toMatch(/FAIL /)
     expect(run.status).toBe(0)
-  }, 300_000)
+  }, 600_000)
+})
+
+/**
+ * What the anonymous namespaces of a .cpp declare at their top level, and the namespace aliases it makes. Unreal's unity build
+ * joins .cpp files into one translation unit, where two anonymous namespaces are one: a type or constant with the same name in
+ * two files, or a function with the same name AND parameter types, is an error there that a one-file build never shows
+ * (overloads are fine).
+ */
+export function topLevelNames(src: string): { names: Set<string>; aliases: Map<string, string> } {
+  const names = new Set<string>()
+  const aliases = new Map<string, string>()
+  for (const m of src.matchAll(/^namespace\s+(\w+)\s*=\s*([\w:]+);/gm)) aliases.set(m[1]!, m[2]!)
+  const keywords = new Set(['if', 'for', 'while', 'switch', 'return', 'sizeof', 'static_cast', 'const_cast', 'reinterpret_cast', 'TEXT', 'noexcept', 'alignof', 'decltype'])
+  const open = /^namespace\s*\r?\n?\{/gm
+  let m: RegExpExecArray | null
+  while ((m = open.exec(src))) {
+    let depth = 1
+    let i = m.index + m[0].length
+    let top = ''
+    for (; i < src.length && depth > 0; i++) {
+      const c = src[i]!
+      if (c === '{') {
+        depth++
+        if (depth === 2) top += '{'
+      } else if (c === '}') {
+        depth--
+      } else if (depth === 1) {
+        top += c
+      }
+    }
+    const code = top.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/.*$/gm, ' ')
+    for (const k of code.matchAll(/\b(?:struct|class|enum(?:\s+class)?)\s+(\w+)/g)) names.add(`type ${k[1]!}`)
+    // A function: its name and the types (not the names) of its parameters.
+    for (const k of code.matchAll(/\b(\w+)\s*\(([^()]*)\)\s*(?:const\s*)?(?:noexcept\s*)?[{;]/g)) {
+      if (keywords.has(k[1]!)) continue
+      const params = k[2]!
+        .split(',')
+        .map((p) => p.replace(/=.*$/, '').trim().split(/\s+/).slice(0, -1).join(' ').replace(/\s*([*&])\s*/g, '$1'))
+        .join(',')
+      names.add(`fn ${k[1]!}(${params})`)
+    }
+    for (const k of code.matchAll(/\b(\w+)\s*=\s*[^=]/g)) names.add(`var ${k[1]!}`)
+  }
+  return { names, aliases }
+}
+
+describe('the Unreal actors in one unity build', () => {
+  it('finds a helper two files both declare (the check works)', () => {
+    const a = 'namespace\n{\n\tvoid Helper(int X)\n\t{\n\t}\n\tconstexpr int Limit = 3;\n}\n'
+    const b = 'namespace Sp = AetherSpace;\nnamespace\n{\n\tdouble Helper(double Y) { return Y; }\n\tstruct Thing { int A; };\n}\n'
+    const na = topLevelNames(a)
+    const nb = topLevelNames(b)
+    expect([...na.names].sort()).toEqual(['fn Helper(int)', 'var Limit'])
+    // The same name with other parameter types is an overload, not a clash.
+    expect([...nb.names].sort()).toEqual(['fn Helper(double)', 'type Thing'])
+    const c = topLevelNames('namespace\n{\n\tvoid Helper(int Z)\n\t{\n\t}\n}\n')
+    expect([...c.names]).toEqual(['fn Helper(int)'])
+    expect([...na.names].filter((n) => c.names.has(n))).toEqual(['fn Helper(int)'])
+    expect(nb.aliases.get('Sp')).toBe('AetherSpace')
+  })
+
+  it('has no helper name in two of the actors\' .cpp files, and no namespace alias that means two things', () => {
+    const files = ['AetherBrainActor.cpp', 'AetherScene.cpp', 'AetherSpaceActor.cpp', 'AetherFxActor.cpp', 'AetherVoyageActor.cpp', 'AetherBrainPlayerController.cpp', 'AetherBrainHUD.cpp', 'AetherBrainGameMode.cpp']
+    const seen = new Map<string, string>()
+    const aliasOf = new Map<string, { target: string; file: string }>()
+    for (const f of files) {
+      const { names, aliases } = topLevelNames(read(path.join(plugin, 'Private', f)))
+      for (const n of names) {
+        const other = seen.get(n)
+        expect(other === undefined || other === f, `${n} is declared in ${other} and in ${f}`).toBe(true)
+        seen.set(n, f)
+      }
+      for (const [a, target] of aliases) {
+        const old = aliasOf.get(a)
+        expect(old === undefined || old.target === target, `namespace ${a} is ${old?.target} in ${old?.file} and ${target} in ${f}`).toBe(true)
+        aliasOf.set(a, { target, file: f })
+      }
+    }
+    expect(seen.size).toBeGreaterThan(20)
+  })
 })
 
 describe('the Unreal space world, wiring', () => {
@@ -56,6 +136,51 @@ describe('the Unreal space world, wiring', () => {
   it('has a key and a HUD line for the space', () => {
     expect(read(path.join(plugin, 'Private/AetherBrainPlayerController.cpp'))).toContain('EKeys::B')
     expect(read(path.join(plugin, 'Private/AetherBrainHUD.cpp'))).toContain('Space: %s')
+  })
+})
+
+describe('the Unreal voyage, wiring', () => {
+  const cpp = read(path.join(plugin, 'Private/AetherVoyageActor.cpp'))
+  const python = read(path.join(unreal, 'AetherBrainViewer/Content/Python/init_unreal.py'))
+
+  it('has a material for everything the voyage loads by name, made by the editor script', () => {
+    const loaded = new Set([...cpp.matchAll(/\/Game\/AetherBrain\/(M_\w+)\.\1/g)].map((m) => m[1]!))
+    expect([...loaded].sort()).toEqual(['M_AetherCard', 'M_AetherCorona', 'M_AetherGlass', 'M_AetherHull', 'M_AetherLight', 'M_AetherNode', 'M_AetherRock', 'M_AetherRockPBR', 'M_AetherSky', 'M_AetherSun'])
+    for (const name of loaded) expect(python).toContain(`"${name}"`)
+    // Every one of the eight new ones has its own maker that the start-up calls.
+    for (const maker of ['make_sky_material', 'make_sun_material', 'make_corona_material', 'make_hull_material', 'make_rock_pbr_material', 'make_glass_material', 'make_light_material', 'make_card_material']) {
+      expect(python.match(new RegExp(`def ${maker}\\(`))).not.toBeNull()
+      expect(python).toContain(`make_${maker.slice(5)}`.replace('make_make_', 'make_'))
+      expect(python.split(maker).length).toBeGreaterThanOrEqual(3)
+    }
+  })
+
+  it('sets only material parameters the editor script makes, under the same names', () => {
+    const textures = new Set([...cpp.matchAll(/SetTextureParameterValue\(TEXT\("(\w+)"\)/g)].map((m) => m[1]!))
+    expect([...textures].sort()).toEqual(['BaseColor', 'Normal', 'ORM', 'Sky', 'Sun', 'Tex'])
+    for (const t of textures) expect(python).toContain(`"${t}"`)
+    const scalars = new Set([...cpp.matchAll(/SetScalarParameterValue\(TEXT\("(\w+)"\)/g)].map((m) => m[1]!))
+    expect([...scalars].sort()).toEqual(['Glow', 'Gain', 'Intensity'].sort())
+    for (const sc of scalars) expect(python).toContain(`"${sc}"`)
+    // The light colour is turned into a vertex colour by this divisor, and the material multiplies it back by its default Intensity.
+    expect(cpp).toContain('constexpr double VoyLightMax = 9.0;')
+    expect(python).toMatch(/_scalar\(mel, material, "Intensity", 9\.0/)
+  })
+
+  it('needs the procedural mesh and image modules and plugin, and is spawned and flown by the usual actors', () => {
+    expect(read(path.join(plugin, 'AetherBrain.Build.cs'))).toContain('"ProceduralMeshComponent"')
+    expect(read(path.join(plugin, 'AetherBrain.Build.cs'))).toContain('"ImageWrapper"')
+    expect(read(path.join(plugin, '../../AetherBrain.uplugin'))).toContain('"Name": "ProceduralMeshComponent"')
+    expect(read(path.join(unreal, 'AetherBrainViewer/AetherBrainViewer.uproject'))).toContain('"Name": "ProceduralMeshComponent"')
+    expect(read(path.join(plugin, 'Private/AetherBrainGameMode.cpp'))).toContain('SpawnActor<AAetherVoyageActor>')
+    expect(read(path.join(plugin, 'Private/AetherBrainPlayerController.cpp'))).toContain('EKeys::V')
+    expect(read(path.join(plugin, 'Private/AetherBrainPlayerController.cpp'))).toContain('StepVoyage')
+    expect(read(path.join(plugin, 'Private/AetherBrainHUD.cpp'))).toContain('Voyage to %s')
+  })
+
+  it('asks the desktop app for a folder\'s picture at the address the companion link serves', () => {
+    expect(cpp).toContain('/v1/thumb?id=%s&size=%d')
+    expect(read(path.join(here, '../src/main/companion.ts'))).toContain("'/v1/thumb': 'GET'")
   })
 })
 

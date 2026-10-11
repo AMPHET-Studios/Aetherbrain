@@ -338,13 +338,17 @@ const CHANGED_OUTSIDE = 'The board was changed outside this window: it has been 
  * the brain window does the opposite, because it already knows what it wrote.
  */
 export async function saveBoard(dto: BoardSaveDto, vault: BoardVault | null): Promise<BoardSaveResult> {
-  const found = await validate(dto, vault)
-  if (!found.ok || !vault) return found
-  const { expectedBase } = dto
-  if (expectedBase !== undefined && typeof expectedBase !== 'string') return { ok: false, reason: 'The text the save was made from must be text' }
-  const path = dto.path as string
-  const text = dto.text as string
-  return inLine(found.abs, async (): Promise<BoardSaveResult> => {
+  // The line is entered NOW, before anything is awaited: judging a save takes several file calls of uneven length, and a save that
+  // got through them sooner used to overtake one asked for earlier (a busy machine swapped two quick saves of one board). A path
+  // that names no note has no line to wait in: its refusal needs no order.
+  const key = lineKey(dto.path, vault)
+  const job = async (): Promise<BoardSaveResult> => {
+    const found = await validate(dto, vault)
+    if (!found.ok || !vault) return found
+    const { expectedBase } = dto
+    if (expectedBase !== undefined && typeof expectedBase !== 'string') return { ok: false, reason: 'The text the save was made from must be text' }
+    const path = dto.path as string
+    const text = dto.text as string
     if (expectedBase !== undefined) {
       const current = await vault.read(path)
       if (current === null) return { ok: false, reason: 'The board note is gone, or is no longer a board: nothing was saved' }
@@ -358,7 +362,18 @@ export async function saveBoard(dto: BoardSaveDto, vault: BoardVault | null): Pr
       return { ok: false, reason: writeFailure(err) }
     }
     return { ok: true }
-  })
+  }
+  return key === null ? job() : inLine(key, job)
+}
+
+/** The key of a save's line: the absolute path of the note it names (what `inspect` finds), or null for a path that names none. Never throws. */
+function lineKey(path: unknown, vault: BoardVault | null): string | null {
+  if (!vault || typeof path !== 'string' || !path.trim() || path.length > MAX_BOARD_PATH || path.includes('\0')) return null
+  try {
+    return vault.abs(path)
+  } catch {
+    return null
+  }
 }
 
 /**

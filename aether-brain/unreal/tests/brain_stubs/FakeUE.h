@@ -243,6 +243,17 @@ struct FRotationMatrix
 		return M;
 	}
 	FQuat ToQuat() const { return Q; }
+	FRotator Rotator() const { return Euler; }
+	FRotator Euler;
+	/** The orientation whose X axis is `X` and whose Z axis is as near `Z` as it can be (pitch and yaw are exact; the stand-in drops roll). */
+	static FRotationMatrix MakeFromXZ(const FVector& X, const FVector&)
+	{
+		FRotationMatrix M;
+		const FVector N = X.GetSafeNormal();
+		M.Euler.Yaw = std::atan2(N.Y, N.X) * 180.0 / 3.14159265358979;
+		M.Euler.Pitch = std::atan2(N.Z, std::sqrt(N.X * N.X + N.Y * N.Y)) * 180.0 / 3.14159265358979;
+		return M;
+	}
 };
 
 /* ---- strings ----------------------------------------------------------------------------------------------- */
@@ -254,6 +265,7 @@ struct FString
 	FString(const char* In) : S(In ? In : "") {}
 	explicit FString(const std::string& In) : S(In) {}
 	bool IsEmpty() const { return S.empty(); }
+	bool StartsWith(const char* Prefix) const { return S.rfind(Prefix, 0) == 0; }
 	int32 Len() const { return static_cast<int32>(S.size()); }
 	const char* operator*() const { return S.c_str(); }
 	void Reset() { S.clear(); }
@@ -336,6 +348,19 @@ struct TArray
 	}
 	[[nodiscard]] T& operator[](int32 I) { assert(I >= 0 && I < Num()); return V[static_cast<size_t>(I)]; }
 	[[nodiscard]] const T& operator[](int32 I) const { assert(I >= 0 && I < Num()); return V[static_cast<size_t>(I)]; }
+	[[nodiscard]] T& Last() { assert(!V.empty()); return V.back(); }
+	T Pop() { assert(!V.empty()); T X = std::move(V.back()); V.pop_back(); return X; }
+	void RemoveAt(int32 I) { assert(I >= 0 && I < Num()); V.erase(V.begin() + I); }
+	template <class U>
+	int32 Remove(const U& Item)
+	{
+		int32 N = 0;
+		for (size_t K = V.size(); K-- > 0;)
+		{
+			if (V[K] == Item) { V.erase(V.begin() + static_cast<std::ptrdiff_t>(K)); ++N; }
+		}
+		return N;
+	}
 	template <class P>
 	void Sort(P Pred) { std::sort(V.begin(), V.end(), [&Pred](const T& A, const T& B) { return Pred(A, B); }); }
 	bool operator==(const TArray& O) const { return V == O.V; }
@@ -350,12 +375,40 @@ template <class T>
 struct TArrayView<const T> : TArrayView<T> { using TArrayView<T>::TArrayView; TArrayView(const TArray<T>& A) : TArrayView<T>(A.GetData(), A.Num()) {} };
 
 template <class K, class V>
+struct TPair
+{
+	K Key{};
+	V Value{};
+};
+template <class K, class V>
 struct TMap
 {
-	std::unordered_map<FString, V, FStringHash> M;
-	void Reserve(int32 N) { M.reserve(static_cast<size_t>(N)); }
-	V& Add(const K& Key, const V& Val) { return M[Key] = Val; }
-	const V* Find(const K& Key) const { auto It = M.find(Key); return It == M.end() ? nullptr : &It->second; }
+	std::map<K, TPair<K, V>> M;
+	struct Iter
+	{
+		typename std::map<K, TPair<K, V>>::iterator It;
+		bool operator!=(const Iter& O) const { return It != O.It; }
+		Iter& operator++() { ++It; return *this; }
+		TPair<K, V>& operator*() const { return It->second; }
+	};
+	struct CIter
+	{
+		typename std::map<K, TPair<K, V>>::const_iterator It;
+		bool operator!=(const CIter& O) const { return It != O.It; }
+		CIter& operator++() { ++It; return *this; }
+		const TPair<K, V>& operator*() const { return It->second; }
+	};
+	void Reserve(int32) {}
+	V& Add(const K& Key, const V& Val) { TPair<K, V>& P = M[Key]; P.Key = Key; P.Value = Val; return P.Value; }
+	V* Find(const K& Key) { auto It = M.find(Key); return It == M.end() ? nullptr : &It->second.Value; }
+	const V* Find(const K& Key) const { auto It = M.find(Key); return It == M.end() ? nullptr : &It->second.Value; }
+	int32 Remove(const K& Key) { return static_cast<int32>(M.erase(Key)); }
+	void Empty() { M.clear(); }
+	int32 Num() const { return static_cast<int32>(M.size()); }
+	Iter begin() { return Iter{M.begin()}; }
+	Iter end() { return Iter{M.end()}; }
+	CIter begin() const { return CIter{M.begin()}; }
+	CIter end() const { return CIter{M.end()}; }
 };
 
 enum class ESPMode { ThreadSafe, NotThreadSafe };
@@ -366,6 +419,7 @@ struct TSharedPtr : std::shared_ptr<T>
 	TSharedPtr(std::nullptr_t) {}
 	TSharedPtr(std::shared_ptr<T> P) : std::shared_ptr<T>(std::move(P)) {}
 	[[nodiscard]] bool IsValid() const { return static_cast<bool>(*this); }
+	[[nodiscard]] T* Get() const { return this->get(); }
 	void Reset() { this->reset(); }
 };
 template <class T, ESPMode M = ESPMode::ThreadSafe>
@@ -398,6 +452,9 @@ struct TWeakObjectPtr
 {
 	T* P = nullptr;
 	T* Get() const { return P; }
+	[[nodiscard]] bool IsValid() const { return P != nullptr; }
+	TWeakObjectPtr& operator=(T* In) { P = In; return *this; }
+	T* operator->() const { return P; }
 };
 
 struct FSoftObjectPath { explicit FSoftObjectPath(const TCHAR*) {} };
@@ -438,7 +495,13 @@ public:
 	bool bVisible = true;
 	void SetMobility(EComponentMobility) {}
 	void SetupAttachment(USceneComponent*) {}
+	FVector WorldLocation;
+	FQuat WorldRotation;
+	FVector WorldScale{1.0, 1.0, 1.0};
 	void SetWorldLocationAndRotation(const FVector&, const FRotator&) {}
+	void SetWorldLocationAndRotation(const FVector& L, const FQuat& R) { WorldLocation = L; WorldRotation = R; }
+	void SetWorldScale3D(const FVector& S) { WorldScale = S; }
+	[[nodiscard]] bool IsVisible() const { return bVisible; }
 	void SetVisibility(bool V, bool = false) { bVisible = V; }
 	void RegisterComponent() { bRegistered = true; }
 };
@@ -523,7 +586,8 @@ public:
 
 // A representative slice of AActor's own data members, so a local with the same name in the new code is caught by -Wshadow as it
 // would be in the engine. (The real class has many more; these are the ones with names a rendering/network actor might clash with.)
-struct FActorTickFunction { bool bCanEverTick = false; bool bStartWithTickEnabled = false; };
+enum ETickingGroup { TG_PrePhysics, TG_PostUpdateWork };
+struct FActorTickFunction { bool bCanEverTick = false; bool bStartWithTickEnabled = false; ETickingGroup TickGroup = TG_PrePhysics; };
 class UWorld;
 class AActor : public UObject
 {
@@ -569,6 +633,7 @@ public:
 class UWorld
 {
 public:
+	std::vector<AActor*> Actors;
 	APlayerController* Player = nullptr;
 	APlayerController* GetFirstPlayerController() const { return Player; }
 };
@@ -601,28 +666,46 @@ class IHttpRequest;
 using FHttpRequestPtr = TSharedPtr<IHttpRequest>;
 struct FCompleteDelegate
 {
-	void Unbind() {}
-	template <class O, class F>
-	void BindUObject(O*, F) {}
+	std::function<void(FHttpRequestPtr, FHttpResponsePtr, bool)> Fn;
+	void Unbind() { Fn = nullptr; }
+	template <class O, class R>
+	void BindUObject(O* Obj, R (O::*Method)(FHttpRequestPtr, FHttpResponsePtr, bool))
+	{
+		Fn = [Obj, Method](FHttpRequestPtr Req, FHttpResponsePtr Resp, bool Ok) { (Obj->*Method)(Req, Resp, Ok); };
+	}
 };
 class IHttpRequest
 {
 public:
-	void SetURL(const FString&) {}
-	void SetVerb(const FString&) {}
-	void SetHeader(const FString&, const FString&) {}
-	void SetTimeout(float) {}
+	void SetURL(const FString& In) { Url = In; }
+	void SetVerb(const FString& In) { Verb = In; }
+	void SetHeader(const FString& K, const FString& V) { Headers[K.S] = V.S; }
+	void SetTimeout(float T) { Timeout = T; }
 	void SetContentAsString(const FString&) {}
 	FCompleteDelegate& OnProcessRequestComplete() { return Delegate; }
-	bool ProcessRequest() { return true; }
+	bool ProcessRequest();
 	void CancelRequest() {}
+	FString GetURL() const { return Url; }
 	FCompleteDelegate Delegate;
+	// What the harness looks at, and how it answers.
+	FString Url;
+	FString Verb;
+	std::map<std::string, std::string> Headers;
+	float Timeout = 0.f;
+	bool bProcessed = false;
 };
 struct FHttpModule
 {
 	static FHttpModule& Get() { static FHttpModule M; return M; }
+	/** Every request that was processed and not yet answered (the harness answers them). */
+	static std::vector<TSharedPtr<IHttpRequest>>& Pending() { static std::vector<TSharedPtr<IHttpRequest>> P; return P; }
 	TSharedRef<IHttpRequest, ESPMode::ThreadSafe> CreateRequest() { return TSharedRef<IHttpRequest, ESPMode::ThreadSafe>(std::make_shared<IHttpRequest>()); }
 };
+inline bool IHttpRequest::ProcessRequest()
+{
+	bProcessed = true;
+	return true;
+}
 
 /* ---- json ---------------------------------------------------------------------------------------------------- */
 
@@ -775,7 +858,11 @@ struct TJsonWriterFactory { static TSharedRef<TJsonWriter<C>> Create(FString* O)
 
 /* ---- misc ----------------------------------------------------------------------------------------------------- */
 
-struct FPlatformMisc { static FString GetEnvironmentVariable(const char* N) { const char* V = std::getenv(N); return FString(V ? V : ""); } };
+struct FPlatformMisc
+{
+	static FString GetEnvironmentVariable(const char* N) { const char* V = std::getenv(N); return FString(V ? V : ""); }
+	static int32 NumberOfCores() { return 4; }
+};
 struct FPaths { static bool FileExists(const FString&) { return false; } };
 struct FFileHelper { static bool LoadFileToString(FString&, const char*) { return false; } };
 struct FCommandLine { static const char* Get() { return ""; } };
@@ -783,3 +870,5 @@ struct FParse { static bool Value(const char*, const char*, FString&) { return f
 
 template <class T>
 T* NewObject(UObject*) { return new T(); }
+
+#include "VoyageFake.h"

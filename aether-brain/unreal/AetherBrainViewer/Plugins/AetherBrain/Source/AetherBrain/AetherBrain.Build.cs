@@ -6,6 +6,6 @@ public class AetherBrain : ModuleRules
 	{
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 		PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore", "HTTP" });
-		PrivateDependencyModuleNames.AddRange(new string[] { "Json", "Niagara" });
+		PrivateDependencyModuleNames.AddRange(new string[] { "Json", "Niagara", "ProceduralMeshComponent", "ImageWrapper" });
 	}
 }

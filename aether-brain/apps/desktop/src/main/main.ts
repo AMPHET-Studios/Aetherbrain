@@ -57,6 +57,7 @@ import { ForgeHost, forgeSettings, type ForgeSettings } from './forge.js'
 import { BoardWindowHost, FlushGate, PictureLedger, boardHandlers, boardSettings, guardIpc, type BoardSettings } from './board-window.js'
 import { readAssetBytes, readAssetChecked } from './read-asset.js'
 import { CompanionHost, companionSettings, type CompanionSettings } from './companion.js'
+import { FolderCovers } from './folder-cover.js'
 import { ChatHost, chatSettings, type ChatSettingsStored } from './chat-host.js'
 import { LibraryHost, librarySettings, type LibrarySettings } from './library-host.js'
 import { VISION_IPC, VISION_SCHEME, VisionHelper } from './library/vision.js'
@@ -524,6 +525,7 @@ async function reveal(p: unknown, fromBoardPage = false): Promise<void> {
 /* Pictures                                                           */
 /* ------------------------------------------------------------------ */
 
+const folderCovers = new FolderCovers()
 /** Thumbnails already made, and the ones being made (two requests for the same one share the work). */
 const thumbs = new ThumbCache()
 const thumbsInFlight = new Map<string, Promise<Uint8Array | null>>()
@@ -1011,6 +1013,12 @@ function createCompanion(): CompanionHost {
     brain: () => (win && !win.isDestroyed() ? win.webContents : null),
     connectionFile: path.join(app.getPath('userData'), 'companion.json'),
     version: app.getVersion(),
+    // The Unreal viewer's extra-large folder pictures: the same thumbnails the brain window gets, for pictures of the vault only.
+    thumb: (p, px) => thumbnail(p, px).catch(() => null),
+    folderCover: (folder) => {
+      const scan = vault?.lastScan
+      return scan ? folderCovers.coverFor(scan, folder) : null
+    },
     // A window covered by the Unreal app is "in the background": Chromium would slow its timers to once a second
     // and then once a minute, and the scene would stop reaching the viewer. While one reads, it runs at full speed.
     onWanted: (on) => {

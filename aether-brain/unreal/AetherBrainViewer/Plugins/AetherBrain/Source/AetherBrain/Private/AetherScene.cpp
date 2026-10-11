@@ -107,6 +107,17 @@ bool AetherScene::ParseGraph(const FString& Json, FAetherGraph& Out, bool* bOutT
 		Node.Radius = FMath::Clamp(static_cast<float>(Radius), 0.f, 1000.f);
 		const int32 P = static_cast<int32>(Parent);
 		Node.Parent = P >= 0 && P < N ? P : INDEX_NONE;
+		// A folder's pictures: a count and, when the brain draws them as moons, the one that stands for it.
+		double Pictures = 0.0;
+		if ((*Obj)->TryGetNumberField(TEXT("pictures"), Pictures))
+		{
+			Node.Pictures = FMath::Clamp(static_cast<int32>(FMath::Clamp(Pictures, 0.0, 2000000000.0)), 0, 2000000000);
+		}
+		FString Cover;
+		if ((*Obj)->TryGetStringField(TEXT("cover"), Cover) && Cover.StartsWith(TEXT("image:")) && Cover.Len() <= 4096)
+		{
+			Node.Cover = Cover;
+		}
 		G.Nodes.Add(MoveTemp(Node));
 	}
 

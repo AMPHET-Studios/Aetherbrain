@@ -98,6 +98,8 @@ public:
 	/** Full, Calm, Off, Full ... */
 	void CycleMode();
 	const TCHAR* GetModeName() const;
+	/** The flat backdrop (stars, nebulae, galaxies) is hidden while the voyage's photographic sky is up; rocks, ships and lights stay. */
+	void SetBackdropVisible(bool bVisible);
 	/** The sprite material is not there: nebulae and galaxies cannot be drawn until init_unreal.py has run. */
 	bool IsSpriteMaterialMissing() const { return bSpriteMaterialMissing; }
 
@@ -149,4 +151,6 @@ private:
 	/** How far out the scene is laid out, eased toward the brain's size. */
 	double FieldNow = 6000.0;
 	bool bSpriteMaterialMissing = false;
+	/** Something else (the voyage's sky) draws the backdrop: it stays hidden whatever the mode says. */
+	bool bBackdropHidden = false;
 };

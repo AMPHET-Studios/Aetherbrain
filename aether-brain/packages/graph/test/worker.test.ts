@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { LayoutNodeInput, MainToWorker, WorkerToMain } from '../src/layout/protocol'
+import type { LayoutEdgeInput, LayoutNodeInput, MainToWorker, WorkerToMain } from '../src/layout/protocol'
 
 /** Runs the real layout worker module in-process with a fake `self` and fake timers. */
 async function startWorker() {
@@ -283,5 +283,74 @@ describe('layout worker, system mode', () => {
     const star = at(first, 1)
     const born = at(first, 7)
     expect(Math.hypot(born[0]! - star[0]!, born[1]! - star[1]!, born[2]! - star[2]!)).toBeLessThan(1)
+  })
+})
+
+/**
+ * The Today hub's beams are edges the notes' degrees do not count: a note with a task due today and no links of its own has
+ * degree 0 and a beam into it. A link's strength used to be 0.9 over the smaller degree of its ends, so that beam was Infinity,
+ * the first tick sent both ends' velocity to Infinity, and d3-octree's `cover` looped forever allocating a node a pass
+ * until the window ran out of memory (a whole-drive vault of orphan notes, constellation layout: one clumped star, no orbits).
+ */
+describe('layout worker, force layouts stay finite', () => {
+  function hub(id: string, degree: number): LayoutNodeInput {
+    return { id, area: 5, degree, created: null, ghost: false, radius: 4.6, parent: -1, kind: 3, role: -1 }
+  }
+  function note(id: string, degree: number): LayoutNodeInput {
+    return { id, area: 5, degree, created: null, ghost: false, radius: 1, parent: -1, kind: 0, role: -1 }
+  }
+  /** The hub beams to three notes; one has no links (degree 0), two are linked to each other. */
+  function beamed(): { nodes: LayoutNodeInput[]; edges: LayoutEdgeInput[] } {
+    return {
+      nodes: [hub('today:', 3), note('Projects/Images', 0), note('a', 1), note('b', 1)],
+      edges: [
+        { s: 0, t: 1, w: 1 },
+        { s: 0, t: 2, w: 1 },
+        { s: 0, t: 3, w: 1 },
+        { s: 2, t: 3, w: 1 },
+      ],
+    }
+  }
+  const allFinite = (positions: Float32Array): boolean => positions.every((v) => Number.isFinite(v))
+
+  for (const mode of ['constellation', 'orbit'] as const) {
+    it(`${mode}: a beam into a note with no links settles with every place a number`, async () => {
+      const w = await startWorker()
+      const { nodes, edges } = beamed()
+      w.send({ type: 'graph', nodes, edges, mode })
+      vi.advanceTimersByTime(30_000)
+      const last = w.positions().at(-1)!
+      expect(last.settled).toBe(true)
+      expect(last.positions.length).toBe(nodes.length * 3)
+      for (const m of w.positions()) expect(allFinite(m.positions)).toBe(true)
+      // The beam still pulls: the unlinked note ends up near the hub, not flung away.
+      const d = Math.hypot(last.positions[3]! - last.positions[0]!, last.positions[4]! - last.positions[1]!, last.positions[5]! - last.positions[2]!)
+      expect(d).toBeLessThan(2000)
+    })
+  }
+
+  it('places carried over from an earlier layout that are not numbers do not hang the physics', async () => {
+    const w = await startWorker()
+    const { nodes, edges } = beamed()
+    const positions = new Float32Array(nodes.length * 3)
+    positions.fill(Infinity)
+    positions[4] = NaN
+    w.send({ type: 'graph', nodes, edges, mode: 'constellation', prev: { ids: nodes.map((n) => n.id), positions } })
+    vi.advanceTimersByTime(30_000)
+    const last = w.positions().at(-1)!
+    expect(last.settled).toBe(true)
+    for (const m of w.positions()) expect(allFinite(m.positions)).toBe(true)
+  })
+
+  it('system layout: start places that are not numbers ease in from the parent, never to NaN', async () => {
+    const w = await startWorker()
+    const ids = system().map((n) => n.id)
+    const positions = new Float32Array(ids.length * 3)
+    positions.fill(Infinity)
+    w.send({ type: 'graph', nodes: system(), edges: [], mode: 'system', prev: { ids, positions } })
+    vi.advanceTimersByTime(3000)
+    // Motion is on, so frames keep coming after the ease: the one frame that completes it is the settled one.
+    expect(w.positions().filter((m) => m.settled).length).toBe(1)
+    for (const m of w.positions()) expect(allFinite(m.positions)).toBe(true)
   })
 })

@@ -6,7 +6,7 @@
  */
 import type { GraphData, GraphNode, NoteId } from '@aether/core'
 import { nodeBaseColor, nodeRadius, type ColorMode, type PictureSize } from '@aether/graph'
-import type { CompanionGraphDto, CompanionKind } from '../shared/ipc'
+import type { CompanionGraphDto, CompanionKind, CompanionNodeDto } from '../shared/ipc'
 import type { ScenePlan } from './companion-bound'
 
 export function companionKind(n: GraphNode): CompanionKind {
@@ -17,6 +17,23 @@ export function companionKind(n: GraphNode): CompanionKind {
     return role === 'root' || role === 'mount' ? 'sun' : role === 'project' ? 'star' : 'planet'
   }
   return n.ghost ? 'ghost' : 'moon'
+}
+
+/**
+ * For each folder whose pictures are drawn as moons, the picture that stands for it: the newest still one (a video only
+ * when there is nothing else), the first of them when their dates are not known. One pass over the nodes.
+ */
+export function folderCovers(graph: GraphData): Map<NoteId, NoteId> {
+  const best = new Map<NoteId, { id: NoteId; score: number }>()
+  for (const n of graph.nodes) {
+    if (n.kind !== 'image' || !n.image || n.parent === null) continue
+    const score = (n.image.video ? 0 : 1e15) + (n.image.mtime ?? n.updated ?? 0)
+    const old = best.get(n.parent)
+    if (!old || score > old.score) best.set(n.parent, { id: n.id, score })
+  }
+  const out = new Map<NoteId, NoteId>()
+  for (const [folder, b] of best) out.set(folder, b.id)
+  return out
 }
 
 export interface CompanionSceneOptions {
@@ -50,14 +67,23 @@ export function companionScene(graph: GraphData, o: CompanionSceneOptions, plan?
   }
   const span = Math.max(1, maxT - minT)
   const ageOf = (n: GraphNode) => (n.created === null ? 0.9 : 1 - (n.created - minT) / span)
-  const dto = (n: GraphNode, parent: number) => ({
-    id: n.id,
-    title: n.title,
-    kind: companionKind(n),
-    color: `#${nodeBaseColor(n, o.colorMode, o.activeTag, ageOf).getHexString()}`,
-    radius: Math.round(nodeRadius(n, o.pictureSize) * 1000) / 1000,
-    parent,
-  })
+  const covers = folderCovers(graph)
+  const dto = (n: GraphNode, parent: number): CompanionNodeDto => {
+    const out: CompanionNodeDto = {
+      id: n.id,
+      title: n.title,
+      kind: companionKind(n),
+      color: `#${nodeBaseColor(n, o.colorMode, o.activeTag, ageOf).getHexString()}`,
+      radius: Math.round(nodeRadius(n, o.pictureSize) * 1000) / 1000,
+      parent,
+    }
+    if (n.folder && n.folder.images > 0) {
+      out.pictures = n.folder.images
+      const cover = covers.get(n.id)
+      if (cover) out.cover = cover
+    }
+    return out
+  }
   if (plan) {
     const nodes = Array.from(plan.keep, (i) => {
       const p = plan.parent[i]!
@@ -113,6 +139,8 @@ export function sceneSignature(g: CompanionGraphDto): string {
     eat(n.kind)
     eat(n.color)
     eat(n.radius)
+    eat(n.cover ?? '')
+    eat(n.pictures ?? 0)
     eat(n.parent)
   }
   for (const e of g.edges) eat(e)
