@@ -101,7 +101,7 @@ export async function loadVault(
   const folders = foldersOfNotes(notes.values())
   for (const f of listed ?? []) addFolder(folders, f)
   const graph = buildGraph(notes, graphOptions?.(folders, notes, assets))
-  search.rebuild(notes.values())
+  await search.rebuildAsync(notes.values())
   return { notes, graph, search, folders, assets }
 }
 

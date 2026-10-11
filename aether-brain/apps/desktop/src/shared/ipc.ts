@@ -13,6 +13,16 @@ export interface VaultFileDto {
   mtime: number
 }
 
+/**
+ * The notes of the vault come a page at a time (one reply with all of them was too large a message for a vault of long chats and
+ * killed the main process): read `files`, and while `more` ask `listMoreFiles(token)` for the next page.
+ */
+export interface VaultFilePage {
+  files: VaultFileDto[]
+  token: number
+  more: boolean
+}
+
 export interface VaultChangeDto {
   /**
    * Note add/change/unlink (with content), image add/change/unlink (no
@@ -403,7 +413,10 @@ export interface AetherBridge {
   onLibraryEvent(cb: (e: LibraryEventDto) => void): () => void
   /** Drive roots on Windows (`C:\`, `D:\`, …); empty elsewhere. */
   listDrives(): Promise<string[]>
-  listFiles(): Promise<VaultFileDto[]>
+  /** The first page of the vault's notes (an array: every note in one reply, as older builds sent them). */
+  listFiles(): Promise<VaultFilePage | VaultFileDto[]>
+  /** The next page of the list `token` came with. */
+  listMoreFiles(token: number): Promise<VaultFilePage>
   /** Every non-ignored folder in the vault (from the last scan). */
   listFolders(): Promise<FolderListDto>
   readFile(path: string): Promise<string | null>
@@ -559,6 +572,7 @@ export const IPC = {
   libraryEvent: 'library:event',
   drives: 'vault:drives',
   list: 'vault:list',
+  listMore: 'vault:listMore',
   folders: 'vault:folders',
   read: 'vault:read',
   write: 'vault:write',

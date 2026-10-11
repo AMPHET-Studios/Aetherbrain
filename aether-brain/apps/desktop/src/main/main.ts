@@ -33,6 +33,7 @@ import type { ChatPatch } from '../shared/chat.js'
 import { FsVault, isVideoName, within } from './fsvault.js'
 import { VaultWatcher } from './watcher.js'
 import { findProjects } from './projects.js'
+import { FilePager, type FilePage } from './pages.js'
 import { BRAIN_WINDOW_NAME, MemoryTrail, crashMessage, crashReport, crashReportName, describeTrail, shouldReload } from './crash.js'
 import {
   MAX_THUMB_FILE_BYTES,
@@ -353,7 +354,10 @@ async function openVault(input: string[]): Promise<VaultInfo> {
  * renderer keeps those until its load is done; the AI link gets them after
  * the snapshot).
  */
-async function listFiles(): Promise<VaultFileDto[]> {
+/** What of the last list has not gone to the renderer yet (a page at a time: see pages.ts). */
+const filePager = new FilePager()
+
+async function listFiles(): Promise<FilePage> {
   const v = requireVault()
   const gen = ++generation
   const latest = () => gen === generation && v === vault
@@ -384,7 +388,7 @@ async function listFiles(): Promise<VaultFileDto[]> {
     const files = await v.readAll(scan.files, (done) => progress({ phase: 'reading', files: done, found, dirs: scan.dirs, done: false }))
     progress({ phase: 'done', files: files.length, found, dirs: scan.dirs, done: true })
     if (latest()) void ai?.setVault(linkVault(v), { files, folders: scan.folders })
-    return files
+    return filePager.start(files)
   } finally {
     // setVault above already set the link's target, so these land after the snapshot.
     if (latest()) {
@@ -1049,6 +1053,7 @@ function registerIpc(): void {
   ipc.handle(IPC.findProjectsStop, () => void findRun++)
   ipc.handle(IPC.drives, () => listDrives())
   ipc.handle(IPC.list, () => listFiles())
+  ipc.handle(IPC.listMore, (_e, token: unknown) => filePager.more(Number(token)))
   ipc.handle(IPC.folders, (): FolderListDto => {
     const scan = requireVault().lastScan
     return { folders: scan ? [...scan.folders] : [], truncated: scan?.truncated ?? false }

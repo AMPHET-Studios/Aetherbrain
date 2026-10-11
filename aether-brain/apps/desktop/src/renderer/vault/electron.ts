@@ -102,7 +102,15 @@ export class ElectronVaultAdapter implements VaultAdapter {
   async list(): Promise<VaultFile[]> {
     if (!this.listeners.size) this.hold()
     try {
-      return await this.bridge.listFiles()
+      // A page at a time (main sends no more than a few MB in one reply); an older main sends them all in an array.
+      let page = await this.bridge.listFiles()
+      if (Array.isArray(page)) return page
+      const files: VaultFile[] = [...page.files]
+      while (page.more) {
+        page = await this.bridge.listMoreFiles(page.token)
+        for (const f of page.files) files.push(f)
+      }
+      return files
     } catch (err) {
       this.release()
       throw err

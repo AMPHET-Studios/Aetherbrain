@@ -3,7 +3,7 @@
  * 12 MB chat ran the 4 GB window out of memory while the vault was loading. What is past the limit is counted and searchable, not linked.
  */
 import { describe, expect, it } from 'vitest'
-import { MemoryVaultAdapter, PARSE_MAX_CHARS, PLAIN_MAX_CHARS, loadVault, parseNote } from '../src'
+import { MemoryVaultAdapter, PARSE_MAX_CHARS, PARSE_MAX_CHARS_CHAT, PLAIN_MAX_CHARS, SearchIndex, loadVault, parseNote } from '../src'
 
 const block = (k: number): string =>
   `> **Me:** How do I make the portal glow? (message ${k})\n>\n> **Claude:** Use volumetrics, see [[Portal ${k % 7}]] and #concept-art.\n>\n> - first point\n> - second point with \`code\`\n\n`
@@ -22,9 +22,10 @@ describe('long notes', () => {
     const note = parseNote({ path: 'Chats/big.md', content: raw, mtime: 1 })
     const ms = performance.now() - t
     expect(ms).toBeLessThan(4000) // 4 MB used to take about 24 s here
-    expect(note.partial).toBeGreaterThan(PARSE_MAX_CHARS * 0.7)
-    expect(note.partial).toBeLessThanOrEqual(PARSE_MAX_CHARS)
-    expect(note.links.length).toBeGreaterThan(100)
+    // A chat (tagged ai-chat) is read less far than other notes: its text is inert, what is read is its header and start.
+    expect(note.partial).toBeGreaterThan(PARSE_MAX_CHARS_CHAT * 0.7)
+    expect(note.partial).toBeLessThanOrEqual(PARSE_MAX_CHARS_CHAT)
+    expect(note.links.length).toBeGreaterThan(20)
     expect(note.links.length).toBeLessThan(2000)
     expect(note.raw).toBe(raw)
     expect(note.plain.length).toBeLessThanOrEqual(PLAIN_MAX_CHARS + 2)
@@ -32,7 +33,7 @@ describe('long notes', () => {
   })
 
   it('cuts at a blank line, so a block is not read in halves', () => {
-    const raw = chat(PARSE_MAX_CHARS * 3)
+    const raw = chat(PARSE_MAX_CHARS_CHAT * 3)
     const note = parseNote({ path: 'a.md', content: raw })
     const body = raw.slice(raw.indexOf('## Transcript'))
     expect(note.partial).toBeDefined()
@@ -43,9 +44,10 @@ describe('long notes', () => {
   })
 
   it('a note under the limit is read whole, as before', () => {
-    const note = parseNote({ path: 'a.md', content: chat(PARSE_MAX_CHARS - 5000) })
+    const note = parseNote({ path: 'a.md', content: chat(PARSE_MAX_CHARS - 5000, '---\ntitle: Plain\n---\n# Plain\n\n') })
     expect(note.partial).toBeUndefined()
     expect(note.links.length).toBeGreaterThan(100)
+    expect(parseNote({ path: 'c.md', content: chat(PARSE_MAX_CHARS_CHAT - 3000) }).partial).toBeUndefined()
   })
 
   it('what is past the limit is searchable (up to PLAIN_MAX_CHARS) and counted, but gives no links or tags', () => {
@@ -96,4 +98,23 @@ describe('long notes', () => {
     })
     expect(seen.length).toBeGreaterThan(1)
   }, 60_000)
+
+  it('a chat is read less far than another long note, and a note that is not a chat keeps the general limit', () => {
+    const asChat = parseNote({ path: 'a.md', content: chat(PARSE_MAX_CHARS * 2) })
+    const other = parseNote({ path: 'b.md', content: chat(PARSE_MAX_CHARS * 2, '---\ntitle: Notes\n---\n# Notes\n\n') })
+    expect(asChat.partial!).toBeLessThanOrEqual(PARSE_MAX_CHARS_CHAT)
+    expect(other.partial!).toBeGreaterThan(PARSE_MAX_CHARS_CHAT)
+    expect(other.partial!).toBeLessThanOrEqual(PARSE_MAX_CHARS)
+  })
+
+  it('the search index is built in slices and finds a word deep in a long chat', async () => {
+    const deep = chat(PARSE_MAX_CHARS_CHAT * 2) + '\n\nlate zebrafish remark\n'
+    const note = parseNote({ path: 'Chats/deep.md', content: deep })
+    const other = parseNote({ path: 'a.md', content: 'Some other note about apples.' })
+    const index = new SearchIndex()
+    await index.rebuildAsync([note, other], 0) // a slice of 0 ms yields after every note
+    expect(index.size).toBe(2)
+    expect(index.search('zebrafish').map((h) => h.id)).toEqual([note.meta.id])
+    expect(index.search('apples').map((h) => h.id)).toEqual([other.meta.id])
+  })
 })

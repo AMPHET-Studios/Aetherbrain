@@ -28,7 +28,11 @@ export class SearchIndex {
   private docs = new Map<NoteId, Doc>()
 
   constructor() {
-    this.ms = new MiniSearch<Doc>({
+    this.ms = SearchIndex.fresh()
+  }
+
+  private static fresh(): MiniSearch<Doc> {
+    return new MiniSearch<Doc>({
       fields: ['title', 'aliases', 'headings', 'tags', 'body', 'path'],
       storeFields: ['title'],
       searchOptions: {
@@ -67,6 +71,28 @@ export class SearchIndex {
       docs.push(d)
     }
     this.ms.addAll(docs)
+  }
+
+  /**
+   * `rebuild` that lets the event loop breathe: indexing costs about 0.3 s per MB of text, and a vault of long chats is tens of MB, which
+   * as one block is a window that does not answer for a quarter of a minute. The index is built on the side and swapped in at the end,
+   * so a search made meanwhile sees the old one.
+   */
+  async rebuildAsync(notes: Iterable<ParsedNote>, sliceMs = 40): Promise<void> {
+    const ms = SearchIndex.fresh()
+    const docs = new Map<NoteId, Doc>()
+    let last = performance.now()
+    for (const n of notes) {
+      const d = this.toDoc(n)
+      docs.set(d.id, d)
+      ms.add(d)
+      if (performance.now() - last > sliceMs) {
+        await new Promise<void>((r) => setTimeout(r, 0))
+        last = performance.now()
+      }
+    }
+    this.ms = ms
+    this.docs = docs
   }
 
   upsert(n: ParsedNote): void {

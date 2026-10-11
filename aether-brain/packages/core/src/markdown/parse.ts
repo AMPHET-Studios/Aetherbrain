@@ -29,8 +29,19 @@ const processor = unified().use(remarkParse).use(remarkGfm).use(remarkNoLateAuto
  * but it gives no links, tags or headings.
  */
 export const PARSE_MAX_CHARS = 120_000
+/**
+ * Most characters of an imported AI chat read as markdown. A chat's text is inert (no link, tag or task comes out of what was said),
+ * so what is read is its header and the start of its transcript; the rest is search text. Three times faster to load than the general limit.
+ */
+export const PARSE_MAX_CHARS_CHAT = 40_000
 /** Most characters of one note's text kept for search (the part read as markdown, then the plain text after it). */
 export const PLAIN_MAX_CHARS = 250_000
+
+/** An imported AI chat or Claude project hub (see chats/notes.ts): known by its tag. */
+function isChatNote(frontmatter: Record<string, unknown>): boolean {
+  const tags = asStringArray(frontmatter['tags'])
+  return tags.includes('ai-chat') || tags.includes('ai-project')
+}
 
 /** Where to cut `text` for `PARSE_MAX_CHARS`: after the last blank line in the last fifth, else after the last line break, else after the last space, else at the limit. */
 function parseCut(text: string, max: number): number {
@@ -54,13 +65,22 @@ function crudePlain(rest: string, room: number): string {
     .slice(0, room)
 }
 
-const WORD_RE = /[\p{L}\p{N}]+(?:['’-][\p{L}\p{N}]+)*/gu
-
-/** `countWords` without building the list of words (for the text past `PARSE_MAX_CHARS`: a 20 MB note has millions). */
+/**
+ * Words in the text past `PARSE_MAX_CHARS`, as runs of non-space characters (a 20 MB note has millions: a regex over the Unicode
+ * letter classes costs 100 ms per MB, this loop 5). A dash on its own counts as a word here; it is a statistic.
+ */
 function countWordsIn(text: string): number {
-  WORD_RE.lastIndex = 0
   let n = 0
-  while (WORD_RE.test(text)) n++
+  let inWord = false
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i)
+    const space = c === 32 || (c >= 9 && c <= 13) || c === 160 || c === 0x2028 || c === 0x2029
+    if (space) inWord = false
+    else if (!inWord) {
+      inWord = true
+      n++
+    }
+  }
   return n
 }
 
@@ -203,8 +223,9 @@ export function parseNote(file: VaultFile): ParsedNote {
   let text = board ? board.text : body
   // A note too long to read whole is read up to PARSE_MAX_CHARS (see there); the rest is only counted and searched.
   let rest = ''
-  if (text.length > PARSE_MAX_CHARS) {
-    const cut = parseCut(text, PARSE_MAX_CHARS)
+  const limit = isChatNote(frontmatter) ? PARSE_MAX_CHARS_CHAT : PARSE_MAX_CHARS
+  if (text.length > limit) {
+    const cut = parseCut(text, limit)
     rest = text.slice(cut)
     text = text.slice(0, cut)
   }
