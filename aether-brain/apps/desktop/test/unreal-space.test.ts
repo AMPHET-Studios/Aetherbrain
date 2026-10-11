@@ -19,10 +19,10 @@ function compiler(): string | null {
 const cxx = process.platform === 'win32' ? null : compiler()
 
 describe.skipIf(!cxx)('the Unreal space world, Niagara layer and brain viewer maths, run as plain C++', () => {
-  it('passes the maths tests and the actor harnesses (strict warnings, six stages)', () => {
+  it('passes the maths tests and the actor harnesses (strict warnings, seven stages)', () => {
     const run = spawnSync('sh', [path.join(unreal, 'tests/run.sh')], { env: { ...process.env, CXX: cxx! }, encoding: 'utf8', timeout: 280_000 })
     const out = `${run.stdout}${run.stderr}`
-    expect(out.match(/\d+ checks, 0 failed/g)).toHaveLength(6)
+    expect(out.match(/\d+ checks, 0 failed/g)).toHaveLength(7)
     expect(out).not.toMatch(/FAIL /)
     expect(run.status).toBe(0)
   }, 300_000)
