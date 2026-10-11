@@ -128,6 +128,11 @@ struct Scene
 {
 	std::vector<Layer> Layers;
 	Vec3 Light;
+	/** An equirectangular sky behind everything (sRGB), and how bright it is; null: black. */
+	const Image* Sky = nullptr;
+	double SkyGain = 1.0;
+	/** Layer kind 3 (a sun): the emissive multiplier of its picture. */
+	double SunGain = 7.0;
 };
 
 /** Renders at 2x and averages down. Returns sRGB bytes. */
@@ -226,6 +231,19 @@ inline std::vector<uint8_t> Render(const Scene& S, const Camera& Cam, double Exp
 			Rgb Out{0.0, 0.0, 0.0};
 			if (D.Zone < 0)
 			{
+				if (S.Sky != nullptr)
+				{
+					// The ray through this pixel, to a point of the sky picture.
+					const double Sx = ((X + 0.5) / static_cast<double>(W) * 2.0 - 1.0) * (static_cast<double>(W) * 0.5 / Focal);
+					const double Sy = (1.0 - (Y + 0.5) / static_cast<double>(H) * 2.0) * (static_cast<double>(H) * 0.5 / Focal);
+					const Vec3 Ray = AetherSpace::Normalized(Cam.Fwd + Cam.Right * Sx + Cam.Up * Sy);
+					const double Lon = std::atan2(Ray.Y, Ray.X);
+					const double Lat = std::asin(std::max(-1.0, std::min(1.0, Ray.Z)));
+					const double U = (Lon + AetherSpace::kPi) / (2.0 * AetherSpace::kPi);
+					const double V = (AetherSpace::kPi * 0.5 - Lat) / AetherSpace::kPi;
+					const Rgb C = Sample(*S.Sky, U, V, true);
+					Out = Rgb{C.R * S.SkyGain, C.G * S.SkyGain, C.B * S.SkyGain};
+				}
 				Lin[static_cast<size_t>(Y) * static_cast<size_t>(W) + static_cast<size_t>(X)] = Out;
 				continue;
 			}
@@ -248,6 +266,15 @@ inline std::vector<uint8_t> Render(const Scene& S, const Camera& Cam, double Exp
 			if (Lay.Kind == 2)
 			{
 				Lin[static_cast<size_t>(Y) * static_cast<size_t>(W) + static_cast<size_t>(X)] = Col;
+				continue;
+			}
+			if (Lay.Kind == 3)
+			{
+				// A sun: its picture, limb-darkened (I = 1 - 0.62 (1 - mu)), times the gain.
+				const double Mu = std::max(0.0, AetherSpace::Dot(AetherSpace::Normalized(Mix3(Sec.Nrm[Ia], Sec.Nrm[Ib], Sec.Nrm[Ic])), View));
+				const Rgb Base = Sample(*Lay.Base, U, Vv, true);
+				const double Limb = (1.0 - 0.62 * (1.0 - Mu)) * S.SunGain;
+				Lin[static_cast<size_t>(Y) * static_cast<size_t>(W) + static_cast<size_t>(X)] = Rgb{Base.R * Limb, Base.G * Limb, Base.B * Limb};
 				continue;
 			}
 			Rgb Albedo{0.02, 0.025, 0.03};
