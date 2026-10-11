@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { BOARD_LIMITS, boardPictureName, parseBoard, serializeBoard, type Vec2 } from '@aether/core'
 import type { KeyIn, PointerIn } from '../src/board/api'
 import { pictureSize } from '../src/board/view/env'
+import { MOD, isMac } from '../src/util'
 import {
   FINAL_BURST_MS,
   MAX_DROP_PIXELS,
@@ -727,8 +728,11 @@ describe('copying between boards, and the clipboard', () => {
   it('Paste from a menu with nothing copied on the board says how to paste from the clipboard', () => {
     const r = rig(RAW)
     r.session.exec('edit.paste')
-    expect(r.host.toastTexts().at(-1)).toBe(pasteHint(false))
-    expect(r.host.toastTexts().at(-1)).toMatch(/Ctrl V/)
+    // The hint names the platform's own modifier (⌘ on a Mac, Ctrl elsewhere).
+    expect(r.host.toastTexts().at(-1)).toBe(pasteHint(isMac))
+    expect(r.host.toastTexts().at(-1)).toContain(`${MOD} V`)
+    expect(pasteHint(false)).toMatch(/Ctrl V/)
+    expect(pasteHint(true)).toMatch(/⌘ V/)
     expect(r.session.controller.state.doc.items).toHaveLength(2)
   })
 })
