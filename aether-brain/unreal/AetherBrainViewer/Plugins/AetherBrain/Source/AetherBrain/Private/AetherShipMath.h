@@ -458,66 +458,6 @@ struct HullMaps
 	Image Orm;
 };
 
-namespace
-{
-/** Periodic gradient noise in about [-1, 1]: a lattice of Px x Py cells that wraps. */
-inline double PGrad(int Ix, int Iy, double Dx, double Dy, uint32_t Seed)
-{
-	const double A = Hash01(static_cast<uint32_t>(Ix), static_cast<uint32_t>(Iy), Seed) * 2.0 * kPi;
-	return std::cos(A) * Dx + std::sin(A) * Dy;
-}
-
-inline double PNoise(double X, double Y, int Px, int Py, uint32_t Seed)
-{
-	const double Fx = std::floor(X);
-	const double Fy = std::floor(Y);
-	const int Ix = static_cast<int>(Fx);
-	const int Iy = static_cast<int>(Fy);
-	const double Dx = X - Fx;
-	const double Dy = Y - Fy;
-	const auto W = [](int I, int P) { return ((I % P) + P) % P; };
-	const int X0 = W(Ix, Px);
-	const int X1 = W(Ix + 1, Px);
-	const int Y0 = W(Iy, Py);
-	const int Y1 = W(Iy + 1, Py);
-	const double U = Dx * Dx * Dx * (Dx * (Dx * 6.0 - 15.0) + 10.0);
-	const double V = Dy * Dy * Dy * (Dy * (Dy * 6.0 - 15.0) + 10.0);
-	const double A = PGrad(X0, Y0, Dx, Dy, Seed);
-	const double B = PGrad(X1, Y0, Dx - 1.0, Dy, Seed);
-	const double C = PGrad(X0, Y1, Dx, Dy - 1.0, Seed);
-	const double D = PGrad(X1, Y1, Dx - 1.0, Dy - 1.0, Seed);
-	return Lerp(Lerp(A, B, U), Lerp(C, D, U), V) * 1.4;
-}
-
-/** Fractal periodic noise over the tile: U, V in [0, 1), `Fx` x `Fy` cells at the first octave. */
-inline double PFbm(double U, double V, int Fx, int Fy, int Octaves, uint32_t Seed)
-{
-	double Sum = 0.0;
-	double Amp = 1.0;
-	double Norm = 0.0;
-	int Px = Fx;
-	int Py = Fy;
-	for (int O = 0; O < Octaves; ++O)
-	{
-		Sum += Amp * PNoise(U * Px, V * Py, Px, Py, Seed + static_cast<uint32_t>(O) * 17U);
-		Norm += Amp;
-		Amp *= 0.5;
-		Px *= 2;
-		Py *= 2;
-	}
-	return Sum / Norm;
-}
-
-inline double Bump(double D, double Width) { return std::exp(-(D * D) / (Width * Width)); }
-
-struct Plate
-{
-	int Ci;
-	int Cj;
-	double Fx;
-	double Fy;
-};
-} // namespace
 
 /**
  * The maps of a ship's metal, `Size` px square (2048 is a good size), tiling every `kHullTile` metres. The tile is 8 x 8

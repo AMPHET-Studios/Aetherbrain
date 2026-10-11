@@ -27,6 +27,8 @@ using AetherSpace::Clamp;
 using AetherSpace::Clamp01;
 using AetherSpace::Cross;
 using AetherSpace::Dot;
+using AetherSpace::Hash01;
+using AetherSpace::Smoothstep;
 using AetherSpace::kPi;
 using AetherSpace::Length;
 using AetherSpace::Lerp;
@@ -573,6 +575,104 @@ inline double HandednessShare(const Section& S)
 		}
 	}
 	return Total == 0U ? 1.0 : static_cast<double>(Good) / static_cast<double>(Total);
+}
+
+/* ------------------------------------------------------------------------------------------------------------------ */
+/* Tileable noise for the maps                                                                                         */
+/* ------------------------------------------------------------------------------------------------------------------ */
+
+/** Periodic gradient noise in about [-1, 1]: a lattice of Px x Py cells that wraps. */
+inline double PGrad(int Ix, int Iy, double Dx, double Dy, uint32_t Seed)
+{
+	const double A = Hash01(static_cast<uint32_t>(Ix), static_cast<uint32_t>(Iy), Seed) * 2.0 * kPi;
+	return std::cos(A) * Dx + std::sin(A) * Dy;
+}
+
+inline double PNoise(double X, double Y, int Px, int Py, uint32_t Seed)
+{
+	const double Fx = std::floor(X);
+	const double Fy = std::floor(Y);
+	const int Ix = static_cast<int>(Fx);
+	const int Iy = static_cast<int>(Fy);
+	const double Dx = X - Fx;
+	const double Dy = Y - Fy;
+	const auto W = [](int I, int P) { return ((I % P) + P) % P; };
+	const int X0 = W(Ix, Px);
+	const int X1 = W(Ix + 1, Px);
+	const int Y0 = W(Iy, Py);
+	const int Y1 = W(Iy + 1, Py);
+	const double U = Dx * Dx * Dx * (Dx * (Dx * 6.0 - 15.0) + 10.0);
+	const double V = Dy * Dy * Dy * (Dy * (Dy * 6.0 - 15.0) + 10.0);
+	const double A = PGrad(X0, Y0, Dx, Dy, Seed);
+	const double B = PGrad(X1, Y0, Dx - 1.0, Dy, Seed);
+	const double C = PGrad(X0, Y1, Dx, Dy - 1.0, Seed);
+	const double D = PGrad(X1, Y1, Dx - 1.0, Dy - 1.0, Seed);
+	return Lerp(Lerp(A, B, U), Lerp(C, D, U), V) * 1.4;
+}
+
+/** Fractal periodic noise over the tile: U, V in [0, 1), `Fx` x `Fy` cells at the first octave. */
+inline double PFbm(double U, double V, int Fx, int Fy, int Octaves, uint32_t Seed)
+{
+	double Sum = 0.0;
+	double Amp = 1.0;
+	double Norm = 0.0;
+	int Px = Fx;
+	int Py = Fy;
+	for (int O = 0; O < Octaves; ++O)
+	{
+		Sum += Amp * PNoise(U * Px, V * Py, Px, Py, Seed + static_cast<uint32_t>(O) * 17U);
+		Norm += Amp;
+		Amp *= 0.5;
+		Px *= 2;
+		Py *= 2;
+	}
+	return Sum / Norm;
+}
+
+inline double Bump(double D, double Width) { return std::exp(-(D * D) / (Width * Width)); }
+
+/** Periodic cells (Worley) over the tile: `Cells` x `Cells` of them, the distance to the nearest feature point in cell units (and to the second nearest), and its cell's id in [0, 1). */
+inline double PWorley(double U, double V, int Cells, uint32_t Seed, double* OutId = nullptr, double* OutF2 = nullptr)
+{
+	const double X = U * Cells;
+	const double Y = V * Cells;
+	const int Ix = static_cast<int>(std::floor(X));
+	const int Iy = static_cast<int>(std::floor(Y));
+	double Best = 1e9;
+	double Second = 1e9;
+	double Id = 0.0;
+	for (int Dy = -1; Dy <= 1; ++Dy)
+	{
+		for (int Dx = -1; Dx <= 1; ++Dx)
+		{
+			const int Cx = Ix + Dx;
+			const int Cy = Iy + Dy;
+			const int Wx = ((Cx % Cells) + Cells) % Cells;
+			const int Wy = ((Cy % Cells) + Cells) % Cells;
+			const double Px = Cx + AetherSpace::Hash01(static_cast<uint32_t>(Wx), static_cast<uint32_t>(Wy), Seed);
+			const double Py = Cy + AetherSpace::Hash01(static_cast<uint32_t>(Wx), static_cast<uint32_t>(Wy), Seed + 77U);
+			const double D = std::sqrt((Px - X) * (Px - X) + (Py - Y) * (Py - Y));
+			if (D < Best)
+			{
+				Second = Best;
+				Best = D;
+				Id = AetherSpace::Hash01(static_cast<uint32_t>(Wx), static_cast<uint32_t>(Wy), Seed + 131U);
+			}
+			else if (D < Second)
+			{
+				Second = D;
+			}
+		}
+	}
+	if (OutId != nullptr)
+	{
+		*OutId = Id;
+	}
+	if (OutF2 != nullptr)
+	{
+		*OutF2 = Second;
+	}
+	return Best;
 }
 
 } // namespace AetherMesh
