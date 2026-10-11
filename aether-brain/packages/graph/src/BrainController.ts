@@ -20,6 +20,8 @@ export interface BrainEvents {
    * it back through `setGraph` / `setLayoutMode`.
    */
   onGallery?: (star: NoteId | null) => void
+  /** The layout worker failed (see `LayoutEngine.onError`): until it answers, every body sits at the origin. */
+  onLayoutError?: (message: string) => void
 }
 
 /**
@@ -250,6 +252,8 @@ export class BrainController {
     return this.galleryNear === null ? 0 : Math.max(0, now - this.nearSince)
   }
   events: BrainEvents = {}
+  /** The layout worker's failures go to the owner (the engine tells once per distinct message). */
+  private readonly unError = this.engine.onError((m) => this.events.onLayoutError?.(m))
   camera: CameraLike | null = null
   private cameraListeners = new Set<() => void>()
 
@@ -661,6 +665,7 @@ export class BrainController {
   private subs = new Set<() => void>()
 
   dispose(): void {
+    this.unError()
     this.setScreen(null)
     this.resetGallery()
     this.unTick?.()

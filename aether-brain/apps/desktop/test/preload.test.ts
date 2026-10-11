@@ -12,14 +12,17 @@ const electron = (() => {
   const listeners = new Map<string, ((e: unknown, ...args: unknown[]) => void)[]>()
   const exposed: Record<string, unknown> = {}
   const invoke = vi.fn(async (..._args: unknown[]): Promise<unknown> => undefined)
+  const send = vi.fn((..._args: unknown[]): void => undefined)
   return {
     listeners,
     exposed,
     invoke,
+    send,
     module: {
       contextBridge: { exposeInMainWorld: (key: string, api: unknown) => void (exposed[key] = api) },
       ipcRenderer: {
         invoke,
+        send,
         on: (channel: string, fn: (e: unknown, ...args: unknown[]) => void) => {
           listeners.set(channel, [...(listeners.get(channel) ?? []), fn])
         },
@@ -50,6 +53,7 @@ beforeAll(async () => {
 beforeEach(() => {
   electron.invoke.mockReset()
   electron.invoke.mockResolvedValue(undefined)
+  electron.send.mockReset()
 })
 
 /** Main relays a Forge window request to the brain window; resolves once the preload answered. */
@@ -65,6 +69,22 @@ async function relay(req: ForgeRequest): Promise<unknown[]> {
 }
 
 const save = { projectId: 'Projects/PORTALz', title: 'Gesture', png: new Uint8Array([0x89, 0x50]) }
+
+describe('preload: the start after an open that did not get through', () => {
+  it('asks once whether the last open got through, opens with the options it is given, and says when an open has', async () => {
+    await bridge.startupInterrupted()
+    await bridge.openVault(['D:\\', 'F:\\'], { pictures: false })
+    await bridge.openVault('D:\\')
+    bridge.startupSettled()
+    // The channel names are the contract with main: literal here on purpose.
+    expect(electron.invoke.mock.calls).toEqual([
+      ['startup:interrupted'],
+      ['vault:open', ['D:\\', 'F:\\'], { pictures: false }],
+      ['vault:open', 'D:\\', undefined],
+    ])
+    expect(electron.send.mock.calls).toEqual([['startup:settled']])
+  })
+})
 
 describe('preload: pictures', () => {
   it('invokes the picture channels with their arguments', async () => {

@@ -865,6 +865,8 @@ export const useAether = create<AetherState>()((set, get) => {
     onOpen: (id) => get().openNote(id, { fly: true }),
     onHover: (id) => set({ hoveredId: id }),
     onGallery: (star) => get().setGallery(star),
+    // A failed layout leaves every body at the origin (one clump, no orbits): say so, with the reason, so it can be sent on.
+    onLayoutError: (message) => get().toast(`The layout stopped: ${message}. Bodies stay piled up until it runs again.`, 'error'),
   }
   /** The first gallery of a session says how it works (later ones open quietly). */
   let galleryHinted = false

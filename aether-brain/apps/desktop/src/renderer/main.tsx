@@ -1,8 +1,8 @@
-import { StrictMode } from 'react'
+import { StrictMode, useMemo, useSyncExternalStore } from 'react'
 import { createRoot } from 'react-dom/client'
 import { AetherApp, ErrorBoundary, createDemoVault, registerCommands, registerHelpRows, registerKey, useAether, type VaultSource } from '@aether/ui'
 import '@aether/ui/styles.css'
-import type { AiActivityDto } from '../shared/ipc'
+import type { AiActivityDto, OpenVaultOptions } from '../shared/ipc'
 import { ElectronVaultAdapter } from './vault/electron'
 import { RootsPanel } from './components/RootsPanel'
 import { AiLinkPanel } from './components/AiLinkPanel'
@@ -11,6 +11,7 @@ import { LibraryPanel, registerLibrary } from './components/LibraryPanel'
 import { FindProjectsPanel, registerFindProjects } from './components/FindProjectsPanel'
 import { activityFailed, clientLabel, errorText, flyToPath, openPanel, pushActivity, samePath, togglePanel, usePanel } from './panels'
 import { useForgeScreen } from './forge'
+import { SETTLE_MS, getInterrupted, interruptedMessage, rootsLabel, setInterrupted, subscribeInterrupted } from './startup'
 import './companion'
 import './board'
 
@@ -101,11 +102,45 @@ function ForgeScreenHint() {
 /** The vault name in the top bar opens the vault folders panel (the welcome screen outside Electron). */
 const onPickVault = bridge ? () => openPanel('roots') : () => useAether.setState({ status: 'idle' })
 
+/** Open folders again by hand after a start that did not get through (the choices on the welcome screen). */
+async function reopen(roots: string[], opts?: OpenVaultOptions): Promise<void> {
+  setInterrupted(null)
+  useAether.setState({ status: 'idle', error: null })
+  try {
+    const a = await ElectronVaultAdapter.open(roots, opts)
+    if (!a) return
+    await useAether.getState().openVault(a)
+    if (opts?.pictures === false) useAether.getState().toast('Opened without pictures and videos. Restart Aether Brain to bring them back.', 'info')
+  } catch (err) {
+    useAether.setState({ status: 'error', error: `Could not reopen ${rootsLabel(roots)}: ${errorText(err)}` })
+  }
+}
+
 function Desktop() {
   const panel = usePanel()
+  const stopped = useSyncExternalStore(subscribeInterrupted, getInterrupted)
+  const shown = useMemo<VaultSource[]>(() => {
+    if (!stopped) return sources
+    const label = rootsLabel(stopped.roots)
+    return [
+      {
+        id: 'reopen-light',
+        label: `Open ${label} without pictures and videos`,
+        description: 'Only the notes and folders. If this works, the pictures were the heavy part.',
+        open: () => reopen(stopped.roots, { pictures: false }),
+      },
+      {
+        id: 'reopen',
+        label: `Open ${label} again`,
+        description: 'The same folders, as before.',
+        open: () => reopen(stopped.roots),
+      },
+      ...sources,
+    ]
+  }, [stopped])
   return (
     <>
-      <AetherApp sources={sources} onPickVault={onPickVault} />
+      <AetherApp sources={shown} onPickVault={onPickVault} />
       {panel && (
         <ErrorBoundary what="this panel" onClose={() => openPanel(null)}>
           {(panel === 'roots' || panel === 'drives') && <RootsPanel mode={panel} />}
@@ -137,12 +172,29 @@ async function boot() {
   registerChat()
   registerLibrary()
   registerFindProjects()
+  // A vault that has been loaded for a minute with the page alive got through: main forgets that an open was pending.
+  let settle: ReturnType<typeof setTimeout> | null = null
+  useAether.subscribe((s) => {
+    if (s.status === 'ready') settle ??= setTimeout(() => bridge?.startupSettled(), SETTLE_MS)
+    else if (settle) {
+      clearTimeout(settle)
+      settle = null
+    }
+  })
   const root = createRoot(document.getElementById('root')!)
   root.render(
     <StrictMode>
       <Desktop />
     </StrictMode>,
   )
+  // The open that was cut short by a dead page (or the app being stopped) is not repeated by itself: that is a crash loop.
+  // The page says so on the welcome screen and offers other ways in (main's startup-guard.ts).
+  const stopped = await ElectronVaultAdapter.interrupted()
+  if (stopped) {
+    setInterrupted(stopped)
+    useAether.setState({ status: 'error', error: interruptedMessage(stopped) })
+    return
+  }
   // Reopen the last vault (CLI, AETHER_VAULT or the remembered roots) automatically.
   const last = await ElectronVaultAdapter.last()
   if (!last) return
