@@ -106,6 +106,11 @@ export function Inspector() {
           <span title="Created">✦ {relativeTime(m.created)}</span>
           <span title="Updated">✎ {relativeTime(m.updated)}</span>
         </div>
+        {note.partial !== undefined && (
+          <div className="mt-1.5 text-[11px] leading-snug text-faint" title="A long note is read as markdown up to a limit, so that it cannot run the window out of memory">
+            Long note: links, tags and headings come from its first {note.partial.toLocaleString('en-US')} characters; search covers more.
+          </div>
+        )}
         {m.tags.length > 0 && (
           <div className="mt-2 flex flex-wrap gap-1.5">
             {m.tags.map((t) => (

@@ -1,5 +1,17 @@
 import { describe, expect, it } from 'vitest'
-import { BOARD_WINDOW_NAME, BRAIN_WINDOW_NAME, CRASH_RELOADS, CRASH_WINDOW_MS, crashMessage, shouldReload } from '../src/main/crash'
+import {
+  BOARD_WINDOW_NAME,
+  BRAIN_WINDOW_NAME,
+  CRASH_RELOADS,
+  CRASH_WINDOW_MS,
+  MEMORY_TRAIL,
+  MemoryTrail,
+  crashMessage,
+  crashReport,
+  crashReportName,
+  describeTrail,
+  shouldReload,
+} from '../src/main/crash'
 
 describe('a window whose page died', () => {
   it('is opened again, but not when it keeps dying right after', () => {
@@ -42,5 +54,51 @@ describe('a window whose page died', () => {
     // Crashes 20 to 30 seconds apart are not "right after opening".
     expect(crashMessage('oom', false).detail).toContain('several times within a minute')
     expect(crashMessage('oom', false).detail).not.toContain('right after opening')
+  })
+})
+
+describe('what the memory did before a page died', () => {
+  const at = (sec: number, pageMB: number) => ({ t: 1_000_000 + sec * 1000, pageMB, mainMB: 200, gpuMB: 300 })
+
+  it('keeps the last MEMORY_TRAIL looks, oldest first', () => {
+    const trail = new MemoryTrail()
+    for (let i = 0; i < MEMORY_TRAIL + 25; i++) trail.add(at(i * 2, i))
+    expect(trail.samples).toHaveLength(MEMORY_TRAIL)
+    expect(trail.samples[0]!.pageMB).toBe(25)
+    expect(trail.samples.at(-1)!.pageMB).toBe(MEMORY_TRAIL + 24)
+    trail.clear()
+    expect(trail.samples).toHaveLength(0)
+  })
+
+  it('says where it ended, its peak and how it got there', () => {
+    const samples = [at(0, 300), at(10, 900), at(20, 1500), at(30, 3900), at(32, 3700)]
+    const text = describeTrail(samples)
+    expect(text).toContain('3.6 GB') // the last look
+    expect(text).toContain('peak 3.8 GB')
+    expect(text).toContain('900 MB 22 s earlier') // the newest look at least 20 s older than the last
+  })
+
+  it('has nothing to say without a look, and no "earlier" when there is only a short trail', () => {
+    expect(describeTrail([])).toBe('')
+    expect(describeTrail([at(0, 500), at(2, 520)])).toBe("The window's page was using 520 MB when it was last measured (its peak 520 MB).")
+  })
+
+  it('puts the memory and the report into the message box, after what it always says', () => {
+    const plain = crashMessage('oom', true)
+    const text = crashMessage('oom', true, BRAIN_WINDOW_NAME, { memory: 'It was big.', report: '/x/crash-1.json' })
+    expect(text.message).toBe(plain.message)
+    expect(text.detail.startsWith(plain.detail)).toBe(true)
+    expect(text.detail).toContain('It was big.')
+    expect(text.detail).toContain('A report was saved: /x/crash-1.json')
+    expect(crashMessage('oom', true, BRAIN_WINDOW_NAME, {}).detail).toBe(plain.detail)
+  })
+
+  it('writes a report with the reason and the trail, under a name a file system takes', () => {
+    const now = Date.UTC(2026, 9, 11, 12, 30, 5, 123)
+    const report = crashReport({ reason: 'oom', exitCode: 36, window: BRAIN_WINDOW_NAME, version: '0.10.0', platform: 'win32', now }, [at(0, 100)])
+    expect(report).toMatchObject({ app: 'Aether Brain', version: '0.10.0', reason: 'oom', exitCode: 36, time: '2026-10-11T12:30:05.123Z' })
+    expect(report.memory).toEqual([at(0, 100)])
+    expect(crashReportName(now)).toBe('crash-2026-10-11T12-30-05-123Z.json')
+    expect(crashReportName(now)).not.toMatch(/[:]/)
   })
 })

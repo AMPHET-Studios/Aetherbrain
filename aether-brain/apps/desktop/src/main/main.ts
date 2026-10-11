@@ -33,7 +33,7 @@ import type { ChatPatch } from '../shared/chat.js'
 import { FsVault, isVideoName, within } from './fsvault.js'
 import { VaultWatcher } from './watcher.js'
 import { findProjects } from './projects.js'
-import { BRAIN_WINDOW_NAME, crashMessage, shouldReload } from './crash.js'
+import { BRAIN_WINDOW_NAME, MemoryTrail, crashMessage, crashReport, crashReportName, describeTrail, shouldReload } from './crash.js'
 import {
   MAX_THUMB_FILE_BYTES,
   ThumbCache,
@@ -1141,17 +1141,51 @@ function createWindow(): void {
     if (/^https?:/.test(url)) void shell.openExternal(url)
     return { action: 'deny' }
   })
-  // A page that died leaves a dark empty window: say why, and open it again (unless it keeps dying).
+  // A page that died leaves a dark empty window: say why, and open it again (unless it keeps dying). The memory of its page is looked
+  // at every two seconds meanwhile, so that the message can say how much it was using and a report is left that says how it got there.
   const crashes: number[] = []
+  const trail = new MemoryTrail()
+  const look = () => {
+    const page = win && !win.isDestroyed() ? win.webContents.getOSProcessId() : 0
+    if (!page) return
+    let pageMB = 0
+    let mainMB = 0
+    let gpuMB = 0
+    for (const m of app.getAppMetrics()) {
+      const mb = m.memory.workingSetSize / 1024
+      if (m.pid === page) pageMB = mb
+      else if (m.type === 'Browser') mainMB = mb
+      else if (m.type === 'GPU') gpuMB = mb
+    }
+    if (pageMB > 0) trail.add({ t: Date.now(), pageMB, mainMB, gpuMB })
+  }
+  const watch = setInterval(look, 2000)
+  win.once('closed', () => clearInterval(watch))
   win.webContents.on('render-process-gone', (_e, details) => {
     if (details.reason === 'clean-exit') return
     const now = Date.now()
     crashes.push(now)
     const reload = shouldReload(crashes, now)
+    const memory = describeTrail(trail.samples)
+    const report = crashReport(
+      { reason: details.reason, exitCode: details.exitCode, window: BRAIN_WINDOW_NAME, version: app.getVersion(), platform: `${process.platform} ${os.release()}, ${Math.round(os.totalmem() / 1048576)} MB`, now },
+      trail.samples,
+    )
+    trail.clear()
     if (reload) win?.webContents.reload()
-    const text = crashMessage(details.reason, reload, BRAIN_WINDOW_NAME)
-    const box = { type: 'error' as const, title: 'Aether Brain', message: text.message, detail: text.detail }
-    void (win ? dialog.showMessageBox(win, box) : dialog.showMessageBox(box))
+    // The report is written before the message is shown (a few KB; a failure to write it changes nothing else).
+    const dir = path.join(app.getPath('userData'), 'crash-reports')
+    const file = path.join(dir, crashReportName(now))
+    void fs
+      .mkdir(dir, { recursive: true })
+      .then(() => fs.writeFile(file, JSON.stringify(report, null, 2)))
+      .then(() => file)
+      .catch(() => '')
+      .then((saved) => {
+        const text = crashMessage(details.reason, reload, BRAIN_WINDOW_NAME, { memory, report: saved })
+        const box = { type: 'error' as const, title: 'Aether Brain', message: text.message, detail: text.detail }
+        void (win ? dialog.showMessageBox(win, box) : dialog.showMessageBox(box))
+      })
   })
   // The renderer never needs to navigate away from the app.
   win.webContents.on('will-navigate', (e, url) => {

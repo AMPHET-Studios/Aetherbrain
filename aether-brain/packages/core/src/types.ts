@@ -123,6 +123,11 @@ export interface ParsedNote {
   inlineTags: string[]
   /** Plain text (no markdown syntax), used for search + unlinked mentions. */
   plain: string
+  /**
+   * Set when the note was too long to read as markdown whole (`PARSE_MAX_CHARS`): the number of characters at its start that were.
+   * Its links, tags and headings come from that part only; the search text goes a little further (`PLAIN_MAX_CHARS`).
+   */
+  partial?: number
   mtime?: number
 }
 
