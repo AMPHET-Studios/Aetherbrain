@@ -3,6 +3,8 @@
 #include "AetherBrainActor.h"
 #include "AetherFxActor.h"
 #include "AetherSpaceActor.h"
+#include "AetherVoyageActor.h"
+#include "Camera/PlayerCameraManager.h"
 #include "EngineUtils.h"
 #include "Engine/World.h"
 #include "GameFramework/Pawn.h"
@@ -71,6 +73,14 @@ void AAetherBrainPlayerController::PlayerTick(float DeltaTime)
 			break;
 		}
 	}
+	if (!Voyage.IsValid() && GetWorld())
+	{
+		for (TActorIterator<AAetherVoyageActor> It(GetWorld()); It; ++It)
+		{
+			Voyage = *It;
+			break;
+		}
+	}
 	if (AAetherSpaceActor* Sky = Space.Get())
 	{
 		if (WasInputKeyJustPressed(EKeys::B))
@@ -96,6 +106,31 @@ void AAetherBrainPlayerController::PlayerTick(float DeltaTime)
 		if (B->ConsumeBrainSelection(FromBrain))
 		{
 			FlyToNode(FromBrain);
+		}
+	}
+
+	// A voyage takes the controls: the interceptor flies the route, the camera chases it.
+	if (AAetherVoyageActor* V = Voyage.Get())
+	{
+		if (WasInputKeyJustPressed(EKeys::V))
+		{
+			if (V->IsVoyaging())
+			{
+				LeaveVoyage();
+			}
+			else
+			{
+				StartVoyage();
+			}
+		}
+		if (V->IsVoyaging())
+		{
+			VoyageTick(DeltaTime);
+			if (APawn* P = GetPawn())
+			{
+				P->SetActorLocationAndRotation(CamLocation, CamRotation);
+			}
+			return;
 		}
 	}
 
@@ -212,6 +247,15 @@ void AAetherBrainPlayerController::PickAndClick()
 	FVector Direction;
 	const bool bLooking = IsInputKeyDown(EKeys::RightMouseButton);
 	Hovered = !bLooking && DeprojectMousePositionToWorld(Origin, Direction) ? B->Pick(Origin, Direction) : INDEX_NONE;
+	// A folder's picture card is far bigger than its sphere: the card under the cursor wins.
+	if (!bLooking && Voyage.IsValid() && !Voyage->IsVoyaging())
+	{
+		const int32 Card = Voyage->PickCard(Origin, Direction);
+		if (Card != INDEX_NONE)
+		{
+			Hovered = Card;
+		}
+	}
 	B->SetHovered(Hovered);
 	if (!WasInputKeyJustPressed(EKeys::LeftMouseButton) || Hovered == INDEX_NONE)
 	{
@@ -226,6 +270,148 @@ void AAetherBrainPlayerController::PickAndClick()
 	if (!bDouble)
 	{
 		FlyToNode(Hovered);
+	}
+}
+
+bool AAetherBrainPlayerController::HasVoyageNote() const
+{
+	return !VoyageNote.IsEmpty() && GetWorld() && GetWorld()->GetRealTimeSeconds() < VoyageNoteUntil;
+}
+
+int32 AAetherBrainPlayerController::ChooseVoyageTarget() const
+{
+	AAetherBrainActor* B = Brain.Get();
+	if (!B)
+	{
+		return INDEX_NONE;
+	}
+	if (B->GetNode(B->GetSelected()))
+	{
+		return B->GetSelected();
+	}
+	if (B->GetNode(Hovered))
+	{
+		return Hovered;
+	}
+	// Otherwise the folder most in front of the camera, at least a short way off.
+	const FVector Forward = FRotationMatrix(CamRotation).GetUnitAxis(EAxis::X);
+	int32 Best = INDEX_NONE;
+	double BestScore = -2.0;
+	for (int32 I = 0; I < B->NumNodes(); ++I)
+	{
+		const FAetherNode* N = B->GetNode(I);
+		if (!N || (N->Kind != EAetherKind::Sun && N->Kind != EAetherKind::Star && N->Kind != EAetherKind::Planet))
+		{
+			continue;
+		}
+		const FVector Rel = B->NodeTarget(I) - CamLocation;
+		const double Dist = Rel.Size();
+		if (Dist < 3000.0)
+		{
+			continue;
+		}
+		const double Score = FVector::DotProduct(Rel / Dist, Forward);
+		if (Score > BestScore)
+		{
+			BestScore = Score;
+			Best = I;
+		}
+	}
+	return Best;
+}
+
+void AAetherBrainPlayerController::StartVoyage()
+{
+	AAetherVoyageActor* V = Voyage.Get();
+	AAetherBrainActor* B = Brain.Get();
+	if (!V || !B)
+	{
+		return;
+	}
+	const double Now = GetWorld() ? GetWorld()->GetRealTimeSeconds() : 0.0;
+	const int32 Target = ChooseVoyageTarget();
+	if (Target == INDEX_NONE || !V->BeginVoyage(CamLocation, Target))
+	{
+		VoyageNote = Target == INDEX_NONE ? TEXT("No folder to fly to: select one first.") : TEXT("You are already there: fly away a little, or pick another folder.");
+		VoyageNoteUntil = Now + 4.0;
+		return;
+	}
+	bFlying = false;
+	Throttle = 1.f;
+	if (PlayerCameraManager)
+	{
+		FovBeforeVoyage = PlayerCameraManager->GetFOVAngle();
+	}
+	B->SetHovered(INDEX_NONE);
+	B->SelectNode(V->GetVoyageNode(), false);
+	VoyageNote.Empty();
+}
+
+void AAetherBrainPlayerController::LeaveVoyage()
+{
+	if (AAetherVoyageActor* V = Voyage.Get())
+	{
+		V->EndVoyage();
+	}
+	if (PlayerCameraManager)
+	{
+		PlayerCameraManager->SetFOV(FovBeforeVoyage);
+	}
+	bFlying = false;
+}
+
+void AAetherBrainPlayerController::VoyageTick(float DeltaTime)
+{
+	AAetherVoyageActor* V = Voyage.Get();
+	AAetherBrainActor* B = Brain.Get();
+	if (!V)
+	{
+		return;
+	}
+	if (WasInputKeyJustPressed(EKeys::Escape) || WasInputKeyJustPressed(EKeys::RightMouseButton))
+	{
+		LeaveVoyage();
+		return;
+	}
+	if (V->HasArrived() && WasInputKeyJustPressed(EKeys::Enter) && B && B->GetNode(V->GetVoyageNode()))
+	{
+		B->SelectNode(V->GetVoyageNode(), true);
+	}
+	// W and S set the speed, the wheel too.
+	const float Dt = FMath::Min(DeltaTime, 0.1f);
+	Throttle = FMath::Clamp(Throttle + ((IsInputKeyDown(EKeys::W) ? 1.f : 0.f) - (IsInputKeyDown(EKeys::S) ? 1.f : 0.f)) * 0.6f * Dt, 0.f, 1.f);
+	if (WasInputKeyJustPressed(EKeys::MouseScrollUp))
+	{
+		Throttle = FMath::Min(1.f, Throttle + 0.1f);
+	}
+	if (WasInputKeyJustPressed(EKeys::MouseScrollDown))
+	{
+		Throttle = FMath::Max(0.f, Throttle - 0.1f);
+	}
+	FAetherVoyageInput In;
+	In.Right = (IsInputKeyDown(EKeys::D) ? 1.f : 0.f) - (IsInputKeyDown(EKeys::A) ? 1.f : 0.f);
+	In.Up = (IsInputKeyDown(EKeys::E) ? 1.f : 0.f) - (IsInputKeyDown(EKeys::Q) ? 1.f : 0.f);
+	In.Throttle = Throttle;
+	In.bFire = IsInputKeyDown(EKeys::LeftMouseButton) || IsInputKeyDown(EKeys::SpaceBar);
+	FVector Origin;
+	FVector Direction;
+	if (DeprojectMousePositionToWorld(Origin, Direction))
+	{
+		In.bHasAim = true;
+		In.AimDirection = Direction.GetSafeNormal();
+	}
+	V->StepVoyage(DeltaTime, In);
+	FVector Loc;
+	FRotator Rot;
+	float Fov = 90.f;
+	if (V->GetCamera(Loc, Rot, Fov))
+	{
+		CamLocation = Loc;
+		CamRotation = Rot;
+		if (PlayerCameraManager)
+		{
+			PlayerCameraManager->SetFOV(Fov);
+		}
 	}
 }
 

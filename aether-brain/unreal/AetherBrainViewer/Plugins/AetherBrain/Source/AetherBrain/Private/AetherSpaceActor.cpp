@@ -384,6 +384,12 @@ const TCHAR* AAetherSpaceActor::GetModeName() const
 	}
 }
 
+void AAetherSpaceActor::SetBackdropVisible(bool bVisible)
+{
+	bBackdropHidden = !bVisible;
+	ApplyMode();
+}
+
 void AAetherSpaceActor::ApplyMode()
 {
 	if (!State)
@@ -398,7 +404,7 @@ void AAetherSpaceActor::ApplyMode()
 		{
 			if (Ism)
 			{
-				Ism->SetVisibility(bBackdrop);
+				Ism->SetVisibility(bBackdrop && !bBackdropHidden);
 			}
 		}
 	}

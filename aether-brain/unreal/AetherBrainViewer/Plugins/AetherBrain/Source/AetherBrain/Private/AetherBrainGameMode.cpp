@@ -6,6 +6,7 @@
 #include "AetherBrainPlayerController.h"
 #include "AetherFxActor.h"
 #include "AetherSpaceActor.h"
+#include "AetherVoyageActor.h"
 #include "Engine/PostProcessVolume.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
@@ -50,6 +51,21 @@ void AAetherBrainGameMode::StartPlay()
 		if (!bHasSpace)
 		{
 			World->SpawnActor<AAetherSpaceActor>(FVector::ZeroVector, FRotator::ZeroRotator);
+		}
+	}
+
+	// The voyage: a photographic sky and suns, ships, big folder pictures, the flight to a folder (it finds the brain and the space itself).
+	if (bSpawnVoyage)
+	{
+		bool bHasVoyage = false;
+		for (TActorIterator<AAetherVoyageActor> It(World); It; ++It)
+		{
+			bHasVoyage = true;
+			break;
+		}
+		if (!bHasVoyage)
+		{
+			World->SpawnActor<AAetherVoyageActor>(FVector::ZeroVector, FRotator::ZeroRotator);
 		}
 	}
 

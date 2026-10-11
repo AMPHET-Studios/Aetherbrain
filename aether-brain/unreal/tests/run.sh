@@ -11,7 +11,8 @@
 #  9. rock_core_test.cpp   the asteroid meshes and rock maps (Private/AetherRockMath.h)
 # 10. combat_core_test.cpp the voyage: route, asteroid fields, shots, fracture, shield, pilot, aim, debris (Private/AetherCombatMath.h)
 # 11. voyage_core_test.cpp one whole voyage: ship, field, cursor aim, chase camera (Private/AetherVoyageState.h)
-# 12. unity_check.cpp      both actors in one translation unit, as Unreal's unity build joins them (helper names must not clash)
+# 12. voyage_actor_harness.cpp the real AetherVoyageActor.cpp (with the brain actor) run against the stand-in: bakes, textures, suns, traffic, a whole voyage, folder cards over HTTP
+# 13. unity_check.cpp      both actors in one translation unit, as Unreal's unity build joins them (helper names must not clash)
 set -e
 cd "$(dirname "$0")"
 CXX="${CXX:-c++}"
@@ -45,5 +46,7 @@ if echo 'int main(){return 0;}' | "$CXX" -x c++ -fsanitize=address,undefined -o 
 fi
 "$CXX" -std=c++20 -O1 -g $SAN -Wall -Wextra -Wshadow -Wno-unused-parameter -Werror -I brain_stubs -I "$P/Public" -I "$P/Private" brain_actor_harness.cpp -o "$TMP/aether_brain_actor_harness"
 ASAN_OPTIONS=detect_leaks=0 "$TMP/aether_brain_actor_harness"
+"$CXX" -std=c++20 -O1 -g -pthread $SAN -Wall -Wextra -Wshadow -Wno-unused-parameter -Werror -I brain_stubs -I "$P/Public" -I "$P/Private" voyage_actor_harness.cpp -o "$TMP/aether_voyage_actor_harness"
+ASAN_OPTIONS=detect_leaks=0 "$TMP/aether_voyage_actor_harness"
 "$CXX" -std=c++20 -fsyntax-only $WARN -I ue_stubs -I "$P/Public" -I "$P/Private" unity_check.cpp
 echo "unity check: ok"

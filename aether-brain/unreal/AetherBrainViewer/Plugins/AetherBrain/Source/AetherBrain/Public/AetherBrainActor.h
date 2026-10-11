@@ -104,6 +104,9 @@ public:
 	/** The plain stars the brain draws by itself (the space actor draws a richer sky and turns these off). */
 	void SetBuiltInStars(bool bOn);
 
+	/** A GET to the companion link (token set) for `PathAndQuery`, e.g. /v1/thumb?id=...; null while the link's address is not known. */
+	TSharedPtr<IHttpRequest, ESPMode::ThreadSafe> MakeLinkRequest(const FString& PathAndQuery) const;
+
 	const FString& GetStatus() const { return Status; }
 	bool IsLive() const { return bLive; }
 	const FString& GetVaultName() const { return Graph.Vault; }

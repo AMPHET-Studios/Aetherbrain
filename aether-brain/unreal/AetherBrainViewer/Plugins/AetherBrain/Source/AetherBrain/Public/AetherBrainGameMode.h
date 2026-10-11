@@ -19,6 +19,10 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Aether Brain")
 	bool bSpawnSpace = true;
 
+	/** The voyage: photographic sky and suns, ships, folder pictures, and the flight to a folder (V) unless the level already has the actor. */
+	UPROPERTY(EditAnywhere, Category = "Aether Brain")
+	bool bSpawnVoyage = true;
+
 	/** Play the Niagara effects (light along the links, coronas, ripples, dust, shooting stars) unless the level already has the actor. */
 	UPROPERTY(EditAnywhere, Category = "Aether Brain")
 	bool bSpawnFx = true;

@@ -224,6 +224,18 @@ TSharedRef<IHttpRequest, ESPMode::ThreadSafe> AAetherBrainActor::NewRequest(cons
 	return Request;
 }
 
+TSharedPtr<IHttpRequest, ESPMode::ThreadSafe> AAetherBrainActor::MakeLinkRequest(const FString& PathAndQuery) const
+{
+	if (!Conn.IsValid())
+	{
+		return nullptr;
+	}
+	TSharedRef<IHttpRequest, ESPMode::ThreadSafe> Request = NewRequest(PathAndQuery, TEXT("GET"));
+	// A picture of a big folder may take a moment to decode in the app.
+	Request->SetTimeout(30.f);
+	return Request;
+}
+
 void AAetherBrainActor::RequestGraph()
 {
 	TSharedRef<IHttpRequest, ESPMode::ThreadSafe> Request = NewRequest(TEXT("/v1/graph"), TEXT("GET"));
