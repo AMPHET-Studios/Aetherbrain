@@ -10,7 +10,8 @@
 #  8. ship_core_test.cpp   the mesh toolkit and the three ships: outward faces, tangent frames, symmetry, size, the tileable hull maps (Private/AetherMeshMath.h, AetherShipMath.h)
 #  9. rock_core_test.cpp   the asteroid meshes and rock maps (Private/AetherRockMath.h)
 # 10. combat_core_test.cpp the voyage: route, asteroid fields, shots, fracture, shield, pilot, aim, debris (Private/AetherCombatMath.h)
-# 11. unity_check.cpp      both actors in one translation unit, as Unreal's unity build joins them (helper names must not clash)
+# 11. voyage_core_test.cpp one whole voyage: ship, field, cursor aim, chase camera (Private/AetherVoyageState.h)
+# 12. unity_check.cpp      both actors in one translation unit, as Unreal's unity build joins them (helper names must not clash)
 set -e
 cd "$(dirname "$0")"
 CXX="${CXX:-c++}"
@@ -35,6 +36,8 @@ WARN="-Wall -Wextra -Wshadow -Wconversion -Wno-sign-conversion -Werror"
 "$TMP/aether_rock_core_test"
 "$CXX" -std=c++17 -O1 $WARN -o "$TMP/aether_combat_core_test" combat_core_test.cpp
 "$TMP/aether_combat_core_test"
+"$CXX" -std=c++17 -O1 $WARN -o "$TMP/aether_voyage_core_test" voyage_core_test.cpp
+"$TMP/aether_voyage_core_test"
 # Address and undefined-behaviour checking where the compiler has it (an instance range that does not fit, a read past a TArray).
 SAN=""
 if echo 'int main(){return 0;}' | "$CXX" -x c++ -fsanitize=address,undefined -o "$TMP/aether_san_probe" - 2>/dev/null; then

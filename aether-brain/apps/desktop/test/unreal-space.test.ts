@@ -19,10 +19,10 @@ function compiler(): string | null {
 const cxx = process.platform === 'win32' ? null : compiler()
 
 describe.skipIf(!cxx)('the Unreal space world, Niagara layer and brain viewer maths, run as plain C++', () => {
-  it('passes the maths tests and the actor harnesses (strict warnings, ten stages)', () => {
+  it('passes the maths tests and the actor harnesses (strict warnings, eleven stages)', () => {
     const run = spawnSync('sh', [path.join(unreal, 'tests/run.sh')], { env: { ...process.env, CXX: cxx! }, encoding: 'utf8', timeout: 280_000 })
     const out = `${run.stdout}${run.stderr}`
-    expect(out.match(/\d+ checks, 0 failed/g)).toHaveLength(10)
+    expect(out.match(/\d+ checks, 0 failed/g)).toHaveLength(11)
     expect(out).not.toMatch(/FAIL /)
     expect(run.status).toBe(0)
   }, 300_000)
@@ -50,7 +50,7 @@ describe('the Unreal space world, wiring', () => {
   it('reads four floats of per-instance data, like the materials', () => {
     expect(read(path.join(plugin, 'Private/AetherSpaceActor.cpp'))).toContain('SetNumCustomDataFloats(4)')
     // Indexes 0-3 read once each in the sky material and in the rock material (the node material has its own helper).
-    expect([...python.matchAll(/_custom_data\(mel, material, [0-3],/g)]).toHaveLength(10)
+    expect([...python.matchAll(/_custom_data\(mel, material, [0-3],/g)]).toHaveLength(11)
   })
 
   it('has a key and a HUD line for the space', () => {
