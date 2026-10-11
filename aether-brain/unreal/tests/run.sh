@@ -7,7 +7,8 @@
 #  5. view_core_test.cpp   the brain viewer's maths: how big a far body must be drawn, how often a big scene is redrawn, unplaced layouts (Private/AetherViewMath.h)
 #  6. brain_actor_harness.cpp  the real AetherBrainActor.cpp and AetherScene.cpp run against another stand-in (brain_stubs/): the scene it is sent, what it draws, what it says
 #  7. sky_core_test.cpp    the 8K sky, sun and corona generators: determinism, thread independence, seams, colour by temperature (Private/AetherSkyMath.h)
-#  8. unity_check.cpp      both actors in one translation unit, as Unreal's unity build joins them (helper names must not clash)
+#  8. ship_core_test.cpp   the mesh toolkit and the three ships: outward faces, tangent frames, symmetry, size, the tileable hull maps (Private/AetherMeshMath.h, AetherShipMath.h)
+#  9. unity_check.cpp      both actors in one translation unit, as Unreal's unity build joins them (helper names must not clash)
 set -e
 cd "$(dirname "$0")"
 CXX="${CXX:-c++}"
@@ -26,6 +27,8 @@ WARN="-Wall -Wextra -Wshadow -Wconversion -Wno-sign-conversion -Werror"
 "$TMP/aether_view_core_test"
 "$CXX" -std=c++17 -O1 -pthread $WARN -o "$TMP/aether_sky_core_test" sky_core_test.cpp
 "$TMP/aether_sky_core_test"
+"$CXX" -std=c++17 -O1 -pthread $WARN -o "$TMP/aether_ship_core_test" ship_core_test.cpp
+"$TMP/aether_ship_core_test"
 # Address and undefined-behaviour checking where the compiler has it (an instance range that does not fit, a read past a TArray).
 SAN=""
 if echo 'int main(){return 0;}' | "$CXX" -x c++ -fsanitize=address,undefined -o "$TMP/aether_san_probe" - 2>/dev/null; then
