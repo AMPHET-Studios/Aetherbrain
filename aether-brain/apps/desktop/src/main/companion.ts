@@ -43,6 +43,12 @@ const MAX_RINGS = 2_000
 const MAX_ID = 4096
 const MAX_TITLE = 500
 const MAX_BODY = 8192
+/** Thumbnails made at the same time for a viewer: more are told to wait (a viewer pulling a whole street of folders at once). */
+export const MAX_THUMBS_AT_ONCE = 4
+/** The size of a thumbnail when a viewer does not say, and its bounds (px on the longer side; the app's own limit is 1024). */
+export const THUMB_DEFAULT_PX = 512
+const THUMB_MIN_PX = 64
+const THUMB_MAX_PX = 1024
 /** First 4 bytes of /v1/positions: "AEP1". */
 export const POSITIONS_MAGIC = 0x31504541
 export const POSITIONS_HEADER = 16
@@ -104,7 +110,7 @@ export function cleanGraph(raw: unknown): CompanionGraphDto {
   for (let i = 0; i < n; i++) {
     const x: unknown = nodes[i]
     if (!isRecord(x)) throw new Error(`bad node ${i}`)
-    const { id, title, kind, color, radius, parent } = x
+    const { id, title, kind, color, radius, parent, cover, pictures } = x
     if (typeof id !== 'string' || !id || id.length > MAX_ID) throw new Error(`bad node id ${i}`)
     if (typeof kind !== 'string' || !KINDS.has(kind as CompanionKind)) throw new Error(`bad node kind ${i}`)
     if (typeof color !== 'string' || !/^#[0-9a-f]{6}$/i.test(color)) throw new Error(`bad node color ${i}`)
@@ -118,6 +124,9 @@ export function cleanGraph(raw: unknown): CompanionGraphDto {
       radius,
       parent: parent as number,
     }
+    // A folder's picture: only a picture node id and a plain count; anything else is left out, not refused.
+    if (typeof cover === 'string' && cover.startsWith('image:') && cover.length <= MAX_ID) out[i]!.cover = cover
+    if (typeof pictures === 'number' && Number.isInteger(pictures) && pictures > 0 && pictures <= 1_000_000_000) out[i]!.pictures = pictures
   }
   if (!Array.isArray(edges) || edges.length > MAX_EDGE_NUMBERS || edges.length % 2 !== 0) throw new Error('bad edges')
   for (const e of edges) if (!Number.isInteger(e) || (e as number) < 0 || (e as number) >= n) throw new Error('bad edge')
@@ -210,6 +219,10 @@ export interface CompanionHostOptions {
   version: string
   /** The link starts or stops wanting the scene (a viewer reads, or went quiet): the window must not slow itself down while it is read. */
   onWanted?(on: boolean): void
+  /** A thumbnail (PNG bytes) of a picture of the vault at most `px` on its longer side, or null (not a picture of the vault, too big, cannot be decoded). */
+  thumb?(vaultPath: string, px: number): Promise<Uint8Array | null>
+  /** The vault path of a picture that stands for a folder (a vault path), or null: used when the scene names none. */
+  folderCover?(folderPath: string): Promise<string | null> | string | null
   /** Clock (ms), for tests. */
   now?: () => number
 }
@@ -218,6 +231,10 @@ interface Scene {
   graph: CompanionGraphDto
   json: string
   ids: Map<string, number>
+  /** Picture nodes a thumbnail may be asked for: those in the scene and the covers its folders name. */
+  pictures: Set<string>
+  /** Folder id -> the picture node that stands for it. */
+  covers: Map<string, string>
 }
 
 export class CompanionHost {
@@ -234,6 +251,7 @@ export class CompanionHost {
   private lastSeen = 0
   private lastPublish = 0
   private wanted = false
+  private thumbsAtOnce = 0
   private idleTimer: ReturnType<typeof setInterval> | null = null
   private readonly now: () => number
 
@@ -329,8 +347,17 @@ export class CompanionHost {
     }
     this.rejected = null
     const ids = new Map<string, number>()
-    graph.nodes.forEach((n, i) => ids.set(n.id, i))
-    this.scene = { graph, json: JSON.stringify(graph), ids }
+    const pictures = new Set<string>()
+    const covers = new Map<string, string>()
+    graph.nodes.forEach((n, i) => {
+      ids.set(n.id, i)
+      if (n.kind === 'picture' && n.id.startsWith('image:')) pictures.add(n.id)
+      if (n.cover) {
+        pictures.add(n.cover)
+        covers.set(n.id, n.cover)
+      }
+    })
+    this.scene = { graph, json: JSON.stringify(graph), ids, pictures, covers }
     // Positions of another node set no longer fit.
     if (this.positions && this.positions.readUInt32LE(4) !== graph.version >>> 0) this.positions = null
     this.lastPublish = this.now()
@@ -452,10 +479,56 @@ export class CompanionHost {
     }
   }
 
+  /**
+   * GET /v1/thumb?id=<node id>&size=<px>: the picture of a node as a PNG. Only ids the published scene names are served: a
+   * picture node (`image:<vault path>`), the cover a folder names, or a folder (its cover, or, when the scene names none,
+   * the one the vault picks from what it found in it). A viewer cannot ask for a file by path.
+   */
+  private async serveThumb(res: ServerResponse, scene: Scene | null, query: URLSearchParams): Promise<void> {
+    if (!scene) return reply(res, 503, { error: 'Nothing to show yet: open your vault in Aether Brain' }, { 'Retry-After': '1' })
+    if (!this.opts.thumb) return reply(res, 501, { error: 'This version of Aether Brain makes no thumbnails for the link' })
+    const id = query.get('id') ?? ''
+    if (!id || id.length > MAX_ID) return reply(res, 400, { error: 'Say which node: ?id=<node id>&size=<px>' })
+    const raw = Number(query.get('size') ?? THUMB_DEFAULT_PX)
+    const px = Number.isFinite(raw) ? Math.round(Math.min(THUMB_MAX_PX, Math.max(THUMB_MIN_PX, raw))) : THUMB_DEFAULT_PX
+    let vaultPath: string | null = null
+    if (scene.pictures.has(id)) {
+      vaultPath = id.slice('image:'.length)
+    } else if (scene.ids.has(id) && id.startsWith('folder:')) {
+      const cover = scene.covers.get(id)
+      if (cover) {
+        vaultPath = cover.slice('image:'.length)
+      } else {
+        try {
+          vaultPath = (await this.opts.folderCover?.(id.slice('folder:'.length))) ?? null
+        } catch {
+          vaultPath = null
+        }
+      }
+    }
+    if (!vaultPath) return reply(res, 404, { error: 'No picture for that node' })
+    if (this.thumbsAtOnce >= MAX_THUMBS_AT_ONCE) return reply(res, 429, { error: 'Busy making thumbnails: ask again in a moment' }, { 'Retry-After': '1' })
+    this.thumbsAtOnce++
+    let png: Uint8Array | null = null
+    try {
+      png = await this.opts.thumb(vaultPath, px)
+    } catch {
+      png = null
+    } finally {
+      this.thumbsAtOnce--
+    }
+    if (!png || png.length === 0) return reply(res, 404, { error: 'That picture has no thumbnail (it could not be read or decoded)' })
+    res.writeHead(200, { 'Content-Type': 'image/png', 'Content-Length': png.length, 'Cache-Control': 'private, max-age=60' })
+    res.end(Buffer.from(png.buffer, png.byteOffset, png.byteLength))
+  }
+
   private async handle(req: IncomingMessage, res: ServerResponse, tokenOk: (h: string | undefined) => boolean): Promise<void> {
     let pathname: string
+    let query: URLSearchParams
     try {
-      pathname = new URL(req.url ?? '/', 'http://companion.local').pathname
+      const u = new URL(req.url ?? '/', 'http://companion.local')
+      pathname = u.pathname
+      query = u.searchParams
     } catch {
       return reply(res, 404, { error: 'Not found' })
     }
@@ -485,6 +558,8 @@ export class CompanionHost {
         res.end(body)
         return
       }
+      case '/v1/thumb':
+        return this.serveThumb(res, scene, query)
       case '/v1/select': {
         const body = await readBody(req)
         if (body === null) return reply(res, 413, { error: 'Too large' })
@@ -511,6 +586,7 @@ const ROUTES: Record<string, 'GET' | 'POST'> = {
   '/v1/hello': 'GET',
   '/v1/graph': 'GET',
   '/v1/positions': 'GET',
+  '/v1/thumb': 'GET',
   '/v1/select': 'POST',
 }
 

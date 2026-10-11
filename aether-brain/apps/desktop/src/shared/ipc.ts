@@ -86,6 +86,13 @@ export interface CompanionNodeDto {
   radius: number
   /** Index of its structural parent in `nodes` (the system layout's star, planet …), -1 for none. */
   parent: number
+  /**
+   * A folder (sun, star or planet) whose pictures are drawn as moons: the id (`image:<vault path>`) of the newest still
+   * picture among them. A viewer can fetch it, or the folder's own picture, from /v1/thumb.
+   */
+  cover?: string
+  /** A folder: how many pictures lie directly in it (absent when none, and for every other kind of node). */
+  pictures?: number
 }
 
 /**
