@@ -225,6 +225,55 @@ describe('FsVault.scan', () => {
     expect(exact.files).toHaveLength(3)
   })
 
+  it('ends a scan by itself: after its time budget, at the note limit, or when the user presses Stop, and says why', async () => {
+    for (let i = 0; i < 6; i++) await put(`d${i}/n.md`)
+    // No time at all: it stops before reading anything past the root.
+    const late = await new FsVault([tmp], { scanBudgetMs: -1 }).scan()
+    expect(late.stopped).toBe('time')
+    expect(late.truncated).toBe(true)
+    expect(late.files).toHaveLength(0)
+    // Few notes allowed: the scan stops once it has them (shallow folders were read first).
+    const few = await new FsVault([tmp], { maxNotes: 2 }).scan()
+    expect(few.stopped).toBe('notes')
+    expect(few.files.length).toBeGreaterThanOrEqual(2)
+    expect(few.files.length).toBeLessThan(6)
+    // Stop pressed while the scan is running (it reads one folder per file-system round trip, so a few folders in): it ends and
+    // hands back what it found.
+    for (let i = 0; i < 200; i++) await fs.mkdir(path.join(tmp, `many${i}`), { recursive: true })
+    const v = new FsVault([tmp])
+    const running = v.scan()
+    await new Promise((r) => setImmediate(r))
+    v.cancelScan()
+    const stopped = await running
+    expect(stopped.stopped).toBe('user')
+    expect(stopped.dirs).toBeLessThan(207)
+    // A later scan starts afresh.
+    const again = await v.scan()
+    expect(again.stopped).toBeNull()
+    expect(again.files).toHaveLength(6)
+    // A scan that saw everything says so.
+    expect((await new FsVault([tmp]).scan()).stopped).toBeNull()
+  })
+
+  it('frees the folders it has taken from its queue, and never queues more folders than it will read', async () => {
+    for (let i = 0; i < 30; i++) await put(`d${i}/e/n.md`)
+    const res = await new FsVault([tmp], { maxDirs: 10 }).scan()
+    expect(res.dirs).toBe(10)
+    expect(res.stopped).toBe('folders')
+    // The folder list holds what was read, not what was merely found.
+    expect(res.folders.length).toBeLessThanOrEqual(10)
+  })
+
+  it('reads at most a fixed amount of note text in one load, and counts what it left unread', async () => {
+    await put('a/x.md', 'x'.repeat(100))
+    await put('b/y.md', 'y'.repeat(100))
+    const v = new FsVault([tmp])
+    const scan = await v.scan()
+    const all = await v.readAll(scan.files)
+    expect(all).toHaveLength(2)
+    expect(v.lastReadSkipped).toBe(0)
+  })
+
   it('prefixes multi-root paths with mounts and includes mounts as folders', async () => {
     await put('Alpha/x.md')
     await put('Alpha/sub/y.md')

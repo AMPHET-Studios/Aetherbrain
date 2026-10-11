@@ -91,12 +91,24 @@ export interface MountedRoot {
   label: string
 }
 
+/** Why a scan stopped before it was done. */
+export type ScanStop = 'folders' | 'time' | 'notes' | 'user'
+
+/** Whole drives hold millions of files: a scan of the vault gives up after this long (ms) and opens what it has (shallow folders first). */
+export const SCAN_BUDGET_MS = 90_000
+/** Most notes a scan collects; a whole drive can hold hundreds of thousands (every README of every program). */
+export const MAX_NOTES = 60_000
+/** Most note text read into memory in one load (bytes); notes past it are left on disk, unread. */
+export const MAX_TOTAL_NOTE_BYTES = 400 * 1024 * 1024
+
 export interface ScanResult {
   files: { path: string; abs: string }[]
   /** Every visited folder as a vault path (single root: the root itself excluded; several roots: mounts included). */
   folders: string[]
-  /** True when the scan stopped at `maxDirs`. */
+  /** True when the scan stopped before it had seen everything (`stopped` says why). */
   truncated: boolean
+  /** Why the scan stopped early: the folder limit, the time budget, the note limit, or the user pressing Stop. Null when it saw everything. */
+  stopped: ScanStop | null
   /** Folders read. */
   dirs: number
   /** Picture and video files (see isMediaName), found by name only (no stat), at most `maxAssets`. */
@@ -267,12 +279,21 @@ async function moveAcross(from: string, to: string): Promise<void> {
   await fs.rm(from, { recursive: true, force: true })
 }
 
+/** What a folder taken from the scan's queue is replaced with, so its strings can be freed. */
+const DONE_DIR = { abs: '', vault: '', root: false }
+
 export class FsVault {
   readonly roots: MountedRoot[]
   readonly multi: boolean
   lastScan: ScanResult | null = null
   private readonly maxDirs: number
   private readonly maxAssets: number
+  private readonly maxNotes: number
+  private readonly scanBudgetMs: number
+  /** The user pressed Stop: the running scan ends at the next folder with what it has. */
+  private cancelRequested = false
+  /** Notes the last `readAll` left unread because the load had reached `MAX_TOTAL_NOTE_BYTES`. */
+  lastReadSkipped = 0
   private excludeNames: string[] = []
   private excludeSet = new Set<string>()
   private hiddenAbs: string[] = []
@@ -286,7 +307,7 @@ export class FsVault {
 
   constructor(
     roots: string[],
-    opts: { exclude?: string[]; hidden?: string[]; keep?: string[]; maxDirs?: number; maxAssets?: number } = {},
+    opts: { exclude?: string[]; hidden?: string[]; keep?: string[]; maxDirs?: number; maxAssets?: number; maxNotes?: number; scanBudgetMs?: number } = {},
   ) {
     const unique = new Map<string, string>()
     for (const r of roots.map((x) => path.resolve(x))) if (!unique.has(pathKey(r))) unique.set(pathKey(r), r)
@@ -295,6 +316,8 @@ export class FsVault {
     this.multi = this.roots.length > 1
     this.maxDirs = opts.maxDirs ?? 250_000
     this.maxAssets = opts.maxAssets ?? 200_000
+    this.maxNotes = opts.maxNotes ?? MAX_NOTES
+    this.scanBudgetMs = opts.scanBudgetMs ?? SCAN_BUDGET_MS
     this.exclude = opts.exclude ?? []
     this.hidden = opts.hidden ?? []
     this.keep = opts.keep ?? []
@@ -497,9 +520,15 @@ export class FsVault {
    * folders are skipped. Remembered as `lastScan`.
    */
   async scan(onProgress?: (p: ScanProgress) => void): Promise<ScanResult> {
-    const result = await this.walk(this.roots, onProgress)
+    this.cancelRequested = false
+    const result = await this.walk(this.roots, onProgress, this.scanBudgetMs)
     this.lastScan = result
     return result
+  }
+
+  /** Stop the scan that is running (the user pressed Stop): it ends at the next folder and hands back what it found. */
+  cancelScan(): void {
+    this.cancelRequested = true
   }
 
   /**
@@ -507,10 +536,10 @@ export class FsVault {
    * `dirs` is 0 when the root itself could not be read. Leaves `lastScan` alone.
    */
   scanRoot(root: MountedRoot): Promise<ScanResult> {
-    return this.walk([root])
+    return this.walk([root], undefined, this.scanBudgetMs / 2)
   }
 
-  private async walk(roots: MountedRoot[], onProgress?: (p: ScanProgress) => void): Promise<ScanResult> {
+  private async walk(roots: MountedRoot[], onProgress?: (p: ScanProgress) => void, budgetMs = Infinity): Promise<ScanResult> {
     const files: ScanResult['files'] = []
     const assets: ScanResult['assets'] = []
     let assetsTruncated = false
@@ -523,14 +552,22 @@ export class FsVault {
     const rootDirs = new Set(this.roots.map((r) => pathKey(r.abs)))
     const queue = roots.map((r) => ({ abs: r.abs, vault: r.mount, root: true }))
     let dirs = 0
-    let truncated = false
-    let lastReport = Date.now()
+    let stopped: ScanStop | null = null
+    /** A folder was not queued because as many as will ever be read are already queued. */
+    let leftOut = false
+    const started = Date.now()
+    let lastReport = started
     for (let head = 0; head < queue.length; head++) {
-      if (dirs >= this.maxDirs) {
-        truncated = true
-        break
-      }
+      // The scan of a whole drive ends by itself: after the folder limit, the time budget or the note limit (shallow folders were
+      // read first, the queue being breadth first), or when the user presses Stop.
+      if (this.cancelRequested) stopped = 'user'
+      else if (dirs >= this.maxDirs) stopped = 'folders'
+      else if (Date.now() - started > budgetMs) stopped = 'time'
+      else if (files.length >= this.maxNotes) stopped = 'notes'
+      if (stopped) break
       const dir = queue[head]!
+      // A folder that has been taken lets go of its strings: on a whole drive the queue holds hundreds of thousands of them.
+      queue[head] = DONE_DIR
       let entries: Dirent[]
       try {
         entries = await fs.readdir(dir.abs, { withFileTypes: true })
@@ -558,8 +595,11 @@ export class FsVault {
             install(vault, 'game library')
             continue
           }
-          // A root nested inside another root is walked once, as itself.
-          if (!rootDirs.has(pathKey(abs))) queue.push({ abs, vault, root: false })
+          // A root nested inside another root is walked once, as itself. Never more folders waiting than will be read.
+          if (!rootDirs.has(pathKey(abs))) {
+            if (queue.length < this.maxDirs) queue.push({ abs, vault, root: false })
+            else leftOut = true
+          }
         } else if (e.isFile()) {
           if (isNoteName(e.name)) files.push({ path: vault, abs })
           else if (isMediaName(e.name)) {
@@ -574,7 +614,8 @@ export class FsVault {
       }
     }
     onProgress?.({ dirs, found: files.length })
-    return { files, folders, truncated, dirs, assets, assetsTruncated, installs }
+    if (!stopped && leftOut) stopped = 'folders'
+    return { files, folders, truncated: stopped !== null, stopped, dirs, assets, assetsTruncated, installs }
   }
 
   /** Read scanned files with bounded concurrency (32); unreadable files are skipped. Keeps input order. */
@@ -585,6 +626,8 @@ export class FsVault {
     const out: ({ path: string; content: string; mtime: number } | null)[] = new Array(files.length).fill(null)
     let next = 0
     let done = 0
+    let total = 0
+    this.lastReadSkipped = 0
     let lastReport = Date.now()
     const worker = async () => {
       while (next < files.length) {
@@ -593,7 +636,12 @@ export class FsVault {
         try {
           const st = await fs.stat(f.abs)
           // A note file over MAX_NOTE_BYTES is a dump, not a note: it stays on disk, untouched, and is not loaded.
-          if (st.size <= MAX_NOTE_BYTES) out[i] = { path: f.path, content: await fs.readFile(f.abs, 'utf8'), mtime: st.mtimeMs }
+          if (st.size <= MAX_NOTE_BYTES) {
+            // One load holds at most MAX_TOTAL_NOTE_BYTES of text (files come in scan order: shallow folders first).
+            total += st.size
+            if (total > MAX_TOTAL_NOTE_BYTES) this.lastReadSkipped++
+            else out[i] = { path: f.path, content: await fs.readFile(f.abs, 'utf8'), mtime: st.mtimeMs }
+          }
         } catch {
           /* unreadable or vanished: skip */
         }
