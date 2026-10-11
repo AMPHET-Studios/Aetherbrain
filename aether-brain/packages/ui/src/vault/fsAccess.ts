@@ -9,6 +9,7 @@ import {
   mimeOf,
   normalizeFolderPath,
   normalizePath,
+  READ_ASSET_MAX_BYTES,
   type VaultAdapter,
   type VaultAsset,
   type VaultChange,
@@ -165,6 +166,24 @@ export class FsAccessVaultAdapter implements VaultAdapter {
       const file = await (await dir.getFileHandle(name)).getFile()
       if (isVideoPath(p)) return file.size > 0 ? new Blob([file], { type: mimeOf(p) }) : null
       return await resizeImage(file, size)
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * The picture file itself, whole and typed by its extension, or null: not a
+   * picture path (a video is not one), in a skipped folder, missing,
+   * unreadable, empty or over 64 MB. The Blob reads from disk lazily, so a
+   * picture is not held here, and this never rejects.
+   */
+  async readAsset(path: string): Promise<Blob | null> {
+    const p = normalizePath(path)
+    if (!isImagePath(p) || isIgnoredPath(p)) return null
+    try {
+      const { dir, name } = await this.resolve(p)
+      const file = await (await dir.getFileHandle(name)).getFile()
+      return file.size > 0 && file.size <= READ_ASSET_MAX_BYTES ? new Blob([file], { type: mimeOf(p) }) : null
     } catch {
       return null
     }

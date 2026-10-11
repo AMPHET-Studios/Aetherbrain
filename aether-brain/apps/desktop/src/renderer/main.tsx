@@ -12,6 +12,7 @@ import { FindProjectsPanel, registerFindProjects } from './components/FindProjec
 import { activityFailed, clientLabel, errorText, flyToPath, openPanel, pushActivity, samePath, togglePanel, usePanel } from './panels'
 import { useForgeScreen } from './forge'
 import './companion'
+import './board'
 
 const bridge = ElectronVaultAdapter.bridge()
 const isWindows = bridge?.platform === 'win32'

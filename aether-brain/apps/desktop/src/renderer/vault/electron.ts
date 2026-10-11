@@ -1,5 +1,5 @@
-import { isMediaPath, type VaultAdapter, type VaultAsset, type VaultChange, type VaultFile, type VaultRootInfo } from '@aether/core'
-import type { AetherBridge, VaultChangeDto, VaultInfo } from '../../shared/ipc'
+import { isImagePath, isMediaPath, mimeOf, type VaultAdapter, type VaultAsset, type VaultChange, type VaultFile, type VaultRootInfo } from '@aether/core'
+import type { AetherBridge, ReadAssetFailure, VaultChangeDto, VaultInfo } from '../../shared/ipc'
 
 /** A change as main reported it (a picture's comes without content, with its size). */
 function toChange(c: VaultChangeDto): VaultChange {
@@ -102,7 +102,15 @@ export class ElectronVaultAdapter implements VaultAdapter {
   async list(): Promise<VaultFile[]> {
     if (!this.listeners.size) this.hold()
     try {
-      return await this.bridge.listFiles()
+      // A page at a time (main sends no more than a few MB in one reply); an older main sends them all in an array.
+      let page = await this.bridge.listFiles()
+      if (Array.isArray(page)) return page
+      const files: VaultFile[] = [...page.files]
+      while (page.more) {
+        page = await this.bridge.listMoreFiles(page.token)
+        for (const f of page.files) files.push(f)
+      }
+      return files
     } catch (err) {
       this.release()
       throw err
@@ -199,6 +207,37 @@ export class ElectronVaultAdapter implements VaultAdapter {
     const bytes = await this.bridge.thumbnail(path, size)
     // Bytes that crossed IPC sit in a plain ArrayBuffer, never a shared one.
     return bytes?.length ? new Blob([bytes as Uint8Array<ArrayBuffer>], { type: 'image/png' }) : null
+  }
+
+  /**
+   * The picture file itself, whole: main reads the bytes (at most 64 MB, nothing decoded there) and this side decodes them. Null
+   * for a video, a path main refuses, an empty or too big file, and when the read fails: it never rejects.
+   */
+  async readAsset(path: string): Promise<Blob | null> {
+    // A video is a vault asset but not a picture to read whole: no round trip to main for it.
+    if (!isImagePath(path)) return null
+    try {
+      const bytes = await this.bridge.readAsset(path)
+      return bytes?.length ? new Blob([bytes as Uint8Array<ArrayBuffer>], { type: mimeOf(path) }) : null
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * `readAsset` with the reason when there is no picture: main says 'missing', 'too-large' (over 64 MB, or a header that claims more
+   * than 150 million pixels: it reads the first 256 KB and judges them) or 'unreadable'. Never rejects. For the docked board, which
+   * draws a different placeholder for each.
+   */
+  async readAssetChecked(path: string): Promise<{ blob: Blob } | { blob: null; reason: ReadAssetFailure; detail: string }> {
+    if (!isImagePath(path)) return { blob: null, reason: 'missing', detail: 'That is not a picture of the vault' }
+    try {
+      const res = await this.bridge.readAssetChecked(path)
+      if (res.ok) return res.bytes.length ? { blob: new Blob([res.bytes as Uint8Array<ArrayBuffer>], { type: mimeOf(path) }) } : { blob: null, reason: 'unreadable', detail: 'The picture file is empty' }
+      return { blob: null, reason: res.reason, detail: res.detail }
+    } catch {
+      return { blob: null, reason: 'unreadable', detail: 'The picture could not be read' }
+    }
   }
 
   /**

@@ -40,6 +40,8 @@ function isProjectsAreaFolder(folder: string): boolean {
 export function isProjectNote(note: ParsedNote): boolean {
   const { path, folder, area } = note.meta
   if (area === 'archive' || areaFromFolder(path) === 'archive') return false
+  // A reference board is never a project, wherever it lives (a board in Projects/ is not a card of the Projects board).
+  if (asString(note.frontmatter['type'])?.toLowerCase() === 'board') return false
   if (asString(note.frontmatter['type'])?.toLowerCase() === 'project') return true
   const base = basenameOf(path).toLowerCase()
   if (isProjectsAreaFolder(folder)) return lastSegment(folder).toLowerCase() !== base

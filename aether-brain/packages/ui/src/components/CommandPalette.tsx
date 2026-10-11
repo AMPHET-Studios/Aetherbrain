@@ -25,11 +25,10 @@ export function CommandPalette() {
   const notes = useAether((s) => s.notes)
   const revision = useAether((s) => s.revision)
   const openNote = useAether((s) => s.openNote)
-  const select = useAether((s) => s.select)
+  const showNode = useAether((s) => s.showNode)
   const setFilters = useAether((s) => s.setFilters)
   const folders = useAether((s) => s.folders)
   const showFolder = useAether((s) => s.showFolder)
-  const setView = useAether((s) => s.setView)
   const createNote = useAether((s) => s.createNote)
   const [q, setQ] = useState('')
   const [index, setIndex] = useState(0)
@@ -81,11 +80,9 @@ export function CommandPalette() {
   const run = async (row: Row, alt = false) => {
     if (row.kind === 'note') {
       setPalette(false)
-      if (alt) {
-        // Fly only: step out of a view that covers the graph (the board), or nothing visible happens.
-        if (useAether.getState().view === 'projects') setView('graph')
-        select(row.hit.id, { fly: true })
-      } else openNote(row.hit.id, { fly: true })
+      // Fly only: the store steps out of any view that covers the graph (the Boards view, the Projects board ...), or nothing visible happens.
+      if (alt) showNode(row.hit.id)
+      else openNote(row.hit.id, { fly: true })
     } else if (row.kind === 'folder') {
       setPalette(false)
       // showFolder leaves the board (it covers the graph and the folder inspector).

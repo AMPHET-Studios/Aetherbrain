@@ -1,0 +1,584 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { promises as fs } from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { addNote, emptyBoard, isBoardNote, newBoardNote, parseBoard, serializeBoard, splitFrontmatter } from '@aether/core'
+import type { VaultChangeDto } from '../src/shared/ipc.js'
+import { FsVault } from '../src/main/fsvault.js'
+import { VaultWatcher } from '../src/main/watcher.js'
+import { BOARD_HEAD_BYTES, MAX_BOARD_PATH, MAX_BOARD_TEXT, checkBoard, isBoardHead, readBoard, saveBoard, validateBoardSave, type BoardVault } from '../src/main/board-save.js'
+
+const here = path.dirname(fileURLToPath(import.meta.url))
+const NOW = new Date('2026-10-09T12:00:00Z')
+const board = (title = 'Gate'): string => newBoardNote(title, NOW)
+const PLAIN = '---\ntitle: Plain\n---\n# Plain\n\nJust a note.\n'
+
+/* ------------------------------------------------------------------ */
+/* isBoardHead                                                        */
+/* ------------------------------------------------------------------ */
+
+describe('isBoardHead', () => {
+  const fm = (...lines: string[]): string => `---\n${lines.join('\n')}\n---\n# Body\n`
+
+  it('accepts a frontmatter block with exactly one top-level `type: board`', () => {
+    expect(isBoardHead(board())).toBe(true)
+    expect(isBoardHead(fm('type: board'))).toBe(true)
+    expect(isBoardHead(fm('title: x', 'type: board', 'tags: [a]'))).toBe(true)
+    expect(isBoardHead(fm('type: "board"'))).toBe(true)
+    expect(isBoardHead(fm("type: 'board'"))).toBe(true)
+    expect(isBoardHead(fm('"type": board'))).toBe(true)
+    expect(isBoardHead(fm('type : board'))).toBe(true)
+    expect(isBoardHead(fm('type:   board   '))).toBe(true)
+    expect(isBoardHead(fm('type: board # the kind of note'))).toBe(true)
+    expect(isBoardHead('---\r\ntitle: x\r\ntype: board\r\n---\r\n# Body')).toBe(true)
+    expect(isBoardHead('﻿' + fm('type: board'))).toBe(true)
+    expect(isBoardHead('---\ntype: board\n...\nbody')).toBe(true)
+    expect(isBoardHead('---\ntype: board\n---')).toBe(true)
+  })
+
+  it('accepts the frontmatter other tools write around the type: lists, quotes, comments, block text', () => {
+    const ok: Record<string, string> = {
+      'a flow list of words and quotes': fm('tags: [ref, "two words", \'x\']', 'type: board'),
+      'a trailing comma and an empty list': fm('a: [x, y,]', 'b: []', 'type: board'),
+      'an indented block list': fm('type: board', 'tags:', '  - ref', '  - "gate art"', '  - 2026-10-09', 'status: active'),
+      'a block list at the key column': fm('tags:', '- ref', '- gate', 'type: board'),
+      'an empty item and a commented one': fm('tags:', '  -', '  - a # why', '  # a remark', '  - b', 'type: board'),
+      'a block scalar with lines that look like keys': fm('summary: |', '  type: note', '  tags: [x]', '', '  more', 'type: board'),
+      'a folded scalar before the type': fm('summary: >-', '    one', '    two', 'type: board'),
+      'comments and blank lines everywhere': fm('# the gate board', '', 'title: Gate  # name', '', 'type: board', '#', 'created: 2026-10-09'),
+      'dates, numbers, urls, paths and colons without a space': fm('created: 2026-10-09', 'n: -3.5', 'url: https://example.com/a?b=c#d', 'dir: C:\\Art\\Gate', 'at: 10:30', 'type: board'),
+      'a quoted value with every escape': fm('t: "tab\\t quote\\" back\\\\ nl\\n \\x41 \\u00e9"', "s: 'it''s'", 'type: board'),
+      'a quoted key': fm('"my key": 1', "'other': 2", 'type: board'),
+      'unicode': fm('title: 日本語 board 🎨', 'type: board'),
+      'a value that has brackets and commas in the middle of a plain scalar': fm('title: Hello, [world] {x}', 'type: board'),
+    }
+    for (const [what, head] of Object.entries(ok)) {
+      expect(isBoardNote(head), `core: ${what}`).toBe(true)
+      expect(isBoardHead(head), what).toBe(true)
+    }
+  })
+
+  it('refuses everything else', () => {
+    const no: Record<string, string> = {
+      'no frontmatter': '# Gate\n\ntype: board\n',
+      'a blank line before the block': '\n' + fm('type: board'),
+      'an opening that is not exactly ---': '----\ntype: board\n---\n',
+      'a block that never closes': '---\ntype: board\n# Gate\n',
+      'another type': fm('type: note'),
+      'a capital': fm('type: Board'),
+      'a longer word': fm('type: boards'),
+      'a hyphenated word': fm('type: board-ish'),
+      'an escape spelled out (not read)': fm('type: "bo\\x61rd"'),
+      'an indented (nested) type': fm('meta:', '  type: board'),
+      'a repeated type (YAML refuses the block)': fm('type: board', 'type: board'),
+      'a type of a note that is also something else': fm('type: board', 'type: project'),
+      'the same key spelled plain and quoted': fm('type: board', '"type": board'),
+      'any other repeated key (the block is unreadable as a whole)': fm('title: A', 'type: board', 'title: B'),
+      'a repeated quoted key': fm('type: board', '"tags": [a]', 'tags: [b]'),
+      'no space after the colon (a key of its own)': fm('type:board'),
+      'a # glued to the word (a different word)': fm('type: board#x'),
+      'a quote with trailing junk': fm('type: "board" x'),
+      'a list': fm('type: [board]'),
+      'a block list under the type': fm('type:', '  - board'),
+      'an empty value': fm('type:'),
+      'a block scalar': fm('type: |', '  board'),
+      'a comment line': fm('# type: board'),
+      'the key in the body': '---\ntitle: x\n---\ntype: board\n',
+      'the key in a block scalar': fm('x: |', '  type: board'),
+      'empty text': '',
+    }
+    for (const [what, head] of Object.entries(no)) expect(isBoardHead(head), what).toBe(false)
+  })
+
+  it('refuses a block where YAML would read the type line as part of something else, or refuse the block (core says no to each)', () => {
+    // Every one of these has a column-0 `type: board` line that a reader of single lines would take, and a YAML reader does not.
+    const no: Record<string, string> = {
+      'a double quote left open over the line': fm('notes: "a', 'type: board', 'z: b"'),
+      'a single quote left open over the line': fm("notes: 'a", 'type: board', "z: b'"),
+      'a quote left open to the end': fm('key: "unclosed', 'type: board'),
+      'a list left open': fm('x: [a,', 'type: board', ']'),
+      'a flow mapping left open': fm('x: {a: 1,', 'type: board', '}'),
+      'a directive': fm('%YAML 1.2', 'type: board'),
+      'a sequence and then a mapping': fm('- a', 'type: board'),
+      'a mapping and then a sequence': fm('type: board', '- a'),
+      'a mapping with a stray indented key': fm('type: board', '  extra: 1'),
+      'a plain scalar continued on the next line': fm('type: board', '  - a'),
+      'a document start with text': fm('--- a', 'type: board'),
+      'a bare carriage return inside a line': fm('title: x\rtype: other', 'type: board'),
+      'a bare carriage return in a key': fm('a\rb: c', 'type: board'),
+      'a bare carriage return that hides a second type in a comment': fm('# a remark\rtype: note', 'type: board'),
+      'an invalid escape': fm('q: "\\q"', 'type: board'),
+      'a short unicode escape': fm('q: "\\u12"', 'type: board'),
+      'list items first': fm('  - a', 'type: board'),
+      'a colon and a space inside a plain value': fm('a: b: c', 'type: board'),
+      'an alias': fm('x: *a', 'type: board'),
+      'a dash and a space where a word should be': fm('x: - a', 'type: board'),
+      'a quoted scalar with a word after it': fm('x: "a" b', 'type: board'),
+      'a block scalar header with junk': fm('x: |abc', 'type: board'),
+      'a block scalar whose text is less indented than its first line': fm('x: |', '    deep', '  shallow', 'type: board'),
+      'an empty line of spaces longer than the text of a block scalar': fm('x: |', '      ', '  text', 'type: board'),
+      'a tab where an indent should be': fm('tags:', '\t- a', 'type: board'),
+      'a tab at the start of a line': fm('\ttitle: x', 'type: board'),
+      'a control character': fm('title: a\u0001b', 'type: board'),
+    }
+    for (const [what, head] of Object.entries(no)) {
+      expect(isBoardNote(head), `core: ${what}`).toBe(false)
+      expect(isBoardHead(head), what).toBe(false)
+    }
+  })
+
+  it('refuses what core reads leniently as a board but a line-by-line reader cannot follow: stricter, never looser', () => {
+    const fm = (...lines: string[]): string => `---\n${lines.join('\n')}\n---\n# Body\n`
+    const lenient: Record<string, string> = {
+      'an escape past the last code point': fm('q: "\\U00110000"', 'type: board'),
+      'a merge key': fm('<<: x', 'type: board'),
+      'a nested mapping': fm('meta:', '  a: 1', 'type: board'),
+      'a mapping inside a list item': fm('tags:', '  - a: 1', 'type: board'),
+      'list items in two columns': fm('tags:', '  - a', '   - b', 'type: board'),
+      'a list item under a key that has a value': fm('tags: x', '  - a', 'type: board'),
+      'an anchor': fm('x: &a b', 'type: board'),
+      'a tag': fm('x: !!str y', 'type: board'),
+      'a key that is a question mark': fm('? a', 'type: board'),
+      'a next-line character': fm('title: a\u0085b', 'type: board'),
+      'a line separator': fm('title: a\u2028b', 'type: board'),
+      'a key over the length YAML allows an implicit key': fm(`${'k'.repeat(600)}: v`, 'type: board'),
+      'a block indented as a whole': '---\n  type: board\n---\n# Body\n',
+      'an indented block with a title': '---\n  title: Gate\n  type: board\n---\n',
+      'a flow mapping': '---\n{type: board}\n---\n',
+      'a tag on the type': '---\ntype: !!str board\n---\n',
+      'a plain scalar continued on the next line': fm('title: one', '  two', 'type: board'),
+    }
+    for (const [what, head] of Object.entries(lenient)) {
+      expect(isBoardNote(head), `core: ${what}`).toBe(true)
+      expect(isBoardHead(head), what).toBe(false)
+    }
+  })
+
+  it('accepts every board note core writes, whatever the title (the window must open the boards the app makes)', () => {
+    const titles = [
+      'Gate', 'x'.repeat(300), 'a: b', 'a # b', 'He said "hi"', "it's", '- dash', '[x]', '{y}', 'line\nbreak', '  lead', 'trail  ', '', 'null', '~', 'true', '123', '1e3',
+      '0x1F', '#tag', '!bang', '&amp', '*star', '%pct', '@at', '`tick`', '|pipe', '>fold', '?query', ':colon', 'ends:', 'a\u0001b', 'tab\there', '日本語 🎨', 'é', 'a b',
+      'a\u0085b', '﻿bom', '---', '...', 'type: note', '\\back\\slash', '"quoted"', "'single'", 'multi word title '.repeat(20),
+    ]
+    for (const title of titles) {
+      const fresh = newBoardNote(title, NOW)
+      expect(isBoardHead(fresh), JSON.stringify(title)).toBe(true)
+      // After the board view saved it (title, type and updated patched in place), and after a rename.
+      const doc = parseBoard(fresh).doc
+      const saved = serializeBoard(addNote(doc, { text: 'x' }).doc, fresh, new Date('2026-12-31T12:00:00Z'))
+      expect(isBoardHead(saved), `saved ${JSON.stringify(title)}`).toBe(true)
+      expect(isBoardNote(saved)).toBe(true)
+      const renamed = serializeBoard({ ...doc, title: `${title} 2` }, saved, NOW)
+      expect(isBoardHead(renamed), `renamed ${JSON.stringify(title)}`).toBe(true)
+    }
+  })
+
+  /** A small deterministic generator (mulberry32): the same blocks on every run. */
+  const generator = (seed0: number): (() => number) => {
+    let seed = seed0
+    return () => {
+      seed = (seed + 0x6d2b79f5) | 0
+      let t = Math.imul(seed ^ (seed >>> 15), 1 | seed)
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+    }
+  }
+
+  it('never says yes where core says no, over thousands of hostile frontmatters (the ones core cannot read at all included)', () => {
+    const rand = generator(0x9e3779b9)
+    const pool = [
+      'title: Gate', 'type: board', 'type: board # c', 'type: board #c', 'type: "board"', "type: 'board'", 'type:board', 'type: board#x', 'type: Board',
+      'type: boards', '  type: board', 'type:  board  ', 'type:\tboard', 'type: [board]', 'type: !!str board', 'type: &a board', 'tags: [a, b]',
+      'x: |', 'x: >-', 'notes: "a', 'type: board"', '# type: board', 'type: ', 'type: ~', 'type: null', '', ' ', '---', '...', 'type: board\r',
+      '- type: board', '{type: board}', 'type: "board', "type: 'board'x", 'type: board \t', 'key: value', '? type', ': board', 'type: |\n  board',
+      'title: Other', '"type": board', 'status: active',
+      // Shapes that swallow or change the lines around them.
+      'z: b"', "notes: 'a", "z: b'", 'x: [a,', 'y]', ']', 'x: {a: 1,', '}', 'type: board  extra', '  extra: 1', '  - a', '- a', '-', 'x: &a b', 'x: *a',
+      'x: !!str y', '%YAML 1.2', '--- a', '--- ', 'key: "unclosed', 'k: |', '  text', '   more', ' less', 'k: >-', '? a', '<<: x', 'a: b: c', 'a: b #c',
+      'a:\t b', 'q: "esc\\q"', 'q: "\\x41"', 'q: "\\U00110000"', 'q: "\\u12"', 'q: "\\', 'tab:\t', '\tindented', 'ctl: \u0001', 'nel: \u0085',
+      'ls: \u2028', 'cr: a\rb', 'tags:', '  - a', '  - "b"', '- b', 'meta:', '  type: board', '  a: 1', "s: 'it''s'", 'long: ' + 'y'.repeat(100),
+      `${'k'.repeat(600)}: v`, 'a: [x, "]", y]', 'a: ["x', 'a: [x] y', 'a: [x]#y', 'a: [x] #y', 'a: [,]', 'a: [a,,b]', 'a: [{x}]', 'a: [[x]]', 'a: [- x]',
+      'a\rb: c', '# remark\rtype: note', 'k: "x\ry"', 'k: x\r', 'k:\r', '\ufeffkey: v', 'k: \ufeff', 'x: |\r', 'type: board\u2028', 'type: board\u0085',
+      // White space YAML does not trim but JavaScript's trim() does (desktop-m1): no-break, narrow no-break, ideographic, em, a line of only such.
+      'type: board\u00a0', 'type: board\u202f', 'type:\u00a0board', 'type: \u00a0board', 'type: board \u3000', 'type: board\u2003', '\u00a0', '\u202f', 'type: "board"\u00a0', 'tags: [a]\u00a0',
+    ]
+    let readable = 0
+    let boards = 0
+    for (let i = 0; i < 20_000; i++) {
+      const lines = Array.from({ length: 1 + Math.floor(rand() * 6) }, () => pool[Math.floor(rand() * pool.length)]!)
+      const eol = rand() < 0.2 ? '\r\n' : '\n'
+      const head = `${rand() < 0.1 ? '\uFEFF' : ''}---${eol}${lines.join(eol)}${eol}---${eol}# Body${eol}`
+      const ours = isBoardHead(head)
+      const core = isBoardNote(head)
+      // The dangerous direction: the floating window would edit a note the brain does not call a board.
+      expect(ours && !core, JSON.stringify(head)).toBe(false)
+      if (core) boards++
+      if (ours) readable++
+    }
+    // Not vacuous: plenty of the heads are boards to both, and plenty are boards to core and refused here.
+    expect(readable).toBeGreaterThan(300)
+    expect(boards).toBeGreaterThan(readable)
+  })
+
+  it('agrees with core on every ordinary frontmatter, written the way tools write them', () => {
+    const rand = generator(0x51ed270b)
+    const other = ['title: Gate', 'status: active', 'created: "2026-10-09"', 'updated: 2026-10-09', 'area: Projects', 'aliases: [Gate ref, "The gate"]', "source: 'https://x.y/z'"]
+    const lists: string[][] = [['tags: [a, b]'], ['tags:', '  - ref', '  - gate'], ['tags:', '- ref'], ['tags: []'], ['cssclasses:', '  -'], ['n: |', '  type: note', '  text']]
+    const types = ['type: board', 'type: "board"', "type: 'board'", 'type: board  # kind', 'type: note', 'type: Board', 'type: project', 'type: boards', 'type: [board]']
+    let yes = 0
+    for (let i = 0; i < 3000; i++) {
+      const parts: string[][] = []
+      for (const l of other) if (rand() < 0.4) parts.push([l])
+      for (const l of lists) if (rand() < 0.3) parts.push(l)
+      const typeLine = types[Math.floor(rand() * types.length)]!
+      if (rand() < 0.97) parts.splice(Math.floor(rand() * (parts.length + 1)), 0, [typeLine])
+      const lines = parts.flatMap((p) => (rand() < 0.2 ? ['# a remark', ...p] : rand() < 0.1 ? ['', ...p] : p))
+      const eol = rand() < 0.25 ? '\r\n' : '\n'
+      const head = `${rand() < 0.1 ? '\uFEFF' : ''}---${eol}${lines.join(eol)}${lines.length ? eol : ''}---${eol}# Body${eol}`
+      const core = isBoardNote(head)
+      if (core) yes++
+      expect(isBoardHead(head), JSON.stringify(head)).toBe(core)
+    }
+    expect(yes).toBeGreaterThan(500)
+  })
+
+  it('looks at a head of 4 KB: the check after a write sees what the check before it did', () => {
+    expect(BOARD_HEAD_BYTES).toBe(4096)
+    // A block whose closing --- is past the head is no board, however it ends.
+    const long = `---\ntitle: ${'x'.repeat(BOARD_HEAD_BYTES)}\ntype: board\n---\n`
+    expect(isBoardHead(long.slice(0, BOARD_HEAD_BYTES))).toBe(false)
+  })
+})
+
+/* ------------------------------------------------------------------ */
+/* A temp vault                                                       */
+/* ------------------------------------------------------------------ */
+
+let tmp: string
+let root: string
+let outside: string
+
+const at = (rel: string): string => path.join(root, ...rel.split('/'))
+async function put(rel: string, content: string | Uint8Array): Promise<void> {
+  await fs.mkdir(path.dirname(at(rel)), { recursive: true })
+  await fs.writeFile(at(rel), content)
+}
+const disk = (rel: string): Promise<string> => fs.readFile(at(rel), 'utf8')
+const files = async (dir: string): Promise<string[]> => (await fs.readdir(at(dir))).sort()
+
+beforeEach(async () => {
+  tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'aether-board-save-'))
+  root = path.join(tmp, 'vault')
+  outside = path.join(tmp, 'outside')
+  await fs.mkdir(root, { recursive: true })
+  await fs.mkdir(outside, { recursive: true })
+  await put('Boards/Gate.md', board('Gate'))
+  await put('Notes/Plain.md', PLAIN)
+  await put('Boards/Gate/rust.png', new Uint8Array([0x89, 0x50, 0x4e, 0x47]))
+  await put('Boards/Not a note.txt', board('Txt'))
+  await fs.mkdir(at('Boards/Folder.md'), { recursive: true })
+  await put('node_modules/pkg/Board.md', board('Ignored'))
+  await fs.writeFile(path.join(outside, 'Secret.md'), board('Secret'))
+})
+afterEach(async () => {
+  vi.restoreAllMocks()
+  await fs.rm(tmp, { recursive: true, force: true })
+})
+
+const vault = (): FsVault => new FsVault([root])
+
+describe('checkBoard and validateBoardSave', () => {
+  it('say yes only for a board note that is there, and no for each other thing, with a reason', async () => {
+    const v = vault()
+    await expect(checkBoard('Boards/Gate.md', v)).resolves.toEqual({ ok: true })
+    const refused: [string, unknown, RegExp][] = [
+      ['a note that is not a board', 'Notes/Plain.md', /not a board note/],
+      ['a missing file', 'Boards/Missing.md', /There is no note at/],
+      ['a folder named like a note', 'Boards/Folder.md', /There is no note at/],
+      ['a path that leaves the vault', '../outside/Secret.md', /Not a path inside the vault/],
+      ['a deeper way out', 'Boards/../../outside/Secret.md', /Not a path inside the vault/],
+      ['a file that is not markdown', 'Boards/Not a note.txt', /Only markdown notes/],
+      ['a picture', 'Boards/Gate/rust.png', /Only markdown notes/],
+      ['a note in a folder the vault ignores', 'node_modules/pkg/Board.md', /There is no note at/],
+      ['an empty path', '', /empty or too long/],
+      ['a blank path', '   ', /empty or too long/],
+      ['a path with a NUL', 'Boards/Gate.md\0.txt', /empty or too long|Only markdown/],
+      ['a path that is far too long', `Boards/${'a'.repeat(MAX_BOARD_PATH)}.md`, /empty or too long/],
+      ['a number', 42, /must be text/],
+      ['null', null, /must be text/],
+      ['an object', { toString: () => 'Boards/Gate.md' }, /must be text/],
+    ]
+    for (const [what, p, reason] of refused) {
+      const res = await checkBoard(p, v)
+      expect(res.ok, what).toBe(false)
+      expect(res.ok ? '' : res.reason, what).toMatch(reason)
+    }
+  })
+
+  it('refuse everything when no vault is open', async () => {
+    expect(await checkBoard('Boards/Gate.md', null)).toEqual({ ok: false, reason: 'No vault is open' })
+    expect(await validateBoardSave({ path: 'Boards/Gate.md', text: board() }, null)).toEqual({ ok: false, reason: 'No vault is open' })
+    expect(await saveBoard({ path: 'Boards/Gate.md', text: board() }, null)).toEqual({ ok: false, reason: 'No vault is open' })
+    expect(await readBoard('Boards/Gate.md', null)).toBeNull()
+  })
+
+  it('refuse a symlink that leads out of the vault (a board note out there is not this vault\'s)', async () => {
+    try {
+      await fs.symlink(path.join(outside, 'Secret.md'), at('Boards/Link.md'))
+    } catch {
+      return // no symlinks here (Windows without developer mode)
+    }
+    const res = await checkBoard('Boards/Link.md', vault())
+    expect(res.ok).toBe(false)
+    expect(await readBoard('Boards/Link.md', vault())).toBeNull()
+    expect((await saveBoard({ path: 'Boards/Link.md', text: board('Hijack') }, vault())).ok).toBe(false)
+    expect(await fs.readFile(path.join(outside, 'Secret.md'), 'utf8')).toBe(board('Secret'))
+  })
+
+  it('takes a save of at most 1,000,000 characters (the whole note) whose own head is a board', async () => {
+    const v = vault()
+    const pad = (n: number): string => board() + 'x'.repeat(n - board().length)
+    expect(MAX_BOARD_TEXT).toBe(1_000_000)
+    expect(pad(MAX_BOARD_TEXT).length).toBe(MAX_BOARD_TEXT)
+    await expect(validateBoardSave({ path: 'Boards/Gate.md', text: pad(MAX_BOARD_TEXT) }, v)).resolves.toEqual({ ok: true })
+    const over = await validateBoardSave({ path: 'Boards/Gate.md', text: pad(MAX_BOARD_TEXT + 1) }, v)
+    expect(over.ok).toBe(false)
+    expect(over.ok ? '' : over.reason).toMatch(/longer than 1,000,000 characters/)
+    const refused: [string, unknown][] = [
+      ['a note that lost its frontmatter', '# Gate\n\n## Board\n- view x=0 y=0 zoom=1\n'],
+      ['a note of another type', PLAIN],
+      ['text that is not text', 12345],
+      ['nothing', undefined],
+      ['bytes', new Uint8Array([1, 2, 3])],
+      ['an empty text', ''],
+    ]
+    for (const [what, text] of refused) {
+      const res = await validateBoardSave({ path: 'Boards/Gate.md', text }, v)
+      expect(res.ok, what).toBe(false)
+    }
+  })
+
+  it('judges the head of a save in bytes, as the next read will: a long non-ASCII title cannot hide `type: board` past the first 4 KB', async () => {
+    // 1,400 characters (4,200 bytes) of title: the closing --- is inside the first 4,096 *characters* but beyond the first 4,096 *bytes*.
+    const title = 'あ'.repeat(1400)
+    const text = `---\ntitle: ${title}\ntype: board\n---\n# x\n`
+    expect(text.indexOf('type: board')).toBeLessThan(BOARD_HEAD_BYTES)
+    expect(Buffer.byteLength(text.slice(0, text.indexOf('type: board')))).toBeGreaterThan(BOARD_HEAD_BYTES)
+    const res = await validateBoardSave({ path: 'Boards/Gate.md', text }, vault())
+    expect(res.ok).toBe(false)
+    // Written anyway it would never open again: readBoard (which reads the file's first 4,096 bytes) would find no board.
+    await put('Boards/Wide.md', text)
+    expect(await readBoard('Boards/Wide.md', vault())).toBeNull()
+    // The same title at 1,300 characters (3,900 bytes) leaves room for the key and is a board both ways.
+    const ok = `---\ntitle: ${'あ'.repeat(1300)}\ntype: board\n---\n# x\n`
+    expect((await validateBoardSave({ path: 'Boards/Gate.md', text: ok }, vault())).ok).toBe(true)
+    await put('Boards/Narrower.md', ok)
+    expect(await readBoard('Boards/Narrower.md', vault())).toBe(ok)
+  })
+})
+
+describe('saveBoard', () => {
+  it('overwrites an existing board note with the new text, atomically, and leaves nothing else behind', async () => {
+    const v = vault()
+    const before = await files('Boards')
+    const next = serializeBoard(addNote(parseBoard(board()).doc, { text: 'Check the edge of the lintel' }).doc, board(), NOW)
+    expect(next).not.toBe(board())
+    await expect(saveBoard({ path: 'Boards/Gate.md', text: next }, v)).resolves.toEqual({ ok: true })
+    expect(await disk('Boards/Gate.md')).toBe(next)
+    // No temp sibling of the atomic write is left, and no other file appeared.
+    expect(await files('Boards')).toEqual(before)
+    const again = next.replace('Check the edge', 'Check the whole edge')
+    await expect(saveBoard({ path: 'Boards/Gate.md', text: again }, v)).resolves.toEqual({ ok: true })
+    expect(await disk('Boards/Gate.md')).toBe(again)
+    expect(await files('Boards')).toEqual(before)
+  })
+
+  it('never creates a note, however the path is spelled', async () => {
+    const v = vault()
+    for (const p of ['Boards/New.md', 'New.md', 'Boards/Sub/New.md', 'boards/gate2.md']) {
+      const res = await saveBoard({ path: p, text: board('New') }, v)
+      expect(res.ok, p).toBe(false)
+    }
+    expect(await files('Boards')).toEqual(['Folder.md', 'Gate', 'Gate.md', 'Not a note.txt'])
+    expect(await fs.readdir(root)).not.toContain('New.md')
+  })
+
+  it('writes nothing when it refuses: every other note, the folder and the files outside stay byte for byte', async () => {
+    const v = vault()
+    const snapshot = async (): Promise<Record<string, string>> => {
+      const out: Record<string, string> = {}
+      const walk = async (dir: string): Promise<void> => {
+        for (const e of await fs.readdir(dir, { withFileTypes: true })) {
+          const full = path.join(dir, e.name)
+          if (e.isDirectory()) await walk(full)
+          else out[path.relative(tmp, full)] = (await fs.readFile(full)).toString('base64')
+        }
+      }
+      await walk(tmp)
+      return out
+    }
+    const before = await snapshot()
+    const attempts: [unknown, unknown][] = [
+      ['Notes/Plain.md', board('Hijack')],
+      ['Boards/Gate.md', PLAIN],
+      ['Boards/Gate.md', board() + 'x'.repeat(MAX_BOARD_TEXT)],
+      ['Boards/Gate.md', 7],
+      ['Boards/Not a note.txt', board('Hijack')],
+      ['Boards/Gate/rust.png', board('Hijack')],
+      ['../outside/Secret.md', board('Hijack')],
+      ['node_modules/pkg/Board.md', board('Hijack')],
+      ['Boards/Folder.md', board('Hijack')],
+      [null, board('Hijack')],
+      ['Boards/Gate.md\0', board('Hijack')],
+    ]
+    for (const [p, text] of attempts) expect((await saveBoard({ path: p, text }, v)).ok, String(p)).toBe(false)
+    expect(await snapshot()).toEqual(before)
+  })
+
+  it('says why a write failed in words, without the disk path', async () => {
+    const real = vault()
+    const failing = (code: string, message: string): BoardVault => ({
+      abs: (p) => real.abs(p),
+      stat: (p) => real.stat(p),
+      read: (p) => real.read(p),
+      write: async () => {
+        throw Object.assign(new Error(message), { code })
+      },
+    })
+    const dto = { path: 'Boards/Gate.md', text: board() }
+    const denied = await saveBoard(dto, failing('EACCES', `EACCES: permission denied, open '${at('Boards/Gate.md')}'`))
+    expect(denied).toEqual({ ok: false, reason: 'The board file cannot be written (permission denied or read-only)' })
+    expect(await saveBoard(dto, failing('EROFS', 'x'))).toMatchObject({ ok: false, reason: expect.stringMatching(/read-only/) })
+    expect(await saveBoard(dto, failing('ENOSPC', `ENOSPC at ${tmp}`))).toEqual({ ok: false, reason: 'The disk is full' })
+    const other = await saveBoard(dto, failing('EIO', `first line\nsecond ${tmp}`))
+    expect(other).toEqual({ ok: false, reason: 'The board could not be written: first line' })
+    // A message of any length stays one short line.
+    const long = await saveBoard(dto, failing('EIO', 'y'.repeat(5000)))
+    expect(long.ok ? '' : long.reason.length).toBeLessThan(220)
+  })
+
+  it('is reported by the file watcher like an edit made outside the app (the note is not announced as our own write)', async () => {
+    const v = vault()
+    const scan = await v.scan()
+    const seen: VaultChangeDto[] = []
+    const watcher = new VaultWatcher(v, { files: scan.files.map((f) => f.path), folders: scan.folders, images: scan.assets.map((a) => a.path) }, (batch) => seen.push(...batch), {
+      debounceMs: 40,
+    })
+    const noted = vi.spyOn(watcher, 'noteSelfWrite')
+    try {
+      await watcher.start()
+      // The native watcher is armed once it has seen a probe write.
+      for (let i = 0; !seen.some((c) => c.path === 'probe.md'); i++) {
+        if (i > 60) throw new Error('watcher never became ready')
+        await fs.writeFile(at('probe.md'), `probe ${i}`)
+        await new Promise((r) => setTimeout(r, 80))
+      }
+      seen.length = 0
+      const text = serializeBoard(addNote(parseBoard(board()).doc, { text: 'seen by the brain' }).doc, board(), NOW)
+      await expect(saveBoard({ path: 'Boards/Gate.md', text }, v)).resolves.toEqual({ ok: true })
+      await vi.waitFor(() => expect(seen.find((c) => c.path === 'Boards/Gate.md')).toMatchObject({ kind: 'change', content: text }), { timeout: 4000 })
+      expect(noted).not.toHaveBeenCalled()
+
+      // The control: the same write announced the way the brain window's own note writer does is swallowed, which is what this
+      // test would show if a save ever began to announce itself.
+      seen.length = 0
+      const own = text.replace('seen by the brain', 'announced first')
+      watcher.noteSelfWrite('Boards/Gate.md', own)
+      await v.write('Boards/Gate.md', own)
+      await new Promise((r) => setTimeout(r, 400))
+      expect(seen.filter((c) => c.path === 'Boards/Gate.md')).toEqual([])
+    } finally {
+      watcher.stop()
+    }
+  })
+
+  it('never calls noteSelfWrite on any watcher, whichever path a save takes (a prototype-wide spy, with a control)', async () => {
+    const v = vault()
+    const noted = vi.spyOn(VaultWatcher.prototype, 'noteSelfWrite')
+    const watcher = new VaultWatcher(v, { files: [], folders: [], images: [] }, () => undefined)
+    const next = board('Gate').replace('Reference board.', 'Edited.')
+    await expect(saveBoard({ path: 'Boards/Gate.md', text: next }, v)).resolves.toEqual({ ok: true })
+    // The refused ones, the reads and the checks: none of them announces anything either.
+    await saveBoard({ path: 'Notes/Plain.md', text: next }, v)
+    await saveBoard({ path: 'Boards/Gate.md', text: PLAIN }, v)
+    await validateBoardSave({ path: 'Boards/Gate.md', text: next }, v)
+    await readBoard('Boards/Gate.md', v)
+    await checkBoard('Boards/Gate.md', v)
+    expect(noted).not.toHaveBeenCalled()
+    // The control: the spy does see an announcement when one is made.
+    watcher.noteSelfWrite('Boards/Gate.md', next)
+    expect(noted).toHaveBeenCalledTimes(1)
+  })
+
+  it('wires board:save, board:read and board:open in main.ts to the checked functions only, never announcing a write', async () => {
+    const src = await fs.readFile(path.join(here, '..', 'src', 'main', 'main.ts'), 'utf8')
+    const win = await fs.readFile(path.join(here, '..', 'src', 'main', 'board-window.ts'), 'utf8')
+    const wiring = /function registerBoardIpc[\s\S]*?\n}\n/.exec(src)?.[0] ?? ''
+    expect(wiring).toContain('IPC.boardSave')
+    expect(wiring).toContain('h.save(p, text, base)')
+    expect(wiring).toContain('h.read(p)')
+    expect(wiring).not.toMatch(/noteSelfWrite|readNote|writeNote|createNote|vault\.write/)
+    // The handlers get no watcher to announce anything to, and go through board-save.ts for every vault access.
+    const handlers = /export function boardHandlers[\s\S]*?\n}\n/.exec(win)?.[0] ?? ''
+    expect(handlers).toContain('saveBoard(')
+    expect(handlers).toContain('readBoard(')
+    expect(handlers).toContain('checkBoard(')
+    expect(handlers).not.toMatch(/noteSelfWrite|\.write\(|\.read\(/)
+  })
+})
+
+describe('readBoard', () => {
+  it('serves a board note, and only a board note', async () => {
+    const v = vault()
+    expect(await readBoard('Boards/Gate.md', v)).toBe(board('Gate'))
+    const nothing: unknown[] = [
+      'Notes/Plain.md',
+      'Boards/Missing.md',
+      'Boards/Folder.md',
+      '../outside/Secret.md',
+      'Boards/Not a note.txt',
+      'Boards/Gate/rust.png',
+      'node_modules/pkg/Board.md',
+      '',
+      7,
+      null,
+      'Boards/Gate.md\0',
+    ]
+    for (const p of nothing) expect(await readBoard(p, v), String(p)).toBeNull()
+  })
+
+  it('does not serve a board the window could not save back: over 1,000,000 characters, or too many bytes to be that few (it says so, it is not "gone")', async () => {
+    const v = vault()
+    const pad = (n: number): string => board() + 'x'.repeat(n - board().length)
+    await put('Boards/Exact.md', pad(MAX_BOARD_TEXT))
+    expect((await readBoard('Boards/Exact.md', v))?.length).toBe(MAX_BOARD_TEXT)
+    await put('Boards/Over.md', pad(MAX_BOARD_TEXT + 1))
+    await expect(readBoard('Boards/Over.md', v)).rejects.toThrow(/1,000,001 characters long.*up to 1,000,000/)
+    // Far more bytes than 4 per character of the cap: refused from its size, without being read.
+    await put('Boards/Huge.md', Buffer.concat([Buffer.from(board()), Buffer.alloc(MAX_BOARD_TEXT * 4 + 10, 0x78)]))
+    const spy = vi.spyOn(v, 'read')
+    await expect(readBoard('Boards/Huge.md', v)).rejects.toThrow(/over 1,000,000 characters long/)
+    expect(spy).not.toHaveBeenCalled()
+  })
+
+  it('round trips with core: read, change the board, save, read again, the rest of the note untouched', async () => {
+    const v = vault()
+    const hand = board('Gate').replace('Reference board.', 'My own words about this board, kept as they are.') + '\n## Later\n\nA paragraph below the board.\n'
+    await put('Boards/Gate.md', hand)
+    const raw = await readBoard('Boards/Gate.md', v)
+    expect(raw).toBe(hand)
+    expect(isBoardNote(raw!)).toBe(true)
+    const doc = parseBoard(raw!).doc
+    const edited = addNote(addNote(doc, { text: 'one' }).doc, { text: 'two [sic]' }).doc
+    const next = serializeBoard(edited, raw!, NOW)
+    expect(await saveBoard({ path: 'Boards/Gate.md', text: next }, v)).toEqual({ ok: true })
+    const back = await readBoard('Boards/Gate.md', v)
+    expect(back).toBe(next)
+    expect(parseBoard(back!).doc.items.map((i) => (i.kind === 'note' ? i.text : ''))).toEqual(['one', 'two [sic]'])
+    expect(back).toContain('My own words about this board, kept as they are.')
+    expect(back!.endsWith('## Later\n\nA paragraph below the board.\n')).toBe(true)
+    // A fresh empty board saves as it is.
+    expect(parseBoard(await readBoard('Boards/Gate.md', v) as string).doc.title).toBe(emptyBoard('Gate').title)
+  })
+})

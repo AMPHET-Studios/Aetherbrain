@@ -15,6 +15,7 @@
 import { promises as fs, type Dirent } from 'node:fs'
 import path from 'node:path'
 import { installKind, isGameDirName } from './installs.js'
+import { MAX_NOTE_BYTES } from './pages.js'
 
 /**
  * Lowercased folder names never scanned, watched or written into: build
@@ -590,8 +591,9 @@ export class FsVault {
         const i = next++
         const f = files[i]!
         try {
-          const [content, st] = await Promise.all([fs.readFile(f.abs, 'utf8'), fs.stat(f.abs)])
-          out[i] = { path: f.path, content, mtime: st.mtimeMs }
+          const st = await fs.stat(f.abs)
+          // A note file over MAX_NOTE_BYTES is a dump, not a note: it stays on disk, untouched, and is not loaded.
+          if (st.size <= MAX_NOTE_BYTES) out[i] = { path: f.path, content: await fs.readFile(f.abs, 'utf8'), mtime: st.mtimeMs }
         } catch {
           /* unreadable or vanished: skip */
         }

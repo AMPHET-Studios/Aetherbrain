@@ -6,7 +6,8 @@ import { toString as mdToString } from 'mdast-util-to-string'
 import type { Root, Heading as MdHeading, Text } from 'mdast'
 import type { Heading, Link, NoteMeta, ParsedNote, VaultFile } from '../types'
 import { asIsoDate, asString, asStringArray, splitFrontmatter } from './frontmatter'
-import { textTags, textWikilinks } from './wikilink'
+import { boardNoteParts } from '../board/format'
+import { remarkNoLateAutolinks, textTags, textWikilinks } from './wikilink'
 import {
   areaFromFolder,
   basenameOf,
@@ -19,7 +20,69 @@ import {
   typeFromFolder,
 } from '../vault/paths'
 
-const processor = unified().use(remarkParse).use(remarkGfm)
+const processor = unified().use(remarkParse).use(remarkGfm).use(remarkNoLateAutolinks)
+
+/**
+ * Most characters of one note read as markdown. micromark takes about 1.2 s and 300 MB of memory for every MB it reads (a 3 MB chat
+ * peaked above 512 MB, a note of 12 MB runs the 4 GB window out of memory), and a single huge list or quote takes quadratic time (2 MB
+ * of one list: 74 s). Notes that long are chats and logs: what is past this is kept (it is the note), searchable up to `PLAIN_MAX_CHARS`,
+ * but it gives no links, tags or headings.
+ */
+export const PARSE_MAX_CHARS = 120_000
+/**
+ * Most characters of an imported AI chat read as markdown. A chat's text is inert (no link, tag or task comes out of what was said),
+ * so what is read is its header and the start of its transcript; the rest is search text. Three times faster to load than the general limit.
+ */
+export const PARSE_MAX_CHARS_CHAT = 40_000
+/** Most characters of one note's text kept for search (the part read as markdown, then the plain text after it). */
+export const PLAIN_MAX_CHARS = 250_000
+
+/** An imported AI chat or Claude project hub (see chats/notes.ts): known by its tag. */
+function isChatNote(frontmatter: Record<string, unknown>): boolean {
+  const tags = asStringArray(frontmatter['tags'])
+  return tags.includes('ai-chat') || tags.includes('ai-project')
+}
+
+/** Where to cut `text` for `PARSE_MAX_CHARS`: after the last blank line in the last fifth, else after the last line break, else after the last space, else at the limit. */
+function parseCut(text: string, max: number): number {
+  const floor = Math.floor(max * 0.8)
+  const blank = text.lastIndexOf('\n\n', max)
+  if (blank >= floor) return blank + 2
+  const line = text.lastIndexOf('\n', max)
+  if (line >= floor) return line + 1
+  // One enormous line: at a space, so a word is not cut in two.
+  const space = text.lastIndexOf(' ', max)
+  return space >= floor ? space + 1 : max
+}
+
+/** The text after the part that was read, as search text: markup characters become spaces. Linear. */
+function crudePlain(rest: string, room: number): string {
+  return rest
+    .slice(0, room * 2)
+    .replace(/[>*_`#|\\[\]]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, room)
+}
+
+/**
+ * Words in the text past `PARSE_MAX_CHARS`, as runs of non-space characters (a 20 MB note has millions: a regex over the Unicode
+ * letter classes costs 100 ms per MB, this loop 5). A dash on its own counts as a word here; it is a statistic.
+ */
+function countWordsIn(text: string): number {
+  let n = 0
+  let inWord = false
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i)
+    const space = c === 32 || (c >= 9 && c <= 13) || c === 160 || c === 0x2028 || c === 0x2029
+    if (space) inWord = false
+    else if (!inWord) {
+      inWord = true
+      n++
+    }
+  }
+  return n
+}
 
 /** Parse markdown into an mdast tree (cached processor, no stringify). */
 export function parseMarkdown(body: string): Root {
@@ -153,7 +216,20 @@ export function parseNote(file: VaultFile): ParsedNote {
   const path = normalizePath(file.path)
   const id = idFromPath(path)
   const { frontmatter, body } = splitFrontmatter(file.content)
-  const tree = parseMarkdown(body)
+  // A board's item lines are the board's data, not prose: the board's own line scan reads them (a few milliseconds for a full board),
+  // never the markdown parser (0.3 to 0.8 s, on every save), and none of their text becomes links, tags or search text. What the user
+  // wrote in the note and the lines the board keeps as extras are prose and go through the parser as before.
+  const board = frontmatter['type'] === 'board' ? boardNoteParts(body) : null
+  let text = board ? board.text : body
+  // A note too long to read whole is read up to PARSE_MAX_CHARS (see there); the rest is only counted and searched.
+  let rest = ''
+  const limit = isChatNote(frontmatter) ? PARSE_MAX_CHARS_CHAT : PARSE_MAX_CHARS
+  if (text.length > limit) {
+    const cut = parseCut(text, limit)
+    rest = text.slice(cut)
+    text = text.slice(0, cut)
+  }
+  const tree = parseMarkdown(text)
 
   const headings: Heading[] = []
   let firstH1: string | null = null
@@ -177,9 +253,9 @@ export function parseNote(file: VaultFile): ParsedNote {
       const end = t.position?.end.offset
       // Links and tags are read from the markdown as written, so escaped
       // brackets and hashes (`[\[x]]`, `\#word`) stay plain text.
-      const source = start !== undefined && end !== undefined ? body.slice(start, end) : null
+      const source = start !== undefined && end !== undefined ? text.slice(start, end) : null
       for (const { tag } of textTags(t.value, source)) tagSet.add(tag)
-      const base = start ?? 0
+      const base = board ? board.original(start ?? 0) : (start ?? 0)
       for (const tok of textWikilinks(t.value, source)) {
         const link: Link = {
           from: id,
@@ -197,7 +273,7 @@ export function parseNote(file: VaultFile): ParsedNote {
   })
 
   // A paragraph `tameDelimiters` guarded holds look-alikes for its * and _ : links and search text get them back.
-  if (tameDelimiters(body) !== body) {
+  if (tameDelimiters(text) !== text) {
     const back = (x: string) => x.replace(/\u2217/g, '*').replace(/\uff3f/g, '_')
     for (const l of links) {
       l.to = back(l.to)
@@ -208,9 +284,28 @@ export function parseNote(file: VaultFile): ParsedNote {
     for (let i = 0; i < textChunks.length; i++) textChunks[i] = back(textChunks[i]!)
   }
 
+  // The words written on a board (its notes, its captions) are search text and count as words, though they were taken out of the
+  // markdown: they are not text nodes, so none of them becomes a link or a tag, and no coordinate or attribute is among them.
+  if (board) for (const words of board.texts) textChunks.push(words)
+
+  // The pictures of a board, from its lines (an embed is a link like any other; a `pic` line names a picture whose path cannot be
+  // written as a wikilink, so its link is marked to be read as the path it is). Merged in by position.
+  if (board && board.pictures.length > 0) {
+    const merged: Link[] = []
+    let k = 0
+    for (const p of board.pictures) {
+      while (k < links.length && links[k]!.offset <= p.offset) merged.push(links[k++]!)
+      const link: Link = { from: id, to: p.path, raw: p.path, kind: 'embed', resolved: false, offset: p.offset }
+      if (p.literal) link.literal = true
+      merged.push(link)
+    }
+    while (k < links.length) merged.push(links[k++]!)
+    links.splice(0, links.length, ...merged)
+  }
+
   // Plain text for search/mentions: strip wikilink syntax but keep the words.
   // `[^[\]]` like WIKILINK_RE: a long run of `[[` must not make this quadratic.
-  const plain = textChunks
+  const readPlain = textChunks
     .join(' ')
     .replace(/!?\[\[([^[\]]+?)\]\]/g, (_m, inner: string) => {
       const { target, alias } = splitRaw(inner)
@@ -218,6 +313,9 @@ export function parseNote(file: VaultFile): ParsedNote {
     })
     .replace(/\s+/g, ' ')
     .trim()
+  // The text past what was read: searchable up to PLAIN_MAX_CHARS, counted in full.
+  const room = PLAIN_MAX_CHARS - readPlain.length
+  const plain = rest && room > 0 ? `${readPlain} ${crudePlain(rest, room)}`.trim() : readPlain
 
   const fmTags = asStringArray(frontmatter['tags']).map(normalizeTag).filter(Boolean)
   const inlineTags = [...tagSet]
@@ -248,7 +346,7 @@ export function parseNote(file: VaultFile): ParsedNote {
     created: asIsoDate(frontmatter['created'] ?? frontmatter['date']),
     updated: asIsoDate(frontmatter['updated'] ?? frontmatter['modified']) ?? (file.mtime ? new Date(file.mtime).toISOString() : null),
     status: asString(frontmatter['status']),
-    wordCount: countWords(plain),
+    wordCount: rest ? countWords(readPlain) + countWordsIn(rest) : countWords(readPlain),
     headings,
     aliases,
   }
@@ -262,6 +360,7 @@ export function parseNote(file: VaultFile): ParsedNote {
     inlineTags,
     plain,
   }
+  if (rest) parsed.partial = text.length
   if (file.mtime !== undefined) parsed.mtime = file.mtime
   return parsed
 }

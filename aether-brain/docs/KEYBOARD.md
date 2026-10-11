@@ -12,10 +12,11 @@ Every feature has a key. `⌘` is `Ctrl` on Windows/Linux. Single keys are ignor
 | `d`            | Open (or create) today's daily note               |
 | `i`            | Import your AI chats: pick the Claude / ChatGPT data export (.zip) — see [AI-CHATS.md](AI-CHATS.md) |
 | `1` `2` `3` `4` `5` `6` | Graph · Editor · Capture · Search · Review · Projects |
+| `8` · `⇧ B` | Boards: reference boards, the board you were on or the list of boards — see [Reference boards](#reference-boards) |
 | `p`            | Projects board (with a ★ project star selected: that project's board) |
 | `u`            | The newest toast's action: *Undo* (a ticked brief task, a deleted task) or *Show* (pictures just imported, a Concept Forge critique) |
 | `?`            | Keyboard cheatsheet                               |
-| `Esc`          | Close overlay → close editor → clear filters → deselect (first thing that applies) |
+| `Esc`          | Close overlay → close editor → clear filters → deselect (first thing that applies); over a board, the board's own Esc ladder goes first |
 | `Esc` on a crash notice | Close the part of the app that crashed (the same as its Close button) |
 | `Alt ←` / `Alt →` | History back / forward                         |
 
@@ -82,7 +83,7 @@ Focusing a task lights up its note in the graph. With no tasks the brief says *A
 | `Tab` · `⇧ Tab`      | The notes that embed it, and its folder                       |
 | drop files on the window | Import pictures into the selected folder, a selected project's *Critique* planet, else `Inbox` — never replaces a file (`gate 2.png`); up to 40 MB each |
 
-The picture inspector has *Open*, *Reveal* (desktop), *Copy embed* (`![[gate.png]]`, the vault path when two pictures share a name) and *Embedded in*; the folder inspector counts a folder's pictures (*12 pictures · 8 shown*) and has *Import pictures…*. Palette commands (type `> picture`): *Import pictures…*, *Open the selected picture in your image app*, *Copy the embed of the selected picture*, *Toggle image moons*, *Toggle picture thumbnails*, *Picture size* (`z`), *Pictures: medium / large / extra large icons*; and *Today — daily brief*, *Toggle Today hub*.
+The picture inspector has *Open*, *Reveal* (desktop), *Copy embed* (`![[gate.png]]`, the vault path when two pictures share a name), *Add to board ▾* (a menu of the newest boards and *New board…*; palette: *Boards: add the selected picture to the last board* / *to a new board*) and *Embedded in*; the folder inspector counts a folder's pictures (*12 pictures · 8 shown*) and has *Import pictures…*. Palette commands (type `> picture`): *Import pictures…*, *Open the selected picture in your image app*, *Copy the embed of the selected picture*, *Toggle image moons*, *Toggle picture thumbnails*, *Picture size* (`z`), *Pictures: medium / large / extra large icons*; and *Today — daily brief*, *Toggle Today hub*.
 
 **Picture size** works like Windows' icon views: *Medium icons* (the brain's first size), *Large icons* (about a big planet, the default) and *Extra large icons* (about a star). The system layout makes room: bigger pictures get wider orbits, so they never cover each other. After a change the camera stays with what is selected (else it shows the whole brain). The choice is remembered.
 
@@ -91,8 +92,8 @@ The picture inspector has *Open*, *Reveal* (desktop), *Copy embed* (`![[gate.png
 | Key         | Action                                      |
 | ----------- | ------------------------------------------- |
 | `↑` `↓`     | Move                                        |
-| `Enter`     | Open note / fly to folder (over the Projects board: back to the graph first) / run command |
-| `⇧ Enter`   | Select + fly, keep the editor closed         |
+| `Enter`     | Open note / fly to folder (over the Projects board or the Boards view: back to the graph first) / run command |
+| `⇧ Enter`   | Select + fly, keep the editor closed (over the Boards view, the Projects board, review or capture: back to the graph first, or nothing would be seen to happen) |
 | `⌘ Enter`   | Turn the query into a graph filter          |
 | `Tab`       | Toggle `>` command mode                     |
 | `Esc`       | Close the palette (only the palette: the board under it stays open) |
@@ -157,6 +158,98 @@ Mouse: hovering a row shows ▲ ▼ ✎ ✕. The header edits in place: click th
 
 Task checkboxes in any preview (editor split view, review) are clickable too and write back the same way.
 
+## Reference boards
+
+A **board** is a note of the vault (`type: board`) shown as an open canvas of pictures, text notes and drawn marks (guide: [REFERENCE-BOARD.md](REFERENCE-BOARD.md)). While a board is open it owns the keyboard: its keys are the ones below, and none of the 3D view's single keys (`b`, `l`, `t`, `m` …) also fires behind it. `⌘` is `Ctrl` on Windows/Linux. Every key is also a palette command (`⌘ K`, type "Board"); commands without a key are palette-only. From a board `2` … `7` still switch views, `/` and `?` still search and show the cheatsheet, and a text field (a note being written, the picker's search) keeps its own keys.
+
+| Key | Action |
+| --- | --- |
+| `8` · `⇧ B` | Open the boards: the board you were on, else the list. Inside the view: from a board to the list, from the list back to the board |
+| `n` | In the list of boards: make a new board (name it, `Enter`) |
+
+**Tools**
+
+| Key | Action |
+| --- | --- |
+| `V` | Select tool |
+| `H` | Hand tool: drag to pan |
+| `T` | Note tool: click for a text note |
+| `P` | Pen (a tablet pen's pressure thickens the line) |
+| `L` | Line and arrow |
+| `R` | Rectangle |
+| `O` | Ellipse |
+| `E` | Eraser: removes whole marks |
+| `I` | Colour sampler: click to read and copy the colour under the pointer |
+| `C` | Crop the selected picture (`Enter` or `Esc` finishes) |
+
+**Edit**
+
+| Key | Action |
+| --- | --- |
+| `⌘ Z` | Undo (200 steps) |
+| `⌘ ⇧ Z` · `⌘ Y` | Redo |
+| `⌘ A` | Select all |
+| `Esc` | The ladder: cancel what is under way → leave cropping → select none → back to the select tool; at rest it closes the Boards view |
+| `⌘ I` | Invert the selection |
+| `⌘ D` | Duplicate |
+| `Delete` · `⌫` | Delete |
+| `⌘ C` · `⌘ X` · `⌘ V` | Copy · cut · paste. Copied items go on the system clipboard as text that starts with *Aether Brain board: N items copied*, so they paste into another board or window as well; a paste of anything else adds the picture or text the system clipboard holds |
+| `⌘ G` · `⌘ ⇧ G` | Group · ungroup |
+| `⌘ L` · `⌘ ⇧ L` | Lock · unlock |
+| `F2` | Edit the selected note's text (`Enter` does the same when a note is the only thing selected) |
+
+**Order and transform**
+
+| Key | Action |
+| --- | --- |
+| `⌘ ]` · `]` | Bring to front · bring forward |
+| `[` · `⌘ [` | Send backward · send to back |
+| `⇧ H` · `⇧ V` | Flip horizontally · vertically |
+| `⌘ R` · `⌘ ⇧ R` | Rotate 90° clockwise · counter-clockwise |
+
+**Arrange and appearance**
+
+| Key | Action |
+| --- | --- |
+| `A` | Arrange menu: optimal, row, column, grid, pile; sort; align; distribute; make the same size |
+| `G` · `⇧ G` | Grey the whole board · grey the selected pictures |
+| `S` | Smooth or crisp pixels |
+| `N` | Captions on or off |
+| `B` | Next background colour |
+| `⇧ S` | Snap to grid |
+| `⌥ ]` · `⌥ [` | More opaque · more transparent |
+
+**View**
+
+| Key | Action |
+| --- | --- |
+| `Home` · `F` | Fit all |
+| `⇧ F` · `Z` | Fit the selection |
+| `1` | Zoom to 100% |
+| `+` · `=` · `-` | Zoom in · zoom in · zoom out |
+| `Tab` | Hide or show the toolbar |
+
+**Pictures**
+
+| Key | Action |
+| --- | --- |
+| `⌘ O` | Add pictures… (the vault's pictures, with a search box) |
+| `Enter` | Open the selected picture in your image program (with a note as the only selection it edits the note, as `F2` does) |
+| `⌘ E` · `⌘ ⇧ E` | Export the selection · the whole board as a picture, saved in the board's folder |
+
+**Gestures**
+
+| Key / gesture | Action |
+| --- | --- |
+| `← ↑ → ↓` | Nudge the selection 1 unit (`⇧`: 10 units) |
+| `Space + drag` | Pan |
+| `Wheel` | Zoom at the pointer |
+| `⇧ Wheel` | Pan sideways |
+| `⌥ Wheel` | Pan up and down |
+| `Double-click` | Edit a note, fit a picture, or add a note on empty canvas |
+
+Palette only, no key: reset rotation / size / crop / everything, arrange row / column / grid / pile / optimal, sort by name / added / size / shuffle, align and distribute, make the same width / height / size, show at the pictures' own size, show in the file manager (desktop), show in the brain, picture info, extract a colour palette; and on the desktop pop out into its own window (`w` toggles it), dock back, always on top, window opacity. Also: *Boards: open*, *Boards: show list*, *Boards: new board*, *Boards: open the selected note as a board*, and for a selected picture *Boards: add the selected picture to the last board* / *to a new board* (palette only: which board is a choice, and the picture inspector's *Add to board* menu lists them).
+
 ## Review
 
 | Key       | Action                                          |
@@ -176,6 +269,7 @@ Task checkboxes in any preview (editor split view, review) are clickable too and
 | `v`   | Vault folders panel: add folders or whole drives (`D:\`, `F:\` …), skip folders, bring back folders you left out, see the games and programs skipped, rescan |
 | `⇧ H` | Leave the selected folder out of the brain (nothing on disk changes; Undo on the toast, or Bring back in `v`) |
 | `a`   | AI link panel: let Claude and ChatGPT read and write this brain (see [AI-LINK.md](AI-LINK.md)) |
+| `w`   | Reference board: pop the board you have open out into its own window that stays on top of other windows, or bring it back (`w` in the floating window brings it back too; palette: *Board: Pop out to its own window*, *Always on top*, *Window opacity…*; see [REFERENCE-BOARD.md](REFERENCE-BOARD.md)) |
 | `q`   | Chat with your brain: it reads your notes, checks in, remembers what you tell it to (see [BRAIN-CHAT.md](BRAIN-CHAT.md)); `Enter` sends, `Esc` on an empty box closes |
 | `⇧ P` | Find projects: looks through the vault's folders (names only) for your projects — Unreal, Unity and Godot projects, git repositories, code projects, folders of Blender, ZBrush, Photoshop … files — and makes the ticked ones ★ stars in one go; in the panel `a` ticks all, `s` the sure ones, `n` none |
 | `⇧ L` | Librarian: copy every picture of a folder or drive (`D:\`) into one library (`F:\MASTERIMAGES`) sorted by type, genre and year, tagged by taste, linked into the brain as a star; shows the plan before it copies anything (see [LIBRARIAN.md](LIBRARIAN.md)) |
@@ -191,4 +285,4 @@ Inside a panel: `Esc` closes it, its own key closes it too, the other panel's ke
 
 ## Commands (palette `>`)
 
-Today — daily brief · Toggle Today hub · Import AI chats (Claude / ChatGPT export)… (`i`) · Import pictures… · Open the selected picture · Copy the embed of the selected picture · Toggle image moons · Toggle picture thumbnails · Picture size (`z`) · Pictures: medium / large / extra large icons · Star gallery (`⇧ G`) · Toggle star galleries · Move note → Projects / Areas / Resources / Archive · Set status → evergreen / seedling · Delete note · New project · New folder / new note in the selected folder · Make the selected folder a project · Open the selected star's project board · Show in the file manager (a note, folder or picture) · Leave the selected folder out of the brain (`⇧ H`, desktop) · Cycle layout · Orbits moving / paused · Folder levels − / + · Expand / collapse folder · Reload vault from disk · Re-run layout physics · Vault folders · AI link · Chat with your brain (`q`) · New brain chat · Check in with your brain · Librarian (`⇧ L`) · Find projects (`⇧ P`) · Concept Forge — open · Concept Forge — choose file… · Concept Forge — fly to its star (live screen) · Unreal companion link: on / off · Unreal companion link: status… (desktop) · everything above.
+Boards: open (`8` · `⇧ B`) · Boards: show list · Boards: new board · Boards: add the selected picture to the last board / a new board · Board: … (every command of an open board) · Today — daily brief · Toggle Today hub · Import AI chats (Claude / ChatGPT export)… (`i`) · Import pictures… · Open the selected picture · Copy the embed of the selected picture · Toggle image moons · Toggle picture thumbnails · Picture size (`z`) · Pictures: medium / large / extra large icons · Star gallery (`⇧ G`) · Toggle star galleries · Move note → Projects / Areas / Resources / Archive · Set status → evergreen / seedling · Delete note · New project · New folder / new note in the selected folder · Make the selected folder a project · Open the selected star's project board · Show in the file manager (a note, folder or picture) · Leave the selected folder out of the brain (`⇧ H`, desktop) · Cycle layout · Orbits moving / paused · Folder levels − / + · Expand / collapse folder · Reload vault from disk · Re-run layout physics · Vault folders · AI link · Chat with your brain (`q`) · New brain chat · Check in with your brain · Librarian (`⇧ L`) · Find projects (`⇧ P`) · Concept Forge — open · Concept Forge — choose file… · Concept Forge — fly to its star (live screen) · Unreal companion link: on / off · Unreal companion link: status… (desktop) · everything above.

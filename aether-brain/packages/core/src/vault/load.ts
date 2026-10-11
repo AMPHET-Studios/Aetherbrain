@@ -76,6 +76,10 @@ export async function loadVault(
   }
   const notes = new Map<NoteId, ParsedNote>()
   const BATCH = 150
+  // Yield every BATCH notes and also whenever 40 ms have gone by: a few long notes take seconds each, and 150 of them would be
+  // minutes without a repaint (the window shows its progress, and the user can see it is working).
+  const YIELD_MS = 40
+  let lastYield = performance.now()
   for (let i = 0; i < files.length; i++) {
     const f = files[i]!
     const p = normalizePath(f.path)
@@ -86,9 +90,10 @@ export async function loadVault(
     } catch (err) {
       console.warn('[aether] failed to parse', p, err)
     }
-    if (i % BATCH === BATCH - 1) {
+    if (i % BATCH === BATCH - 1 || performance.now() - lastYield > YIELD_MS) {
       onProgress?.({ phase: 'parsing', done: i + 1, total: files.length })
       await new Promise<void>((r) => setTimeout(r, 0))
+      lastYield = performance.now()
     }
   }
   onProgress?.({ phase: 'indexing', done: files.length, total: files.length })
@@ -96,7 +101,7 @@ export async function loadVault(
   const folders = foldersOfNotes(notes.values())
   for (const f of listed ?? []) addFolder(folders, f)
   const graph = buildGraph(notes, graphOptions?.(folders, notes, assets))
-  search.rebuild(notes.values())
+  await search.rebuildAsync(notes.values())
   return { notes, graph, search, folders, assets }
 }
 

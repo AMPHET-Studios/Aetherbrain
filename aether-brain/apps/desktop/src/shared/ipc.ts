@@ -13,6 +13,16 @@ export interface VaultFileDto {
   mtime: number
 }
 
+/**
+ * The notes of the vault come a page at a time (one reply with all of them was too large a message for a vault of long chats and
+ * killed the main process): read `files`, and while `more` ask `listMoreFiles(token)` for the next page.
+ */
+export interface VaultFilePage {
+  files: VaultFileDto[]
+  token: number
+  more: boolean
+}
+
 export interface VaultChangeDto {
   /**
    * Note add/change/unlink (with content), image add/change/unlink (no
@@ -309,6 +319,40 @@ export interface AiActivityDto {
   write: boolean
 }
 
+/* ---- the reference board's floating window ---- */
+
+/** The floating board window, for both windows' toolbars and the palette. */
+export interface BoardStatusDto {
+  /** The window exists. */
+  open: boolean
+  /** The board (vault path of its note) it shows, or null when closed. */
+  path: string | null
+  alwaysOnTop: boolean
+  /** 0.2 to 1. Always 1 where the platform cannot dim a window (`supportsOpacity` false). */
+  opacity: number
+  /** Window opacity works here (Windows, macOS). */
+  supportsOpacity: boolean
+}
+
+/** What `board:configure` takes: either field, either window may send it. */
+export interface BoardConfigureDto {
+  alwaysOnTop?: boolean
+  /** 0.2 to 1 (clamped); ignored where the platform cannot dim a window. */
+  opacity?: number
+}
+
+/**
+ * The answer to `board:save`: nothing is written unless `ok`. `changed` marks the refusal that the note on disk is no longer the text
+ * the save was made from (`expectedBase`): the page must read the note again before it writes.
+ */
+export type BoardSaveResult = { ok: true } | { ok: false; reason: string; changed?: true }
+
+/** Why a picture was not handed over whole: it is not there (or not a picture of the vault), over a size cap, or could not be read. */
+export type ReadAssetFailure = 'missing' | 'too-large' | 'unreadable'
+
+/** The answer to `vault:readAssetChecked`: the bytes, or why there are none (`detail` is a sentence for a message). */
+export type ReadAssetResult = { ok: true; bytes: Uint8Array } | { ok: false; reason: ReadAssetFailure; detail: string }
+
 export interface AetherBridge {
   /** Show the OS folder picker; returns null if cancelled. Opens + watches it as a single-root vault. */
   pickVault(): Promise<VaultInfo | null>
@@ -369,7 +413,10 @@ export interface AetherBridge {
   onLibraryEvent(cb: (e: LibraryEventDto) => void): () => void
   /** Drive roots on Windows (`C:\`, `D:\`, …); empty elsewhere. */
   listDrives(): Promise<string[]>
-  listFiles(): Promise<VaultFileDto[]>
+  /** The first page of the vault's notes (an array: every note in one reply, as older builds sent them). */
+  listFiles(): Promise<VaultFilePage | VaultFileDto[]>
+  /** The next page of the list `token` came with. */
+  listMoreFiles(token: number): Promise<VaultFilePage>
   /** Every non-ignored folder in the vault (from the last scan). */
   listFolders(): Promise<FolderListDto>
   readFile(path: string): Promise<string | null>
@@ -392,6 +439,63 @@ export interface AetherBridge {
   createAsset(path: string, data: Uint8Array): Promise<void>
   /** Open an image of the vault in the OS default app (image paths only). */
   openAsset(path: string): Promise<void>
+  /**
+   * The bytes of a picture of the vault as they are on disk (a picture name, at most 64 MB), or null: not a picture, not in the
+   * visible vault, empty, too big, unreadable, or no vault open. Main reads and never decodes; the caller does.
+   */
+  readAsset(path: string): Promise<Uint8Array | null>
+  /**
+   * `readAsset` with the reason when there are no bytes: 'missing', 'too-large' (over 64 MiB, or a header that claims more than
+   * 150 million pixels: main reads the first 256 KB and judges it, so the renderer never receives bytes it must not decode) or
+   * 'unreadable'. The bytes are the same.
+   */
+  readAssetChecked(path: string): Promise<ReadAssetResult>
+
+  /**
+   * The reference board's floating window. `boardOpen` opens it on a board note (a vault `.md` path whose note is a board) or, when it
+   * is open, shows that board in it; the window belongs to the brain window and closes with it.
+   */
+  boardOpen(path: string): Promise<BoardStatusDto>
+  /** Close the floating window (the brain window hears `onBoardClosed`). */
+  boardClose(): Promise<void>
+  boardStatus(): Promise<BoardStatusDto>
+  /** Change the window's always-on-top and opacity; callable from either window. */
+  boardConfigure(patch: BoardConfigureDto): Promise<BoardStatusDto>
+  /**
+   * Overwrite an existing board note (`type: board` in its head, text at most 1,000,000 characters). Never creates a note. ONE call:
+   * main compares the note on disk with `expectedBase` (the text `text` was made from) and writes, so there is no read-then-write
+   * gap and a save sent as a window closes is complete once main has it. A note that is no longer `expectedBase` (and is not already
+   * `text`) is refused with `changed`; without `expectedBase` the note is overwritten. Written WITHOUT telling the watcher it was us,
+   * so the brain window sees it like an outside edit and rebuilds its graph.
+   */
+  boardSave(path: string, text: string, expectedBase?: string): Promise<BoardSaveResult>
+  /**
+   * A board note's text for the floating window, or null when the path is not a board note that is there (or no vault is open).
+   * Rejects with a message when the note is longer than the window can hold.
+   */
+  boardRead(path: string): Promise<string | null>
+  /**
+   * Every picture of the vault as it is NOW (the scan's list plus what was added or removed since: `listAssets` is the scan's
+   * snapshot, and a picture dropped into a board a minute ago is not in it). For the floating window, which gets later changes
+   * through `onChanges` (pictures only).
+   */
+  boardAssets(): Promise<AssetListDto>
+  /** The floating window opened, closed, moved to another board or changed its settings. Sent to both windows. */
+  onBoardState(cb: (s: BoardStatusDto) => void): () => void
+  /** The floating window stopped showing the board at `path` (closed, or moved to another board): the docked view takes it back. */
+  onBoardClosed(cb: (path: string) => void): () => void
+  /**
+   * Main is about to close a window (the board window, the app window, the app itself) and asks its page to save what it has not
+   * saved: `cb(token)`, and the page answers with `boardFlushed(token)` once it is on disk (main waits 1.5 s at most). A page that has
+   * registered nothing is answered for by its preload at once.
+   */
+  onBoardFlush(cb: (token: number) => void): () => void
+  boardFlushed(token: number): void
+  /**
+   * The note the floating window shows was deleted, renamed away or is no longer a board: `cb(why)`. The window keeps what it has.
+   * `cb(null)`: the note reads as a board again, and the notice comes down (not sent for the one about a rename the window could not follow).
+   */
+  onBoardGone(cb: (why: string | null) => void): () => void
 
   /** Open (or focus) the Concept Forge window; asks for concept-forge.html the first time or with `pick`. */
   forgeOpen(opts?: { pick?: boolean }): Promise<ForgeStatus>
@@ -468,6 +572,7 @@ export const IPC = {
   libraryEvent: 'library:event',
   drives: 'vault:drives',
   list: 'vault:list',
+  listMore: 'vault:listMore',
   folders: 'vault:folders',
   read: 'vault:read',
   write: 'vault:write',
@@ -482,6 +587,25 @@ export const IPC = {
   thumb: 'vault:thumb',
   createAsset: 'vault:createAsset',
   openAsset: 'vault:openAsset',
+  readAsset: 'vault:readAsset',
+  readAssetChecked: 'vault:readAssetChecked',
+  boardOpen: 'board:open',
+  boardClose: 'board:close',
+  boardStatus: 'board:status',
+  boardConfigure: 'board:configure',
+  boardSave: 'board:save',
+  boardRead: 'board:read',
+  boardAssets: 'board:assets',
+  /** main → brain window and floating window: a BoardStatusDto. */
+  boardState: 'board:state',
+  /** main → brain window: the vault path of the board the floating window stopped showing. */
+  boardClosed: 'board:closed',
+  /** main → a page about to be closed: a token (number); the page answers `boardFlushed` with it once everything is saved. */
+  boardFlush: 'board:flush',
+  /** page → main (send): the token of the `boardFlush` that is answered. */
+  boardFlushed: 'board:flushed',
+  /** main → board window: why its note is gone (a string). */
+  boardGone: 'board:gone',
   forgeOpen: 'forge:open',
   forgeStatus: 'forge:status',
   /** main → brain window: a ForgeRequest to serve. */
@@ -509,6 +633,34 @@ export const IPC = {
   aiActivity: 'ai:activity',
   copy: 'app:copy',
 } as const
+
+/**
+ * What the floating board window's page really calls (its preload, board-preload.cts, exposes exactly these under the same name,
+ * `window.aether`, and main answers no other channel to that window: see BOARD_PAGE_CHANNELS in main/board-window.ts).
+ */
+export type BoardBridge = Pick<
+  AetherBridge,
+  | 'boardAssets'
+  | 'boardClose'
+  | 'boardConfigure'
+  | 'boardFlushed'
+  | 'boardRead'
+  | 'boardSave'
+  | 'boardStatus'
+  | 'copyText'
+  | 'createAsset'
+  | 'onBoardFlush'
+  | 'onBoardGone'
+  | 'onBoardState'
+  | 'onChanges'
+  | 'openAsset'
+  | 'platform'
+  | 'readAsset'
+  | 'readAssetChecked'
+  | 'revealInFolder'
+  | 'thumbnail'
+  | 'version'
+>
 
 declare global {
   interface Window {

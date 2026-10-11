@@ -9,6 +9,7 @@
       "@aether/ui": ["packages/ui/src/index.ts"]
     }
   },
+  "files": ["apps/desktop/src/renderer/board.tsx"],
   "include": [
     "packages/core/src",
     "packages/graph/src",

@@ -22,6 +22,7 @@ export type NoteType =
   | 'inbox'
   | 'concept'
   | 'moc'
+  | 'board'
 
 export type Area = 'inbox' | 'projects' | 'areas' | 'resources' | 'archive' | 'untagged'
 
@@ -36,6 +37,7 @@ export const NOTE_TYPES: readonly NoteType[] = [
   'inbox',
   'concept',
   'moc',
+  'board',
 ]
 
 export type NoteStatus = string
@@ -88,6 +90,11 @@ export interface Link {
   alias?: string
   /** Whether `to` points to an existing note. */
   resolved: boolean
+  /**
+   * `raw` is a vault path to be read as it is, not wikilink text (no `|alias`, no `#heading`): the picture of a reference board's
+   * `pic` line, whose path holds characters a wikilink cannot. Absent for every link read from `[[...]]`.
+   */
+  literal?: true
   /** Character offset of the link inside the body (post-frontmatter). */
   offset: number
 }
@@ -116,6 +123,11 @@ export interface ParsedNote {
   inlineTags: string[]
   /** Plain text (no markdown syntax), used for search + unlinked mentions. */
   plain: string
+  /**
+   * Set when the note was too long to read as markdown whole (`PARSE_MAX_CHARS`): the number of characters at its start that were.
+   * Its links, tags and headings come from that part only; the search text goes a little further (`PLAIN_MAX_CHARS`).
+   */
+  partial?: number
   mtime?: number
 }
 
@@ -383,6 +395,14 @@ export interface VaultAdapter {
    * JPEG), or null when it can't be read or decoded. Absent: no thumbnails.
    */
   thumbnail?(path: string, size: number): Promise<Blob | null>
+  /**
+   * The picture file itself, whole and undecoded (the reference board draws
+   * it at full size when zoomed in; `thumbnail` stops at 1024 px), as a Blob
+   * typed by its extension. Null when the path is not a picture of the vault
+   * (a video, a note, a path outside it), it is missing, unreadable or empty,
+   * or it is over 64 MB. Never rejects. Absent: only previews can be read.
+   */
+  readAsset?(path: string): Promise<Blob | null>
   /**
    * Create a NEW image file from its bytes (a PNG from Concept Forge, a
    * dropped picture). Create-only like `create` (EEXIST when anything is

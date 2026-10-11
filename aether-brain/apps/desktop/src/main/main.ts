@@ -8,10 +8,11 @@
  *   - watch them (VaultWatcher) and stream debounced change batches to the renderer and the AI link
  *   - run the AI link (the in-app MCP server on 127.0.0.1) when the user switches it on
  *   - open the user's Concept Forge page in a window of its own and relay its saves to the brain (ForgeHost)
+ *   - show a reference board in a floating window of its own that stays on top of other programs (BoardWindowHost)
  *
  * No telemetry. The renderer is sandboxed with context isolation and makes no network requests.
  */
-import { app, BrowserWindow, clipboard, dialog, ipcMain, protocol, safeStorage, shell, nativeTheme, screen, session } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, protocol, safeStorage, shell, nativeTheme, screen, session } from 'electron'
 import { promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -21,6 +22,7 @@ import {
   type AssetListDto,
   type FolderListDto,
   type ProjectScanDto,
+  type ReadAssetResult,
   type SkippedInstallDto,
   type VaultChangeDto,
   type VaultFileDto,
@@ -31,7 +33,8 @@ import type { ChatPatch } from '../shared/chat.js'
 import { FsVault, isVideoName, within } from './fsvault.js'
 import { VaultWatcher } from './watcher.js'
 import { findProjects } from './projects.js'
-import { crashMessage, shouldReload } from './crash.js'
+import { FilePager, type FilePage } from './pages.js'
+import { BRAIN_WINDOW_NAME, MemoryTrail, crashMessage, crashReport, crashReportName, describeTrail, shouldReload } from './crash.js'
 import {
   MAX_THUMB_FILE_BYTES,
   ThumbCache,
@@ -48,6 +51,8 @@ import {
 import { THUMB_IPC, Thumbnailer, VIDEO_SCHEME } from './thumbnailer.js'
 import { AiLinkHost, aiSettings, cleanPatch, type AiLinkSettings, type LinkVault } from './ai-link.js'
 import { ForgeHost, forgeSettings, type ForgeSettings } from './forge.js'
+import { BoardWindowHost, FlushGate, PictureLedger, boardHandlers, boardSettings, guardIpc, type BoardSettings } from './board-window.js'
+import { readAssetBytes, readAssetChecked } from './read-asset.js'
 import { CompanionHost, companionSettings, type CompanionSettings } from './companion.js'
 import { ChatHost, chatSettings, type ChatSettingsStored } from './chat-host.js'
 import { LibraryHost, librarySettings, type LibrarySettings } from './library-host.js'
@@ -94,6 +99,8 @@ interface Settings {
   library?: LibrarySettings
   /** The companion link (the Unreal viewer). */
   companion?: Partial<CompanionSettings>
+  /** The reference board's floating window: where it was, how big, on top, how dim. */
+  board?: BoardSettings
 }
 
 let settings: Settings = {}
@@ -214,11 +221,39 @@ let ai: AiLinkHost | null = null
 let chat: ChatHost | null = null
 let library: LibraryHost | null = null
 let vision: VisionHelper | null = null
+let board: BoardWindowHost | null = null
+/** Pictures created or removed since the last scan, which `listAssets` does not have (the floating board window needs them). */
+const pictureLedger = new PictureLedger()
+/**
+ * The save-before-close handshake of every window that can hold an unsaved board (the board window, the brain window with a docked
+ * board) and of the app quitting: a window's first close, and the quit, wait for its page to say it saved (board-window.ts).
+ */
+const flushGate = new FlushGate()
+/**
+ * ipcMain with the sender check in front of every handler: the board window's page is answered the board's channels and no other
+ * (BOARD_PAGE_CHANNELS), whatever it sends, and on those only for what it may name: the board it shows (`board:read`, `board:save`),
+ * a picture or that board to show in the file manager (`vault:reveal`). Every channel is registered through this.
+ */
+const ipc = guardIpc(
+  ipcMain,
+  (wc) => board?.isBoardPage(wc) ?? false,
+  (channel, args) => board?.pageRefusal(channel, args) ?? null,
+)
 
 /** Changes for the AI link's brain: held during a read, else applied now. */
 function toAi(changes: VaultChangeDto[]): void {
   if (aiHeld) aiHeld.push(changes)
   else ai?.applyExternal(changes)
+}
+
+/**
+ * Our own note writes are swallowed by the watcher (`noteSelfWrite`), so the ones who would have heard of them from it hear here: the
+ * AI link, and the floating board window, which follows the board it shows (an edit made in the editor, a rename, a delete) and
+ * would otherwise write over it with a stale text.
+ */
+function afterOwnWrite(changes: VaultChangeDto[]): void {
+  toAi(changes)
+  board?.forward(changes)
 }
 
 /** Comparable form of an absolute path (Windows paths are case-insensitive). */
@@ -292,11 +327,16 @@ async function openVault(input: string[]): Promise<VaultInfo> {
     )
   }
   const next = new FsVault(ok, { exclude: settings.exclude ?? [], hidden: settings.hidden ?? [], keep: settings.keep ?? [] })
+  // A floating board belongs to the vault it was opened in: another set of roots changes every vault path (a second root puts a
+  // mount in front of them), so its page would read and save paths that are no longer the board's. Folder rules do not (same roots).
+  // The window is closed (its page saves first) BEFORE the vault is swapped: that save goes to the vault it was made in.
+  if (!vault || vault.roots.length !== ok.length || vault.roots.some((r, i) => rootKey(r.abs) !== rootKey(ok[i]!))) await board?.close()
   generation++
   watcher?.stop()
   watcher = null
   aiHeld = null
   thumbs.clear()
+  pictureLedger.clear()
   vault = next
   opened = true
   settings.roots = wanted
@@ -314,7 +354,10 @@ async function openVault(input: string[]): Promise<VaultInfo> {
  * renderer keeps those until its load is done; the AI link gets them after
  * the snapshot).
  */
-async function listFiles(): Promise<VaultFileDto[]> {
+/** What of the last list has not gone to the renderer yet (a page at a time: see pages.ts). */
+const filePager = new FilePager()
+
+async function listFiles(): Promise<FilePage> {
   const v = requireVault()
   const gen = ++generation
   const latest = () => gen === generation && v === vault
@@ -337,13 +380,15 @@ async function listFiles(): Promise<VaultFileDto[]> {
         throw err
       })
     if (latest()) {
+      // The new list has every picture the old changes were about; what the watcher reports from here on is new.
+      pictureLedger.clear()
       w.seed({ files: scan.files.map((f) => f.path), folders: scan.folders, images: scan.assets.map((a) => a.path), imagesCapped: scan.assetsTruncated })
     }
     const found = scan.files.length
     const files = await v.readAll(scan.files, (done) => progress({ phase: 'reading', files: done, found, dirs: scan.dirs, done: false }))
     progress({ phase: 'done', files: files.length, found, dirs: scan.dirs, done: true })
     if (latest()) void ai?.setVault(linkVault(v), { files, folders: scan.folders })
-    return files
+    return filePager.start(files)
   } finally {
     // setVault above already set the link's target, so these land after the snapshot.
     if (latest()) {
@@ -360,6 +405,9 @@ async function startWatcher(v: FsVault): Promise<VaultWatcher> {
   const w = new VaultWatcher(v, null, (changes) => {
     toRenderer(IPC.changes, changes)
     toAi(changes)
+    // The floating board window gets the pictures (no note text) and the board it shows, to keep both right.
+    pictureLedger.apply(changes)
+    board?.forward(changes)
   })
   watcher = w
   await w.start()
@@ -387,8 +435,7 @@ async function writeNote(p: unknown, content: unknown): Promise<void> {
   const existed = (await v.stat(rel)) !== null
   watcher?.noteSelfWrite(rel, text)
   await v.write(rel, text)
-  // Our own writes are swallowed by the watcher, so the AI link hears about them here.
-  toAi([{ kind: existed ? 'change' : 'add', path: rel, content: text, mtime: Date.now() }])
+  afterOwnWrite([{ kind: existed ? 'change' : 'add', path: rel, content: text, mtime: Date.now() }])
 }
 
 /**
@@ -408,7 +455,7 @@ async function createNote(p: unknown, content: unknown): Promise<void> {
     watcher?.forgetSelfWrite(rel, text)
     throw err
   }
-  toAi([{ kind: 'add', path: rel, content: text, mtime: Date.now() }])
+  afterOwnWrite([{ kind: 'add', path: rel, content: text, mtime: Date.now() }])
 }
 
 async function deleteNote(p: unknown): Promise<void> {
@@ -416,20 +463,24 @@ async function deleteNote(p: unknown): Promise<void> {
   const rel = notePath(p)
   watcher?.noteSelfWrite(rel, null)
   await v.remove(rel)
-  toAi([{ kind: 'unlink', path: rel }])
+  afterOwnWrite([{ kind: 'unlink', path: rel }])
 }
 
 async function renameNote(from: unknown, to: unknown): Promise<void> {
   const v = requireVault()
   const a = notePath(from)
   const b = notePath(to)
+  // The floating window shows this note: its page saves what it has to the note under its old name first.
+  await board?.beforeMove(a)
   const content = await v.read(a)
   watcher?.noteSelfWrite(a, null)
   if (content !== null) watcher?.noteSelfWrite(b, content)
   await v.rename(a, b)
+  // ... and then follows the note to its new name (before it is told of the change, so that the unlink is not "the board is gone").
+  void board?.followMove(a, b)
   const changes: VaultChangeDto[] = [{ kind: 'unlink', path: a }]
   if (content !== null) changes.push({ kind: 'add', path: b, content, mtime: Date.now() })
-  toAi(changes)
+  afterOwnWrite(changes)
 }
 
 async function createFolder(p: unknown): Promise<void> {
@@ -441,10 +492,14 @@ async function createFolder(p: unknown): Promise<void> {
   if (canonical) toAi([{ kind: 'addDir', path: canonical }])
 }
 
-async function reveal(p: unknown): Promise<void> {
+async function reveal(p: unknown, fromBoardPage = false): Promise<void> {
   const v = requireVault()
   const rel = String(p)
-  if (!(await v.stat(rel))) throw new Error(`Not in the vault: ${rel}`)
+  const st = await v.stat(rel)
+  if (!st) throw new Error(`Not in the vault: ${rel}`)
+  // The board window's page (its names are judged in the guard) shows a picture, a video or its board: a folder that happens to be
+  // called like a picture is none of them.
+  if (fromBoardPage && !st.isFile) throw new Error(`Not a file in the vault: ${rel}`)
   shell.showItemInFolder(v.abs(rel))
 }
 
@@ -465,6 +520,8 @@ const thumbnailer = new Thumbnailer({
  * the renderer's few requests in flight forever (it gets null, a plain moon).
  */
 const THUMB_TIMEOUT = 20_000
+/** Longest wait for a whole picture (up to 64 MB) from a share that may have stopped answering. */
+const READ_ASSET_TIMEOUT = 60_000
 /** A video's still that came back empty after this long timed out in the helper (it waits 15 s). */
 const VIDEO_GAVE_UP_MS = 14_000
 
@@ -555,6 +612,7 @@ async function createAsset(p: unknown, data: unknown): Promise<void> {
   const parent = canonical.includes('/') ? canonical.slice(0, canonical.lastIndexOf('/')) : ''
   const madeFolder = parent !== '' && (await v.stat(parent)) === null
   await v.createBinary(rel, bytes)
+  pictureLedger.add(canonical, { mtime: Date.now(), size: bytes.length })
   const changes: VaultChangeDto[] = madeFolder ? [{ kind: 'addDir', path: parent }] : []
   changes.push({ kind: 'add', path: canonical, mtime: Date.now(), size: bytes.length })
   toAi(changes)
@@ -865,17 +923,53 @@ function createForge(): ForgeHost {
   })
 }
 
+function createBoardWindow(): BoardWindowHost {
+  return new BoardWindowHost({
+    electron: { BrowserWindow, screen, shell, dialog, Menu },
+    settings: boardSettings(settings.board),
+    save: (s) => {
+      settings.board = s
+      return saveSettings()
+    },
+    brain: () => win,
+    // The board page's own preload (the board calls, the pictures, nothing else); the default session, no partition.
+    preload: path.join(__dirname, '..', 'preload', 'board-preload.cjs'),
+    devUrl: process.env['VITE_DEV_SERVER_URL'] ?? null,
+    pageFile: path.join(__dirname, '..', 'renderer', 'board.html'),
+    gate: flushGate,
+  })
+}
+
+/**
+ * Either window opens, closes and sets up the floating board window; its page reads and saves the board it shows (only a board
+ * note that is already there, see board-save.ts; the guard refuses it any other path) and learns of the vault's pictures from here,
+ * since it is not the brain window.
+ * The handlers are plain functions (boardHandlers): this only wires them to their channels. `board:open` is the brain window's
+ * alone (the guard refuses it to the board page), and the answer to a flush is the page's.
+ */
+function registerBoardIpc(host: BoardWindowHost): void {
+  const h = boardHandlers({ host, vault: () => vault, scan: () => vault?.lastScan ?? null, ledger: pictureLedger })
+  ipc.handle(IPC.boardOpen, (_e, p: unknown) => h.open(p))
+  ipc.handle(IPC.boardClose, () => h.close())
+  ipc.handle(IPC.boardStatus, () => h.status())
+  ipc.handle(IPC.boardConfigure, (_e, patch: unknown) => h.configure(patch))
+  ipc.handle(IPC.boardSave, (_e, p: unknown, text: unknown, base: unknown) => h.save(p, text, base))
+  ipc.on(IPC.boardFlushed, (e, token: unknown) => flushGate.ack(e.sender.id, token))
+  ipc.handle(IPC.boardRead, (_e, p: unknown) => h.read(p))
+  ipc.handle(IPC.boardAssets, () => h.assets())
+}
+
 /**
  * The brain window opens the Forge window; the Forge window's requests go through the host to the brain window's
  * store; the brain window's Concept Forge star gets frames of the page while its screen is in view.
  */
 function registerForgeIpc(forge: ForgeHost): void {
-  ipcMain.handle(IPC.forgeOpen, (_e, opts: unknown) => forge.open(opts))
-  ipcMain.handle(IPC.forgeStatus, () => forge.status())
-  ipcMain.handle(IPC.forgeProjects, (e) => forge.projects(e.sender))
-  ipcMain.handle(IPC.forgeSave, (e, dto: unknown) => forge.save(e.sender, dto))
-  ipcMain.handle(IPC.forgeReply, (e, id: unknown, ok: unknown, value: unknown) => forge.reply(e.sender, id, ok, value))
-  ipcMain.handle(IPC.forgeScreen, (e, on: unknown) => forge.screen(e.sender, on))
+  ipc.handle(IPC.forgeOpen, (_e, opts: unknown) => forge.open(opts))
+  ipc.handle(IPC.forgeStatus, () => forge.status())
+  ipc.handle(IPC.forgeProjects, (e) => forge.projects(e.sender))
+  ipc.handle(IPC.forgeSave, (e, dto: unknown) => forge.save(e.sender, dto))
+  ipc.handle(IPC.forgeReply, (e, id: unknown, ok: unknown, value: unknown) => forge.reply(e.sender, id, ok, value))
+  ipc.handle(IPC.forgeScreen, (e, on: unknown) => forge.screen(e.sender, on))
 }
 
 /* ------------------------------------------------------------------ */
@@ -910,10 +1004,10 @@ function createCompanion(): CompanionHost {
 
 /** The brain window publishes the scene; viewers read it over HTTP; the panel switches it. */
 function registerCompanionIpc(host: CompanionHost): void {
-  ipcMain.handle(IPC.companionStatus, () => host.status())
-  ipcMain.handle(IPC.companionConfigure, (_e, patch: unknown) => host.configure(patch))
-  ipcMain.on(IPC.companionGraph, (e, graph: unknown) => void host.publishGraph(e.sender.id, graph))
-  ipcMain.on(IPC.companionPositions, (e, version: unknown, positions: unknown, rings: unknown) => void host.publishPositions(e.sender.id, version, positions, rings))
+  ipc.handle(IPC.companionStatus, () => host.status())
+  ipc.handle(IPC.companionConfigure, (_e, patch: unknown) => host.configure(patch))
+  ipc.on(IPC.companionGraph, (e, graph: unknown) => void host.publishGraph(e.sender.id, graph))
+  ipc.on(IPC.companionPositions, (e, version: unknown, positions: unknown, rings: unknown) => void host.publishPositions(e.sender.id, version, positions, rings))
 }
 
 /* ------------------------------------------------------------------ */
@@ -921,18 +1015,18 @@ function registerCompanionIpc(host: CompanionHost): void {
 /* ------------------------------------------------------------------ */
 
 function registerIpc(): void {
-  ipcMain.handle(IPC.pick, async (): Promise<VaultInfo | null> => {
+  ipc.handle(IPC.pick, async (): Promise<VaultInfo | null> => {
     const dir = await chooseFolder(
       'Choose your vault folder',
       'Pick a folder of markdown notes. Aether Brain reads and writes .md files in place.',
     )
     return dir ? openVault([dir]) : null
   })
-  ipcMain.handle(IPC.open, (_e, roots: unknown) => openVault(Array.isArray(roots) ? roots.map(String) : [String(roots)]))
+  ipc.handle(IPC.open, (_e, roots: unknown) => openVault(Array.isArray(roots) ? roots.map(String) : [String(roots)]))
   // At launch `aether-brain D:\ F:\` or AETHER_VAULT wins over the remembered roots. Once a vault
   // is open the remembered set is the truth: roots added or removed since then (the vault folders
   // panel lists remembered roots it could not open) and a reloaded window keep them.
-  ipcMain.handle(IPC.last, (): string[] | null => {
+  ipc.handle(IPC.last, (): string[] | null => {
     if (!opened) {
       const cli = cliRoots()
       if (cli.length) return cli
@@ -941,50 +1035,59 @@ function registerIpc(): void {
     }
     return settings.roots?.length ? [...settings.roots] : null
   })
-  ipcMain.handle(IPC.info, (): VaultInfo | null => (vault ? vaultInfo(vault) : null))
-  ipcMain.handle(IPC.addRoot, async (): Promise<VaultInfo | null> => {
+  ipc.handle(IPC.info, (): VaultInfo | null => (vault ? vaultInfo(vault) : null))
+  ipc.handle(IPC.addRoot, async (): Promise<VaultInfo | null> => {
     const dir = await chooseFolder('Add a folder to the vault', 'Its folders become planets in the brain, next to the ones already there.')
     return dir ? addRootPath(dir) : null
   })
-  ipcMain.handle(IPC.addRootPath, (_e, p: unknown) => addRootPath(p))
-  ipcMain.handle(IPC.removeRoot, (_e, p: unknown) => removeRoot(p))
-  ipcMain.handle(IPC.setExclude, (_e, names: unknown) => setExclude(names))
-  ipcMain.handle(IPC.hideFolder, (_e, p: unknown) => hideFolder(p))
-  ipcMain.handle(IPC.unhideFolder, (_e, p: unknown) => unhideFolder(p))
-  ipcMain.handle(IPC.setFolderRules, (_e, rules: unknown) =>
+  ipc.handle(IPC.addRootPath, (_e, p: unknown) => addRootPath(p))
+  ipc.handle(IPC.removeRoot, (_e, p: unknown) => removeRoot(p))
+  ipc.handle(IPC.setExclude, (_e, names: unknown) => setExclude(names))
+  ipc.handle(IPC.hideFolder, (_e, p: unknown) => hideFolder(p))
+  ipc.handle(IPC.unhideFolder, (_e, p: unknown) => unhideFolder(p))
+  ipc.handle(IPC.setFolderRules, (_e, rules: unknown) =>
     setFolderRules(rules && typeof rules === 'object' ? (rules as { hidden?: unknown; keep?: unknown }) : {}),
   )
-  ipcMain.handle(IPC.skippedInstalls, () => skippedInstalls())
-  ipcMain.handle(IPC.findProjects, () => findProjectFolders())
-  ipcMain.handle(IPC.findProjectsStop, () => void findRun++)
-  ipcMain.handle(IPC.drives, () => listDrives())
-  ipcMain.handle(IPC.list, () => listFiles())
-  ipcMain.handle(IPC.folders, (): FolderListDto => {
+  ipc.handle(IPC.skippedInstalls, () => skippedInstalls())
+  ipc.handle(IPC.findProjects, () => findProjectFolders())
+  ipc.handle(IPC.findProjectsStop, () => void findRun++)
+  ipc.handle(IPC.drives, () => listDrives())
+  ipc.handle(IPC.list, () => listFiles())
+  ipc.handle(IPC.listMore, (_e, token: unknown) => filePager.more(Number(token)))
+  ipc.handle(IPC.folders, (): FolderListDto => {
     const scan = requireVault().lastScan
     return { folders: scan ? [...scan.folders] : [], truncated: scan?.truncated ?? false }
   })
-  ipcMain.handle(IPC.read, (_e, p: unknown) => readNote(p))
-  ipcMain.handle(IPC.write, (_e, p: unknown, content: unknown) => writeNote(p, content))
-  ipcMain.handle(IPC.create, (_e, p: unknown, content: unknown) => createNote(p, content))
-  ipcMain.handle(IPC.delete, (_e, p: unknown) => deleteNote(p))
-  ipcMain.handle(IPC.rename, (_e, a: unknown, b: unknown) => renameNote(a, b))
-  ipcMain.handle(IPC.mkdir, (_e, p: unknown) => createFolder(p))
-  ipcMain.handle(IPC.reveal, (_e, p: unknown) => reveal(p))
-  ipcMain.handle(IPC.assets, () => listAssets())
-  ipcMain.handle(IPC.thumb, (_e, p: unknown, size: unknown) => within(thumbnail(p, size), THUMB_TIMEOUT, null))
+  ipc.handle(IPC.read, (_e, p: unknown) => readNote(p))
+  ipc.handle(IPC.write, (_e, p: unknown, content: unknown) => writeNote(p, content))
+  ipc.handle(IPC.create, (_e, p: unknown, content: unknown) => createNote(p, content))
+  ipc.handle(IPC.delete, (_e, p: unknown) => deleteNote(p))
+  ipc.handle(IPC.rename, (_e, a: unknown, b: unknown) => renameNote(a, b))
+  ipc.handle(IPC.mkdir, (_e, p: unknown) => createFolder(p))
+  ipc.handle(IPC.reveal, (e, p: unknown) => reveal(p, board?.isBoardPage(e.sender) ?? false))
+  ipc.handle(IPC.assets, () => listAssets())
+  ipc.handle(IPC.thumb, (_e, p: unknown, size: unknown) => within(thumbnail(p, size), THUMB_TIMEOUT, null))
   // From the thumbnail helper only: the thumbnailer ignores every other sender.
-  ipcMain.on(THUMB_IPC.ready, (e) => thumbnailer.ready(e.sender))
-  ipcMain.on(THUMB_IPC.done, (e, id: unknown, png: unknown) => thumbnailer.done(e.sender, id, png))
-  ipcMain.handle(IPC.createAsset, (_e, p: unknown, data: unknown) => createAsset(p, data))
-  ipcMain.handle(IPC.openAsset, (_e, p: unknown) => openAsset(p))
-  ipcMain.handle(IPC.chatStatus, () => requireChat().status())
-  ipcMain.handle(IPC.chatConfigure, (_e, patch: unknown) => requireChat().configure(patch && typeof patch === 'object' ? (patch as ChatPatch) : {}))
-  ipcMain.handle(IPC.chatSend, (_e, conv: unknown, text: unknown) => requireChat().send(conv, text))
-  ipcMain.handle(IPC.chatStop, (_e, conv: unknown) => requireChat().stop(conv))
-  ipcMain.handle(IPC.chatForget, (_e, conv: unknown) => requireChat().forget(conv))
-  ipcMain.handle(IPC.libraryStatus, () => requireLibrary().status())
-  ipcMain.handle(IPC.libraryConfigure, (_e, patch: unknown) => requireLibrary().configure(patch && typeof patch === 'object' ? (patch as LibraryPatch) : {}))
-  ipcMain.handle(IPC.libraryPick, async (_e, which: unknown) => {
+  ipc.on(THUMB_IPC.ready, (e) => thumbnailer.ready(e.sender))
+  ipc.on(THUMB_IPC.done, (e, id: unknown, png: unknown) => thumbnailer.done(e.sender, id, png))
+  ipc.handle(IPC.createAsset, (_e, p: unknown, data: unknown) => createAsset(p, data))
+  ipc.handle(IPC.openAsset, (_e, p: unknown) => openAsset(p))
+  // A whole picture for the reference board to decode (never decoded here); null for anything but a picture of the open vault.
+  ipc.handle(IPC.readAsset, (_e, p: unknown) => (vault && typeof p === 'string' ? within(readAssetBytes(vault, p), READ_ASSET_TIMEOUT, null) : null))
+  // The same, with the reason when there are no bytes (missing, too large, unreadable) so that the board can say why.
+  ipc.handle(IPC.readAssetChecked, (_e, p: unknown): Promise<ReadAssetResult> | ReadAssetResult =>
+    vault && typeof p === 'string'
+      ? within<ReadAssetResult>(readAssetChecked(vault, p), READ_ASSET_TIMEOUT, { ok: false, reason: 'unreadable', detail: 'The picture did not answer in time' })
+      : { ok: false, reason: 'missing', detail: 'No vault is open' },
+  )
+  ipc.handle(IPC.chatStatus, () => requireChat().status())
+  ipc.handle(IPC.chatConfigure, (_e, patch: unknown) => requireChat().configure(patch && typeof patch === 'object' ? (patch as ChatPatch) : {}))
+  ipc.handle(IPC.chatSend, (_e, conv: unknown, text: unknown) => requireChat().send(conv, text))
+  ipc.handle(IPC.chatStop, (_e, conv: unknown) => requireChat().stop(conv))
+  ipc.handle(IPC.chatForget, (_e, conv: unknown) => requireChat().forget(conv))
+  ipc.handle(IPC.libraryStatus, () => requireLibrary().status())
+  ipc.handle(IPC.libraryConfigure, (_e, patch: unknown) => requireLibrary().configure(patch && typeof patch === 'object' ? (patch as LibraryPatch) : {}))
+  ipc.handle(IPC.libraryPick, async (_e, which: unknown) => {
     const lib = requireLibrary()
     const dest = which === 'dest'
     const dir = await chooseFolder(
@@ -993,19 +1096,19 @@ function registerIpc(): void {
     )
     return dir ? lib.configure(dest ? { dest: dir } : { source: dir }) : lib.status()
   })
-  ipcMain.handle(IPC.libraryAnalyze, () => requireLibrary().analyze())
-  ipcMain.handle(IPC.libraryCopy, () => requireLibrary().copy())
-  ipcMain.handle(IPC.libraryStop, () => requireLibrary().stop())
-  ipcMain.handle(IPC.libraryModel, (_e, action: unknown) =>
+  ipc.handle(IPC.libraryAnalyze, () => requireLibrary().analyze())
+  ipc.handle(IPC.libraryCopy, () => requireLibrary().copy())
+  ipc.handle(IPC.libraryStop, () => requireLibrary().stop())
+  ipc.handle(IPC.libraryModel, (_e, action: unknown) =>
     requireLibrary().model(action === 'cancel' || action === 'remove' ? (action as LibraryModelAction) : 'download'),
   )
-  ipcMain.handle(IPC.libraryThumb, (_e, id: unknown) => within(requireLibrary().thumb(id), THUMB_TIMEOUT, null))
+  ipc.handle(IPC.libraryThumb, (_e, id: unknown) => within(requireLibrary().thumb(id), THUMB_TIMEOUT, null))
   // From the vision helper only: the helper ignores every other sender.
-  ipcMain.on(VISION_IPC.ready, (e) => vision?.ready(e.sender))
-  ipcMain.on(VISION_IPC.done, (e, id: unknown, answer: unknown) => vision?.done(e.sender, id, answer))
-  ipcMain.handle(IPC.aiStatus, () => requireAi().status())
-  ipcMain.handle(IPC.aiConfigure, (_e, patch: unknown) => requireAi().configure(cleanPatch(patch)))
-  ipcMain.handle(IPC.copy, (_e, text: unknown) => clipboard.writeText(String(text)))
+  ipc.on(VISION_IPC.ready, (e) => vision?.ready(e.sender))
+  ipc.on(VISION_IPC.done, (e, id: unknown, answer: unknown) => vision?.done(e.sender, id, answer))
+  ipc.handle(IPC.aiStatus, () => requireAi().status())
+  ipc.handle(IPC.aiConfigure, (_e, patch: unknown) => requireAi().configure(cleanPatch(patch)))
+  ipc.handle(IPC.copy, (_e, text: unknown) => clipboard.writeText(String(text)))
 }
 
 /* ------------------------------------------------------------------ */
@@ -1043,17 +1146,51 @@ function createWindow(): void {
     if (/^https?:/.test(url)) void shell.openExternal(url)
     return { action: 'deny' }
   })
-  // A page that died leaves a dark empty window: say why, and open it again (unless it keeps dying).
+  // A page that died leaves a dark empty window: say why, and open it again (unless it keeps dying). The memory of its page is looked
+  // at every two seconds meanwhile, so that the message can say how much it was using and a report is left that says how it got there.
   const crashes: number[] = []
+  const trail = new MemoryTrail()
+  const look = () => {
+    const page = win && !win.isDestroyed() ? win.webContents.getOSProcessId() : 0
+    if (!page) return
+    let pageMB = 0
+    let mainMB = 0
+    let gpuMB = 0
+    for (const m of app.getAppMetrics()) {
+      const mb = m.memory.workingSetSize / 1024
+      if (m.pid === page) pageMB = mb
+      else if (m.type === 'Browser') mainMB = mb
+      else if (m.type === 'GPU') gpuMB = mb
+    }
+    if (pageMB > 0) trail.add({ t: Date.now(), pageMB, mainMB, gpuMB })
+  }
+  const watch = setInterval(look, 2000)
+  win.once('closed', () => clearInterval(watch))
   win.webContents.on('render-process-gone', (_e, details) => {
     if (details.reason === 'clean-exit') return
     const now = Date.now()
     crashes.push(now)
     const reload = shouldReload(crashes, now)
+    const memory = describeTrail(trail.samples)
+    const report = crashReport(
+      { reason: details.reason, exitCode: details.exitCode, window: BRAIN_WINDOW_NAME, version: app.getVersion(), platform: `${process.platform} ${os.release()}, ${Math.round(os.totalmem() / 1048576)} MB`, now },
+      trail.samples,
+    )
+    trail.clear()
     if (reload) win?.webContents.reload()
-    const text = crashMessage(details.reason, reload)
-    const box = { type: 'error' as const, title: 'Aether Brain', message: text.message, detail: text.detail }
-    void (win ? dialog.showMessageBox(win, box) : dialog.showMessageBox(box))
+    // The report is written before the message is shown (a few KB; a failure to write it changes nothing else).
+    const dir = path.join(app.getPath('userData'), 'crash-reports')
+    const file = path.join(dir, crashReportName(now))
+    void fs
+      .mkdir(dir, { recursive: true })
+      .then(() => fs.writeFile(file, JSON.stringify(report, null, 2)))
+      .then(() => file)
+      .catch(() => '')
+      .then((saved) => {
+        const text = crashMessage(details.reason, reload, BRAIN_WINDOW_NAME, { memory, report: saved })
+        const box = { type: 'error' as const, title: 'Aether Brain', message: text.message, detail: text.detail }
+        void (win ? dialog.showMessageBox(win, box) : dialog.showMessageBox(box))
+      })
   })
   // The renderer never needs to navigate away from the app.
   win.webContents.on('will-navigate', (e, url) => {
@@ -1066,6 +1203,8 @@ function createWindow(): void {
   } else {
     void win.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'))
   }
+  // A board open in the brain window (docked) saves what it has before the window goes (the page answers `board:flush`).
+  flushGate.guardClose(win)
   win.on('closed', () => {
     win = null
     // Nothing asks for thumbnails without the brain window, and a hidden helper left open
@@ -1084,12 +1223,35 @@ let started = false
 app.on('activate', () => {
   if (started && BrowserWindow.getAllWindows().length === 0) createWindow()
 })
-app.on('before-quit', () => {
+/** Set once every page has been asked to save for this quit: the quit then goes on, and the closes it makes pass through. */
+let quitSaved = false
+app.on('before-quit', (e) => {
+  if (!quitSaved) {
+    // The pages that can hold an unsaved board save first (1.5 s at most; a page that is gone, crashed or still loading is not
+    // waited for, so a broken page never keeps the app from quitting).
+    const brainPage = win && !win.isDestroyed() ? win.webContents : null
+    const asked: Promise<unknown>[] = []
+    if (board?.shownPath()) asked.push(board.flushPage())
+    if (brainPage && flushGate.askable(brainPage)) asked.push(flushGate.ask(brainPage))
+    if (asked.length) {
+      e.preventDefault()
+      quitSaved = true
+      void Promise.allSettled(asked).then(() => {
+        // Every page has saved: the closes this quit makes go through without asking again.
+        flushGate.openFor(5000)
+        app.quit()
+        // A quit that something else cancelled (a page that kept its window) asks again next time.
+        setTimeout(() => (quitSaved = false), 6000).unref()
+      })
+      return
+    }
+  }
   watcher?.stop()
   watcher = null
   thumbnailer.stop()
   library?.close()
   vision?.stop()
+  board?.flush()
   void chat?.close()
   void ai?.stop()
   companion?.quit()
@@ -1110,6 +1272,8 @@ void app.whenReady().then(async () => {
   registerIpc()
   createWindow()
   registerForgeIpc(createForge())
+  board = createBoardWindow()
+  registerBoardIpc(board)
   companion = createCompanion()
   registerCompanionIpc(companion)
   void companion.start()

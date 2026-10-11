@@ -113,7 +113,7 @@ Source: <https://claude.ai/chat/5a1f0c1e-…>
   a chat is written escaped (`\[\[Gate\]\]`, `\#portal`, `- \[ ] add bloom`). It
   reads the same, but it won't create links, tags or to-dos on your Today hub.
   Code blocks are never touched.
-- **A very long chat opens read-only.** A chat over 400,000 characters (a few hundred long messages) opens in the editor as its preview, the first 60,000 characters with a *Show more* button up to 300,000, and without a text box: a text box of megabytes would take gigabytes of memory and the window would stop. The note and its file are untouched; any text editor opens it.
+- **A very long chat opens read-only.** A chat over 400,000 characters (a few hundred long messages) opens in the editor as its preview, the first 60,000 characters with a *Show more* button up to 300,000, and without a text box: a text box of megabytes would take gigabytes of memory and the window would stop. The note and its file are untouched; any text editor opens it. **Loading** reads a chat as markdown only up to its first 120,000 characters (a chat's text is inert anyway: no link, tag or task comes out of it), and searches up to 250,000: a 12 MB chat used to run the window out of memory while the vault was loading.
 - **Your own notes go above `## Transcript`** (or below the line
   `*— end of transcript —*`). Write your thoughts, `[[links]]` and
   `- [ ] tasks` there, and they count like in any note.

@@ -40,6 +40,7 @@ const IPC = {
   libraryEvent: 'library:event',
   drives: 'vault:drives',
   list: 'vault:list',
+  listMore: 'vault:listMore',
   folders: 'vault:folders',
   read: 'vault:read',
   write: 'vault:write',
@@ -54,6 +55,20 @@ const IPC = {
   thumb: 'vault:thumb',
   createAsset: 'vault:createAsset',
   openAsset: 'vault:openAsset',
+  readAsset: 'vault:readAsset',
+  readAssetChecked: 'vault:readAssetChecked',
+  boardOpen: 'board:open',
+  boardClose: 'board:close',
+  boardStatus: 'board:status',
+  boardConfigure: 'board:configure',
+  boardSave: 'board:save',
+  boardRead: 'board:read',
+  boardAssets: 'board:assets',
+  boardState: 'board:state',
+  boardClosed: 'board:closed',
+  boardFlush: 'board:flush',
+  boardFlushed: 'board:flushed',
+  boardGone: 'board:gone',
   forgeOpen: 'forge:open',
   forgeStatus: 'forge:status',
   forgeRequest: 'forge:request',
@@ -80,6 +95,35 @@ function on<T>(channel: string, cb: (payload: T) => void): () => void {
   ipcRenderer.on(channel, handler)
   return () => ipcRenderer.off(channel, handler)
 }
+
+/**
+ * A rejected invoke carries Electron's own wrapping ("Error invoking remote method 'board:open': Error: ..."); the board's messages
+ * are sentences for the user, so the wrapping is taken off them.
+ */
+function plain<T>(p: Promise<T>): Promise<T> {
+  return p.catch((err: unknown) => {
+    const m = err instanceof Error ? /^Error invoking remote method '[^']*': (?:Error: )?([\s\S]*)$/.exec(err.message) : null
+    throw m ? new Error(m[1]) : err
+  })
+}
+
+/**
+ * Main asks a page to save what it has not saved before it closes the window (board:flush, with a token); the page answers
+ * boardFlushed(token). A page that registered nothing (not started yet) is answered for at once, so it never holds a close.
+ */
+const flushSubs = new Set<(token: number) => void>()
+ipcRenderer.on(IPC.boardFlush, (_e, token: unknown) => {
+  if (typeof token !== 'number') return
+  const answer = (): void => ipcRenderer.send(IPC.boardFlushed, token)
+  if (!flushSubs.size) return answer()
+  for (const cb of [...flushSubs]) {
+    try {
+      cb(token)
+    } catch {
+      answer()
+    }
+  }
+})
 
 type ForgeHandler = (req: ForgeRequest) => Promise<unknown>
 
@@ -152,6 +196,7 @@ const bridge: AetherBridge = {
   onLibraryEvent: (cb) => on(IPC.libraryEvent, cb),
   listDrives: () => ipcRenderer.invoke(IPC.drives),
   listFiles: () => ipcRenderer.invoke(IPC.list),
+  listMoreFiles: (token) => ipcRenderer.invoke(IPC.listMore, token),
   listFolders: () => ipcRenderer.invoke(IPC.folders),
   readFile: (p) => ipcRenderer.invoke(IPC.read, p),
   writeFile: (p, content) => ipcRenderer.invoke(IPC.write, p, content),
@@ -166,6 +211,24 @@ const bridge: AetherBridge = {
   thumbnail: (p, size) => ipcRenderer.invoke(IPC.thumb, p, size),
   createAsset: (p, data) => ipcRenderer.invoke(IPC.createAsset, p, data),
   openAsset: (p) => ipcRenderer.invoke(IPC.openAsset, p),
+  readAsset: (p) => ipcRenderer.invoke(IPC.readAsset, p),
+  readAssetChecked: (p) => ipcRenderer.invoke(IPC.readAssetChecked, p),
+  boardOpen: (p) => plain(ipcRenderer.invoke(IPC.boardOpen, p)),
+  boardClose: () => ipcRenderer.invoke(IPC.boardClose),
+  boardStatus: () => ipcRenderer.invoke(IPC.boardStatus),
+  boardConfigure: (patch) => ipcRenderer.invoke(IPC.boardConfigure, patch),
+  boardSave: (p, text, expectedBase) =>
+    expectedBase === undefined ? ipcRenderer.invoke(IPC.boardSave, p, text) : ipcRenderer.invoke(IPC.boardSave, p, text, expectedBase),
+  boardRead: (p) => plain(ipcRenderer.invoke(IPC.boardRead, p)),
+  boardAssets: () => ipcRenderer.invoke(IPC.boardAssets),
+  onBoardState: (cb) => on(IPC.boardState, cb),
+  onBoardClosed: (cb) => on(IPC.boardClosed, cb),
+  onBoardFlush: (cb) => {
+    flushSubs.add(cb)
+    return () => void flushSubs.delete(cb)
+  },
+  boardFlushed: (token) => ipcRenderer.send(IPC.boardFlushed, token),
+  onBoardGone: (cb) => on(IPC.boardGone, cb),
   forgeOpen: (opts) => ipcRenderer.invoke(IPC.forgeOpen, opts),
   forgeStatus: () => ipcRenderer.invoke(IPC.forgeStatus),
   onForgeRequest: (handler) => {

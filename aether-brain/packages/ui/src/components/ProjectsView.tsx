@@ -430,13 +430,13 @@ function ProjectsBoard({ drafts }: { drafts: Drafts }) {
 
   return (
     <div ref={board} className="absolute inset-0 z-30 flex items-stretch justify-center bg-black/30 p-3 pt-16" onMouseDown={(e) => e.target === e.currentTarget && setView('graph')} role="dialog" aria-label="Projects">
-      <div className="panel rise flex w-full max-w-[1180px] overflow-hidden">
+      <div className="panel panel-solid rise flex w-full max-w-[1180px] overflow-hidden">
         {/* Left: project cards */}
         <div className="flex w-[340px] shrink-0 flex-col border-r border-[var(--line)]">
           <div className="flex items-center gap-2 border-b border-[var(--line)] px-4 py-2.5">
             <span className="text-projects">◆</span>
             <span className="text-[13px] font-semibold text-white">Projects</span>
-            <span className="text-[11.5px] text-faint">{plural(rows.length, 'board')}</span>
+            <span className="text-[11.5px] text-faint">{plural(rows.length, 'project')}</span>
             <span className="flex-1" />
             <button type="button" className="hud-btn" onClick={() => setCreating(true)} disabled={readOnly} title="New project (⇧N)">
               + New

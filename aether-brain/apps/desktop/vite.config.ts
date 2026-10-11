@@ -33,5 +33,13 @@ export default defineConfig({
     target: 'es2022',
     sourcemap: false,
     chunkSizeWarningLimit: 1500,
+    // Two pages: the brain window and the reference board's floating window (src/renderer/board.html). Dev serving needs no
+    // entry for it: the dev server answers /board.html from the root.
+    rolldownOptions: {
+      input: {
+        index: r('./src/renderer/index.html'),
+        board: r('./src/renderer/board.html'),
+      },
+    },
   },
 })

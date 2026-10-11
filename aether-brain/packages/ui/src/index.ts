@@ -11,3 +11,18 @@ export { MarkdownPreview } from './components/MarkdownPreview'
 export { ErrorBoundary } from './components/ErrorBoundary'
 export { createDemoVault, resetDemoVault, createStressVault } from './vault/demo'
 export { FsAccessVaultAdapter, supportsFsAccess } from './vault/fsAccess'
+export { BoardView } from './board/BoardView'
+export type { BoardViewProps } from './board/BoardView'
+export type { BoardHost, BoardPictureHost, BoardWindowHost, BoardTone } from './board/api'
+export { BoardsView } from './board/BoardsView'
+export { createDockedBoardHost, BoardChangedOutsideError } from './board/dockedHost'
+export type { DockedBoardHost } from './board/dockedHost'
+export {
+  getActiveBoard,
+  setActiveBoard,
+  subscribeActiveBoard,
+  getBoardWindowControl,
+  setBoardWindowControl,
+  subscribeBoardWindowControl,
+} from './board/active'
+export type { ActiveBoard, BoardWindowControl, BoardWindowStatus } from './board/active'

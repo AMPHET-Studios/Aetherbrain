@@ -1,5 +1,7 @@
-import { folderPathOf, imagePathOf, isFolderId, isImageId, type NoteId } from '@aether/core'
+import { folderPathOf, imageFileName, imagePathOf, isFolderId, isImageId, isVideoPath, type NoteId } from '@aether/core'
 import { PICTURE_SIZES, PICTURE_SIZE_NAMES } from '@aether/graph'
+import { getActiveBoard } from './board/active'
+import { BOARD_COMMANDS } from './board/commands'
 import { importChatsFromDialog } from './components/chats'
 import { copyEmbed, importPicturesFromDialog } from './components/pictures'
 import type { AetherState } from './store'
@@ -32,6 +34,12 @@ export function selectedImage(s: AetherState): string | null {
   return s.selectedId && isImageId(s.selectedId) ? imagePathOf(s.selectedId) : null
 }
 
+/** Vault path of the selected picture when a board can take it (a video is shown in the brain, never put on a board), else null. */
+function selectedBoardPicture(s: AetherState): string | null {
+  const path = selectedImage(s)
+  return path !== null && !isVideoPath(path) ? path : null
+}
+
 /** The selected folder when it is a folder on disk (not the vault root that joins several drives). */
 function diskFolder(s: AetherState): string | null {
   const f = selectedFolder(s)
@@ -46,6 +54,29 @@ export function selectedProject(s: AetherState): NoteId | null {
 }
 
 const writable = (s: AetherState) => !!s.adapter && !s.adapter.readOnly
+
+/**
+ * Every command of the board that is open, as a palette entry "Board: …" (the table is board/commands.ts, which also holds the keys).
+ * Offered while a board is open in the Boards view and enough items are selected for the command. The window rows (pop out, dock, on
+ * top) are the desktop app's (`renderer/board.ts` registers them with the right state), so they are not repeated here; "show in the file
+ * manager" needs a vault that can.
+ */
+export const BOARD_PALETTE: Command[] = BOARD_COMMANDS.filter((c) => !c.id.startsWith('window.')).map((c) => ({
+  id: `board-${c.id}`,
+  title: `Board: ${c.title}`,
+  group: 'view' as const,
+  ...(c.keys ? { keys: c.keys } : {}),
+  when: (s: AetherState) => {
+    const board = getActiveBoard()
+    if (!board || s.view !== 'boards') return false
+    if (c.id === 'picture.reveal' && !s.adapter?.reveal) return false
+    return board.state().selection.length >= (c.needs ?? 0)
+  },
+  run: () => getActiveBoard()?.exec(c.id),
+}))
+
+/** The board a picture command acts on: the one open, else the one last open (null: none). */
+const targetBoard = (s: AetherState): string | null => s.boardPath ?? s.lastBoardPath
 
 /** Every keyboard path has a palette twin, and vice versa. */
 export const COMMANDS: Command[] = [
@@ -166,6 +197,44 @@ export const COMMANDS: Command[] = [
   { id: 'view-search', title: 'View: Search', keys: '4 · /', group: 'view', run: (s) => s.setPalette(true) },
   { id: 'view-review', title: 'View: Review', keys: '5 · r', group: 'view', run: (s) => s.setView('review') },
   { id: 'view-projects', title: 'View: Projects board (to-dos)', keys: '6 · p', group: 'view', run: (s) => s.setView('projects') },
+  { id: 'boards-open', title: 'Boards: open', hint: 'the board you were on, else the list', keys: '8 · ⇧ B', group: 'view', run: (s) => s.openBoards() },
+  {
+    id: 'boards-list',
+    title: 'Boards: show list',
+    group: 'view',
+    run: (s) => {
+      s.closeBoard()
+      s.setView('boards')
+    },
+  },
+  { id: 'boards-new', title: 'Boards: new board', hint: 'a canvas for pictures, notes and sketches (n in the list)', group: 'view', when: writable, run: (s) => s.requestForm('board') },
+  {
+    id: 'boards-open-selected',
+    title: 'Boards: open the selected note as a board',
+    group: 'view',
+    when: (s) => !!s.selectedId && !!s.notes.get(s.selectedId) && s.notes.get(s.selectedId)!.frontmatter['type'] === 'board',
+    run: (s) => s.selectedId && s.openBoard(s.notes.get(s.selectedId)!.meta.path),
+  },
+  {
+    id: 'boards-add-picture',
+    title: 'Boards: add the selected picture to the last board',
+    hint: 'the board open or last open',
+    group: 'view',
+    when: (s) => writable(s) && selectedBoardPicture(s) !== null && targetBoard(s) !== null,
+    run: (s) => s.addPicturesToBoard([selectedBoardPicture(s)!]),
+  },
+  {
+    id: 'boards-add-picture-new',
+    title: 'Boards: add the selected picture to a new board',
+    group: 'view',
+    when: (s) => writable(s) && selectedBoardPicture(s) !== null,
+    run: async (s) => {
+      const path = selectedBoardPicture(s)!
+      const board = await s.newBoard(`${imageFileName(path).replace(/\.[^.]+$/, '')} reference`, { open: false })
+      if (board) await s.addPicturesToBoard([path], board)
+    },
+  },
+  ...BOARD_PALETTE,
   {
     id: 'new-project',
     title: 'New project…',

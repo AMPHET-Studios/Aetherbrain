@@ -1,6 +1,7 @@
 import { useEffect } from 'react'
 import { folderPathOf, imagePathOf, isFolderId, isImageId, isTodayId } from '@aether/core'
 import { selectedProject } from '../commands'
+import { keyToCommand } from '../board/commands'
 import { importChatsFromDialog } from '../components/chats'
 import { focusBrief } from '../components/Inspector'
 import { useAether } from '../store'
@@ -34,6 +35,22 @@ export function useKeyboard(): void {
   }, [])
 }
 
+/**
+ * Keys that the Boards view leaves to the app: the board (or the list of boards) owns the rest of the keyboard, because its keys are the
+ * 3D view's letters (b, l, t, m, z, e ...) and `1`. These are views and help, none of them a board key.
+ */
+const BOARDS_VIEW_KEYS: ReadonlySet<string> = new Set(['?', '/', '2', '3', '4', '5', '6', '7'])
+
+/** Whether the board has a use for this key (a command, a nudge, Space), as the board's own handler would decide. */
+function boardOwns(e: KeyboardEvent): boolean {
+  if (e.key === ' ' || e.key.startsWith('Arrow')) return true
+  const id = keyToCommand(
+    { key: e.key, code: e.code ?? '', down: true, shift: e.shiftKey, ctrl: e.ctrlKey, alt: e.altKey, meta: e.metaKey, repeat: e.repeat === true },
+    { tool: 'select', editing: false, cropping: false },
+  )
+  return id !== null
+}
+
 /** The global keydown handler (exported for tests). */
 export function handleKey(e: KeyboardEvent): void {
   const s = useAether.getState()
@@ -63,7 +80,12 @@ export function handleKey(e: KeyboardEvent): void {
   if (e.key === 'Escape') {
     if (s.helpOpen) return s.setHelp(false)
     if (s.paletteOpen) return s.setPalette(false)
-    if (s.view === 'capture' || s.view === 'review' || s.view === 'projects') return s.setView('graph')
+    // In the Boards view a text field of the view (a note being written, the picker's search) keeps its own Esc.
+    if (s.view === 'boards' && isTyping(e)) {
+      ;(e.target as HTMLElement).blur()
+      return
+    }
+    if (s.view === 'capture' || s.view === 'review' || s.view === 'projects' || s.view === 'boards') return s.setView('graph')
     if (s.editorId && s.view === 'editor') return s.closeEditor()
     if (isTyping(e)) {
       ;(e.target as HTMLElement).blur()
@@ -77,6 +99,26 @@ export function handleKey(e: KeyboardEvent): void {
 
   if (isTyping(e) || mod || e.altKey) return
   if (s.paletteOpen || s.helpOpen) return
+
+  // The Boards view owns the keyboard: the board consumes its keys before they get here (capture phase), and this makes sure the 3D
+  // view's single keys never also fire for the ones it leaves, or while the list of boards is showing.
+  if (s.view === 'boards') {
+    // 8 and Shift+B inside the view are "up": from a board to the list, from the list back to the board last open.
+    if (e.key === '8' || ((e.key === 'B' || e.key === 'b') && e.shiftKey)) {
+      e.preventDefault()
+      s.openBoards()
+      return
+    }
+    if (!BOARDS_VIEW_KEYS.has(e.key)) {
+      // Keys the desktop adds (w pops the board out) work, unless the board has a use for the same key.
+      const extra = extraKeys.get(e.key) ?? (e.shiftKey ? undefined : extraKeys.get(e.key.toLowerCase()))
+      if (extra && !boardOwns(e)) {
+        e.preventDefault()
+        extra()
+      }
+      return
+    }
+  }
 
   const cam = s.controller.camera
   switch (e.key) {
@@ -130,6 +172,10 @@ export function handleKey(e: KeyboardEvent): void {
     case '7':
       s.showToday()
       return
+    case '8':
+      // Reference boards: the board last open, else the list (inside the view: see above).
+      s.openBoards()
+      return
     case 'u':
       // The newest toast's action: Undo a tick from the brief, Show a picture just imported.
       if (s.toastAction()) e.preventDefault()
@@ -150,7 +196,7 @@ export function handleKey(e: KeyboardEvent): void {
       return
     case 'Tab':
       // Over the board / review, Tab moves focus between their controls.
-      if (s.view === 'projects' || s.view === 'review' || s.view === 'capture') return
+      if (s.view === 'projects' || s.view === 'review' || s.view === 'capture' || s.view === 'boards') return
       e.preventDefault()
       // The Today hub's neighbors are its tasks: Tab walks into the brief (its rows keep Tab to themselves).
       if (s.selectedId !== null && isTodayId(s.selectedId) && focusBrief(e.shiftKey)) return
@@ -194,7 +240,18 @@ export function handleKey(e: KeyboardEvent): void {
     case 'z':
       s.cyclePictureSize()
       return
+    case 'B':
+      // Shift+B: the boards, like 8. (With Caps Lock on, Shift+B arrives as 'b': see below.)
+      if (e.shiftKey) {
+        s.openBoards()
+        return
+      }
+      break
     case 'b':
+      if (e.shiftKey) {
+        s.openBoards()
+        return
+      }
       s.setSettings({ bloom: !s.settings.bloom })
       return
     case 'l':
