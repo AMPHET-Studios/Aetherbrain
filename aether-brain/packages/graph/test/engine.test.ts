@@ -13,9 +13,14 @@ class FakeWorker {
   postMessage(msg: MainToWorker): void {
     this.sent.push(msg)
   }
+  onerror: ((ev: { message: string; filename: string; lineno: number; preventDefault: () => void }) => void) | null = null
+  onmessageerror: (() => void) | null = null
   terminate(): void {}
   reply(msg: WorkerToMain): void {
     this.onmessage?.({ data: msg })
+  }
+  fail(message: string, filename = '', lineno = 0): void {
+    this.onerror?.({ message, filename, lineno, preventDefault: () => {} })
   }
 }
 
@@ -36,6 +41,31 @@ afterEach(() => {
 })
 
 describe('LayoutEngine', () => {
+  it('says when the worker fails (it used to fail silently: no positions ever came, one clump, no orbits), once per message, and clears it on an answer', async () => {
+    const { LayoutEngine } = await import('../src/layout/LayoutEngine')
+    const engine = new LayoutEngine()
+    const worker = FakeWorker.last!
+    const told: string[] = []
+    const off = engine.onError((m) => told.push(m))
+    engine.setGraph(graphOf(['a.md', 'b.md']), 'system')
+    expect(engine.error).toBeNull()
+    worker.fail('RangeError: Invalid typed array length: 4294967296', 'http://x/assets/layout.worker-abc.js', 42)
+    worker.fail('RangeError: Invalid typed array length: 4294967296', 'http://x/assets/layout.worker-abc.js', 42)
+    expect(told).toEqual(['RangeError: Invalid typed array length: 4294967296 (layout.worker-abc.js:42)'])
+    expect(engine.error).toBe(told[0])
+    worker.onmessageerror?.()
+    expect(told).toHaveLength(2)
+    expect(told[1]).toBe('a layout answer could not be read')
+    // An answer for the current graph clears it, so the next failure is told again.
+    worker.reply({ type: 'positions', positions: new Float32Array(6).fill(1), alpha: 0, settled: true, generation: 1 })
+    expect(engine.error).toBeNull()
+    worker.fail('again')
+    expect(told).toHaveLength(3)
+    off()
+    worker.fail('after off')
+    expect(told).toHaveLength(3)
+  })
+
   it('drops frames and rings of a superseded layout, even before the new one is ready', async () => {
     const { LayoutEngine } = await import('../src/layout/LayoutEngine')
     const engine = new LayoutEngine()

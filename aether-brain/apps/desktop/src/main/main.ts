@@ -26,6 +26,8 @@ import {
   type SkippedInstallDto,
   type VaultChangeDto,
   type VaultFileDto,
+  type InterruptedStartDto,
+  type OpenVaultOptions,
   type VaultInfo,
   type VaultProgressDto,
 } from '../shared/ipc.js'
@@ -34,7 +36,8 @@ import { FsVault, isVideoName, within } from './fsvault.js'
 import { VaultWatcher } from './watcher.js'
 import { findProjects } from './projects.js'
 import { FilePager, type FilePage } from './pages.js'
-import { BRAIN_WINDOW_NAME, MemoryTrail, crashMessage, crashReport, crashReportName, describeTrail, shouldReload } from './crash.js'
+import { StartupGuard, latestCrash } from './startup-guard.js'
+import { BRAIN_WINDOW_NAME, MemoryTrail, type MemorySample, crashMessage, crashReport, crashReportName, describeTrail, shouldReload } from './crash.js'
 import {
   MAX_THUMB_FILE_BYTES,
   ThumbCache,
@@ -206,6 +209,10 @@ function envRoots(): string[] {
 /* ------------------------------------------------------------------ */
 
 let vault: FsVault | null = null
+/** An open that crashed the page leaves a note here (startup-guard.ts): the next start does not reopen those folders by itself. */
+let guard: StartupGuard | null = null
+/** Pictures and videos are left out of the vault for this session (the user chose to open without them after a crash). */
+let picturesOff = false
 let watcher: VaultWatcher | null = null
 /** Bumped by every open and every read, so a slow scan never installs a stale watcher. */
 let generation = 0
@@ -315,7 +322,7 @@ function rememberedRoots(): string[] {
  * skipped (they stay remembered, so an unplugged drive comes back next time);
  * it fails only when none can be opened. Reading happens in listFiles.
  */
-async function openVault(input: string[]): Promise<VaultInfo> {
+async function openVault(input: string[], opts?: OpenVaultOptions): Promise<VaultInfo> {
   const wanted = uniqueRoots(input)
   if (!wanted.length) throw new Error('No folder to open')
   const ok = (await Promise.all(wanted.map(async (r) => ((await isDir(r)) ? r : null)))).filter(isString)
@@ -326,7 +333,17 @@ async function openVault(input: string[]): Promise<VaultInfo> {
         : `None of these folders can be opened: ${wanted.join(', ')}`,
     )
   }
-  const next = new FsVault(ok, { exclude: settings.exclude ?? [], hidden: settings.hidden ?? [], keep: settings.keep ?? [] })
+  // `opts` says how to open: an open that was cut short may be tried again without pictures and videos, and a re-open for another
+  // reason (folder rules, another folder) keeps what the session was told.
+  if (opts) picturesOff = opts.pictures === false
+  // From here a page that dies leaves the note that this open did not get through (the page settles it once it has been up a while).
+  guard?.begin(wanted)
+  const next = new FsVault(ok, {
+    exclude: settings.exclude ?? [],
+    hidden: settings.hidden ?? [],
+    keep: settings.keep ?? [],
+    ...(picturesOff ? { maxAssets: 0 } : {}),
+  })
   // A floating board belongs to the vault it was opened in: another set of roots changes every vault path (a second root puts a
   // mount in front of them), so its page would read and save paths that are no longer the board's. Folder rules do not (same roots).
   // The window is closed (its page saves first) BEFORE the vault is swapped: that save goes to the vault it was made in.
@@ -1014,15 +1031,54 @@ function registerCompanionIpc(host: CompanionHost): void {
 /* IPC                                                                */
 /* ------------------------------------------------------------------ */
 
+/** What the page is told when the last open did not get through: the folders, and what the newest crash report since says. */
+function interruptedStart(): InterruptedStartDto | null {
+  const a = guard?.interrupted()
+  if (!a) return null
+  const crash = latestCrash(path.join(app.getPath('userData'), 'crash-reports'), a.at)
+  const samples = (crash?.memory ?? []).filter(
+    (m): m is MemorySample => !!m && typeof m === 'object' && typeof (m as MemorySample).pageMB === 'number' && typeof (m as MemorySample).t === 'number',
+  )
+  return { roots: a.roots, at: a.at, died: a.died, report: crash?.file ?? null, memory: describeTrail(samples), vault: crash?.vault ?? null }
+}
+
+/** The vault in numbers, for a crash report: what was being held when the page died. */
+function vaultCounts(): Record<string, number | string> | undefined {
+  if (!vault) return undefined
+  const scan = vault.lastScan
+  return {
+    roots: vault.roots.length,
+    notes: scan?.files.length ?? 0,
+    folders: scan?.folders.length ?? 0,
+    pictures: scan?.assets.length ?? 0,
+    foldersScanned: scan?.dirs ?? 0,
+    scanStoppedEarly: scan?.truncated ? 'yes' : 'no',
+    picturesCut: scan?.assetsTruncated ? 'yes' : 'no',
+    picturesOff: picturesOff ? 'yes' : 'no',
+  }
+}
+
 function registerIpc(): void {
   ipc.handle(IPC.pick, async (): Promise<VaultInfo | null> => {
     const dir = await chooseFolder(
       'Choose your vault folder',
       'Pick a folder of markdown notes. Aether Brain reads and writes .md files in place.',
     )
-    return dir ? openVault([dir]) : null
+    return dir ? openVault([dir], { pictures: true }) : null
   })
-  ipc.handle(IPC.open, (_e, roots: unknown) => openVault(Array.isArray(roots) ? roots.map(String) : [String(roots)]))
+  ipc.handle(IPC.open, (_e, roots: unknown, opts: unknown) =>
+    openVault(
+      Array.isArray(roots) ? roots.map(String) : [String(roots)],
+      // An open asked for by the page says how it wants pictures (none given: as usual); the opens main makes itself keep the session's.
+      { pictures: opts && typeof opts === 'object' ? (opts as OpenVaultOptions).pictures !== false : true },
+    ),
+  )
+  // The page asks once as it starts: did the last open get through? If not, it does not reopen the folders by itself (startup-guard.ts).
+  ipc.handle(IPC.interrupted, (): InterruptedStartDto | null => interruptedStart())
+  // Only the brain window can say its vault got through.
+  ipc.on(IPC.settled, (e) => {
+    if (win && !win.isDestroyed() && e.sender === win.webContents) guard?.settle()
+  })
   // At launch `aether-brain D:\ F:\` or AETHER_VAULT wins over the remembered roots. Once a vault
   // is open the remembered set is the truth: roots added or removed since then (the vault folders
   // panel lists remembered roots it could not open) and a reloaded window keep them.
@@ -1172,8 +1228,11 @@ function createWindow(): void {
     crashes.push(now)
     const reload = shouldReload(crashes, now)
     const memory = describeTrail(trail.samples)
+    // An open that was still pending did not get through: the reloaded page will not reopen those folders by itself.
+    guard?.died()
+    const counts = vaultCounts()
     const report = crashReport(
-      { reason: details.reason, exitCode: details.exitCode, window: BRAIN_WINDOW_NAME, version: app.getVersion(), platform: `${process.platform} ${os.release()}, ${Math.round(os.totalmem() / 1048576)} MB`, now },
+      { reason: details.reason, exitCode: details.exitCode, window: BRAIN_WINDOW_NAME, version: app.getVersion(), platform: `${process.platform} ${os.release()}, ${Math.round(os.totalmem() / 1048576)} MB`, now, ...(counts ? { vault: counts } : {}) },
       trail.samples,
     )
     trail.clear()
@@ -1246,6 +1305,8 @@ app.on('before-quit', (e) => {
       return
     }
   }
+  // Quitting by itself: an open cut short by the user is forgotten (one cut short by a dead page stays, see startup-guard.ts).
+  guard?.cleanExit()
   watcher?.stop()
   watcher = null
   thumbnailer.stop()
@@ -1265,6 +1326,7 @@ void app.whenReady().then(async () => {
   }
   const loaded = await loadSettings()
   settings = loaded.settings
+  guard = new StartupGuard(path.join(app.getPath('userData'), 'startup.json'))
   if (loaded.migrated) void saveSettings()
   ai = createAiLink()
   chat = createChat()

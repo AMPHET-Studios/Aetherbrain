@@ -55,6 +55,9 @@ export class LayoutEngine {
   pictureSize: PictureSize = 'medium'
   private worker: Worker | null = null
   private listeners = new Set<TickListener>()
+  private errorListeners = new Set<(message: string) => void>()
+  /** What the worker last failed with (a thrown error or a reply that could not be read), or null. Until it answers, every node sits at the origin. */
+  error: string | null = null
   /**
    * Generation of the last 'graph' message sent. The worker numbers its
    * layouts the same way (one per 'graph' message), so anything it posts for
@@ -68,11 +71,31 @@ export class LayoutEngine {
     if (typeof Worker !== 'undefined') {
       this.worker = new Worker(new URL('./layout.worker.ts', import.meta.url), { type: 'module', name: 'aether-layout' })
       this.worker.onmessage = (ev: MessageEvent<WorkerToMain>) => this.onMessage(ev.data)
+      // A worker that throws (or cannot start) used to fail silently: no positions ever came, every node stayed at the origin
+      // (one clumped star, no orbits) and nothing said why. Say it.
+      this.worker.onerror = (ev: ErrorEvent) => {
+        ev.preventDefault?.()
+        this.fail(ev.message || 'the layout worker failed', ev.filename ? `${ev.filename.split('/').pop()}:${ev.lineno}` : '')
+      }
+      this.worker.onmessageerror = () => this.fail('a layout answer could not be read', '')
     }
   }
 
   get running(): boolean {
     return !this.settled
+  }
+
+  /** Told when the layout worker fails (its message, once per distinct message). */
+  onError(cb: (message: string) => void): () => void {
+    this.errorListeners.add(cb)
+    return () => this.errorListeners.delete(cb)
+  }
+
+  private fail(message: string, where: string): void {
+    const text = where ? `${message} (${where})` : message
+    if (text === this.error) return
+    this.error = text
+    for (const l of this.errorListeners) l(text)
   }
 
   onTick(cb: TickListener): () => void {
@@ -246,6 +269,7 @@ export class LayoutEngine {
       return
     }
     if (msg.positions.length !== this.ids.length * 3) return
+    this.error = null
     this.positions = msg.positions as Float32Array<ArrayBuffer>
     this.placed = true
     this.answered = true

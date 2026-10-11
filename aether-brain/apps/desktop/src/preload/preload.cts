@@ -11,6 +11,8 @@ const IPC = {
   pick: 'vault:pick',
   open: 'vault:open',
   last: 'vault:last',
+  interrupted: 'startup:interrupted',
+  settled: 'startup:settled',
   info: 'vault:info',
   addRoot: 'vault:addRoot',
   addRootPath: 'vault:addRootPath',
@@ -166,7 +168,9 @@ ipcRenderer.on(IPC.forgeRequest, (e, req: ForgeRequest) => void serveForge(e, re
 
 const bridge: AetherBridge = {
   pickVault: () => ipcRenderer.invoke(IPC.pick),
-  openVault: (roots) => ipcRenderer.invoke(IPC.open, roots),
+  openVault: (roots, opts) => ipcRenderer.invoke(IPC.open, roots, opts),
+  startupInterrupted: () => ipcRenderer.invoke(IPC.interrupted),
+  startupSettled: () => ipcRenderer.send(IPC.settled),
   lastVault: () => ipcRenderer.invoke(IPC.last),
   vaultInfo: () => ipcRenderer.invoke(IPC.info),
   addRoot: () => ipcRenderer.invoke(IPC.addRoot),

@@ -1,5 +1,5 @@
 import { isImagePath, isMediaPath, mimeOf, type VaultAdapter, type VaultAsset, type VaultChange, type VaultFile, type VaultRootInfo } from '@aether/core'
-import type { AetherBridge, ReadAssetFailure, VaultChangeDto, VaultInfo } from '../../shared/ipc'
+import type { AetherBridge, InterruptedStartDto, OpenVaultOptions, ReadAssetFailure, VaultChangeDto, VaultInfo } from '../../shared/ipc'
 
 /** A change as main reported it (a picture's comes without content, with its size). */
 function toChange(c: VaultChangeDto): VaultChange {
@@ -81,11 +81,22 @@ export class ElectronVaultAdapter implements VaultAdapter {
     return info ? new ElectronVaultAdapter(b, info) : null
   }
 
-  /** Open one or more folders as the vault; null outside Electron. Rejects when none can be opened. */
-  static async open(roots: string[]): Promise<ElectronVaultAdapter | null> {
+  /** Open one or more folders as the vault; null outside Electron. Rejects when none can be opened. `pictures: false` leaves pictures and videos out. */
+  static async open(roots: string[], opts?: OpenVaultOptions): Promise<ElectronVaultAdapter | null> {
     const b = ElectronVaultAdapter.bridge()
     if (!b) return null
-    return new ElectronVaultAdapter(b, await b.openVault(roots))
+    return new ElectronVaultAdapter(b, await b.openVault(roots, opts))
+  }
+
+  /** The open that did not get through last time (the page died while it was opening), or null; asked once as the page starts. */
+  static async interrupted(): Promise<InterruptedStartDto | null> {
+    const b = ElectronVaultAdapter.bridge()
+    if (!b) return null
+    try {
+      return (await b.startupInterrupted()) ?? null
+    } catch {
+      return null
+    }
   }
 
   /** Roots to reopen on launch (CLI, AETHER_VAULT or the remembered set), or null. */

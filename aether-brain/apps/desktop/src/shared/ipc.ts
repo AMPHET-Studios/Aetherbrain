@@ -213,6 +213,30 @@ export interface VaultRootDto {
   label: string
 }
 
+/**
+ * What `startupInterrupted()` says when the last open of a vault did not get through (the page died while it was opening, or
+ * within a minute of it): the folders, when, and what the newest crash report says. The page then does not reopen them by itself.
+ */
+export interface InterruptedStartDto {
+  /** The folders that were being opened (absolute paths). */
+  roots: string[]
+  /** ISO time the open began. */
+  at: string
+  /** The brain window's page died (rather than the app being stopped some other way). */
+  died: boolean
+  /** The crash report written for it (a file path), or null. */
+  report: string | null
+  /** One sentence on the page's memory from that report ("The window's page was using 3.1 GB …"), or ''. */
+  memory: string
+  /** What the report knew of the vault (counts), or null. */
+  vault: Record<string, number | string> | null
+}
+
+/** How to open a vault: `pictures: false` leaves pictures and videos out for this session (notes and folders only). */
+export interface OpenVaultOptions {
+  pictures?: boolean
+}
+
 export interface VaultInfo {
   /** Absolute path of the first root (kept for older callers). */
   root: string
@@ -357,7 +381,11 @@ export interface AetherBridge {
   /** Show the OS folder picker; returns null if cancelled. Opens + watches it as a single-root vault. */
   pickVault(): Promise<VaultInfo | null>
   /** Open + watch one or more folders (e.g. the remembered roots). */
-  openVault(roots: string | string[]): Promise<VaultInfo>
+  openVault(roots: string | string[], opts?: OpenVaultOptions): Promise<VaultInfo>
+  /** The open that did not get through last time (see `InterruptedStartDto`), or null. Asked once, as the page starts. */
+  startupInterrupted(): Promise<InterruptedStartDto | null>
+  /** The page has had the vault loaded for a while: the open got through (forgets the interrupted-open note). */
+  startupSettled(): void
   /** Roots to reopen on launch (CLI args, AETHER_VAULT, or the remembered set), or null. */
   lastVault(): Promise<string[] | null>
   /** Current vault info, or null when none is open. */
@@ -542,6 +570,8 @@ export const IPC = {
   pick: 'vault:pick',
   open: 'vault:open',
   last: 'vault:last',
+  interrupted: 'startup:interrupted',
+  settled: 'startup:settled',
   info: 'vault:info',
   addRoot: 'vault:addRoot',
   addRootPath: 'vault:addRootPath',

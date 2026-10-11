@@ -115,7 +115,9 @@ describe('board:read and board:save from the board window\'s page', () => {
       await t.host.open(SHOWN)
       const w = wire(t)
       const read = w.call(w.page, IPC.boardRead, 'boards/SHOWN.md')
-      if (accepted) await expect(read, platform).resolves.toBeNull() // allowed through; the vault then looks for that spelling (a miss on Linux's disk)
+      // Allowed through; the vault then looks for that spelling: a miss on a case-sensitive disk (null), the very same
+      // shown board on a case-insensitive one (a Mac's or Windows' default), so either answer is "not refused".
+      if (accepted) expect([null, board('Shown')], platform).toContain(await read)
       else await expect(read, platform).rejects.toThrow(/only the board it shows/)
     }
   })
