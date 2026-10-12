@@ -132,6 +132,52 @@ describe('board:save is ONE call: main compares the note with the text the save 
   })
 })
 
+describe('the saves of one note keep the order they were asked in', () => {
+  it('even when judging the first one takes longer than judging the second (a busy machine, a slow disk)', async () => {
+    const base = board()
+    const a = edit(base, '- note x=1 y=1 w=100 size=18 color=ffffff fill= r=0 » A')
+    const b = edit(base, '- note x=2 y=2 w=100 size=18 color=ffffff fill= r=0 » B')
+    const real = vault()
+    const log: string[] = []
+    let stats = 0
+    const slowToJudge: BoardVault = {
+      abs: (p) => real.abs(p),
+      // The first save's look at the note is slow, the second's is immediate: unlined, the second would reach the note first.
+      stat: async (p) => {
+        const n = stats++
+        if (n === 0) await new Promise((r) => setTimeout(r, 80))
+        return real.stat(p)
+      },
+      read: (p) => real.read(p),
+      write: async (p, c) => {
+        log.push(`write:${c === a ? 'A' : 'B'}`)
+        await real.write(p, c)
+      },
+    }
+    const first = saveBoard({ path: 'Boards/Gate.md', text: a, expectedBase: base }, slowToJudge)
+    const second = saveBoard({ path: 'Boards/Gate.md', text: b, expectedBase: base }, slowToJudge)
+    expect(await first).toEqual({ ok: true })
+    // The second was made from the base the first has since replaced: refused, nothing written.
+    expect(await second).toMatchObject({ ok: false, changed: true })
+    expect(log).toEqual(['write:A'])
+    expect(await disk('Boards/Gate.md')).toBe(a)
+  })
+
+  it('and a save that names no note is refused at once, without waiting behind a slow one', async () => {
+    const base = board()
+    const a = edit(base, '- note x=1 y=1 w=100 size=18 color=ffffff fill= r=0 » A')
+    const real = vault()
+    let release!: () => void
+    const gate = new Promise<void>((r) => (release = r))
+    const stuck: BoardVault = { abs: (p) => real.abs(p), stat: (p) => real.stat(p), read: (p) => real.read(p), write: async (p, c) => { await gate; await real.write(p, c) } }
+    const slow = saveBoard({ path: 'Boards/Gate.md', text: a, expectedBase: base }, stuck)
+    expect(await saveBoard({ path: 5 as unknown as string, text: a }, stuck)).toMatchObject({ ok: false })
+    expect(await saveBoard({ path: '../outside.md', text: a }, stuck)).toMatchObject({ ok: false })
+    release()
+    expect(await slow).toEqual({ ok: true })
+  })
+})
+
 describe('a link to a note is no board to write to', () => {
   it.skipIf(process.platform === 'win32')('refuses a link inside the vault, whose write would replace the link with a copy (the real note would not change)', async () => {
     await fs.symlink(at('Boards/Gate.md'), at('Boards/alias.md'))

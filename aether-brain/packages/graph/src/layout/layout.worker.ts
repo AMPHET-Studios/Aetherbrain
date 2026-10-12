@@ -30,6 +30,7 @@ import {
   type Simulation,
 } from 'd3-force-3d'
 import type { LayoutEdgeInput, LayoutMode, LayoutNodeInput, MainToWorker, WorkerToMain } from './protocol'
+import { finiteOr, healBodies, linkStrength } from './safe'
 import { computeSystemLayout, systemPositions, type SystemLayout } from './system'
 
 interface Node extends SimNode {
@@ -130,9 +131,10 @@ function buildNodes(input: LayoutNodeInput[], prev?: { ids: string[]; positions:
     const anchor = ANCHORS[n.area] ?? [0, 0, 0]
     let x: number, y: number, z: number
     if (pi !== undefined && prev) {
-      x = prev.positions[pi * 3] ?? 0
-      y = prev.positions[pi * 3 + 1] ?? 0
-      z = prev.positions[pi * 3 + 2] ?? 0
+      // A place that is not a number (an earlier layout that went wrong) starts at the area's anchor instead.
+      x = finiteOr(prev.positions[pi * 3], anchor[0])
+      y = finiteOr(prev.positions[pi * 3 + 1], anchor[1])
+      z = finiteOr(prev.positions[pi * 3 + 2], anchor[2])
     } else {
       // Spawn near the area anchor so clusters form immediately.
       x = anchor[0] + (rnd() - 0.5) * 80
@@ -167,7 +169,7 @@ function applyForces(): void {
   const link = forceLink<Node, Link>(links)
     .id((d) => d.id)
     .distance((l) => 22 + 5 * Math.sqrt(l.source.degree + l.target.degree) + (l.w > 1 ? -4 : 0))
-    .strength((l) => (mode === 'orbit' ? 0.25 : 0.9) / Math.min(l.source.degree, l.target.degree, 12))
+    .strength((l) => linkStrength(mode === 'orbit' ? 0.25 : 0.9, l.source.degree, l.target.degree))
     .iterations(big ? 1 : 2)
   sim.force('link', link)
 
@@ -200,6 +202,18 @@ function applyForces(): void {
   }
 }
 
+/** Where a body that lost its place goes back to: its area's anchor. */
+function areaAnchor(d: Node): [number, number, number] {
+  return ANCHORS[d.area] ?? [0, 0, 0]
+}
+
+let healedWarned = false
+function warnHealed(): void {
+  if (healedWarned) return
+  healedWarned = true
+  console.warn('[aether] the layout put back a body whose place was not a number')
+}
+
 function post(settled: boolean): void {
   const out = new Float32Array(nodes.length * 3)
   for (let i = 0; i < nodes.length; i++) {
@@ -214,6 +228,8 @@ function post(settled: boolean): void {
 
 function loop(): void {
   if (!sim || !running) return
+  // A body that is not finite would hang the next tick inside d3-octree (see safe.ts): put it back first.
+  if (healBodies(nodes, areaAnchor) > 0) warnHealed()
   const alphaMin = sim.alphaMin()
   // Large graphs: several ticks per posted frame so they settle in seconds.
   const ticks = nodes.length > 600 ? 2 : 1
@@ -302,6 +318,12 @@ function setGraph(input: LayoutNodeInput[], edges: LayoutEdgeInput[], prev?: { i
 function enterSystem(from: Float32Array, known: Uint8Array | null, keepOffsets: boolean): void {
   stopLoop()
   const n = inputs.length
+  // The ease runs from these places: one that is not a number would make the settled place NaN (Infinity × 0).
+  for (let k = 0; k < from.length; k++) {
+    if (Number.isFinite(from[k])) continue
+    from[k] = 0
+    if (known) known[Math.floor(k / 3)] = 0
+  }
   const parent = new Int32Array(n)
   const kind = new Uint8Array(n)
   const role = new Int8Array(n)
@@ -420,9 +442,9 @@ function leaveSystem(): void {
   } else {
     for (let i = 0; i < n; i++) {
       const d = nodes[i]!
-      d.x = sysPos[i * 3] ?? d.x
-      d.y = sysPos[i * 3 + 1] ?? d.y
-      d.z = sysPos[i * 3 + 2] ?? d.z
+      d.x = finiteOr(sysPos[i * 3], d.x ?? 0)
+      d.y = finiteOr(sysPos[i * 3 + 1], d.y ?? 0)
+      d.z = finiteOr(sysPos[i * 3 + 2], d.z ?? 0)
       d.vx = 0
       d.vy = 0
       d.vz = 0
