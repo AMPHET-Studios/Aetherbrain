@@ -283,7 +283,7 @@ export class ChatThread {
         .map((b) => b.text)
         .join('')
       if (message.stop_reason === 'refusal') {
-        opts.onEvent({ type: 'notice', text: "Claude can't help with that one. If you're in danger or thinking about ending your life, call 911 or call or text 9-8-8 now." })
+        opts.onEvent({ type: 'notice', text: "Claude didn't answer that one. Try saying it another way. If you're not safe right now, get someone you trust next to you." })
         return { text: '', stop: 'refusal' }
       }
       const uses = message.content.filter((b): b is Anthropic.Beta.BetaToolUseBlock => b.type === 'tool_use')

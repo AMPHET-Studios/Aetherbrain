@@ -94,9 +94,20 @@ describe('Me notes (pure)', () => {
     expect(emptySections(raw)).toEqual(Object.values(ABOUT_ME_SECTIONS).filter((h) => h !== 'Who I am'))
   })
 
-  it('ships a companion guide that names no person and gives the crisis lines', () => {
+  it('ships a companion guide that names no person, pastes no phone numbers, and still stays with someone in danger', () => {
     expect(COMPANION_GUIDE).not.toMatch(/\b(he|him|his|she|her)\b/i)
-    for (const n of ['911', '9-8-8', '310-6789', '604-872-3311']) expect(COMPANION_GUIDE).toContain(n)
+    // A coach, not a switchboard: no hotline numbers in the instructions or in the playbook note.
+    const PHONE = /\b911\b|\b9-8-8\b|\b8-1-1\b|\b\d{3}-\d{4}\b|\b\d{3}-\d{3}-\d{4}\b|\b1-800/
+    expect(COMPANION_GUIDE).not.toMatch(PHONE)
+    expect(PLAYBOOK_BODY).not.toMatch(PHONE)
+    // What stays: it does not drop someone who says they may be unsafe.
+    expect(COMPANION_GUIDE).toMatch(/## If they might hurt themselves or someone else/)
+    expect(COMPANION_GUIDE).toMatch(/Stay with them\./)
+    expect(COMPANION_GUIDE).toMatch(/emergency services/)
+    // What it is for: the day, mood-aware motivation, and no arguing with unusual beliefs.
+    expect(COMPANION_GUIDE).toMatch(/## The day/)
+    expect(COMPANION_GUIDE).toMatch(/motivation is not pushing/i)
+    expect(COMPANION_GUIDE).toMatch(/don't argue, don't agree/)
     expect(COMPANION_GUIDE).toMatch(/Never advise starting, stopping, skipping or changing the dose/)
     expect(PLAYBOOK_BODY).toMatch(/^# Wellbeing playbook/)
     expect(PLAYBOOK_BODY).toMatch(/## Sources/)
@@ -122,9 +133,12 @@ describe('Brain: Me', () => {
     expect(me.empty).toContain('Goals')
     await expect(b.rememberAboutMe('nope' as never, 'x')).rejects.toThrow(/Unknown area/)
     // The playbook: the user's copy, or one section of it.
-    const pb = await b.playbook('crisis')
+    const pb = await b.playbook('sleep')
     expect(pb.path).toBe('Me/Wellbeing playbook.md')
-    expect(pb.text).toMatch(/^> ## If things get hard right now|9-8-8/m)
+    expect(pb.text).toMatch(/### Sleep/)
+    const whole = await b.playbook()
+    expect(whole.text).toMatch(/^> ## If things get hard$/m)
+    expect(whole.text).toMatch(/Who I want next to me/)
   })
 
   it('files check-ins by month, one row each, and returns the trends', async () => {
@@ -298,7 +312,7 @@ describe('ChatThread with Claude', () => {
     const events: ChatEvent[] = []
     const r = await thread.send('…', { provider: 'claude', model: 'claude-haiku-4-5', apiKey: 'sk-ant-test-0123456789abcdef' }, tools, { onEvent: (e) => events.push(e), fetch: fn })
     expect(r.stop).toBe('refusal')
-    expect(events.some((e) => e.type === 'notice' && /9-8-8/.test(e.text))).toBe(true)
+    expect(events.some((e) => e.type === 'notice' && /not safe right now/.test(e.text) && !/\d-\d-\d|911/.test(e.text))).toBe(true)
     expect(requests[0]!.body['fallbacks']).toBeUndefined()
     expect(requests[0]!.body['output_config']).toBeUndefined()
     expect(thread.transcript.map((m) => m.role)).toEqual(['user'])

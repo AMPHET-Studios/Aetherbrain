@@ -19,7 +19,7 @@ Everything it learns lives in your own notes, in `Me/` (under the first vault fo
 
 - **About me**: what you asked it to remember, in sections (who you are, how you like to be talked to, what matters, strengths, family, health and routine, work and art, goals, what helps, early warning signs, your care team). It asks before saving anything and tells you what it saved. Edit or delete anything there yourself.
 - **Check-ins**: one note per month, one table row per check-in (mood, sleep, energy, stress, medication if you track it, family, a win, a worry).
-- **Wellbeing playbook**: the evidence the chat leans on (sleep, movement, stress, an early warning signs plan to fill in, recovery, work and creativity, family, crisis lines), with its sources.
+- **Wellbeing playbook**: the evidence the chat leans on (sleep, movement, stress, an early warning signs plan to fill in, recovery, work and creativity, family, the people you lean on), with its sources.
 - **Chats**: each conversation, kept as a note (turn off in ⚙). The transcript is quoted: nothing in it becomes a link, tag or task of your brain.
 
 Each conversation starts from what About me and your last two weeks of check-ins say. Start a **New** chat to pick up what changed since.
@@ -30,7 +30,7 @@ Each conversation starts from what About me and your last two weeks of check-ins
 - Changes notes when you ask: a task, a captured idea, a tick. Tool chips under each answer show what it did (click one with a note to fly there).
 - Check-ins: say "check in" (or the **Check in** button, or the palette's *Check in with your brain*). It compares your last week with the weeks before and mentions a shift (sleep down, mood down, stress up, missed medication, a long gap) as a plain fact, then asks.
 
-It is a supportive companion, not a therapist or a doctor. It never diagnoses and never suggests changing a medication; your care team leads. When you mention suicide, self-harm or danger, it stops coaching and gives the crisis lines (911 · call or text 9-8-8 · 310-6789 in BC · 604-872-3311 in Greater Vancouver).
+It is a supportive companion, not a therapist or a doctor. It never diagnoses and never suggests changing a medication; your care team leads. When you mention suicide, self-harm or danger, it stops coaching and stays with you: it asks plainly what is going on and helps you reach the people you chose, and if the danger is now it says to get emergency help and someone next to you. It never pastes hotline numbers unless you ask for one.
 
 ## Keys
 
