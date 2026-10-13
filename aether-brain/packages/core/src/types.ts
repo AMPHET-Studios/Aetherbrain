@@ -143,11 +143,11 @@ export interface ParsedNote {
 export type NodeKind = 'note' | 'ghost' | 'folder' | 'image' | 'today'
 
 /**
- * Visual role of a folder node in the solar-system layout.
- *  - root:    the vault itself (one per graph, id `folder:`)
- *  - mount:   a top-level root folder in a multi-root vault (a drive such as D:\ or F:\)
- *  - project: a folder bound to a project note — rendered as a star
- *  - folder:  any other folder — a planet (or a moon, deeper down)
+ * Role of a folder node in the system layout (see docs/COSMOLOGY.md).
+ *  - root:    the vault itself (one per graph, id `folder:`); a galaxy when the vault is one folder or drive
+ *  - mount:   a top-level root folder in a multi-root vault (a drive such as D: or F:): a galaxy
+ *  - project: a folder bound to a project note: a brighter, bigger star
+ *  - folder:  any other folder: a star
  */
 export type FolderRole = 'root' | 'mount' | 'project' | 'folder'
 
@@ -157,6 +157,8 @@ export interface FolderNodeInfo {
   role: FolderRole
   /** 0 = vault root; mounts are depth 1 in a multi-root vault. */
   depth: number
+  /** True for the vault root of a single-root vault: a galaxy itself (a multi-root vault's root is only the origin). */
+  galaxy?: boolean
   /** Project note bound to this folder (the star's note), if any. */
   projectId: NoteId | null
   /** True when some ancestor folder is a project folder (its planets and moons). */
@@ -258,6 +260,12 @@ export interface GraphNode {
   created: number | null
   updated: number | null
   wordCount: number
+  /**
+   * How soon this needs you, 0 to 1 (`markdown/urgency.ts`). A note: its most urgent open task. A picture or
+   * video: the most urgent note that embeds it. A folder: its whole system (`systemUrgency`). Only present when the
+   * graph was built with `urgency`; the system layout draws it as orbit speed and star brightness.
+   */
+  urgency?: number
 }
 
 export interface GraphEdge {

@@ -4,11 +4,15 @@
  * current colour mode) and radius, its structural parent, and the links. Pure,
  * unit-tested; companion.ts publishes it.
  */
-import type { GraphData, GraphNode, NoteId } from '@aether/core'
+import { isGalaxyNode, isPlanetNode, type GraphData, type GraphNode, type NoteId } from '@aether/core'
 import { nodeBaseColor, nodeRadius, type ColorMode, type PictureSize } from '@aether/graph'
-import type { CompanionGraphDto, CompanionKind } from '../shared/ipc'
+import type { CompanionBody, CompanionGraphDto, CompanionKind } from '../shared/ipc'
 import type { ScenePlan } from './companion-bound'
 
+/**
+ * The original names, kept as they were for the viewers built to them: the vault or a drive is a 'sun', a project
+ * folder a 'star', any other folder a 'planet', a note a 'moon'. The cosmology's names are in `companionBody`.
+ */
 export function companionKind(n: GraphNode): CompanionKind {
   if (n.kind === 'today') return 'today'
   if (n.kind === 'image') return 'picture'
@@ -17,6 +21,18 @@ export function companionKind(n: GraphNode): CompanionKind {
     return role === 'root' || role === 'mount' ? 'sun' : role === 'project' ? 'star' : 'planet'
   }
   return n.ghost ? 'ghost' : 'moon'
+}
+
+/**
+ * What a node is in the cosmology (docs/COSMOLOGY.md): a drive or a one-folder vault a 'galaxy', the origin of several
+ * drives an 'origin', every folder a 'star', a big picture, video, model or long note a 'planet', every small file a
+ * 'moon'.
+ */
+export function companionBody(n: GraphNode): CompanionBody {
+  if (n.kind === 'today') return 'hub'
+  if (n.folder) return isGalaxyNode(n) ? 'galaxy' : n.folder.role === 'root' ? 'origin' : 'star'
+  if (n.ghost) return 'ghost'
+  return isPlanetNode(n) ? 'planet' : 'moon'
 }
 
 export interface CompanionSceneOptions {
@@ -54,9 +70,11 @@ export function companionScene(graph: GraphData, o: CompanionSceneOptions, plan?
     id: n.id,
     title: n.title,
     kind: companionKind(n),
+    body: companionBody(n),
     color: `#${nodeBaseColor(n, o.colorMode, o.activeTag, ageOf).getHexString()}`,
     radius: Math.round(nodeRadius(n, o.pictureSize) * 1000) / 1000,
     parent,
+    urgency: Math.round((n.urgency ?? 0) * 1000) / 1000,
   })
   if (plan) {
     const nodes = Array.from(plan.keep, (i) => {
@@ -111,9 +129,11 @@ export function sceneSignature(g: CompanionGraphDto): string {
     eat(n.id)
     eat(n.title)
     eat(n.kind)
+    eat(n.body ?? '')
     eat(n.color)
     eat(n.radius)
     eat(n.parent)
+    eat(n.urgency ?? 0)
   }
   for (const e of g.edges) eat(e)
   if (g.limits) {

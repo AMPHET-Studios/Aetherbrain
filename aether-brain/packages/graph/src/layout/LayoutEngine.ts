@@ -1,4 +1,4 @@
-import type { FolderRole, GraphData, NodeKind } from '@aether/core'
+import { isPlanetNode, type FolderRole, type GraphData, type NodeKind } from '@aether/core'
 import type { LayoutEdgeInput, LayoutKind, LayoutMode, LayoutNodeInput, LayoutRole, MainToWorker, WorkerToMain } from './protocol'
 import { AREA_INDEX, nodeRadius, type PictureSize } from '../theme'
 
@@ -118,6 +118,8 @@ export class LayoutEngine {
       parent: n.parent === null ? -1 : (graph.index.get(n.parent) ?? -1),
       kind: KIND_CODE[n.kind] ?? 0,
       role: n.folder ? (ROLE_CODE[n.folder.role] ?? 3) : -1,
+      urgency: n.urgency ?? 0,
+      planet: isPlanetNode(n),
     }))
     graph.nodes.forEach((n, i) => {
       const card = n.image?.gallery

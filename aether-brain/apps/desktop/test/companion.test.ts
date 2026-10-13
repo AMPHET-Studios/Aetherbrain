@@ -20,7 +20,7 @@ import {
   type CompanionHostOptions,
   type CompanionSettings,
 } from '../src/main/companion.js'
-import { companionKind, companionScene } from '../src/renderer/companion-scene.js'
+import { companionBody, companionKind, companionScene } from '../src/renderer/companion-scene.js'
 
 const TOKEN = 'tok_0123456789abcdefghijKLMN'
 
@@ -117,8 +117,14 @@ describe('the scene the brain window publishes', () => {
     expect(dto.nodes).toHaveLength(g.nodes.length)
     const at = (id: string) => dto.nodes.findIndex((n) => n.id === id)
     const star = dto.nodes[at('folder:Projects/Forge')]
-    expect(star).toMatchObject({ kind: 'star', color: '#ffcf6b', radius: 5.5 })
-    expect(dto.nodes[at('folder:')]?.kind).toBe('sun')
+    // The original names are unchanged for the viewers built to them: a project folder is a 'star', another folder a 'planet'.
+    expect(star).toMatchObject({ kind: 'star', body: 'star', color: '#ffcf6b' })
+    expect(star?.radius).toBeGreaterThan(4)
+    expect(dto.nodes[at('folder:Inbox')]).toMatchObject({ kind: 'planet', body: 'star' })
+    // The vault of one folder is a galaxy.
+    expect(dto.nodes[at('folder:')]).toMatchObject({ kind: 'sun', body: 'galaxy', radius: 16 })
+    // Everything carries its urgency (0 here: the graph was built without it).
+    for (const n of dto.nodes) expect(n.urgency).toBe(0)
     expect(dto.nodes[at('ghost:nowhere')]?.kind ?? dto.nodes.find((n) => n.kind === 'ghost')?.kind).toBe('ghost')
     expect(dto.nodes[at('Projects/Forge/Plan')]?.parent).toBe(at('folder:Projects/Forge'))
     expect(dto.selected).toBe(at('Projects/Forge/Plan'))
@@ -129,6 +135,65 @@ describe('the scene the brain window publishes', () => {
     expect(() => cleanGraph(dto)).not.toThrow()
     expect(companionKind({ kind: 'today' } as never)).toBe('today')
     expect(companionKind({ kind: 'image' } as never)).toBe('picture')
+  })
+
+  it('keeps the original names in kind and gives the cosmology its own: body', () => {
+    const folder = (role: string, extra: object = {}) => ({ kind: 'folder', ghost: false, folder: { role, ...extra } }) as never
+    const note = (wordCount: number) => ({ kind: 'note', ghost: false, wordCount }) as never
+    // kind: as it always was (a viewer built to it draws what it drew).
+    expect(companionKind(folder('mount'))).toBe('sun')
+    expect(companionKind(folder('root'))).toBe('sun')
+    expect(companionKind(folder('project'))).toBe('star')
+    expect(companionKind(folder('folder'))).toBe('planet')
+    expect(companionKind(note(120))).toBe('moon')
+    expect(companionKind(note(9000))).toBe('moon')
+    // body: galaxy for a drive or a one-folder vault, origin for the root of several drives, every folder a star.
+    expect(companionBody(folder('mount'))).toBe('galaxy')
+    expect(companionBody(folder('root', { galaxy: true }))).toBe('galaxy')
+    expect(companionBody(folder('root'))).toBe('origin')
+    expect(companionBody(folder('project'))).toBe('star')
+    expect(companionBody(folder('folder'))).toBe('star')
+    expect(companionBody(note(120))).toBe('moon')
+    expect(companionBody(note(9000))).toBe('planet')
+    expect(companionBody({ kind: 'ghost', ghost: true, wordCount: 0 } as never)).toBe('ghost')
+    expect(companionBody({ kind: 'today', ghost: false, wordCount: 0 } as never)).toBe('hub')
+  })
+
+  it('publishes the urgency of what is due: a note, and the folder star above it', () => {
+    const files: VaultFile[] = [
+      { path: 'Work/Gate/Plan.md', content: '# Plan\n\n- [ ] Ship the gate 📅 2026-09-29\n', mtime: 1 },
+      { path: 'Work/Gate/Notes.md', content: '# Notes\n\nNothing open.\n', mtime: 2 },
+      { path: 'Home/Idle.md', content: '# Idle\n\n- [ ] Someday maybe\n', mtime: 3 },
+    ]
+    const notes = new Map(files.map((f) => [f.path.replace(/\.md$/, ''), parseNote(f)]))
+    const g = buildGraph(notes, {
+      folders: { all: ['Work', 'Work/Gate', 'Home'], multiRoot: false, rootTitle: 'Vault' },
+      urgency: { date: '2026-09-30' },
+    })
+    const dto = companionScene(g, { version: 1, vault: 'Vault', layout: 'system', colorMode: 'area', activeTag: null, selectedId: null })
+    const u = (id: string) => dto.nodes.find((n) => n.id === id)?.urgency
+    expect(u('Work/Gate/Plan')).toBeGreaterThanOrEqual(0.9)
+    expect(u('Work/Gate/Notes')).toBe(0)
+    // The system of the overdue note burns; the folder of one idle someday task barely glows.
+    expect(u('folder:Work/Gate')).toBeGreaterThanOrEqual(0.9)
+    expect(u('folder:Work')).toBeGreaterThanOrEqual(0.9)
+    expect(u('folder:Home')).toBeLessThan(0.1)
+  })
+
+  it('lets body and urgency through the link, and leaves out a bad one instead of failing the scene', () => {
+    const node = (extra: object) => ({ id: 'a', title: 'A', kind: 'moon', color: '#aabbcc', radius: 1, parent: -1, ...extra })
+    const clean = (extra: object) => cleanGraph({ version: 1, vault: 'V', layout: 'system', nodes: [node(extra)], edges: [], selected: -1 }).nodes[0]!
+    expect(clean({ body: 'planet', urgency: 0.4567 })).toMatchObject({ body: 'planet', urgency: 0.457 })
+    // Out of range is pulled in; nothing else about the node changes.
+    expect(clean({ urgency: 7 }).urgency).toBe(1)
+    expect(clean({ urgency: -1 }).urgency).toBe(0)
+    // A name nobody knows, or not a number: left out, the scene still goes.
+    expect(clean({ body: 'comet' })).not.toHaveProperty('body')
+    expect(clean({ urgency: 'hot' })).not.toHaveProperty('urgency')
+    expect(clean({ urgency: Number.NaN })).not.toHaveProperty('urgency')
+    // An older build sends neither.
+    expect(clean({})).not.toHaveProperty('body')
+    expect(clean({})).not.toHaveProperty('urgency')
   })
 })
 

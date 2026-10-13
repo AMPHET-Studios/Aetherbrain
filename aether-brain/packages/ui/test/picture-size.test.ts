@@ -47,38 +47,39 @@ const vault = () =>
   )
 
 describe('picture sizes in the app', () => {
-  it('start large, cycle with z (medium → large → extra large), rebuild the graph and stay chosen', async () => {
+  it('start extra large, cycle with z (extra large → medium → large), rebuild the graph and stay chosen', async () => {
     const { s, press, storage } = await freshStore()
-    expect(s().settings.pictureSize).toBe('large')
-    expect(s().controller.pictureSize).toBe('large')
+    // The big files are planets drawn as extra-large thumbnails: that is where it starts.
+    expect(s().settings.pictureSize).toBe('xl')
+    expect(s().controller.pictureSize).toBe('xl')
     await s().openVault(vault())
     const before = s().graph
     press('z')
-    expect(s().settings.pictureSize).toBe('xl')
-    expect(s().controller.pictureSize).toBe('xl')
-    expect(s().controller.engine.pictureSize).toBe('xl')
+    expect(s().settings.pictureSize).toBe('medium')
+    expect(s().controller.pictureSize).toBe('medium')
+    expect(s().controller.engine.pictureSize).toBe('medium')
     // The layout spaces orbits by the size: a new graph went to the layout.
     expect(s().graph).not.toBe(before)
-    expect(s().toasts.at(-1)?.text).toMatch(/extra large icons/)
-    press('z')
-    expect(s().settings.pictureSize).toBe('medium')
+    expect(s().toasts.at(-1)?.text).toMatch(/medium icons/)
     press('z')
     expect(s().settings.pictureSize).toBe('large')
+    press('z')
+    expect(s().settings.pictureSize).toBe('xl')
     // Kept for next time.
-    expect(JSON.parse(storage.getItem('aether:settings') ?? '{}').pictureSize).toBe('large')
+    expect(JSON.parse(storage.getItem('aether:settings') ?? '{}').pictureSize).toBe('xl')
   })
 
   it('has a palette command per size, and ignores a size it does not know', async () => {
     const storage = new MemoryStorage()
     storage.setItem('aether:settings', JSON.stringify({ pictureSize: 'huge', v: 2 }))
     const { s, commands } = await freshStore(storage)
-    expect(s().settings.pictureSize).toBe('large')
-    const xl = commands.find((c) => c.id === 'picture-size-xl')!
-    expect(xl.title).toMatch(/extra large icons/)
-    await xl.run(s())
     expect(s().settings.pictureSize).toBe('xl')
+    const large = commands.find((c) => c.id === 'picture-size-large')!
+    expect(large.title).toMatch(/large icons/)
+    await large.run(s())
+    expect(s().settings.pictureSize).toBe('large')
     expect(commands.find((c) => c.id === 'picture-size')?.keys).toBe('z')
     s().setSettings({ pictureSize: 'giant' as never })
-    expect(s().settings.pictureSize).toBe('xl')
+    expect(s().settings.pictureSize).toBe('large')
   })
 })

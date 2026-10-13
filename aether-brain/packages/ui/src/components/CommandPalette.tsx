@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { AREA_LABELS, planetColor } from '@aether/graph'
+import { AREA_LABELS, starColor } from '@aether/graph'
 import type { SearchHit } from '@aether/core'
 import { findCommands, type Command } from '../commands'
 import { folderIndex, matchFolders } from '../folderSearch'
@@ -154,7 +154,7 @@ export function CommandPalette() {
               {row.kind === 'note' && <NoteRow hit={row.hit} />}
               {row.kind === 'folder' && (
                 <>
-                  <span className="mt-0.5 w-5 text-center" style={{ color: planetColor(row.path) }}>
+                  <span className="mt-0.5 w-5 text-center" style={{ color: starColor(row.path) }}>
                     ●
                   </span>
                   <span className="min-w-0 flex-1">

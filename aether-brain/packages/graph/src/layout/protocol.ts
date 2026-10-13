@@ -3,8 +3,9 @@
 /**
  * constellation — force layout clustered by PARA area
  * orbit         — force layout with time as radial rings
- * system        — solar system: the folder tree laid out analytically; folders
- *                 are stars/planets, notes are moons, children orbit parents
+ * system        — the cosmology (docs/COSMOLOGY.md): the folder tree laid out
+ *                 analytically; drives are galaxies, folders stars, big files
+ *                 planets, small files moons; children orbit parents
  */
 export type LayoutMode = 'constellation' | 'orbit' | 'system'
 
@@ -38,6 +39,10 @@ export interface LayoutNodeInput {
    * graph for the gallery only (it takes no place in its parent's system).
    */
   gallery?: { anchor: number; rank: number; only: boolean }
+  /** System layout: how soon it needs you, 0 to 1: its orbit's speed (a folder's: its whole system's, the star's brightness). */
+  urgency?: number
+  /** System layout: a leaf drawn as a planet (a big file) rather than a moon (a small one). */
+  planet?: boolean
 }
 
 export interface LayoutEdgeInput {

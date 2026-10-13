@@ -3,6 +3,7 @@ import { LinkResolver } from './resolve'
 import { asString } from '../markdown/frontmatter'
 import type { DailyBrief } from '../markdown/brief'
 import { isProjectNote, projectFolderOf } from '../markdown/projects'
+import { noteUrgency, systemUrgency } from '../markdown/urgency'
 import { AssetResolver, TODAY_ID, imageKey, imageTitle, isMediaPath, isVideoPath } from '../vault/assets'
 import { folderUniverse, selectFolders, type FolderSelectOptions } from '../vault/folders'
 import { ancestorsOf, areaFromFolder, folderDepth, folderKey, folderOf, normalizeFolderPath } from '../vault/paths'
@@ -62,6 +63,11 @@ export interface BuildGraphOptions {
   images?: ImageGraphOptions | null
   /** Add the Today hub (id `today:`) with beams to the notes of today's brief. Omit/null: no hub. */
   today?: TodayGraphOptions | null
+  /**
+   * Give every node its urgency on `date` (YYYY-MM-DD, local time): a note's from its open tasks, a picture's from
+   * the notes that embed it, a folder's from everything in its system. Omit/null: no node has one.
+   */
+  urgency?: { date: string } | null
 }
 
 function toTs(iso: string | null): number | null {
@@ -239,6 +245,7 @@ export function buildGraph(notes: Map<NoteId, ParsedNote>, opts: BuildGraphOptio
     : null
 
   if (opts.today) addTodayHub(nodes, edges, index, backlinks, outlinks, opts.today.brief, opts.folders ? folderKey('') : null)
+  if (opts.urgency) applyUrgency(nodes, index, notes, backlinks, opts.urgency.date)
 
   return {
     nodes,
@@ -252,6 +259,63 @@ export function buildGraph(notes: Map<NoteId, ParsedNote>, opts: BuildGraphOptio
     areaCounts,
     folderSelection: system?.selection ?? null,
     gallery: system?.gallery ?? null,
+  }
+}
+
+/**
+ * Urgency of every node (see `GraphNode.urgency`): notes from their tasks, pictures from the notes that embed them,
+ * folders from what is directly in them, deepest folders first so each system is complete before its parent reads it.
+ */
+function applyUrgency(
+  nodes: GraphNode[],
+  index: Map<NoteId, number>,
+  notes: Map<NoteId, ParsedNote>,
+  backlinks: Map<NoteId, Set<NoteId>>,
+  date: string,
+): void {
+  const u = new Float64Array(nodes.length)
+  for (let i = 0; i < nodes.length; i++) {
+    const n = nodes[i]!
+    if (n.kind === 'note') {
+      const note = notes.get(n.id)
+      u[i] = note ? noteUrgency(note, date) : 0
+    }
+  }
+  for (let i = 0; i < nodes.length; i++) {
+    const n = nodes[i]!
+    if (n.kind !== 'image') continue
+    let max = 0
+    for (const from of backlinks.get(n.id) ?? []) {
+      const j = index.get(from)
+      if (j !== undefined && u[j]! > max) max = u[j]!
+    }
+    u[i] = max
+  }
+  // Folders: everything directly in a folder (files and sub-systems) is read when its depth comes up.
+  const kids = new Map<number, number[]>()
+  const folders: number[] = []
+  for (let i = 0; i < nodes.length; i++) {
+    const n = nodes[i]!
+    if (n.folder) folders.push(i)
+    if (n.parent === null) continue
+    const p = index.get(n.parent)
+    if (p === undefined) continue
+    const list = kids.get(p)
+    if (list) list.push(i)
+    else kids.set(p, [i])
+  }
+  folders.sort((a, z) => nodes[z]!.folder!.depth - nodes[a]!.folder!.depth)
+  for (const f of folders) {
+    const list = kids.get(f)
+    if (!list) continue
+    const values = new Float64Array(list.length)
+    for (let k = 0; k < list.length; k++) values[k] = u[list[k]!]!
+    u[f] = systemUrgency(values)
+  }
+  for (let i = 0; i < nodes.length; i++) {
+    const n = nodes[i]!
+    if (n.kind === 'today' || n.kind === 'ghost') continue
+    n.urgency = Math.round(u[i]! * 1000) / 1000
   }
 }
 
@@ -581,6 +645,7 @@ function addFolderSystem(
         path,
         role,
         depth,
+        ...(role === 'root' && !opts.multiRoot ? { galaxy: true } : {}),
         projectId,
         inProject: ancestorsOf(path).some((a) => projectAt.has(a)),
         childFolders: selection.childCount.get(path) ?? 0,

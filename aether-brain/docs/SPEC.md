@@ -9,7 +9,7 @@ Aether Brain is a personal knowledge operating system whose primary interface is
 - A folder / PARA area is a cluster / constellation.
 - A tag is a colored field.
 - Time is an orbital layer.
-- In the **system layout** the folder tree is a set of solar systems: the vault (or each drive) is a sun, a project's home folder is a star, folders are planets, notes are moons.
+- In the **system layout** the folder tree is a cosmology (`docs/COSMOLOGY.md`): each drive (or the vault, when it is one folder) is a galaxy, every folder is a star (a project's home folder the biggest), big pictures, videos, 3D models and long notes are planets drawn as extra-large thumbnails, small files are moons. How soon something needs you (from its open tasks) is its orbit's speed and its star's brightness.
 - Capture, edit, search and wander all happen inside or beside that space.
 - Claude and ChatGPT can talk to the brain directly through a local MCP server (the **AI link**).
 

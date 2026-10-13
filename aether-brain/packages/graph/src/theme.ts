@@ -1,4 +1,4 @@
-import type { Area, GraphNode, NoteType } from '@aether/core'
+import { isPlanetNode, type Area, type GraphNode, type NoteType } from '@aether/core'
 import { Color } from 'three'
 
 /** Cosmic palette. Keep in sync with packages/ui/src/styles.css tokens. */
@@ -44,9 +44,9 @@ export const TYPE_COLORS: Record<NoteType, string> = {
 
 export const GHOST_COLOR = '#ff3e6c'
 
-/** Project folders: the stars of the system layout. */
+/** A project folder: the biggest, brightest star of the system layout (every folder is a star). */
 export const STAR_COLOR = '#ffcf6b'
-/** The vault root and its mounts (drives): the suns everything orbits. */
+/** The vault root and its mounts (drives): the galaxies everything orbits. */
 export const SUN_COLOR = '#fff1d6'
 /** The Today hub: aurora cyan, so it never reads as one of the gold stars. */
 export const TODAY_COLOR = '#8ff7ff'
@@ -69,6 +69,23 @@ export function planetColor(path: string): string {
   let hue = (h >>> 0) % 335
   if (hue >= 32) hue += 25
   return `hsl(${hue}, 42%, 62%)`
+}
+
+/**
+ * Star color for a folder: a stable hue in the warm band (ember to straw), so a star never reads as a planet and
+ * two folders still tell apart. A project star is STAR_COLOR.
+ */
+export function starColor(path: string): string {
+  let h = 2166136261
+  for (let i = 0; i < path.length; i++) {
+    h ^= path.charCodeAt(i)
+    h = Math.imul(h, 16777619)
+  }
+  h ^= h >>> 15
+  h = Math.imul(h, 0x2c1b3c6d)
+  h ^= h >>> 12
+  const hue = 16 + ((h >>> 0) % 44)
+  return `hsl(${hue}, 88%, 66%)`
 }
 
 export type ColorMode = 'area' | 'type' | 'tag' | 'age'
@@ -117,7 +134,7 @@ export function nodeBaseColor(
     const role = n.folder.role
     if (role === 'root' || role === 'mount') return cachedColor(SUN_COLOR)
     if (role === 'project') return cachedColor(STAR_COLOR)
-    return cachedColor(planetColor(n.folder.path))
+    return cachedColor(starColor(n.folder.path))
   }
   if (n.ghost) return cachedColor(GHOST_COLOR)
   switch (mode) {
@@ -150,26 +167,28 @@ export function isPictureSize(v: unknown): v is PictureSize {
   return v === 'medium' || v === 'large' || v === 'xl'
 }
 
+/** A small picture's radius (an icon, a sprite): it is a moon, not a planet. */
+export const MOON_PICTURE_RADIUS = 1.0
+
 /**
- * Visual radius in world units. Notes: hubs grow with sqrt(degree); MOCs get a
- * bonus. Folders by role: suns (root 8, mounts 6.5), project stars 5.5, and
- * planets that grow with how much they hold (1.6 to 4.2). The Today hub is a
- * fixed 4.6 (its beams must not inflate it) and pictures the radius of their
- * size (`pictures`, PICTURE_RADIUS). The system layout spaces orbits by these
- * radii, so bigger pictures get room of their own.
+ * Visual radius in world units (docs/COSMOLOGY.md). Galaxies (drives, a one-folder vault) are the biggest bodies; the
+ * origin of a multi-root vault is small. Stars grow with what they hold, a project a little more. A planet is
+ * a big picture, video or model (the radius of the picture size, extra large by default) or a document-sized note;
+ * a moon is every small file. The Today hub is a fixed 4.6. The system layout spaces orbits by these radii.
  */
 export function nodeRadius(n: GraphNode, pictures: PictureSize = 'medium'): number {
   if (n.kind === 'today') return 4.6
-  if (n.kind === 'image') return PICTURE_RADIUS[pictures] ?? PICTURE_RADIUS.medium
+  if (n.kind === 'image') return isPlanetNode(n) ? (PICTURE_RADIUS[pictures] ?? PICTURE_RADIUS.xl) : MOON_PICTURE_RADIUS
   if (n.folder) {
     const f = n.folder
-    if (f.role === 'root') return 8
-    if (f.role === 'mount') return 6.5
-    if (f.role === 'project') return 5.5
-    return Math.min(4.2, Math.max(1.6, 1.6 + 0.55 * Math.log2(1 + f.totalNotes + f.childFolders)))
+    if (f.role === 'mount') return 16
+    if (f.role === 'root') return f.galaxy ? 16 : 6
+    const held = Math.log2(1 + f.totalNotes + f.childFolders + 0.25 * f.images)
+    const star = Math.min(8, 3.4 + 0.6 * held)
+    return f.role === 'project' ? star + 1.2 : star
   }
-  if (n.ghost) return 0.8
-  const base = 1.0 + 0.5 * Math.sqrt(n.degree)
-  const bonus = n.type === 'moc' ? 1.3 : n.type === 'project' || n.type === 'area' ? 1.1 : 1
-  return Math.min(5.5, base * bonus)
+  if (n.ghost) return 0.7
+  const links = Math.sqrt(n.degree)
+  if (isPlanetNode(n)) return Math.min(4.2, 2.4 + 0.3 * links)
+  return Math.min(2.0, 0.8 + 0.18 * links)
 }

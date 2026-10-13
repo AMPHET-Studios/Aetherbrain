@@ -1,12 +1,13 @@
 /**
  * Solar-system layout: the folder tree laid out analytically, no physics.
  *
- * Every node orbits its structural parent. Leaf moons (notes and ghosts
- * without children of their own) sit on the inner rings, or on a Fibonacci
- * shell when there are more than 24 of them; planets (folders, notes with
- * ghost moons) sit on the outer rings, biggest first. Bodies never overlap:
- * ring radii are spaced by the extents (subtree radii) of the bodies on them,
- * and angles within a ring are allocated by extent. Orbit planes and start
+ * Every node orbits its structural parent (docs/COSMOLOGY.md): a drive is a galaxy (what sits in it lies on a
+ * flat disc), a folder is a star, a big file is a planet, a small file is a moon. Around a star, from the inside
+ * out: urgent files (the hottest, fastest), small files (on rings, or on a Fibonacci shell when there are more than
+ * 24 of them), big files, then the stars of its sub-folders. Bodies of one heat band share rings, so a ring has
+ * one speed and **orbit speed is urgency** (`urgencySpeed`). Bodies never overlap: ring radii are spaced by the
+ * extents (subtree radii) of the bodies on them, and angles within a ring are allocated by extent. Orbit planes
+ * and start
  * phases come from hashes of the node ids, so the same vault always lays out
  * the same way. The Today hub (kind 3) is the exception: it hangs still,
  * straight above the root sun, outside every ring. So are the cards of an
@@ -37,6 +38,10 @@ export interface SystemInput {
   galleryRank?: Int32Array
   /** 1 for a card in the graph for the gallery only: it takes no place in its parent's system. */
   galleryOnly?: Uint8Array
+  /** How soon each node needs you, 0 to 1: the speed of its orbit; a folder's is its whole system's (the star's brightness). */
+  urgency?: Float32Array
+  /** 1 for a leaf drawn as a planet (a big file), 0 or absent for a moon (a small one). */
+  planet?: Uint8Array
 }
 
 export interface SystemLayout {
@@ -108,6 +113,20 @@ const GALLERY_SPIN = 0.5
 /** Angular speed of an orbit of radius r: inner orbits run faster. */
 export function orbitSpeed(r: number): number {
   return 0.9 / Math.sqrt(Math.max(r, 4))
+}
+
+/** A leaf at least this urgent leaves the crowd for its own close, fast ring. */
+const URGENT_LEAF = 0.55
+/** Inclination of what orbits a galaxy: nearly flat, so a drive reads as a disc. */
+const GALAXY_INCLINATION = 0.05
+
+/**
+ * What an orbit's speed is multiplied by for its urgency (0 to 1): a calm orbit crawls at 0.55, an overdue one
+ * runs at 2. The speed is never zero: the sky stays alive.
+ */
+export function urgencySpeed(u: number): number {
+  const v = Number.isFinite(u) ? Math.min(1, Math.max(0, u)) : 0
+  return 0.55 + 1.45 * v
 }
 
 /** Stable hash of a string to [0, 1). FNV-1a with a murmur3 finalizer. */
@@ -233,9 +252,27 @@ export function computeSystemLayout(input: SystemInput): SystemLayout {
     return input.kind[i] === KIND_IMAGE ? body * PICTURE_FOOTPRINT : body
   }
   const hasChildren = (i: number): boolean => childStart[i + 1]! > childStart[i]!
+  /** Small files (and ghosts) on the inner rings or a shell. */
   const moons: number[] = []
-  const planets: number[] = []
-  const bySize = (a: number, b: number): number => extent[b]! - extent[a]! || a - b
+  /** Big files: the planets, outside the moons. */
+  const bodies: number[] = []
+  /** Urgent files: closest in, fastest. */
+  const fast: number[] = []
+  /** Folders and anything with children of its own: the stars, outermost. */
+  const systems: number[] = []
+  /** Urgency of a node, 0 to 1 (0 when the graph carries none). */
+  const urgencyOf = (i: number): number => {
+    const u = input.urgency?.[i]
+    return u !== undefined && Number.isFinite(u) ? Math.min(1, Math.max(0, u)) : 0
+  }
+  /** Heat band: bodies of one band share rings, so a ring has one speed and its bodies never pass through each other. */
+  const bandOf = (i: number): number => {
+    const u = urgencyOf(i)
+    return u >= 0.75 ? 3 : u >= 0.5 ? 2 : u >= 0.2 ? 1 : 0
+  }
+  const isPlanet = (i: number): boolean => input.planet?.[i] === 1
+  /** Hottest band first, then biggest, then by index (stable). */
+  const byHeat = (a: number, b: number): number => bandOf(b) - bandOf(a) || extent[b]! - extent[a]! || a - b
   const q = [0, 0, 0, 1]
 
   /**
@@ -259,7 +296,9 @@ export function computeSystemLayout(input: SystemInput): SystemLayout {
    */
   const place = (p: number, kids: ArrayLike<number>, base: number, dir: number, seed: number): number => {
     moons.length = 0
-    planets.length = 0
+    bodies.length = 0
+    fast.length = 0
+    systems.length = 0
     let hub = -1
     for (let k = 0; k < kids.length; k++) {
       const c = kids[k]!
@@ -268,11 +307,15 @@ export function computeSystemLayout(input: SystemInput): SystemLayout {
       if (p >= 0 && input.kind[c] === KIND_TODAY) {
         hangAbove(c, p)
         hub = c
-      }
-      else if (!hasChildren(c) && input.kind[c] !== KIND_FOLDER) moons.push(c)
-      else planets.push(c)
+      } else if (hasChildren(c) || input.kind[c] === KIND_FOLDER) systems.push(c)
+      else if (urgencyOf(c) >= URGENT_LEAF) fast.push(c)
+      else if (isPlanet(c)) bodies.push(c)
+      else moons.push(c)
     }
-    planets.sort(bySize)
+    fast.sort(byHeat)
+    moons.sort(byHeat)
+    bodies.sort(byHeat)
+    systems.sort(byHeat)
     let outer = 0
     let ringNo = 0
 
@@ -293,8 +336,11 @@ export function computeSystemLayout(input: SystemInput): SystemLayout {
         let maxE = extent[list[j]!]!
         let r = base + maxE
         let sum = ringAngle(maxE, r)
+        // A ring takes bodies of one heat band only: its orbit has one speed, and that speed is the urgency.
+        const band = bandOf(list[start]!)
         j++
         while (j < list.length) {
+          if (bandOf(list[j]!) !== band) break
           const e = extent[list[j]!]!
           if (e > maxE) {
             // A bigger body widens the ring: re-measure everyone already on it.
@@ -314,7 +360,10 @@ export function computeSystemLayout(input: SystemInput): SystemLayout {
         }
         // Spread the ring evenly: each body gets its share of the circle by extent.
         const scale = TAU / sum
-        const w = orbitSpeed(r) * dir
+        // One speed for the ring: its orbit's urgency is the mean of what rides it.
+        let heat = 0
+        for (let k = start; k < j; k++) heat += urgencyOf(list[k]!)
+        const w = orbitSpeed(r) * dir * urgencySpeed(heat / (j - start))
         let a0 = (seed + ringNo * 0.6180339887) * TAU
         for (let k = start; k < j; k++) {
           const c = list[k]!
@@ -329,13 +378,18 @@ export function computeSystemLayout(input: SystemInput): SystemLayout {
       }
     }
 
+    fillRings(fast)
     if (moons.length > SHELL_ABOVE) {
       // Too many moons for rings: a Fibonacci sphere that turns rigidly.
       const m = moons.length
       let maxE = 0
-      for (const c of moons) maxE = Math.max(maxE, extent[c]!)
+      let heat = 0
+      for (const c of moons) {
+        maxE = Math.max(maxE, extent[c]!)
+        heat += urgencyOf(c)
+      }
       const R = Math.max(base + maxE, ((2 * maxE + GAP) * Math.sqrt(m)) / FIB_SPACING)
-      const w = orbitSpeed(R) * dir
+      const w = orbitSpeed(R) * dir * urgencySpeed(heat / m)
       const a0 = seed * TAU
       for (let k = 0; k < m; k++) {
         const c = moons[k]!
@@ -348,7 +402,7 @@ export function computeSystemLayout(input: SystemInput): SystemLayout {
         shellDir[c * 3 + 2] = Math.sin(th) * rr
         setOrbit(c, R, a0, w)
       }
-      outer = R + maxE
+      outer = Math.max(outer, R + maxE)
       base = R + maxE + GAP
       // A shell covers the poles too: the hub hangs clear above it. (Rings stay
       // within 0.45 rad of the equator, so their moons never come near the axis.)
@@ -356,7 +410,8 @@ export function computeSystemLayout(input: SystemInput): SystemLayout {
     } else {
       fillRings(moons)
     }
-    fillRings(planets)
+    fillRings(bodies)
+    fillRings(systems)
     return outer
   }
 
@@ -369,7 +424,9 @@ export function computeSystemLayout(input: SystemInput): SystemLayout {
       continue
     }
     const id = input.ids[p] ?? String(p)
-    const inc = hash01(id, 1) * MAX_INCLINATION
+    // What orbits a galaxy (a drive, a vault root) lies nearly flat: a disc.
+    const flat = input.role[p] === 0 || input.role[p] === 1
+    const inc = hash01(id, 1) * (flat ? GALAXY_INCLINATION : MAX_INCLINATION)
     const az = hash01(id, 2) * TAU
     const s = Math.sin(inc / 2)
     q[0] = Math.cos(az) * s

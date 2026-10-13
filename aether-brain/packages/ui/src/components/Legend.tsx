@@ -64,14 +64,17 @@ export function Legend() {
           )}
           {system && (
             <>
-              <span title="A project's home folder, or a drive / vault root">
-                <span style={{ color: STAR_COLOR, textShadow: `0 0 8px ${STAR_COLOR}` }}>★</span> star · project or drive
+              <span title="A drive (or the whole vault): the folders on it lie on its disc">
+                <span style={{ color: SUN_COLOR, textShadow: `0 0 8px ${SUN_COLOR}` }}>◉</span> galaxy · drive
               </span>
-              <span title="A folder">
-                <span style={{ color: SUN_COLOR }}>●</span> planet · folder
+              <span title="A folder. The brighter the star, the more urgent its whole system; a project is the biggest">
+                <span style={{ color: STAR_COLOR, textShadow: `0 0 8px ${STAR_COLOR}` }}>★</span> star · folder
               </span>
-              <span title="A note">
-                <span className="text-ink">·</span> moon · note
+              <span title="A picture, video or big note, as an extra-large thumbnail. A faster orbit is more urgent">
+                <span style={{ color: IMAGE_COLOR }}>●</span> planet · big file
+              </span>
+              <span title="Any small file">
+                <span className="text-ink">·</span> moon · small file
               </span>
             </>
           )}

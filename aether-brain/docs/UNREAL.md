@@ -1,6 +1,7 @@
 # Aether Brain in Unreal Engine
 
-The **Unreal companion** draws your brain in Unreal Engine 5: the same suns, stars, planets and moons, in the same
+The **Unreal companion** draws your brain in Unreal Engine 5: the same galaxies, stars, planets and moons (what each one
+is, and how urgency becomes speed and brightness, is [COSMOLOGY.md](COSMOLOGY.md)), in the same
 places and colours, live. Every glow blooms, the orbits turn, and a whole [space](#the-space-around-it) hangs around
 it: layers of stars, nebulae and far galaxies that slide against each other as you fly (parallax), asteroids going
 round the brain and zooming through it, shooting stars, and alien ships. You fly through it with the mouse and WASD.

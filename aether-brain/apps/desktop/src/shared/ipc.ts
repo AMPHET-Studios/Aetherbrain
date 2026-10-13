@@ -73,7 +73,19 @@ export interface ForgeFrameDto {
 /* ---- the companion link (the Unreal viewer) ---- */
 
 /** What a node is, for a viewer drawing it. */
+/**
+ * What a node is, for a viewer drawing it: the original names, unchanged for the viewers built to them ('sun': the
+ * vault or a drive, 'star': a project folder, 'planet': any other folder, 'moon': a note). The cosmology's own names
+ * are `CompanionBody`.
+ */
 export type CompanionKind = 'sun' | 'star' | 'planet' | 'moon' | 'ghost' | 'picture' | 'today'
+
+/**
+ * What a node is in the cosmology (docs/COSMOLOGY.md): a drive or a one-folder vault is a 'galaxy', the origin of
+ * several drives only an 'origin', every folder a 'star', a big picture, video, model or long note a 'planet', every
+ * small file a 'moon'; 'ghost' and 'hub' (the Today hub) as before.
+ */
+export type CompanionBody = 'galaxy' | 'origin' | 'star' | 'planet' | 'moon' | 'ghost' | 'hub'
 
 /** A node of the brain as the brain window draws it. */
 export interface CompanionNodeDto {
@@ -86,6 +98,13 @@ export interface CompanionNodeDto {
   radius: number
   /** Index of its structural parent in `nodes` (the system layout's star, planet …), -1 for none. */
   parent: number
+  /** The cosmology's name for it (see `CompanionBody`). Absent from older builds: use `kind`. */
+  body?: CompanionBody
+  /**
+   * How soon it needs you, 0 to 1: its orbit's speed (a star: its whole system's, its brightness). Absent from older
+   * builds; a viewer that does not know it draws every orbit at one speed.
+   */
+  urgency?: number
 }
 
 /**

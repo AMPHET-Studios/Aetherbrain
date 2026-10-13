@@ -21,7 +21,6 @@
  * them by that chain (a few hundred nodes at most). Pure (no electron, no three.js): unit-tested.
  */
 import type { GraphData, GraphNode, NoteId } from '@aether/core'
-import { companionKind } from './companion-scene'
 
 export interface SceneBudget {
   /** The most nodes kept by importance (suns, the Today hub and the selection come on top, never displaced). */
@@ -107,7 +106,17 @@ const MOON = 3
 const GHOST = 4
 const PICTURE = 5
 const TODAY = 6
-const CLASS_OF: Record<ReturnType<typeof companionKind>, number> = { sun: SUN, star: STAR, planet: PLANET, moon: MOON, ghost: GHOST, picture: PICTURE, today: TODAY }
+/**
+ * What a node is in the tree, for the budget: a root or drive (SUN), a project folder (STAR), any other folder (PLANET),
+ * a note (MOON). These are structural classes, not the names a viewer draws them with (companionKind: every folder is a
+ * star there): the cut ranks folders against each other and keeps the chain of folders above whatever it keeps.
+ */
+function structuralClass(n: GraphNode): number {
+  if (n.kind === 'today') return TODAY
+  if (n.kind === 'image') return PICTURE
+  if (n.folder) return n.folder.role === 'root' || n.folder.role === 'mount' ? SUN : n.folder.role === 'project' ? STAR : PLANET
+  return n.ghost ? GHOST : MOON
+}
 
 /** A stable total order: bigger score first, then id, so an unrelated edit never reshuffles the kept set. */
 function byScore(score: Float64Array, ids: string[]) {
@@ -124,7 +133,7 @@ export function planBase(graph: GraphData, B: SceneBudget = COMPANION_BUDGET): B
   for (let i = 0; i < n; i++) {
     const nd = nodes[i]!
     ids[i] = nd.id
-    cls[i] = CLASS_OF[companionKind(nd)]
+    cls[i] = structuralClass(nd)
     parent[i] = nd.parent === null ? -1 : (graph.index.get(nd.parent) ?? -1)
   }
   const E = graph.edges.length

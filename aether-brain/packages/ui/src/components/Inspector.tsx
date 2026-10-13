@@ -17,7 +17,7 @@ import {
   type GraphNode,
   type NoteId,
 } from '@aether/core'
-import { AREA_LABELS, IMAGE_COLOR, STAR_COLOR, SUN_COLOR, TODAY_COLOR, planetColor } from '@aether/graph'
+import { AREA_LABELS, IMAGE_COLOR, STAR_COLOR, SUN_COLOR, TODAY_COLOR, starColor } from '@aether/graph'
 import { listBoards } from '../board/boardRegistry'
 import { picturesUnder, useAether } from '../store'
 import { cx, plural, relativeTime, truncate, MOD } from '../util'
@@ -239,12 +239,12 @@ export function linkRow(
   if (isTodayId(id)) return { kind: 'today', label: '☀ Today', hint: "Click: select the daily brief", dot: TODAY_COLOR }
   if (isFolderId(id)) {
     const path = folderPathOf(id)
-    return { kind: 'folder', label: `● ${path.slice(path.lastIndexOf('/') + 1) || 'Vault'}`, hint: 'Click: select · double-click: expand', dot: planetColor(path) }
+    return { kind: 'folder', label: `● ${path.slice(path.lastIndexOf('/') + 1) || 'Vault'}`, hint: 'Click: select · double-click: expand', dot: starColor(path) }
   }
   return { kind: 'note', label: meta?.title ?? id, hint: 'Click: select · double-click: open', dotClass: `bg-${meta?.area ?? 'untagged'}` }
 }
 
-const ROLE_LABEL = { root: 'Vault', mount: 'Drive · root folder', project: '★ Project star', folder: 'Folder' } as const
+const ROLE_LABEL = { root: 'Vault', mount: 'Galaxy · drive', project: '★ Project star', folder: 'Star · folder' } as const
 
 /**
  * Inspector for a folder node of the system layout: where it is, what is in
@@ -318,7 +318,7 @@ function FolderInspector({ node }: { node: GraphNode }) {
     setAsked((n) => n + 1)
   }, [formRequest, readOnly, onDisk, canMkdir])
   const role = info.role === 'folder' && info.inProject ? 'Planet of a project' : ROLE_LABEL[info.role]
-  const color = info.role === 'project' ? STAR_COLOR : info.role === 'folder' ? planetColor(info.path) : SUN_COLOR
+  const color = info.role === 'project' ? STAR_COLOR : info.role === 'folder' ? starColor(info.path) : SUN_COLOR
   const projectNote = info.projectId ? notes.get(info.projectId) : undefined
   const where = info.role === 'root' ? (adapter?.location ?? '') : `${info.path}/`
 
@@ -460,7 +460,7 @@ function FolderInspector({ node }: { node: GraphNode }) {
           <Section title={`Planets · ${children.planets.length}`}>
             {children.planets.map((p) => (
               <div key={p.id} className="flex items-center gap-2 py-0.5">
-                <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: p.folder?.role === 'project' ? STAR_COLOR : planetColor(p.folder?.path ?? '') }} />
+                <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: p.folder?.role === 'project' ? STAR_COLOR : starColor(p.folder?.path ?? '') }} />
                 <button
                   type="button"
                   className="min-w-0 flex-1 truncate text-left text-[12.5px] text-dim hover:text-ink"
