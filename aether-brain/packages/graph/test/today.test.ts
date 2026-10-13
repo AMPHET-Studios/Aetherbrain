@@ -111,7 +111,7 @@ describe('Today hub and picture moons: controller', () => {
 })
 
 describe('Today hub and picture moons: system layout through the engine', () => {
-  it('hangs the hub above the sun and makes pictures moons of their folder', async () => {
+  it('hangs the hub above the galaxy and has pictures orbit their folder', async () => {
     const sent: MainToWorker[] = []
     vi.stubGlobal(
       'Worker',
@@ -148,7 +148,9 @@ describe('Today hub and picture moons: system layout through the engine', () => 
     for (const t of [0, 12]) {
       systemPositions(layout, t, pos)
       expect(pos[hubI * 3]! - pos[rootI * 3]!).toBeCloseTo(0, 4)
-      expect(pos[hubI * 3 + 1]! - pos[rootI * 3 + 1]!).toBeCloseTo(8 * 2.4 + 30, 4)
+      // Straight above the galaxy: its radius times the first ring factor, plus the lift.
+      expect(nodes[rootI]!.radius).toBe(16)
+      expect(pos[hubI * 3 + 1]! - pos[rootI * 3 + 1]!).toBeCloseTo(nodes[rootI]!.radius * 2.4 + 30, 4)
       expect(pos[hubI * 3 + 2]! - pos[rootI * 3 + 2]!).toBeCloseTo(0, 4)
       const d = Math.hypot(pos[gateI * 3]! - pos[artI * 3]!, pos[gateI * 3 + 1]! - pos[artI * 3 + 1]!, pos[gateI * 3 + 2]! - pos[artI * 3 + 2]!)
       expect(d).toBeCloseTo(layout.orbitRadius[gateI]!, 3)

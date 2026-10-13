@@ -174,7 +174,7 @@ export const TOOLS = {
     title: 'Wellbeing playbook',
     write: false,
     description:
-      "Use this when you need the evidence behind wellbeing advice, or the user's own plan: their copy of the Wellbeing playbook (sleep, movement, stress, early warning signs plan, recovery, work and creativity, family, crisis lines), or one section of it with topic.",
+      "Use this when you need the evidence behind wellbeing advice, or the user's own plan: their copy of the Wellbeing playbook (sleep, movement, stress, early warning signs plan, recovery, work and creativity, family, the people they lean on), or one section of it with topic.",
   },
   capture: {
     title: 'Quick capture',
@@ -595,7 +595,7 @@ export function createMcpServer(brain: Brain, opts: McpServerOptions): McpServer
 
   tool(
     'wellbeing_playbook',
-    { topic: oneLine().optional().describe('Only the section whose heading contains this, e.g. "sleep", "early warning", "family", "crisis".') },
+    { topic: oneLine().optional().describe('Only the section whose heading contains this, e.g. "sleep", "early warning", "family".') },
     READ,
     async ({ topic }) => {
       const r = await brain.playbook(topic)

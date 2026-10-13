@@ -237,7 +237,7 @@ Read tools (always available):
 | `search` / `fetch` | The same search and read in the shape ChatGPT's connectors expect |
 | `about_me` | What you asked your brain to remember about you (`Me/About me`), which parts are still empty, and your last two weeks of check-ins |
 | `my_trends` | Your check-ins over 7–90 days: the last week against the weeks before (mood, sleep, energy, stress, medication), with plain-fact notices |
-| `wellbeing_playbook` | Your Wellbeing playbook (or one section of it): the evidence behind wellbeing advice, your early warning signs plan, crisis lines |
+| `wellbeing_playbook` | Your Wellbeing playbook (or one section of it): the evidence behind wellbeing advice, your early warning signs plan, the people you lean on |
 
 Write tools (hidden when the link is read-only):
 

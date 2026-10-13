@@ -26,7 +26,7 @@ import {
   Vector3,
 } from 'three'
 import type { CameraControlsImpl } from '@react-three/drei'
-import type { GraphData, GraphNode, NoteId } from '@aether/core'
+import { isPlanetNode, type GraphData, type GraphNode, type NoteId } from '@aether/core'
 import { BrainController, DEFAULT_FAR, DEFAULT_MAX_DISTANCE, cameraRange } from '../BrainController'
 import { GALLERY_CHECK_MS, easeGrow, nearestStar, stepGrow } from '../gallery'
 import type { LayoutEngine } from '../layout/LayoutEngine'
@@ -39,7 +39,7 @@ import {
   TODAY_COLOR,
   nodeBaseColor,
   nodeRadius,
-  planetColor,
+  starColor,
   tagColor,
   type PictureSize,
 } from '../theme'
@@ -491,7 +491,7 @@ function buildBuffers(graph: GraphData, pictures: PictureSize): Buffers {
     if (f) {
       role[i] = ROLE_CODES[f.role] ?? ROLE_FOLDER
       if (f.role !== 'folder') landmarks.push(i)
-      labelColors[i] = f.role === 'folder' ? planetColor(f.path) : f.role === 'project' ? STAR_COLOR : SUN_COLOR
+      labelColors[i] = f.role === 'folder' ? starColor(f.path) : f.role === 'project' ? STAR_COLOR : SUN_COLOR
     }
     let label = n.ghost ? `+ ${n.title}` : n.title
     if (f?.role === 'project') label = `★ ${label}`
@@ -1030,10 +1030,20 @@ const IDLE_GLOW = 1.35
 const NEIGHBOR_GLOW = 1.5
 const HOVER_GLOW = 1.7
 const SELECTED_GLOW = 1.9
-/** Folders by role: suns (root, mounts) and project stars bloom; planets read as solid bodies. */
-const SUN_GLOW = 2.2
-const STAR_GLOW = 2.4
+/** Galaxies (the vault root, the drives) bloom steadily; every folder is a star whose glow follows its system's urgency. */
+const GALAXY_GLOW = 2.2
+/** A calm star's glow (under the bloom threshold: a body, not a flare), what a fully urgent system adds (it blooms), and where a project star starts (the bigger, brighter one). */
+const STAR_GLOW_CALM = 0.85
+const STAR_GLOW_HEAT = 1.25
+const PROJECT_GLOW_CALM = 1.15
+/** Big files (planets) are solid bodies, under the bloom threshold. */
 const PLANET_GLOW = 0.95
+
+/** Brightness of a star for the urgency (0 to 1) of its whole system. */
+function starGlow(urgency: number, project: boolean): number {
+  const u = Math.min(1, Math.max(0, urgency))
+  return (project ? PROJECT_GLOW_CALM : STAR_GLOW_CALM) + STAR_GLOW_HEAT * u
+}
 /** The Today hub outshines the stars (and breathes: the core pulses above glow 1.5). */
 const TODAY_GLOW = 2.6
 /** Picture moons are solid and stay under the bloom threshold: their pale color would smear. */
@@ -1102,12 +1112,18 @@ function recolor(b: Buffers, c: BrainController, neighbors: Set<number>, labelSe
     } else if (node.kind === 'image') {
       solid = 1
       gl = i === selI ? IMAGE_GLOW + 0.25 : i === hovI ? IMAGE_GLOW + 0.15 : neighbors.has(i) ? IMAGE_GLOW + 0.07 : IMAGE_GLOW
-    } else if (role === ROLE_FOLDER) {
+    } else if (role === ROLE_FOLDER || role === ROLE_PROJECT) {
+      // A star, as bright as the urgency of its whole system.
+      const star = starGlow(node.urgency ?? 0, role === ROLE_PROJECT)
+      gl = i === selI ? star + 0.4 : i === hovI ? star + 0.2 : neighbors.has(i) ? star + 0.1 : star
+    } else if (role >= 0) {
+      // A galaxy.
+      gl = i === selI ? GALAXY_GLOW + 0.4 : i === hovI ? GALAXY_GLOW + 0.2 : GALAXY_GLOW
+    } else if (!node.ghost && isPlanetNode(node)) {
+      // A document-sized note: a solid planet.
       solid = 1
       gl = i === selI ? 1.2 : i === hovI ? 1.1 : neighbors.has(i) ? 1.02 : PLANET_GLOW
-    } else if (role >= 0) {
-      const star = role === ROLE_PROJECT ? STAR_GLOW : SUN_GLOW
-      gl = i === selI ? star + 0.4 : i === hovI ? star + 0.2 : star
+      b.labelColors[i] = c.colorMode === 'area' ? AREA_COLORS[node.area] : '#e8ecff'
     } else {
       if (i === selI) gl = SELECTED_GLOW
       else if (i === hovI) gl = HOVER_GLOW

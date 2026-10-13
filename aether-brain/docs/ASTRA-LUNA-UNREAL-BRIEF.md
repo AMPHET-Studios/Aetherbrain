@@ -40,7 +40,7 @@ Aether Brain is a local-first 3D second brain. Markdown files in a folder (or se
 
 - a note is a neuron: a small glowing sphere, called a moon
 - a [[wikilink]] is a synapse: a thin glowing line, with light pulses travelling along it for the selected note
-- a folder is a planet; a project folder is a star (★) that blooms; the vault or a drive is a sun
+- a drive (or the whole vault) is a galaxy; a folder is a star (a project folder the brightest); a big picture, video, 3D model or long note is a planet; every small file is a moon; urgency is orbit speed and star brightness (docs/COSMOLOGY.md is the contract)
 - a picture is a moon showing its thumbnail; a video shows one still frame with a ▶ badge and is never played inside the brain
 - Today (☀) is a hub above the sun with beams to every note that holds one of today's tasks
 - tags are coloured fields; in the orbit layout, a note's age is its orbital ring

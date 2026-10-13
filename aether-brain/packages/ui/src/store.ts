@@ -207,7 +207,7 @@ const LAYOUTS: LayoutMode[] = ['constellation', 'orbit', 'system']
 const LAYOUT_TOASTS: Record<LayoutMode, string> = {
   constellation: 'Constellation layout — clustered by area',
   orbit: 'Orbit layout — time as rings, newest at the core',
-  system: 'System layout — folders are stars and planets, notes are moons',
+  system: 'System layout — drives are galaxies, folders are stars, big files are planets, small files are moons',
 }
 const DEFAULT_SETTINGS: Settings = {
   colorMode: 'area',
@@ -219,7 +219,7 @@ const DEFAULT_SETTINGS: Settings = {
   motion: true,
   imageMoons: true,
   thumbnails: true,
-  pictureSize: 'large',
+  pictureSize: 'xl',
   todayHub: true,
   starGalleries: true,
   v: SETTINGS_VERSION,
@@ -919,7 +919,11 @@ export const useAether = create<AetherState>()((set, get) => {
     const brief = shown && sameBrief(shown, fresh) ? shown : fresh
     builtBrief = brief
     const system = settings.layoutMode === 'system'
-    const opts: BuildGraphOptions = { images: { all: assets, moons: system && settings.imageMoons, gallery: system ? get().gallery : null } }
+    const opts: BuildGraphOptions = {
+      images: { all: assets, moons: system && settings.imageMoons, gallery: system ? get().gallery : null },
+      // Orbit speed and star brightness: how soon each thing needs you, from its open tasks.
+      urgency: { date },
+    }
     if (settings.todayHub) opts.today = { brief }
     if (!system) return opts
     const mountLabels: Record<string, string> = {}

@@ -44,7 +44,7 @@ Legend chips (bottom-left): click an area or tag to filter (dims everything else
 
 ## System layout (folders as solar systems)
 
-The default layout. The vault is the sun at the centre; with several roots (e.g. `D:\` and `F:\`) each drive is a sun of its own. A project's home folder is a **★ star**, folders are **● planets** (folders inside folders are their moons) and notes are the small **· moons** orbiting the folder they live in.
+The default layout, a cosmology (see [COSMOLOGY.md](COSMOLOGY.md)). Each drive is a **◉ galaxy** (several roots, e.g. `D:\` and `F:\`, are several galaxies); every folder is a **★ star**, a project's home folder the biggest; pictures, videos and long notes are **● planets** drawn as extra-large thumbnails; small files are the **· moons** orbiting the folder they live in. A **faster orbit** is a more urgent file and a **brighter star** a more urgent system: both come from the open tasks in your notes.
 
 | Key         | Action                                                            |
 | ----------- | ----------------------------------------------------------------- |

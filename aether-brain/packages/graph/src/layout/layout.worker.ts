@@ -332,8 +332,12 @@ function enterSystem(from: Float32Array, known: Uint8Array | null, keepOffsets: 
   const gallery = new Int32Array(n).fill(-1)
   const galleryRank = new Int32Array(n)
   const galleryOnly = new Uint8Array(n)
+  const urgency = new Float32Array(n)
+  const planet = new Uint8Array(n)
   for (let i = 0; i < n; i++) {
     const d = inputs[i]!
+    urgency[i] = d.urgency ?? 0
+    planet[i] = d.planet ? 1 : 0
     parent[i] = d.parent
     kind[i] = d.kind
     role[i] = d.role
@@ -345,7 +349,7 @@ function enterSystem(from: Float32Array, known: Uint8Array | null, keepOffsets: 
       galleryOnly[i] = d.gallery.only ? 1 : 0
     }
   }
-  const next = computeSystemLayout({ parent, kind, role, radius, ids, gallery, galleryRank, galleryOnly })
+  const next = computeSystemLayout({ parent, kind, role, radius, ids, gallery, galleryRank, galleryOnly, urgency, planet })
 
   const nextOffsets = new Float32Array(n * 3)
   if (keepOffsets && offsets.length) {
