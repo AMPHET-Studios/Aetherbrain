@@ -23,6 +23,12 @@ A file is a **planet** when it is worth looking at as itself:
 
 Everything else is a **moon**: notes, ghosts (links to notes that do not exist yet), icons and sprites. Folders and the Today hub are never either.
 
+### What a model looks like
+
+A `.glb` (binary glTF, one self-contained file) is drawn as one still by the desktop app itself. The thumbnail helper has no GPU, so a small software rasterizer in its preload draws the model's triangles from a fixed side (a little off the front and above, with one key light), in its materials' base colours (a textured material in its texture's average colour), on a dark ground. A dark model is lifted to a readable level, never by more than three times.
+
+What it does not do, said plainly: textures are not mapped; skins, animation and lights are ignored (the bind pose is drawn); compressed (Draco, meshopt) and sparse geometry is skipped; and a file over 64 MB gets no still (it is still a planet, without a picture). The production viewer is free to draw the real model. The planet and moon rule above is the contract, not the still.
+
 ## Urgency
 
 Urgency is a number from 0 to 1: how soon something needs you. It is derived from the **open tasks** a note holds and from nothing else (`packages/core/src/markdown/urgency.ts`); nothing is written anywhere.

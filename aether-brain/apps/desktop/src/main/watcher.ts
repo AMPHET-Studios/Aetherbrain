@@ -19,7 +19,7 @@
 import { promises as fs, watch as nodeWatch, type Dirent, type FSWatcher, type Stats } from 'node:fs'
 import path from 'node:path'
 import type { VaultChangeDto } from '../shared/ipc.js'
-import { isMediaName, isNoteName, isVideoName, within, type FsVault, type MountedRoot } from './fsvault.js'
+import { isAssetName, isNoteName, isVideoName, within, type FsVault, type MountedRoot } from './fsvault.js'
 import { installKind, isInstallMarker } from './installs.js'
 
 /** A write we made ourselves; its watcher echo is swallowed for SELF_WINDOW ms. */
@@ -560,7 +560,7 @@ export class VaultWatcher {
     const isFile = st?.isFile() ?? false
     const name = path.basename(abs)
     const isNote = isFile && isNoteName(name)
-    const isImage = isFile && this.trackImages && isMediaName(name)
+    const isImage = isFile && this.trackImages && isAssetName(name)
     // A game or program being installed into a folder the brain shows: once its folder looks like one, it goes.
     if (isFile && !isNote && !isImage && isInstallMarker(name) && (await this.becameInstall(parentOf(p), path.dirname(abs), ctx))) {
       ctx.handled.add(p)
@@ -799,7 +799,7 @@ export class VaultWatcher {
           continue
         } else if (isNoteName(e.name)) {
           if (!this.files.has(vault)) await this.addFile(vault, child, ctx)
-        } else if (this.trackImages && isMediaName(e.name) && !this.images.has(vault)) {
+        } else if (this.trackImages && isAssetName(e.name) && !this.images.has(vault)) {
           pictures.push({ abs: child, vault })
         }
       }

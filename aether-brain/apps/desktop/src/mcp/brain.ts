@@ -49,7 +49,7 @@ import {
   isIgnoredPath,
   chatUrlOf,
   isChatNote,
-  isMediaPath,
+  isAssetPath,
   isProjectNote,
   joinFrontmatter,
   loadVault,
@@ -722,13 +722,13 @@ export class Brain {
 
   /**
    * Apply file/folder changes observed elsewhere (the host's watcher).
-   * Idempotent; applied lazily. Pictures are dropped: no tool offers them, and
-   * a folder of renders arriving must not rebuild the index.
+   * Idempotent; applied lazily. Pictures, videos and 3D models are dropped: no
+   * tool offers them, and a folder of renders arriving must not rebuild the index.
    */
   applyExternal(changes: VaultChangeDto[]): void {
     if (this.closed || !changes.length) return
     for (const c of changes) {
-      if (c.kind !== 'addDir' && c.kind !== 'unlinkDir' && isMediaPath(c.path)) continue
+      if (c.kind !== 'addDir' && c.kind !== 'unlinkDir' && isAssetPath(c.path)) continue
       this.pending.push(c)
     }
     if (this.loaded && this.pending.length > MAX_PENDING) this.sync()

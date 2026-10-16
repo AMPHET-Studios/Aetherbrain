@@ -54,6 +54,8 @@ export function isNoteName(name: string): boolean {
 const IMAGE_RE = /\.(png|jpe?g|webp|gif|bmp|avif)$/i
 /** Video extensions: the same list as `isVideoPath` in @aether/core. Shown as a still, opened in the OS player. */
 const VIDEO_RE = /\.(mp4|m4v|mov|webm)$/i
+/** 3D model extensions: the same list as `isModelPath` in @aether/core. Binary glTF only. Shown as a lit still, opened in the OS's 3D app. */
+const MODEL_RE = /\.glb$/i
 /** Names Windows keeps for devices, alone or with an extension (`CON`, `nul.png`). */
 const WIN_DEVICE = /^(con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³])\s*(\.|$)/i
 
@@ -72,9 +74,22 @@ export function isVideoName(name: string, platform: string = process.platform): 
   return VIDEO_RE.test(name) && safeAssetName(name, platform)
 }
 
-/** A picture or a video (isImageName, isVideoName): what the vault lists, watches, thumbnails and opens. Writes stay pictures only. */
+/**
+ * A picture or a video (isImageName, isVideoName): what pictures are read from, what reference boards show and reveal.
+ * Writes stay pictures only. A 3D model is not one (isModelName): the board window's reach is exactly what it was.
+ */
 export function isMediaName(name: string, platform: string = process.platform): boolean {
   return (IMAGE_RE.test(name) || VIDEO_RE.test(name)) && safeAssetName(name, platform)
+}
+
+/** True for a file name the vault treats as a 3D model: a model extension, with isImageName's other rules. */
+export function isModelName(name: string, platform: string = process.platform): boolean {
+  return MODEL_RE.test(name) && safeAssetName(name, platform)
+}
+
+/** A picture, a video or a model (isMediaName, isModelName): what the vault lists and watches. */
+export function isAssetName(name: string, platform: string = process.platform): boolean {
+  return (IMAGE_RE.test(name) || VIDEO_RE.test(name) || MODEL_RE.test(name)) && safeAssetName(name, platform)
 }
 
 function safeAssetName(name: string, platform: string): boolean {
@@ -99,7 +114,7 @@ export interface ScanResult {
   truncated: boolean
   /** Folders read. */
   dirs: number
-  /** Picture and video files (see isMediaName), found by name only (no stat), at most `maxAssets`. */
+  /** Picture, video and 3D model files (see isAssetName), found by name only (no stat), at most `maxAssets`. */
   assets: { path: string; abs: string }[]
   /** True when more pictures were found than `maxAssets` (the list is partial). */
   assetsTruncated: boolean
@@ -562,7 +577,7 @@ export class FsVault {
           if (!rootDirs.has(pathKey(abs))) queue.push({ abs, vault, root: false })
         } else if (e.isFile()) {
           if (isNoteName(e.name)) files.push({ path: vault, abs })
-          else if (isMediaName(e.name)) {
+          else if (isAssetName(e.name)) {
             if (assets.length < this.maxAssets) assets.push({ path: vault, abs })
             else assetsTruncated = true
           }
@@ -697,11 +712,24 @@ export class FsVault {
    * (`TOOL~1.PNG` for `tool.pngx`) never passes for a picture.
    */
   async assetAbs(p: string): Promise<string | null> {
-    // Lexical first: no fs call for anything that is not a picture or video name.
-    if (!isMediaName(segmentsOf(p).at(-1) ?? '')) return null
+    return this.shownAbs(p, isMediaName)
+  }
+
+  /**
+   * Absolute path of a 3D model in the visible vault, with every check `assetAbs` makes (the name judged lexically and again as
+   * resolved on disk, inside the vault, not in a skipped folder, a plain file). A separate door on purpose: `assetAbs` is what
+   * picture reads, board saves and the board window go through, and a model never comes out of it.
+   */
+  async modelAbs(p: string): Promise<string | null> {
+    return this.shownAbs(p, isModelName)
+  }
+
+  private async shownAbs(p: string, isName: (name: string) => boolean): Promise<string | null> {
+    // Lexical first: no fs call for anything that is not the kind of name asked for.
+    if (!isName(segmentsOf(p).at(-1) ?? '')) return null
     try {
       const { full, real } = await this.resolved(p)
-      if (this.isRoot(full) || !isMediaName(path.basename(real))) return null
+      if (this.isRoot(full) || !isName(path.basename(real))) return null
       return (await fs.lstat(full)).isFile() ? full : null
     } catch {
       return null

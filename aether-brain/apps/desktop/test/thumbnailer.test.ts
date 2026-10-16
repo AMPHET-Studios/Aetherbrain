@@ -435,6 +435,24 @@ describe('Thumbnailer (the helper window)', () => {
     expect((await serve(new Request(url))).status).toBe(404)
   })
 
+  it('sends a 3D model whole on its own channel, with the side of the square, and takes the PNG it answers', async () => {
+    const e = fakeElectron()
+    const t = new Thumbnailer({ electron: e.electron, preload: '/app/dist/preload/thumb-preload.cjs' })
+    const glb = new Uint8Array([0x67, 0x6c, 0x54, 0x46, 2, 0, 0, 0, 20, 0, 0, 0])
+    const out = t.renderModel(glb, 256)
+    const w = e.windows[0]!
+    t.ready(w.webContents)
+    const [channel, id, bytes, px] = w.webContents.sent[0]! as [string, number, Uint8Array, number]
+    expect([channel, px]).toEqual([THUMB_IPC.model, 256])
+    expect(bytes).toBe(glb)
+    // Only the helper's own answer counts, as for pictures.
+    t.done({ id: w.webContents.id + 50 }, id, pngBytes(1))
+    t.done(w.webContents, id, pngBytes(3))
+    expect(await out).toEqual(pngBytes(3))
+    // The helper loads its empty page and nothing a model could name: the session still refuses everything else.
+    expect(e.ses.beforeRequest).not.toBeNull()
+  })
+
   it('ends a hung helper process on a timeout and opens a new one for the next job', async () => {
     vi.useFakeTimers()
     try {

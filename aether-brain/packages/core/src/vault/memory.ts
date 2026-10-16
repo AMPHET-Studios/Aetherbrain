@@ -1,5 +1,5 @@
 import type { VaultAdapter, VaultAsset, VaultChange, VaultFile } from '../types'
-import { isImagePath, isMediaPath } from './assets'
+import { isAssetPath, isImagePath, isModelPath } from './assets'
 import { folderOf, isIgnoredPath, isMarkdownPath, normalizeFolderPath, normalizePath } from './paths'
 
 /**
@@ -80,7 +80,7 @@ export class MemoryVaultAdapter implements VaultAdapter {
     }
     for (const a of opts.assets ?? []) {
       const path = normalizePath(a.path)
-      if (!isMediaPath(path) || isIgnoredPath(path)) continue
+      if (!isAssetPath(path) || isIgnoredPath(path)) continue
       this.assets.set(path, { path, data: a.data, mtime: a.mtime ?? Date.now() })
     }
   }
@@ -93,11 +93,12 @@ export class MemoryVaultAdapter implements VaultAdapter {
   /**
    * The image's own bytes as a Blob (no resizing here), or null when there is
    * no such image. A video comes as itself (a `video/…` Blob): the renderer
-   * takes one still frame of it.
+   * takes one still frame of it. A 3D model has no still here (only the
+   * desktop app's thumbnail helper draws one): null.
    */
   async thumbnail(path: string, _size: number): Promise<Blob | null> {
     const a = this.assets.get(normalizePath(path))
-    if (!a || typeof Blob === 'undefined') return null
+    if (!a || typeof Blob === 'undefined' || isModelPath(a.path)) return null
     return new Blob([a.data.slice()], { type: mimeOf(a.path) })
   }
 
@@ -244,7 +245,7 @@ export class MemoryVaultAdapter implements VaultAdapter {
   external(changes: VaultChange[]): void {
     for (const c of changes) {
       const p = normalizePath(c.path)
-      if (isMediaPath(p) && (c.kind === 'add' || c.kind === 'change' || c.kind === 'unlink')) {
+      if (isAssetPath(p) && (c.kind === 'add' || c.kind === 'change' || c.kind === 'unlink')) {
         if (c.kind === 'unlink') {
           if (this.assets.delete(p)) this.keepFolderOf(p)
         } else {

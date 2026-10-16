@@ -1,11 +1,14 @@
 /**
- * Picture and video files in the vault: concept art, references, Concept
- * Forge critiques, timelapses and turntables. They are not notes (nothing
- * parses them), but they are part of the brain: embedded ones
- * (`![[gate.png]]`, `![[turntable.mp4]]`) link from their notes, and in the
- * system layout each folder shows its newest ones as thumbnail moons. A video
- * shows one still frame, never plays in the brain (it opens in the OS player).
- * Writes (imports, the Concept Forge) are pictures only: `isImagePath`.
+ * Picture, video and 3D model files in the vault: concept art, references,
+ * Concept Forge critiques, timelapses, turntables and `.glb` models. They are
+ * not notes (nothing parses them), but they are part of the brain: embedded
+ * ones (`![[gate.png]]`, `![[turntable.mp4]]`, `![[robot.glb]]`) link from
+ * their notes, and in the system layout each folder shows its newest ones as
+ * thumbnail moons. A video shows one still frame, never plays in the brain (it
+ * opens in the OS player); a model shows one lit still, drawn in the thumbnail
+ * helper, and opens in the OS's 3D app. Writes (imports, the Concept Forge)
+ * are pictures only: `isImagePath`; reference boards take pictures and videos:
+ * `isMediaPath`; the vault lists all three kinds: `isAssetPath`.
  */
 import type { NoteId, VaultAsset } from '../types'
 import { folderOf, isIgnoredPath, normalizePath } from './paths'
@@ -37,6 +40,29 @@ export function isVideoPath(p: string): boolean {
  */
 export function isMediaPath(p: string): boolean {
   return MEDIA_RE.test(p)
+}
+
+/**
+ * 3D model extensions the brain shows as a lit still (lowercase, no dot). Binary glTF only: one self-contained file,
+ * nothing else to fetch. Models are *not* media: `isMediaPath` is what reference boards take, and a board cannot hold one.
+ */
+export const MODEL_EXTENSIONS: readonly string[] = ['glb']
+
+const MODEL_RE = /\.glb$/i
+const ASSET_RE = /\.(png|jpe?g|webp|gif|bmp|avif|mp4|m4v|mov|webm|glb)$/i
+
+/** True for a path (or file name) with a 3D model extension, any letter case. */
+export function isModelPath(p: string): boolean {
+  return MODEL_RE.test(p)
+}
+
+/**
+ * True for anything the vault lists as a showable file: a picture, a video or a 3D model (`isMediaPath` plus
+ * `isModelPath`). Image nodes (`image:<path>`) are made for all three, and a `![[robot.glb]]` link is never a ghost.
+ * It is the scan's, the graph's and the resolver's question; a board asks `isMediaPath` instead.
+ */
+export function isAssetPath(p: string): boolean {
+  return ASSET_RE.test(p)
 }
 
 /** Graph node id of an image: `image:<vault path>`. */
@@ -74,12 +100,12 @@ export function imageFileName(path: string): string {
   return p.slice(p.lastIndexOf('/') + 1)
 }
 
-/** Assets of a list, keyed by normalized path: pictures and videos only, ignored folders skipped, the last entry per path wins. */
+/** Assets of a list, keyed by normalized path: pictures, videos and 3D models only, ignored folders skipped, the last entry per path wins. */
 export function assetMap(list: Iterable<VaultAsset>): Map<string, VaultAsset> {
   const out = new Map<string, VaultAsset>()
   for (const a of list) {
     const path = normalizePath(a.path)
-    if (!isMediaPath(path) || isIgnoredPath(path)) continue
+    if (!isAssetPath(path) || isIgnoredPath(path)) continue
     const asset: VaultAsset = { path }
     if (a.mtime !== undefined && Number.isFinite(a.mtime)) asset.mtime = a.mtime
     if (a.size !== undefined && Number.isFinite(a.size)) asset.size = a.size
@@ -118,7 +144,7 @@ export class AssetResolver {
   /** Vault path of the image `target` names from a note in `fromFolder`, or null. */
   resolve(target: string, fromFolder = ''): string | null {
     const raw = normalizePath(target.trim()).replace(/^(\.\/)+/, '')
-    if (!raw || !isMediaPath(raw)) return null
+    if (!raw || !isAssetPath(raw)) return null
     const exact = this.byPath.get(raw.toLowerCase())
     if (exact) return exact
     if (fromFolder) {
@@ -170,5 +196,5 @@ export function imageTitle(path: string): string {
 
 /** File name without its extension (`gate.png` → `gate`). */
 export function imageBaseName(path: string): string {
-  return imageFileName(path).replace(MEDIA_RE, '')
+  return imageFileName(path).replace(ASSET_RE, '')
 }

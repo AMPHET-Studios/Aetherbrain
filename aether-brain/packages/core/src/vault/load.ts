@@ -2,7 +2,7 @@ import type { GraphData, NoteId, ParsedNote, VaultAdapter, VaultAsset, VaultChan
 import { parseNote } from '../markdown/parse'
 import { buildGraph, type BuildGraphOptions } from '../graph/build'
 import { SearchIndex } from '../search/index'
-import { assetMap, isMediaPath } from './assets'
+import { assetMap, isAssetPath } from './assets'
 import { folderOf, idFromPath, isIgnoredPath, isMarkdownPath, normalizeFolderPath, normalizePath } from './paths'
 
 export interface LoadedVault {
@@ -119,7 +119,7 @@ export async function loadVault(
  * the system layout is memoized per Set (`folderUniverse`), so an autosave
  * doesn't re-index a whole drive's folders.
  *
- * Pictures and videos (`isMediaPath`): add / change set the asset (mtime, size), unlink
+ * Pictures, videos and 3D models (`isAssetPath`): add / change set the asset (mtime, size), unlink
  * drops it, and `unlinkDir` drops every image under the folder. `opts.assets`
  * is copied on write the same way and returned as it is when no image changed.
  */
@@ -207,7 +207,7 @@ export function applyChanges(
       continue
     }
     const p = normalizePath(c.path)
-    if (isMediaPath(p)) {
+    if (isAssetPath(p)) {
       if (isIgnoredPath(p)) continue
       if (c.kind === 'unlink') {
         if (assets.has(p)) writableAssets().delete(p)

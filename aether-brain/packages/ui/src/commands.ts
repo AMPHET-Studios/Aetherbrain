@@ -1,4 +1,4 @@
-import { folderPathOf, imageFileName, imagePathOf, isFolderId, isImageId, isVideoPath, type NoteId } from '@aether/core'
+import { folderPathOf, imageFileName, imagePathOf, isFolderId, isImageId, isImagePath, type NoteId } from '@aether/core'
 import { PICTURE_SIZES, PICTURE_SIZE_NAMES } from '@aether/graph'
 import { getActiveBoard } from './board/active'
 import { BOARD_COMMANDS } from './board/commands'
@@ -34,10 +34,10 @@ export function selectedImage(s: AetherState): string | null {
   return s.selectedId && isImageId(s.selectedId) ? imagePathOf(s.selectedId) : null
 }
 
-/** Vault path of the selected picture when a board can take it (a video is shown in the brain, never put on a board), else null. */
+/** Vault path of the selected picture when a board can take it (a video or a 3D model is shown in the brain, never put on a board), else null. */
 function selectedBoardPicture(s: AetherState): string | null {
   const path = selectedImage(s)
-  return path !== null && !isVideoPath(path) ? path : null
+  return path !== null && isImagePath(path) ? path : null
 }
 
 /** The selected folder when it is a folder on disk (not the vault root that joins several drives). */

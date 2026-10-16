@@ -37,6 +37,7 @@ import {
   isIgnoredPath,
   isImageId,
   isImagePath,
+  isModelPath,
   isProjectNote,
   isTodayId,
   isVirtualId,
@@ -872,15 +873,16 @@ export const useAether = create<AetherState>()((set, get) => {
   let galleryHinted = false
 
   /**
-   * Video stills already asked for, by path, size and file version (newest
-   * last): taking one decodes the video, so the scene, the inspector and a
-   * note's embeds share it. Pictures go straight through. Emptied for another vault.
+   * Video stills and model stills already asked for, by path, size and file
+   * version (newest last): taking one decodes the video or draws the model, so
+   * the scene, the inspector and a note's embeds share it. Pictures go
+   * straight through. Emptied for another vault.
    */
   const stills = new Map<string, Promise<Blob | null>>()
   const STILLS_MAX = 64
   const stillFor = (path: string, size: number, fetch: () => Promise<Blob | null>): Promise<Blob | null> => {
     const take = () => fetch().then((blob) => stillOf(blob, size))
-    if (!isVideoPath(path)) return take()
+    if (!isVideoPath(path) && !isModelPath(path)) return take()
     const a = get().assets.get(path)
     const key = `${path}\n${size}\n${a?.mtime ?? ''}\n${a?.size ?? ''}`
     let p = stills.get(key)
@@ -2861,7 +2863,14 @@ export const useAether = create<AetherState>()((set, get) => {
       const { adapter } = get()
       if (!adapter) return
       if (!adapter.openAsset) {
-        get().toast(isVideoPath(path) ? 'Videos play in your video player from the desktop app' : 'Pictures open in your image app from the desktop app', 'info')
+        get().toast(
+          isVideoPath(path)
+            ? 'Videos play in your video player from the desktop app'
+            : isModelPath(path)
+              ? 'Models open in your 3D app from the desktop app'
+              : 'Pictures open in your image app from the desktop app',
+          'info',
+        )
         return
       }
       try {
