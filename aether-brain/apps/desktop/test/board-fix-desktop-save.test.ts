@@ -74,8 +74,9 @@ describe('board:save is ONE call: main compares the note with the text the save 
     const write = vi.spyOn(v, 'write')
     // Sent and forgotten, as a page that is destroyed straight after its message does.
     void saveBoard({ path: 'Boards/Gate.md', text: next, expectedBase: base }, v)
-    for (let i = 0; i < 200 && (await disk('Boards/Gate.md')) === base; i++) await new Promise((r) => setTimeout(r, 5))
-    expect(await disk('Boards/Gate.md')).toBe(next)
+    // Nobody reads the answer, so the test waits for the file itself. A second was too little when the whole suite runs at once
+    // (a temp file written and renamed on a busy Windows disk): it failed there now and then, and a gate must not go red for it.
+    await vi.waitFor(async () => expect(await disk('Boards/Gate.md')).toBe(next), { timeout: 10_000, interval: 10 })
     expect(write).toHaveBeenCalledTimes(1)
     expect((await fs.readdir(at('Boards'))).sort()).toEqual(['Gate.md'])
   })
