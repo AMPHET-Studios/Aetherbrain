@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { MemoryVaultAdapter } from '@aether/core'
 import { BOARD_COMMANDS, boardHelpRows } from '../src/board/commands'
 import { assetFiles, freshApp, vaultFiles } from './board-integration-harness'
+import { lf } from './helpers/lf'
 
 // The first test loads the whole UI package, which takes seconds on a busy machine (the default 5 s timed out at 5.1 s and 8.1 s).
 vi.setConfig({ testTimeout: 60_000, hookTimeout: 60_000 })
@@ -283,8 +284,8 @@ describe('keys the desktop app adds', () => {
 /* -------------------------------------------------------------------------- the docs --- */
 
 const docsUrl = (name: string) => new URL(`../../../docs/${name}`, import.meta.url)
-const doc = readFileSync(docsUrl('KEYBOARD.md'), 'utf8')
-const guide = readFileSync(docsUrl('REFERENCE-BOARD.md'), 'utf8')
+const doc = lf(readFileSync(docsUrl('KEYBOARD.md'), 'utf8'))
+const guide = lf(readFileSync(docsUrl('REFERENCE-BOARD.md'), 'utf8'))
 
 /** The section of `text` under the `## <heading>` line, up to the next heading of its level. */
 function sectionOf(text: string, heading: string): string {
