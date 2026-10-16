@@ -7,6 +7,7 @@ import { MAX_BOARD_TEXT } from '../src/main/board-save.js'
 import { IPC, type AetherBridge, type BoardBridge, type VaultChangeDto } from '../src/shared/ipc.js'
 import { createFloatingBoardHost } from '../src/renderer/board-host.js'
 import { BOARD, OTHER, rig, type Rig } from './board-fix-desktop-fakes.js'
+import { lf } from './lf.js'
 
 /**
  * Round 2, diff-app-2 + live-window-m4: the red banner of the floating window ("deleted or moved away", "no longer reads as a board") was
@@ -17,7 +18,7 @@ import { BOARD, OTHER, rig, type Rig } from './board-fix-desktop-fakes.js'
  */
 
 const here = path.dirname(fileURLToPath(import.meta.url))
-const read = (...p: string[]): Promise<string> => fs.readFile(path.join(here, '..', ...p), 'utf8')
+const read = (...p: string[]): Promise<string> => fs.readFile(path.join(here, '..', ...p), 'utf8').then(lf)
 
 beforeEach(() => {
   vi.useFakeTimers()

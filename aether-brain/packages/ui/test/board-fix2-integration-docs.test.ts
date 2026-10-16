@@ -1,4 +1,5 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { MemoryVaultAdapter, NOTE_TYPES, SearchIndex, addNote, addPicture, emptyBoard, parseBoard, parseNote, serializeBoard } from '@aether/core'
 import type { BoardHost } from '../src/board/api'
@@ -7,6 +8,7 @@ import { MAX_DROP_PIXELS, FINAL_BURST_MS, SAVE_THROTTLE_MS, Saver, tooLargeMessa
 import { assetFiles, freshApp, vaultFiles } from './board-integration-harness'
 import { Rig, threeThings } from './board-controller-harness'
 import { FakeTimers, settle } from './helpers/board-view-fakes'
+import { lf } from './helpers/lf'
 
 /**
  * Round 2 of the reference board's review, the documents (integration agent). The guide, the design, the spec and CLAUDE.md said things
@@ -25,7 +27,7 @@ afterEach(() => {
 })
 
 const root = (p: string) => new URL(`../../../${p}`, import.meta.url)
-const read = (p: string) => readFileSync(root(p), 'utf8')
+const read = (p: string) => lf(readFileSync(root(p), 'utf8'))
 const guide = read('docs/REFERENCE-BOARD.md')
 const design = read('docs/design/reference-board.md')
 const spec = read('docs/SPEC.md')
@@ -278,7 +280,7 @@ describe('the camera and the copy of an unsaved board are kept per host key (dif
     const key = app.hostModule.createDockedBoardHost('Boards/Armour.md').stateKey
     expect(key).toBe(`${app.s().adapter?.location ?? ''}\nBoards/Armour.md`)
     // The floating host (apps/desktop) is not loaded here: its source is the evidence. If it gets a key, the documents change.
-    const floating = readFileSync(root('apps/desktop/src/renderer/board-host.ts'), 'utf8')
+    const floating = lf(readFileSync(root('apps/desktop/src/renderer/board-host.ts'), 'utf8'))
     expect(floating).not.toMatch(/\bstateKey\b/)
     expect(guideText).toContain('for the docked view under the vault\'s folder and the note\'s path')
     expect(guideText).toContain('for the floating window under the note\'s path alone')
@@ -342,7 +344,8 @@ describe('the spec matches the code (app-regression-m7)', () => {
         const p = `${dir}/${name}`
         return n + (statSync(p).isDirectory() ? count(p) : name.endsWith('.md') ? 1 : 0)
       }, 0)
-    const real = count(new URL('../../../vault-demo', import.meta.url).pathname)
+    // fileURLToPath, not `.pathname`: on Windows that is `/C:/Users/…`, which the file system reads as `C:\C:\Users\…`.
+    const real = count(fileURLToPath(new URL('../../../vault-demo', import.meta.url)))
     expect(spec).toContain(`vault-demo     ${real} richly linked starter notes`)
     expect(claude).toContain(`vault-demo        ${real} richly linked starter notes`)
   })

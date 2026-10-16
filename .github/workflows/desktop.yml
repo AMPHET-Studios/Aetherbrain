@@ -80,8 +80,12 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Test + typecheck
         run: |
+          # pwsh does not stop at a failing command: the step's result was the last command's alone, so a failing `pnpm test`
+          # went through green and only the typecheck gated. Each command that must pass ends the step with its own exit code.
           pnpm --filter @aether/desktop build:mcp
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           pnpm test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           pnpm typecheck
       - name: Package
         run: pnpm --filter @aether/desktop dist:win

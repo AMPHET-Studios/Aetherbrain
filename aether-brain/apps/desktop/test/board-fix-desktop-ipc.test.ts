@@ -6,6 +6,7 @@ import ts from 'typescript'
 import { BOARD_PAGE_CHANNELS, boardWindowOptions, channelAllowed, guardIpc, type IpcLike } from '../src/main/board-window.js'
 import { IPC } from '../src/shared/ipc.js'
 import { FakeWin, rig } from './board-fix-desktop-fakes.js'
+import { lf } from './lf.js'
 
 /**
  * desktop-3: the board window's page decodes pictures from the user's folders, so it gets a bridge of its own (board-preload.cts: the
@@ -14,7 +15,7 @@ import { FakeWin, rig } from './board-fix-desktop-fakes.js'
  */
 
 const here = path.dirname(fileURLToPath(import.meta.url))
-const read = (...p: string[]): Promise<string> => fs.readFile(path.join(here, '..', ...p), 'utf8')
+const read = (...p: string[]): Promise<string> => fs.readFile(path.join(here, '..', ...p), 'utf8').then(lf)
 
 /** The channels the board page may use, spelled out: a change to the list is a change to what a compromised page can do. */
 const ALLOWED = [

@@ -8,6 +8,7 @@ import { FsVault } from '../src/main/fsvault.js'
 import { PictureLedger, boardHandlers, guardIpc } from '../src/main/board-window.js'
 import { IPC } from '../src/shared/ipc.js'
 import { rig, type Rig } from './board-fix-desktop-fakes.js'
+import { lf } from './lf.js'
 
 /**
  * Round 2, diff-app-1 + live-window-m1: the floating window's page reads and saves ONLY the board it shows, and shows only pictures,
@@ -222,7 +223,7 @@ describe('the guard\'s argument check', () => {
 
 describe('main.ts wires the check', () => {
   it('gives guardIpc the host\'s refusal, and passes the sender of a reveal on so that a folder is refused to the board page', async () => {
-    const src = await fs.readFile(path.join(here, '..', 'src', 'main', 'main.ts'), 'utf8')
+    const src = lf(await fs.readFile(path.join(here, '..', 'src', 'main', 'main.ts'), 'utf8'))
     const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '')
     expect(code).toMatch(/const ipc = guardIpc\(\s*ipcMain,\s*\(wc\) => board\?\.isBoardPage\(wc\) \?\? false,\s*\(channel, args\) => board\?\.pageRefusal\(channel, args\) \?\? null,?\s*\)/)
     expect(code).toContain('ipc.handle(IPC.reveal, (e, p: unknown) => reveal(p, board?.isBoardPage(e.sender) ?? false))')
@@ -236,7 +237,7 @@ describe('main.ts wires the check', () => {
   })
 
   it('says in the window\'s header what is true: the board it shows, and only that one', async () => {
-    const src = await fs.readFile(path.join(here, '..', 'src', 'main', 'board-window.ts'), 'utf8')
+    const src = lf(await fs.readFile(path.join(here, '..', 'src', 'main', 'board-window.ts'), 'utf8'))
     expect(src).toMatch(/reads and saves the board it shows, and only that one/)
     expect(src).not.toMatch(/reads and saves the one board note/)
   })

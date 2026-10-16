@@ -11,6 +11,7 @@ import { IPC, type AetherBridge, type BoardStatusDto, type ReadAssetResult, type
 import { ECHO_TEXTS, MAX_NAME_TRIES, PICTURE_CHANGE_MS, boardFolderOfPath, createFloatingBoardHost, numberedName, sniffMime } from '../src/renderer/board-host.js'
 import { FsVault } from '../src/main/fsvault.js'
 import { CRASH_WINDOW_MS } from '../src/main/crash.js'
+import { lf } from './lf.js'
 import {
   BOARD_DEFAULT_HEIGHT,
   BOARD_DEFAULT_WIDTH,
@@ -1288,7 +1289,7 @@ describe('boardHandlers', () => {
 describe('main.ts wiring', () => {
   let src: string
   beforeEach(async () => {
-    src = await fs.readFile(path.join(here, '..', 'src', 'main', 'main.ts'), 'utf8')
+    src = lf(await fs.readFile(path.join(here, '..', 'src', 'main', 'main.ts'), 'utf8'))
   })
 
   it('registers each board channel once, to the handlers, and the picture read to the checked reader', () => {

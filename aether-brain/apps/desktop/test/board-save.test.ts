@@ -8,6 +8,7 @@ import type { VaultChangeDto } from '../src/shared/ipc.js'
 import { FsVault } from '../src/main/fsvault.js'
 import { VaultWatcher } from '../src/main/watcher.js'
 import { BOARD_HEAD_BYTES, MAX_BOARD_PATH, MAX_BOARD_TEXT, checkBoard, isBoardHead, readBoard, saveBoard, validateBoardSave, type BoardVault } from '../src/main/board-save.js'
+import { lf } from './lf.js'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const NOW = new Date('2026-10-09T12:00:00Z')
@@ -512,8 +513,8 @@ describe('saveBoard', () => {
   })
 
   it('wires board:save, board:read and board:open in main.ts to the checked functions only, never announcing a write', async () => {
-    const src = await fs.readFile(path.join(here, '..', 'src', 'main', 'main.ts'), 'utf8')
-    const win = await fs.readFile(path.join(here, '..', 'src', 'main', 'board-window.ts'), 'utf8')
+    const src = lf(await fs.readFile(path.join(here, '..', 'src', 'main', 'main.ts'), 'utf8'))
+    const win = lf(await fs.readFile(path.join(here, '..', 'src', 'main', 'board-window.ts'), 'utf8'))
     const wiring = /function registerBoardIpc[\s\S]*?\n}\n/.exec(src)?.[0] ?? ''
     expect(wiring).toContain('IPC.boardSave')
     expect(wiring).toContain('h.save(p, text, base)')

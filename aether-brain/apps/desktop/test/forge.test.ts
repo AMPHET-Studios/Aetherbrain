@@ -155,7 +155,9 @@ describe('settings, options, permissions, navigation', () => {
     expect(forgeFileRequest('file:///home/me/art/./x/../concept-forge.html', file, 'linux')).toBe(true)
     // Spaces, # and % in the page's path are escaped in its URL.
     const odd = '/home/me/My Art #2/concept 100%.html'
-    expect(forgeFileRequest(pathToFileURL(odd).href, odd, 'linux')).toBe(true)
+    // `windows: false`: `odd` is a POSIX path judged as 'linux', so its URL is spelled that way on every platform (pathToFileURL
+    // would put a drive letter in front of it on Windows).
+    expect(forgeFileRequest(pathToFileURL(odd, { windows: false }).href, odd, 'linux')).toBe(true)
     expect(forgeFileRequest('file:///home/me/My Art %232/concept 100%25.html#top', odd, 'linux')).toBe(true)
     // As Electron's loadFile spells it: `#` escaped, a `%` that starts no escape left as it is.
     expect(forgeFileRequest('file:///home/me/My%20Art%20%232/concept%20100%.html', odd, 'linux')).toBe(true)
