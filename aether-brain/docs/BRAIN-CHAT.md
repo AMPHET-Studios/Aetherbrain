@@ -30,6 +30,22 @@ Each conversation starts from what About me and your last two weeks of check-ins
 - Changes notes when you ask: a task, a captured idea, a tick. Tool chips under each answer show what it did (click one with a note to fly there).
 - Check-ins: say "check in" (or the **Check in** button, or the palette's *Check in with your brain*). It compares your last week with the weeks before and mentions a shift (sleep down, mood down, stress up, missed medication, a long gap) as a plain fact, then asks.
 
+## Plan my day, and the quiet cards
+
+**Plan my day** (the palette's *Plan my day with your brain*, or the button on an empty chat) asks the chat to look at today's brief, pick at most three things with you and help you start the first. It is for anyone; for someone who finds starting or time hard, the coach leans on each step more. It has two companions: *Check in on my day with your brain* (what is done, re-plan the rest, no guilt) and *Wrap up my day with your brain* (one win, one thing to carry over, a clear stop). They go on in today's conversation, so the evening knows the morning's plan; a conversation left open from another day starts a new one.
+
+A **quiet card** offers each of the three, once a day, under the top bar. No sound, never the keyboard's focus, and no number in it: not a count of what is on, and never of what is late.
+
+| Card | Offers | Shows between |
+| --- | --- | --- |
+| Good morning | *Plan my day* | 05:00 and 12:00 |
+| A check-in | *Check in* | 14:00 and 17:30 |
+| Winding down | *Wrap up* | 18:00 and 21:30 |
+
+A card shows when the window is in front, the chat is set up and something is open on today's brief (overdue, or due, scheduled or flagged for today). *In an hour* puts it off; ✕ is *not today*; left alone for two minutes it goes away by itself and comes back in an hour. It waits while the chat is open or answering and while the palette, the cheatsheet or the Boards view is up. Planning the day another way (the palette, the button) counts as taking the card up. Tasks carry dates, not times, so there is no card for "something is due within the hour".
+
+*Turn nudges off* on the card, the checkbox in the chat's ⚙ and the palette's *Nudges* switch the cards off, and on again. They are on until you turn them off.
+
 It is a supportive companion, not a therapist or a doctor. It never diagnoses and never suggests changing a medication; your care team leads. When you mention suicide, self-harm or danger, it stops coaching and stays with you: it asks plainly what is going on and helps you reach the people you chose, and if the danger is now it says to get emergency help and someone next to you. It never pastes hotline numbers unless you ask for one.
 
 ## Keys
@@ -40,7 +56,7 @@ It is a supportive companion, not a therapist or a doctor. It never diagnoses an
 | `Enter` / `Shift+Enter` | Send / new line |
 | `Esc` | Clear the message box; on an empty box, close the chat |
 
-Palette: *Chat with your brain* · *New brain chat* · *Check in with your brain*.
+Palette: *Chat with your brain* · *New brain chat* · *Check in with your brain* · *Plan my day with your brain* · *Check in on my day with your brain* · *Wrap up my day with your brain* · *Nudges*.
 
 ## The same in Claude Desktop
 

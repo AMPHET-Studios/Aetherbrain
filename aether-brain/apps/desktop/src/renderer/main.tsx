@@ -7,6 +7,7 @@ import { ElectronVaultAdapter } from './vault/electron'
 import { RootsPanel } from './components/RootsPanel'
 import { AiLinkPanel } from './components/AiLinkPanel'
 import { ChatPanel, registerChat } from './components/ChatPanel'
+import { NudgeCard } from './components/NudgeCard'
 import { LibraryPanel, registerLibrary } from './components/LibraryPanel'
 import { FindProjectsPanel, registerFindProjects } from './components/FindProjectsPanel'
 import { activityFailed, clientLabel, errorText, flyToPath, openPanel, pushActivity, samePath, togglePanel, usePanel } from './panels'
@@ -151,6 +152,9 @@ function Desktop() {
       )}
       <ErrorBoundary what="the chat" quiet>
         <ChatPanel />
+      </ErrorBoundary>
+      <ErrorBoundary what="the nudges" quiet>
+        <NudgeCard />
       </ErrorBoundary>
       <ForgeScreenHint />
     </>

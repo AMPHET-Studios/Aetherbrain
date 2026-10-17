@@ -7,9 +7,11 @@
  * what the panel shows, in a tiny store outside React.
  */
 import { useEffect, useRef, useState, useSyncExternalStore, type KeyboardEvent } from 'react'
+import { todayIso } from '@aether/core'
 import { MarkdownPreview, registerCommands, registerHelpRows, registerKey, useAether } from '@aether/ui'
 import type { ChatEventDto, ChatStatusDto } from '../../shared/ipc'
 import { ElectronVaultAdapter } from '../vault/electron'
+import { DAY_PROMPTS, answerNudge, type NudgeKind } from '../nudges'
 import { errorText, flyToPath, openPanel } from '../panels'
 
 interface ToolStep {
@@ -31,6 +33,8 @@ interface Msg {
 interface ChatState {
   open: boolean
   conv: string
+  /** The local day (YYYY-MM-DD) the conversation's first message was sent, null while it is empty. */
+  convDay: string | null
   messages: Msg[]
   busy: boolean
   status: ChatStatusDto | null
@@ -41,7 +45,7 @@ interface ChatState {
 
 const newId = (): string => (typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : `c${Date.now()}${Math.random().toString(36).slice(2)}`)
 
-let state: ChatState = { open: false, conv: newId(), messages: [], busy: false, status: null, settings: false, error: null, saved: null }
+let state: ChatState = { open: false, conv: newId(), convDay: null, messages: [], busy: false, status: null, settings: false, error: null, saved: null }
 const subs = new Set<() => void>()
 function set(patch: Partial<ChatState> | ((s: ChatState) => Partial<ChatState>)): void {
   state = { ...state, ...(typeof patch === 'function' ? patch(state) : patch) }
@@ -86,7 +90,38 @@ export function toggleChat(force?: boolean): void {
 /** A new conversation (the last one stays as its note). */
 export function newChat(): void {
   if (bridge) void bridge.chatForget(state.conv).catch(() => undefined)
-  set({ conv: newId(), messages: [], busy: false, error: null, saved: null })
+  set({ conv: newId(), convDay: null, messages: [], busy: false, error: null, saved: null })
+}
+
+/** Whether the chat has the person's attention: it is open, or still answering (nudges wait for it to be neither). */
+export function useChatOccupied(): boolean {
+  const s = useChat()
+  return s.open || s.busy
+}
+
+/**
+ * Plan the day (morning), check in on it (afternoon) or wrap it up (evening): the palette, the starters and the nudge cards all
+ * come here. It goes on in today's conversation, so the evening knows the morning's plan, and starts a new one when the open
+ * conversation is from another day.
+ */
+export function sendDayPrompt(kind: NudgeKind): void {
+  answerNudge(kind, 'start')
+  toggleChat(true)
+  if (state.messages.length && state.convDay !== todayIso()) newChat()
+  void sendChat(DAY_PROMPTS[kind])
+}
+
+/** Nudges on or off (the opposite of now when `on` is not given): kept with the chat's settings in main. */
+export async function setNudges(on?: boolean): Promise<void> {
+  if (!bridge) return
+  try {
+    const status = state.status ?? (await bridge.chatStatus())
+    const next = await bridge.chatConfigure({ nudges: on ?? !status.nudges })
+    set({ status: next })
+    useAether.getState().toast(next.nudges ? 'Nudges on: a quiet card in the morning, afternoon and evening' : 'Nudges off')
+  } catch (err) {
+    set({ error: errorText(err) })
+  }
 }
 
 /** Send `text` in the open conversation. */
@@ -99,7 +134,7 @@ export async function sendChat(text: string): Promise<void> {
     return
   }
   const conv = state.conv
-  set((s) => ({ busy: true, error: null, messages: [...s.messages, { role: 'user', text: message, steps: [] }, { role: 'assistant', text: '', steps: [], live: true }] }))
+  set((s) => ({ busy: true, error: null, convDay: s.convDay ?? todayIso(), messages: [...s.messages, { role: 'user', text: message, steps: [] }, { role: 'assistant', text: '', steps: [], live: true }] }))
   try {
     // The answer is finished by the turn's `done` event (it comes after every other event of the turn).
     await bridge.chatSend(conv, message)
@@ -143,8 +178,10 @@ function onEvent(e: ChatEventDto): void {
   })
 }
 
-const STARTERS = [
+/** `day`: one of the day's three prompts (it goes through `sendDayPrompt`, so the morning card knows it is done). */
+const STARTERS: { label: string; text: string; day?: NudgeKind }[] = [
   { label: 'Get to know me', text: "Let's get to know each other. Ask me one thing at a time." },
+  { label: 'Plan my day', text: DAY_PROMPTS.morning, day: 'morning' },
   { label: 'Check in', text: "Let's do a quick check-in." },
   { label: "What's on today?", text: "What's on for me today?" },
   { label: 'How have I been?', text: 'How have I been doing lately?' },
@@ -227,7 +264,7 @@ export function ChatPanel() {
               <p className="mb-3">What I learn goes into your own notes in Me/ (About me, Check-ins), and you can change anything there.</p>
               <div className="flex flex-wrap gap-1.5">
                 {STARTERS.map((x) => (
-                  <button key={x.label} type="button" className="hud-btn" disabled={s.busy} onClick={() => void sendChat(x.text)}>
+                  <button key={x.label} type="button" className="hud-btn" disabled={s.busy} onClick={() => (x.day ? sendDayPrompt(x.day) : void sendChat(x.text))}>
                     {x.label}
                   </button>
                 ))}
@@ -426,6 +463,12 @@ function ChatSettings({ status }: { status: ChatStatusDto | null }) {
         <input type="checkbox" checked={status.saveChats} disabled={busy} onChange={(e) => void configure({ saveChats: e.target.checked })} />
         Keep each chat as a note in Me/Chats
       </label>
+      <label className="mb-3 flex cursor-pointer items-center gap-2 text-white">
+        <input type="checkbox" checked={status.nudges} disabled={busy} onChange={(e) => void configure({ nudges: e.target.checked })} />
+        <span>
+          A quiet card offers to plan my day <span className="text-faint">· morning, afternoon, evening; no sound</span>
+        </span>
+      </label>
       {status.ready && (
         <button type="button" className="hud-btn primary" onClick={() => set({ settings: false })}>
           Back to the chat
@@ -460,6 +503,13 @@ export function registerChat(): void {
         void sendChat("Let's do a quick check-in.")
       },
     },
+    { id: 'chat-plan-day', title: 'Plan my day with your brain', hint: 'pick what matters today, start the first thing', group: 'navigate', run: () => sendDayPrompt('morning') },
+    { id: 'chat-check-day', title: 'Check in on my day with your brain', hint: "what's done, re-plan the rest, no guilt", group: 'navigate', run: () => sendDayPrompt('afternoon') },
+    { id: 'chat-wrap-day', title: 'Wrap up my day with your brain', hint: 'one win, one thing to carry over, a clear stop', group: 'navigate', run: () => sendDayPrompt('evening') },
+    { id: 'nudges', title: 'Nudges: the quiet day-planning cards on / off', hint: 'a card in the morning, afternoon and evening; no sound', group: 'view', run: () => void setNudges() },
   ])
-  registerHelpRows('Desktop', [['q', 'Chat with your brain: it reads your notes, checks in, remembers what you tell it to']])
+  registerHelpRows('Desktop', [
+    ['q', 'Chat with your brain: it reads your notes, checks in, remembers what you tell it to'],
+    ['/ plan my day', 'Plan the day with the chat (also: check in on it, wrap it up). A quiet card offers each in turn; turn it off in the chat’s ⚙'],
+  ])
 }

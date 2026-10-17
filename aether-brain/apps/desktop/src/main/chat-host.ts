@@ -18,6 +18,8 @@ export interface ChatSettingsStored {
   ollamaUrl: string
   ollamaModel: string
   saveChats: boolean
+  /** The quiet day-planning cards (renderer): on unless turned off. */
+  nudges: boolean
   /** The API key, encrypted by the system's keychain (base64). */
   key?: string
 }
@@ -32,6 +34,7 @@ export function chatSettings(raw: unknown): ChatSettingsStored {
     ollamaUrl: str(r['ollamaUrl'], DEFAULT_OLLAMA_URL),
     ollamaModel: typeof r['ollamaModel'] === 'string' ? r['ollamaModel'].trim().slice(0, 200) : '',
     saveChats: r['saveChats'] !== false,
+    nudges: r['nudges'] !== false,
   }
   if (typeof r['key'] === 'string' && r['key']) out.key = r['key']
   return out
@@ -138,6 +141,7 @@ export class ChatHost {
       ollamaUrl: s.ollamaUrl,
       ollamaModel: s.ollamaModel,
       saveChats: s.saveChats,
+      nudges: s.nudges,
       vaultOpen,
       ready: missing === null,
       missing,
@@ -155,6 +159,7 @@ export class ChatHost {
     }
     if (typeof patch.ollamaModel === 'string') next.ollamaModel = patch.ollamaModel.trim().slice(0, 200)
     if (typeof patch.saveChats === 'boolean') next.saveChats = patch.saveChats
+    if (typeof patch.nudges === 'boolean') next.nudges = patch.nudges
     if (patch.apiKey === null) {
       delete next.key
       this.key = null
