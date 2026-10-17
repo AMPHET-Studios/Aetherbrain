@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { LayoutEdgeInput, LayoutNodeInput, MainToWorker, WorkerToMain } from '../src/layout/protocol'
+import { calmSpeed, urgencySpeed } from '../src/layout/system'
 
 /** Runs the real layout worker module in-process with a fake `self` and fake timers. */
 async function startWorker() {
@@ -352,5 +353,103 @@ describe('layout worker, force layouts stay finite', () => {
     // Motion is on, so frames keep coming after the ease: the one frame that completes it is the settled one.
     expect(w.positions().filter((m) => m.settled).length).toBe(1)
     for (const m of w.positions()) expect(allFinite(m.positions)).toBe(true)
+  })
+})
+
+/** `system()` with `A/one` 0.9 urgent: it runs on a fast ring of its own, while `A/two` is a calm moon on the moons' ring. */
+function urgentSystem(): LayoutNodeInput[] {
+  return system().map((n) => (n.id === 'A/one' ? { ...n, urgency: 0.9 } : n))
+}
+
+/** How far body `i` travelled around body `p` over these frames: the sum of its steps from frame to frame. */
+function travelled(frames: { positions: Float32Array }[], i: number, p: number): number {
+  let sum = 0
+  let before: number[] | null = null
+  for (const f of frames) {
+    const rel = [0, 1, 2].map((k) => f.positions[i * 3 + k]! - f.positions[p * 3 + k]!)
+    if (before) sum += Math.hypot(rel[0]! - before[0]!, rel[1]! - before[1]!, rel[2]! - before[2]!)
+    before = rel
+  }
+  return sum
+}
+
+describe('layout worker, calm orbits', () => {
+  const ONE = 3
+  const TWO = 4
+  const STAR_A = 1
+
+  it('slows an urgent orbit by what urgency added, and leaves a calm one alone', async () => {
+    const w = await startWorker()
+    w.send({ type: 'graph', nodes: urgentSystem(), edges: [], mode: 'system' })
+    vi.advanceTimersByTime(1500)
+    let mark = w.positions().length
+    vi.advanceTimersByTime(2000)
+    const livelyOne = travelled(w.positions().slice(mark), ONE, STAR_A)
+    const livelyTwo = travelled(w.positions().slice(mark), TWO, STAR_A)
+    expect(livelyOne).toBeGreaterThan(1)
+
+    w.send({ type: 'calm', on: true })
+    mark = w.positions().length
+    vi.advanceTimersByTime(2000)
+    const calmOne = travelled(w.positions().slice(mark), ONE, STAR_A)
+    const calmTwo = travelled(w.positions().slice(mark), TWO, STAR_A)
+    // A/one is 0.9 urgent and alone on its ring: 1.855 times a normal orbit, calm 0.955 times.
+    expect(calmOne / livelyOne).toBeCloseTo(calmSpeed(0.9) / urgencySpeed(0.9), 1)
+    expect(calmOne).toBeLessThan(livelyOne * 0.6)
+    // A/two has nothing urgent about it: calm takes nothing off.
+    expect(calmTwo / livelyTwo).toBeCloseTo(1, 1)
+
+    // And off again: back to the urgent speed.
+    w.send({ type: 'calm', on: false })
+    mark = w.positions().length
+    vi.advanceTimersByTime(2000)
+    expect(travelled(w.positions().slice(mark), ONE, STAR_A) / livelyOne).toBeCloseTo(1, 1)
+  })
+
+  it('moves nothing when calm goes on or off: the next frame is one step on from the last', async () => {
+    const w = await startWorker()
+    w.send({ type: 'graph', nodes: urgentSystem(), edges: [], mode: 'system' })
+    vi.advanceTimersByTime(3000)
+    for (const on of [true, false, true]) {
+      const before = w.positions().at(-1)!.positions
+      w.send({ type: 'calm', on })
+      vi.advanceTimersByTime(33)
+      const after = w.positions().at(-1)!.positions
+      // One frame of motion is a fraction of a unit; applying calm to the whole time so far would be several units.
+      for (let i = 0; i < before.length; i++) expect(Math.abs(after[i]! - before[i]!), `calm ${on}, coordinate ${i}`).toBeLessThan(1)
+      vi.advanceTimersByTime(1500)
+    }
+  })
+
+  it('does nothing while the orbits are paused, and wakes nothing', async () => {
+    const w = await startWorker()
+    w.send({ type: 'graph', nodes: urgentSystem(), edges: [], mode: 'system' })
+    vi.advanceTimersByTime(2000)
+    w.send({ type: 'motion', on: false })
+    vi.advanceTimersByTime(100)
+    const count = w.positions().length
+    w.send({ type: 'calm', on: true })
+    vi.advanceTimersByTime(2000)
+    expect(w.positions().length).toBe(count)
+  })
+
+  it('leaves every body where it was when the sky is laid out again while calm', async () => {
+    const w = await startWorker()
+    w.send({ type: 'graph', nodes: urgentSystem(), edges: [], mode: 'system' })
+    w.send({ type: 'calm', on: true })
+    vi.advanceTimersByTime(5000)
+    // Freeze both clocks, then lay the same vault out again (a file changed somewhere else).
+    w.send({ type: 'motion', on: false })
+    vi.advanceTimersByTime(100)
+    const frozen = new Float32Array(w.positions().at(-1)!.positions)
+    const ids = urgentSystem().map((n) => n.id)
+    const mark = w.positions().length
+    w.send({ type: 'graph', nodes: urgentSystem(), edges: [], mode: 'system', prev: { ids, positions: frozen } })
+    vi.advanceTimersByTime(3000)
+    const frames = w.positions().slice(mark)
+    expect(frames.length).toBeGreaterThan(10)
+    expect(frames.at(-1)!.settled).toBe(true)
+    // Not only at the end: in none of the frames of the ease does anything move (an orbit that came out in a different place would swoosh).
+    for (const f of frames) for (let i = 0; i < frozen.length; i++) expect(Math.abs(f.positions[i]! - frozen[i]!), `coordinate ${i}`).toBeLessThan(1e-3)
   })
 })

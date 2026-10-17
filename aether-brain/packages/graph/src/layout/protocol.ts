@@ -68,6 +68,8 @@ export type MainToWorker =
   | { type: 'reheat'; alpha?: number }
   /** System layout: planets orbit their parents over time when on. */
   | { type: 'motion'; on: boolean }
+  /** System layout: while on (and the orbits move), urgency speeds an orbit up less: none runs faster than a normal one. */
+  | { type: 'calm'; on: boolean }
   | { type: 'stop' }
 
 export type WorkerToMain =

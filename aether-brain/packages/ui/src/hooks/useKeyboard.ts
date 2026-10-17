@@ -205,8 +205,11 @@ export function handleKey(e: KeyboardEvent): void {
     case 't':
       s.toggleLayout()
       return
+    case 'O':
     case 'o':
-      s.toggleMotion()
+      // Shift+O: calm orbits (urgency never runs an orbit faster than a normal one). Shift decides, as for Shift+G.
+      if (e.shiftKey) s.toggleCalm()
+      else s.toggleMotion()
       return
     case '[':
       s.setFolderDepth(s.settings.folderDepth - 1)
