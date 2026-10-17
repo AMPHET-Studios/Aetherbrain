@@ -9,7 +9,7 @@
  * vault (api.anthropic.com, the user's own key); Ollama runs on this computer.
  * Nothing is sent before the user sets a key or a local model and writes.
  */
-import { CLAUDE_MODELS, DEFAULT_CLAUDE_MODEL, DEFAULT_OLLAMA_URL, type ChatEventDto, type ChatPatch, type ChatProvider, type ChatReplyDto, type ChatStatusDto } from '../shared/chat.js'
+import { CLAUDE_MODELS, DEFAULT_CLAUDE_MODEL, DEFAULT_OLLAMA_URL, type ChatEventDto, type ChatPatch, type ChatProvider, type ChatReplyDto, type ChatStatusDto, type OllamaCheckDto } from '../shared/chat.js'
 
 /** Persisted in settings.json under `chat`. */
 export interface ChatSettingsStored {
@@ -97,6 +97,8 @@ export interface ChatHostOptions {
   emit: (e: ChatEventDto) => void
   /** The system keychain (Electron safeStorage); strings in and out, base64 for the encrypted side. */
   keychain: { available(): boolean; encrypt(text: string): string; decrypt(base64: string): string }
+  /** How to reach Ollama (tests pass a fake). */
+  fetch?: typeof fetch
 }
 
 interface Conversation {
@@ -181,6 +183,30 @@ export class ChatHost {
     await this.opts.save({ ...next })
     if (this.configured()) this.opts.wantBrain(true)
     return this.status()
+  }
+
+  /**
+   * Ask Ollama on this computer which models it has (its /api/tags), for the settings screen. Only an address on this computer is
+   * ever asked, whatever the settings file says; a short wait, so a stopped Ollama is a quick answer rather than a hang.
+   */
+  async ollamaCheck(): Promise<OllamaCheckDto> {
+    const url = this.settings.ollamaUrl
+    const none = (error: string): OllamaCheckDto => ({ url, reachable: false, models: [], error })
+    if (!loopback(url)) return none('Ollama must run on this computer')
+    try {
+      const res = await (this.opts.fetch ?? fetch)(`${url.replace(/\/+$/, '')}/api/tags`, { signal: AbortSignal.timeout(2500) })
+      if (!res.ok) return none(`It answered ${res.status}`)
+      const body = (await res.json()) as { models?: unknown }
+      const list = Array.isArray(body.models) ? body.models : []
+      const models = list
+        .map((m) => (m && typeof m === 'object' && typeof (m as { name?: unknown }).name === 'string' ? (m as { name: string }).name : ''))
+        .filter((name) => name.length > 0 && name.length <= 200)
+        .sort()
+        .slice(0, 100)
+      return { url, reachable: true, models, error: null }
+    } catch {
+      return none('Nothing answered')
+    }
   }
 
   /** Answer `text` in conversation `conv` (made on its first message). Events stream through `emit`. */

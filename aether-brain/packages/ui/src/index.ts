@@ -6,6 +6,8 @@ export type { AetherState, View, Filters, Settings, Toast, ToastAction, FormRequ
 export { COMMANDS, registerCommands } from './commands'
 export type { Command } from './commands'
 export { registerKey } from './hooks/useKeyboard'
+export { registerTopBarButton } from './topbarButtons'
+export type { TopBarButton } from './topbarButtons'
 export { registerHelpRows } from './components/Help'
 export { MarkdownPreview } from './components/MarkdownPreview'
 export { ErrorBoundary } from './components/ErrorBoundary'

@@ -218,8 +218,8 @@ export interface VaultProgressDto {
   done: boolean
 }
 
-import type { ChatEventDto, ChatPatch, ChatReplyDto, ChatStatusDto } from './chat.js'
-export type { ChatEventDto, ChatPatch, ChatReplyDto, ChatStatusDto } from './chat.js'
+import type { ChatEventDto, ChatPatch, ChatReplyDto, ChatStatusDto, OllamaCheckDto } from './chat.js'
+export type { ChatEventDto, ChatPatch, ChatReplyDto, ChatStatusDto, OllamaCheckDto } from './chat.js'
 import type { LibraryEventDto, LibraryModelAction, LibraryPatch, LibraryStatusDto } from './library.js'
 export type * from './library.js'
 
@@ -434,6 +434,8 @@ export interface AetherBridge {
   /** The brain's chat: its settings and whether it can chat now. */
   chatStatus(): Promise<ChatStatusDto>
   chatConfigure(patch: ChatPatch): Promise<ChatStatusDto>
+  /** Ask Ollama on this computer (at the address in the chat's settings) which models it has. */
+  chatOllama(): Promise<OllamaCheckDto>
   /** Send a message in conversation `conv` (an id the renderer makes); events stream through onChatEvent. */
   chatSend(conv: string, text: string): Promise<ChatReplyDto>
   /** Stop the answer being written. */
@@ -606,6 +608,7 @@ export const IPC = {
   findProgress: 'vault:findProgress',
   chatStatus: 'chat:status',
   chatConfigure: 'chat:configure',
+  chatOllama: 'chat:ollama',
   chatSend: 'chat:send',
   chatStop: 'chat:stop',
   chatForget: 'chat:forget',

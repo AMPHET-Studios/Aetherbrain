@@ -1,6 +1,8 @@
+import { useSyncExternalStore } from 'react'
 import { TODAY_ID } from '@aether/core'
 import { TODAY_COLOR, type LayoutMode } from '@aether/graph'
 import { useAether, type View } from '../store'
+import { topBarButtons, type TopBarButton } from '../topbarButtons'
 import { cx, MOD } from '../util'
 
 const LAYOUT_LABEL: Record<LayoutMode, string> = { constellation: '✧ Constellation', orbit: '◎ Orbit', system: '☀ System' }
@@ -14,6 +16,21 @@ const VIEWS: { id: View; label: string; key: string }[] = [
   { id: 'projects', label: 'Projects', key: '6' },
   { id: 'boards', label: 'Boards', key: '8' },
 ]
+
+const noSubscribe = (): (() => void) => () => undefined
+const notPressed = (): boolean => false
+
+/** A button the host app added (see topbarButtons.ts): its word gives way on a narrow window, its key shows on a wide one. */
+function HostButton({ item }: { item: TopBarButton }) {
+  const pressed = useSyncExternalStore(item.subscribe ?? noSubscribe, item.pressed ?? notPressed, item.pressed ?? notPressed)
+  return (
+    <button type="button" className="hud-btn ml-1" aria-label={item.word} aria-pressed={item.pressed ? pressed : undefined} onClick={item.run} title={item.title}>
+      <span aria-hidden>{item.icon}</span>
+      <span className="topbar-roomy">{item.word}</span>
+      {item.key && <kbd className="topbar-wide">{item.key}</kbd>}
+    </button>
+  )
+}
 
 /*
  * Room. The bar must fit a laptop window (1366 px, down to 1100): a narrow window gives up words before it gives up buttons. Under
@@ -97,6 +114,10 @@ export function TopBar({ onPickVault }: { onPickVault?: (() => void) | undefined
           <kbd className="topbar-wide">y</kbd>
         </button>
       )}
+
+      {topBarButtons().map((b) => (
+        <HostButton key={b.id} item={b} />
+      ))}
 
       <span className="flex-1" />
 

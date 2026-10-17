@@ -64,6 +64,18 @@ export interface ChatPatch {
   nudges?: boolean
 }
 
+/** What a look at Ollama on this computer found (its model list): for the chat's settings. */
+export interface OllamaCheckDto {
+  /** The address that was asked. */
+  url: string
+  /** Ollama answered. */
+  reachable: boolean
+  /** The names of the models it has, as they are typed in the settings. Empty when it did not answer. */
+  models: string[]
+  /** Why it did not answer, in a few words. */
+  error: string | null
+}
+
 /** How a turn ended. */
 export interface ChatReplyDto {
   text: string
