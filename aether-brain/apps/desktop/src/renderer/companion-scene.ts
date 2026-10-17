@@ -11,7 +11,9 @@ import type { ScenePlan } from './companion-bound'
 
 /**
  * The original names, kept as they were for the viewers built to them: the vault or a drive is a 'sun', a project
- * folder a 'star', any other folder a 'planet', a note a 'moon'. The cosmology's names are in `companionBody`.
+ * folder a 'star', any other folder a 'planet', a note a 'moon'. A reference board with pictures orbiting it is a
+ * 'star' too (it is a sun of its own: a viewer that draws every 'star' bright and named draws it right). The
+ * cosmology's names are in `companionBody`.
  */
 export function companionKind(n: GraphNode): CompanionKind {
   if (n.kind === 'today') return 'today'
@@ -20,17 +22,19 @@ export function companionKind(n: GraphNode): CompanionKind {
     const role = n.folder.role
     return role === 'root' || role === 'mount' ? 'sun' : role === 'project' ? 'star' : 'planet'
   }
+  if (n.board) return 'star'
   return n.ghost ? 'ghost' : 'moon'
 }
 
 /**
  * What a node is in the cosmology (docs/COSMOLOGY.md): a drive or a one-folder vault a 'galaxy', the origin of several
- * drives an 'origin', every folder a 'star', a big picture, video, model or long note a 'planet', every small file a
- * 'moon'.
+ * drives an 'origin', every folder a 'star', a reference board with pictures orbiting it a 'star' (a sun of its own), a
+ * big picture, video, model or long note a 'planet', every small file a 'moon'.
  */
 export function companionBody(n: GraphNode): CompanionBody {
   if (n.kind === 'today') return 'hub'
   if (n.folder) return isGalaxyNode(n) ? 'galaxy' : n.folder.role === 'root' ? 'origin' : 'star'
+  if (n.board) return 'star'
   if (n.ghost) return 'ghost'
   return isPlanetNode(n) ? 'planet' : 'moon'
 }
