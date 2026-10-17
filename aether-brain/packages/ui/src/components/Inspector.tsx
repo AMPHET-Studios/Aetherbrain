@@ -10,6 +10,7 @@ import {
   isFolderId,
   isGhostId,
   isImageId,
+  isModelPath,
   isTodayId,
   isVideoPath,
   type BriefTask,
@@ -232,6 +233,7 @@ export function linkRow(
   if (isGhostId(id)) return { kind: 'ghost', label: `+ ${ghostTitle(id)}`, hint: 'Missing note — select to create', dotClass: 'bg-danger' }
   if (isImageId(id)) {
     const path = imagePathOf(id)
+    if (isModelPath(path)) return { kind: 'image', label: `◈ ${imageFileName(path)}`, hint: 'Click: select · double-click: open in your 3D app', dot: IMAGE_COLOR }
     return isVideoPath(path)
       ? { kind: 'image', label: `▶ ${imageFileName(path)}`, hint: 'Click: select · double-click: play in your video player', dot: IMAGE_COLOR }
       : { kind: 'image', label: `🖼 ${imageFileName(path)}`, hint: 'Click: select · double-click: open in your image app', dot: IMAGE_COLOR }
@@ -821,13 +823,16 @@ function ImageInspector({ id }: { id: NoteId }) {
   const folder = folderOf(path)
   const refs = [...(embeddedIn ?? [])].sort()
   const video = info?.video === true || isVideoPath(path)
+  const model = info?.model === true || isModelPath(path)
+  // Only a picture goes on a reference board: a board holds pictures and videos' stills never, and a model is the brain's.
+  const picture = !video && !model
 
   return (
     <aside className="panel rise flex max-h-full w-80 flex-col overflow-hidden" aria-label="Picture inspector">
       <div className="p-4 pb-3">
         <div className="section-title flex items-center gap-1.5">
           <span className="inline-block h-2 w-2 rounded-full" style={{ background: IMAGE_COLOR, boxShadow: `0 0 8px ${IMAGE_COLOR}` }} />
-          {video ? 'Video' : 'Picture'}
+          {video ? 'Video' : model ? '3D model' : 'Picture'}
         </div>
         <button
           type="button"
@@ -868,7 +873,12 @@ function ImageInspector({ id }: { id: NoteId }) {
       </div>
 
       <div className="flex flex-wrap gap-1.5 px-4 pb-3">
-        <button type="button" className="hud-btn primary" onClick={() => void openImage(path)} title={video ? 'Play it in your video player (e · Enter)' : 'Open in your image app (e · Enter)'}>
+        <button
+          type="button"
+          className="hud-btn primary"
+          onClick={() => void openImage(path)}
+          title={video ? 'Play it in your video player (e · Enter)' : model ? 'Open it in your 3D app (e · Enter)' : 'Open in your image app (e · Enter)'}
+        >
           Open <kbd className="!text-white/80">e</kbd>
         </button>
         {canReveal && (
@@ -879,7 +889,7 @@ function ImageInspector({ id }: { id: NoteId }) {
         <button type="button" className="hud-btn" onClick={() => void copyEmbed(path)} title={`Copy ![[${name}]] to paste into a note`}>
           Copy embed
         </button>
-        {!video && (
+        {picture && (
           <button
             type="button"
             className="hud-btn"
@@ -901,7 +911,7 @@ function ImageInspector({ id }: { id: NoteId }) {
         </button>
       </div>
 
-      {boardMenu && !video && <AddToBoardMenu path={path} onDone={() => setBoardMenu(false)} />}
+      {boardMenu && picture && <AddToBoardMenu path={path} onDone={() => setBoardMenu(false)} />}
 
       <div className="scroll flex-1 border-t border-[var(--line)] px-4 py-3">
         {refs.length > 0 ? (

@@ -13,6 +13,9 @@
  * (`aether-video://clip/<token>`) that its session serves from that one file,
  * in the ranges the helper's media player asks for, and only while the job
  * runs. The helper takes one still frame of it and never plays it.
+ * A 3D model (a binary glTF) is sent whole, like a picture; the helper has no
+ * GPU (`webgl: false`), so its preload draws it with a small software
+ * rasterizer and sends back one PNG.
  *
  * ThumbQueue is the bookkeeping (a HelperQueue, see helper-queue.ts, tested
  * with a fake helper): at most two decodes at once, a timeout per decode (the
@@ -37,6 +40,8 @@ export const THUMB_IPC = {
   done: 'thumbs:done',
   /** main → helper: (id, video address, longest side): a still frame of a video, fitted to the size. */
   video: 'thumbs:video',
+  /** main → helper: (id, binary glTF bytes, side): a 3D model drawn lit from one side, a square of that side. */
+  model: 'thumbs:model',
 } as const
 
 /**
@@ -71,7 +76,13 @@ export interface VideoJob {
   px: number
 }
 
-export type ThumbJob = PictureJob | VideoJob
+/** One 3D model to draw: its whole file (a binary glTF, checked by `modelKindOf`) and the side of the square still. */
+export interface ModelJob {
+  model: Uint8Array
+  px: number
+}
+
+export type ThumbJob = PictureJob | VideoJob | ModelJob
 
 /**
  * A job that got no answer through no fault of its picture (the helper could
@@ -170,6 +181,15 @@ export class Thumbnailer {
     }
   }
 
+  /**
+   * PNG bytes of a 3D model (`bytes`: a whole binary glTF, already checked by `modelKindOf`) drawn lit from one side as a square
+   * of `px`, or null when it has nothing the helper can draw (compressed or empty geometry, a broken file, too much of it).
+   * The bytes are sent over; the helper reads nothing else, and a model that breaks its drawing code takes only the helper down.
+   */
+  renderModel(bytes: Uint8Array, px: number): Promise<Uint8Array | null> {
+    return this.queue.render({ model: bytes, px })
+  }
+
   /** One request of the helper's session for a video address: the file of a job running now, else 404. */
   serve(url: string, range: string | null): Promise<Response> {
     const video = url.startsWith(VIDEO_URL_PREFIX) ? this.videos.get(url.slice(VIDEO_URL_PREFIX.length)) : undefined
@@ -225,8 +245,11 @@ export class Thumbnailer {
     w.loadURL(THUMB_PAGE).catch(gone)
     return {
       id,
-      send: (jobId, job) =>
-        'url' in job ? wc.send(THUMB_IPC.video, jobId, job.url, job.px) : wc.send(THUMB_IPC.job, jobId, job.bytes, job.type, job.width, job.height),
+      send: (jobId, job) => {
+        if ('url' in job) wc.send(THUMB_IPC.video, jobId, job.url, job.px)
+        else if ('model' in job) wc.send(THUMB_IPC.model, jobId, job.model, job.px)
+        else wc.send(THUMB_IPC.job, jobId, job.bytes, job.type, job.width, job.height)
+      },
       destroy: (hung) => {
         if (w.isDestroyed()) return
         // A renderer stuck in a decode may never finish closing: end its process first.

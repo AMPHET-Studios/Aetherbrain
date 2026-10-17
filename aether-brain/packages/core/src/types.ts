@@ -189,6 +189,8 @@ export interface ImageNodeInfo {
   embeddedBy: number
   /** True for a video (`isVideoPath`): shown as one still frame, never played in the brain. */
   video?: boolean
+  /** True for a 3D model (`isModelPath`): shown as one lit still the thumbnail helper draws, opened in the OS's 3D app. */
+  model?: boolean
   /** Present while the picture is a card of the open star gallery. */
   gallery?: GalleryCardInfo
 }
@@ -320,9 +322,9 @@ export interface SearchHit {
 
 /**
  * File changes, plus folder creation/removal ('addDir' / 'unlinkDir', path =
- * the folder). Picture and video files (`isMediaPath`) come as add / change /
- * unlink without `content` (mtime and size when known); everything that is
- * not a note, a picture or a video is never reported.
+ * the folder). Picture, video and 3D model files (`isAssetPath`) come as add /
+ * change / unlink without `content` (mtime and size when known); everything
+ * that is not a note, a picture, a video or a model is never reported.
  */
 export type VaultChangeKind = 'add' | 'change' | 'unlink' | 'addDir' | 'unlinkDir'
 

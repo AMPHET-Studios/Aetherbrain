@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { imagePathOf, isFolderId, isImageId, isTodayId, isVideoPath } from '@aether/core'
+import { imagePathOf, isFolderId, isImageId, isModelPath, isTodayId, isVideoPath } from '@aether/core'
 import { BrainScene } from '@aether/graph'
 import { FULL_PANEL_VIEWS, useAether, type AetherState } from './store'
 import { useKeyboard } from './hooks/useKeyboard'
@@ -240,7 +240,8 @@ function Hint() {
         </span>
       ) : selectedId && isImageId(selectedId) ? (
         <span>
-          <kbd>e</kbd> {isVideoPath(imagePathOf(selectedId)) ? 'play in your video player' : 'open in your image app'} · <kbd>Tab</kbd> neighbors · <kbd>f</kbd> fly · <kbd>Esc</kbd> deselect
+          <kbd>e</kbd>{' '}
+          {isVideoPath(imagePathOf(selectedId)) ? 'play in your video player' : isModelPath(imagePathOf(selectedId)) ? 'open in your 3D app' : 'open in your image app'} · <kbd>Tab</kbd> neighbors · <kbd>f</kbd> fly · <kbd>Esc</kbd> deselect
         </span>
       ) : selectedId ? (
         <span>

@@ -395,6 +395,34 @@ export function videoKindOf(b: Uint8Array): VideoKind | null {
   return null
 }
 
+/* ---- 3D models ---- */
+
+export type ModelKind = 'glb'
+
+/** Largest model file the thumbnail helper is sent whole (what a picture is allowed too). */
+export const MAX_MODEL_BYTES = MAX_THUMB_FILE_BYTES
+/** Bytes read from the start of a model to tell it: the 12-byte header and the first chunk's length and type. */
+export const GLB_HEAD_BYTES = 20
+
+/** `glTF`, `JSON` as the little-endian numbers a GLB stores them as. */
+const GLB_MAGIC = 0x46546c67
+const GLB_JSON_CHUNK = 0x4e4f534a
+
+/**
+ * What kind of model the first bytes start with, or null for anything else: a binary glTF 2.0 file has the magic `glTF`, version
+ * 2, a total length that is not more than the file (a cut-off copy is not a model) and a JSON chunk first, inside that length.
+ * A model is opened with the OS's 3D app and drawn by the thumbnail helper: a file named `.glb` that is not one gets neither.
+ * `b`: the first GLB_HEAD_BYTES of the file (or all of it); `size`: the file's size when `b` is only its start.
+ */
+export function modelKindOf(b: Uint8Array, size: number = b.length): ModelKind | null {
+  if (b.length < GLB_HEAD_BYTES) return null
+  if (u32le(b, 0) !== GLB_MAGIC || u32le(b, 4) !== 2) return null
+  const declared = u32le(b, 8)
+  if (declared < GLB_HEAD_BYTES || declared > size) return null
+  const json = u32le(b, 12)
+  return u32le(b, 16) === GLB_JSON_CHUNK && json > 0 && GLB_HEAD_BYTES + json <= declared ? 'glb' : null
+}
+
 /** The first `n` bytes of a file (fewer when it is shorter). */
 export async function readHead(abs: string, n: number): Promise<Uint8Array> {
   const handle = await fs.open(abs, 'r')

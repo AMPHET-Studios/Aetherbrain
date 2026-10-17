@@ -32,19 +32,22 @@ import {
   type VaultProgressDto,
 } from '../shared/ipc.js'
 import type { ChatPatch } from '../shared/chat.js'
-import { FsVault, isVideoName, within } from './fsvault.js'
+import { FsVault, isModelName, isVideoName, within } from './fsvault.js'
 import { VaultWatcher } from './watcher.js'
 import { findProjects } from './projects.js'
 import { FilePager, type FilePage } from './pages.js'
 import { StartupGuard, latestCrash } from './startup-guard.js'
 import { BRAIN_WINDOW_NAME, MemoryTrail, type MemorySample, crashMessage, crashReport, crashReportName, describeTrail, shouldReload } from './crash.js'
 import {
+  GLB_HEAD_BYTES,
+  MAX_MODEL_BYTES,
   MAX_THUMB_FILE_BYTES,
   ThumbCache,
   VIDEO_HEAD_BYTES,
   VIDEO_MIME,
   assetBytes,
   assetPath,
+  modelKindOf,
   readHead,
   readUpTo,
   thumbPx,
@@ -554,22 +557,26 @@ async function listAssets(): Promise<AssetListDto> {
  * PNG bytes of a picture at most `size` px on its longer side, or null when
  * it is not a picture of the vault, too big, or cannot be decoded. A video's
  * thumbnail is one still frame of it (any size of file: it is streamed to
- * the helper, never read whole).
+ * the helper, never read whole). A 3D model's is a square still the helper
+ * draws from the file's bytes.
  */
 async function thumbnail(p: unknown, size: unknown): Promise<Uint8Array | null> {
   const v = requireVault()
   const px = thumbPx(size)
-  const abs = await v.assetAbs(String(p))
+  const rel = String(p)
+  // A model comes in by its own door (`modelAbs`): the one pictures and boards use never opens one.
+  const abs = (await v.assetAbs(rel)) ?? (await v.modelAbs(rel))
   if (!abs) return null
   const st = await fs.stat(abs).catch(() => null)
   const video = isVideoName(path.basename(abs))
+  const model = isModelName(path.basename(abs))
   if (!st?.isFile() || st.size === 0 || (!video && st.size > MAX_THUMB_FILE_BYTES)) return null
   const key = ThumbCache.key(abs, st.mtimeMs, st.size, px)
   const hit = thumbs.get(key)
   if (hit !== undefined) return hit
   let job = thumbsInFlight.get(key)
   if (!job) {
-    job = (video ? renderVideoThumb(abs, px) : renderThumb(abs, px))
+    job = (video ? renderVideoThumb(abs, px) : model ? renderModelThumb(abs, px) : renderThumb(abs, px))
       .then(
         (png) => {
           // A picture that cannot be decoded is an answer too (null, cached for this version of the
@@ -597,6 +604,18 @@ async function renderThumb(abs: string, px: number): Promise<Uint8Array | null> 
   if (!bytes) return null
   const target = thumbTarget(bytes, px)
   return target ? thumbnailer.render({ bytes, ...target }) : null
+}
+
+/**
+ * A 3D model's still, drawn by the thumbnail helper: main reads the file here
+ * (asynchronously, never more than 64 MB), checks that it starts like a binary
+ * glTF and sends the bytes; it parses and draws nothing itself. A file that
+ * is not one gets no thumbnail (a plain moon).
+ */
+async function renderModelThumb(abs: string, px: number): Promise<Uint8Array | null> {
+  const bytes = await readUpTo(abs, MAX_MODEL_BYTES)
+  if (!bytes || !modelKindOf(bytes)) return null
+  return thumbnailer.renderModel(bytes, px)
 }
 
 /**
@@ -636,16 +655,21 @@ async function createAsset(p: unknown, data: unknown): Promise<void> {
 }
 
 /**
- * Open a picture or video of the vault in the OS default app (a video plays
- * there, never in the brain). Pictures and videos only: shell.openPath would
- * run a program just the same. A video must also start like one.
+ * Open a picture, video or 3D model of the vault in the OS default app (a
+ * video plays there, never in the brain; a model opens in the 3D app). Those
+ * only: shell.openPath would run a program just the same. A video or a model
+ * must also start like one.
  */
 async function openAsset(p: unknown): Promise<void> {
   const v = requireVault()
   const rel = String(p)
-  const abs = await v.assetAbs(rel)
+  const abs = (await v.assetAbs(rel)) ?? (await v.modelAbs(rel))
   if (!abs) throw new Error(`Not a picture in the vault: ${rel}`)
   if (isVideoName(path.basename(abs)) && !videoKindOf(await readHead(abs, VIDEO_HEAD_BYTES))) throw new Error(`Not a video: ${rel}`)
+  if (isModelName(path.basename(abs))) {
+    const st = await fs.stat(abs)
+    if (!modelKindOf(await readHead(abs, GLB_HEAD_BYTES), st.size)) throw new Error(`Not a model: ${rel}`)
+  }
   const err = await shell.openPath(abs)
   if (err) throw new Error(`Could not open ${rel}: ${err}`)
 }

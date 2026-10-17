@@ -23,7 +23,7 @@ import { IPC, type AssetListDto, type BoardConfigureDto, type BoardSaveResult, t
 import { MAX_BOARD_TEXT, boardNoteVerdict, checkBoard, readBoard, saveBoard, type BoardVault } from './board-save.js'
 import { BOARD_WINDOW_NAME, CRASH_WINDOW_MS, crashMessage, shouldReload } from './crash.js'
 import { forgeNavigation } from './forge.js'
-import { isImageName, isMediaName } from './fsvault.js'
+import { isImageName, isMediaName, isModelName } from './fsvault.js'
 
 export const BOARD_TITLE = 'Aether Brain — Board'
 /** Smallest window: a board you cannot see is no board (at 320 x 240 the toolbar wrapped to three rows and left 72 px of canvas). */
@@ -676,6 +676,10 @@ export class BoardWindowHost {
         return this.showsPath(first) || (typeof first === 'string' && isMediaName(first.slice(first.lastIndexOf('/') + 1)))
           ? null
           : 'The board window can show only pictures, videos and its own board in the file manager'
+      case IPC.thumb:
+      case IPC.openAsset:
+        // A board holds pictures and videos. A 3D model is the brain's: drawn by the helper and opened in the 3D app on its request.
+        return typeof first === 'string' && isModelName(first.slice(first.lastIndexOf('/') + 1)) ? 'The board window works with pictures and videos only' : null
       default:
         return null
     }

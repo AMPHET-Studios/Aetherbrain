@@ -1,10 +1,10 @@
-import type { Area, FolderRole, FolderSelection, GalleryInfo, GraphData, GraphEdge, GraphNode, Link, NoteId, ParsedNote, VaultAsset } from '../types'
+import type { Area, FolderRole, FolderSelection, GalleryInfo, GraphData, GraphEdge, GraphNode, ImageNodeInfo, Link, NoteId, ParsedNote, VaultAsset } from '../types'
 import { LinkResolver } from './resolve'
 import { asString } from '../markdown/frontmatter'
 import type { DailyBrief } from '../markdown/brief'
 import { isProjectNote, projectFolderOf } from '../markdown/projects'
 import { noteUrgency, systemUrgency } from '../markdown/urgency'
-import { AssetResolver, TODAY_ID, imageKey, imageTitle, isMediaPath, isVideoPath } from '../vault/assets'
+import { AssetResolver, TODAY_ID, imageKey, imageTitle, isAssetPath, isModelPath, isVideoPath } from '../vault/assets'
 import { folderUniverse, selectFolders, type FolderSelectOptions } from '../vault/folders'
 import { ancestorsOf, areaFromFolder, folderDepth, folderKey, folderOf, normalizeFolderPath } from '../vault/paths'
 
@@ -142,8 +142,8 @@ export function buildGraph(notes: Map<NoteId, ParsedNote>, opts: BuildGraphOptio
       // Always resolve from the raw text so rebuilding after a vault change
       // (a ghost becoming real, a rename) never needs a re-parse.
       const rawTarget = link.literal ? link.raw.trim() : stripRaw(link.raw)
-      if (isMediaPath(rawTarget)) {
-        // A picture or video: an image node when the file exists, else nothing (never a ghost).
+      if (isAssetPath(rawTarget)) {
+        // A picture, video or 3D model: an image node when the file exists, else nothing (never a ghost).
         const img = pictures()?.resolve(rawTarget, n.meta.folder) ?? null
         link.resolved = img !== null
         link.to = img !== null ? imageKey(img) : rawTarget
@@ -330,6 +330,9 @@ function addImageNode(
 ): GraphNode {
   const id = imageKey(path)
   const mtime = asset?.mtime ?? null
+  const image: ImageNodeInfo = { path, mtime, size: asset?.size ?? null, embeddedBy: 0 }
+  if (isVideoPath(path)) image.video = true
+  else if (isModelPath(path)) image.model = true
   const node: GraphNode = {
     id,
     title: imageTitle(path),
@@ -339,7 +342,7 @@ function addImageNode(
     kind: 'image',
     ghost: false,
     parent: null,
-    image: isVideoPath(path) ? { path, mtime, size: asset?.size ?? null, embeddedBy: 0, video: true } : { path, mtime, size: asset?.size ?? null, embeddedBy: 0 },
+    image,
     inDegree: 0,
     outDegree: 0,
     degree: 0,

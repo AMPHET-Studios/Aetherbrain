@@ -9,7 +9,8 @@ import {
   imageFileName,
   imageKey,
   imagePathOf,
-  isMediaPath,
+  isAssetPath,
+  isModelPath,
   isVideoPath,
   remarkNoLateAutolinks,
   remarkWikilink,
@@ -76,7 +77,7 @@ export function MarkdownPreview({ source, selfId = null, depth = 0, className }:
   const plugins = useMemo(() => {
     const pictures = picturesOf(assets)
     const resolve = (t: string): string | null => {
-      if (!isMediaPath(t)) return resolver.resolve(t)
+      if (!isAssetPath(t)) return resolver.resolve(t)
       const path = pictures.resolve(t, folder)
       return path === null ? null : imageKey(path)
     }
@@ -205,10 +206,10 @@ export function previewLink(props: ComponentProps<'a'> & ExtraProps, ctx: LinkCo
   }
   const id = data['data-id'] ?? null
   const embed = data['data-embed'] === 'true'
-  if (isMediaPath(target)) {
+  if (isAssetPath(target)) {
     if (!id) {
       return (
-        <span className="picture-missing" title={`No ${isVideoPath(target) ? 'video' : 'picture'} “${target}” in the vault`}>
+        <span className="picture-missing" title={`No ${isVideoPath(target) ? 'video' : isModelPath(target) ? '3D model' : 'picture'} “${target}” in the vault`}>
           {embed ? target : children}
         </span>
       )
@@ -270,8 +271,9 @@ function PictureEmbed({ path, stamp, onOpen }: { path: string; stamp: string; on
   const url = preview.url !== broken ? preview.url : null
   // A video shows one still frame with a play badge: it plays in the OS player (its inspector's Open), never here.
   const video = isVideoPath(path)
+  const model = isModelPath(path)
   return (
-    <button type="button" className="embed-picture" onClick={onOpen} title={video ? `${path} (video)` : path}>
+    <button type="button" className="embed-picture" onClick={onOpen} title={video ? `${path} (video)` : model ? `${path} (3D model)` : path}>
       {url ? (
         <span className="still">
           <img src={url} alt={name} draggable={false} onError={() => setBroken(url)} />
@@ -283,7 +285,7 @@ function PictureEmbed({ path, stamp, onOpen }: { path: string; stamp: string; on
         </span>
       ) : (
         <span className="embed-picture-wait">
-          {video ? '▶' : '🖼'} {name}
+          {video ? '▶' : model ? '◈' : '🖼'} {name}
           {preview.state === 'loading' ? ' …' : ''}
         </span>
       )}
