@@ -156,6 +156,8 @@ export interface Settings {
   folderDepth: number
   /** System layout: planets and moons orbit their parents. */
   motion: boolean
+  /** System layout: calm orbits. Urgency speeds an orbit up less, never past a normal orbit (⇧O). */
+  calm: boolean
   /** System layout: each shown folder's newest pictures orbit it as moons. */
   imageMoons: boolean
   /** Picture moons show their thumbnails. */
@@ -218,6 +220,7 @@ const DEFAULT_SETTINGS: Settings = {
   previewMode: 'split',
   folderDepth: 3,
   motion: true,
+  calm: false,
   imageMoons: true,
   thumbnails: true,
   pictureSize: 'xl',
@@ -263,6 +266,7 @@ function loadSettings(): Settings {
   if (!LAYOUTS.includes(s.layoutMode)) s.layoutMode = 'system'
   s.folderDepth = clampDepth(s.folderDepth)
   s.motion = s.motion !== false
+  s.calm = s.calm === true
   s.imageMoons = s.imageMoons !== false
   s.thumbnails = s.thumbnails !== false
   if (!isPictureSize(s.pictureSize)) s.pictureSize = DEFAULT_SETTINGS.pictureSize
@@ -544,6 +548,8 @@ export interface AetherState {
   toggleLayout(): void
   /** System layout: orbits moving / paused. */
   toggleMotion(): void
+  /** System layout: calm orbits on / off (⇧O). */
+  toggleCalm(): void
 
   /** Where new notes go: '' for one root, `<first mount>/` for several. */
   homePrefix(): string
@@ -857,6 +863,7 @@ export const useAether = create<AetherState>()((set, get) => {
   controller.bloom = settings.bloom
   controller.hubLabels = settings.hubLabels
   controller.motion = settings.motion
+  controller.calm = settings.calm
   controller.showThumbnails = settings.thumbnails
   controller.galleries = settings.starGalleries
   controller.pictureSize = settings.pictureSize
@@ -2358,6 +2365,7 @@ export const useAether = create<AetherState>()((set, get) => {
       controller.setBloom(next.bloom)
       controller.setHubLabels(next.hubLabels)
       controller.setMotion(next.motion)
+      controller.setCalm(next.calm)
       controller.showThumbnails = next.thumbnails
       controller.galleries = next.starGalleries
       controller.pictureSize = next.pictureSize
@@ -2402,6 +2410,11 @@ export const useAether = create<AetherState>()((set, get) => {
       const motion = !get().settings.motion
       get().setSettings({ motion })
       get().toast(motion ? 'Orbits moving' : 'Orbits paused')
+    },
+    toggleCalm() {
+      const calm = !get().settings.calm
+      get().setSettings({ calm })
+      get().toast(calm ? 'Calm orbits: none runs faster than a normal orbit' : 'Orbits at their urgent speed')
     },
 
     homePrefix() {

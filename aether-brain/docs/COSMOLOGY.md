@@ -2,7 +2,7 @@
 
 What every body in the system layout *is*, how it moves and why. This is the contract: the desktop app is the concept that proves it, and the Unreal Engine 5.8 version is built to it. When the two disagree, this page is right and one of them has a bug.
 
-## The five rules
+## The six rules
 
 | Your vault | Is | Drawn as |
 | --- | --- | --- |
@@ -10,9 +10,20 @@ What every body in the system layout *is*, how it moves and why. This is the con
 | a **folder** | a **star** | a glowing body; bigger the more it holds; a project folder is the brightest, biggest kind |
 | a **picture, video or 3D model** big enough to matter, or a **document-sized note** | a **planet** | pictures, videos and models as extra-large thumbnails; a long note as a solid sphere |
 | every **small file** | a **moon** | a small body on a close orbit |
+| a **reference board** with pictures on it | a **sun** | a bright mint-white star of its own, bigger the more pictures it holds; the pictures on it orbit it instead of their folders |
 | **how soon it needs you** | **orbit speed** and **star brightness** | a faster orbit; a brighter star for the whole system |
 
-Everything orbits what is above it: files orbit their folder's star, a sub-folder's star orbits its parent star, a drive's stars lie on its disc. Nothing is a star that is not a folder.
+Everything orbits what is above it: files orbit their folder's star, a sub-folder's star orbits its parent star, a drive's stars lie on its disc. Nothing is a star that is not a folder, except a board's sun (below).
+
+## A board is a sun
+
+A reference board (`type: board`, the PureRef-style note of [REFERENCE-BOARD.md](REFERENCE-BOARD.md)) that has pictures on it is a **sun**: a star of its own with its pictures orbiting it.
+
+- **Which pictures.** Every picture or video the board links to (its `pic` lines). In the system layout each of them orbits the board **instead of its own folder**; its links stay, and it is no longer one of its folder's moons. A picture on several boards orbits the first board by its path (a stable order); the others keep their links to it.
+- **The board.** It orbits its own folder like any note (as a system, among the folder's sub-folders), is drawn bigger the more pictures it holds (radius 4 and a little more for each doubling, at most 9), always named (`▣ Name`), and blooms steadily in mint-white (`BOARD_SUN_COLOR`), whatever the colour mode. Flying to it frames its whole system.
+- **Its pictures** are planets like any picture (extra-large thumbnails; a faster orbit when an urgent note embeds them), on rings around it.
+- **A board with nothing to hold** (no pictures, only missing files, or every picture already on an earlier board) is a plain note. The other layouts do not change: there a board only links to its pictures.
+- **The viewer** is sent the board as a `star` (kind and body) with its pictures as children (`parent`), and the sun's radius, like any other body.
 
 ## Planet or moon
 
@@ -60,6 +71,15 @@ Bodies of the same heat share rings, so a ring has one speed (`packages/graph/sr
 - A ring's speed is the usual `0.9 / √radius` times `urgencySpeed(u) = 0.55 + 1.45·u`, with `u` the mean urgency of the ring: a calm orbit crawls at 0.55×, an overdue one runs at 2×. **Nothing ever stops**: the sky stays alive.
 - Moons beyond 24 go on a Fibonacci shell that turns as one, at the speed of their mean urgency (the urgent ones have left it for their own rings).
 
+### Calm mode
+
+Some days a sky of fast orbits is too much to look at. **Calm mode** (`⇧ O`, the legend's ☾ calm, the palette's *calm orbits*) keeps the same rings, the same order and the same brightness, and holds the speed to a normal orbit's pace:
+
+- A ring's speed is the usual `0.9 / √radius` times `calmSpeed(u) = 0.55 + 0.45·u` instead of `urgencySpeed(u)`: a low-urgency orbit still crawls at 0.55×, an overdue one runs at 1× (`CALM_MAX_SPEED`, a normal orbit), never 2×. A more urgent orbit is still a faster one, just by less.
+- It is a clock, not a layout. Every orbit carries `slack`, the speed calm takes off it (0 for an orbit urgency does not speed up), and the brain window counts the seconds spent calm: an angle is `phase + speed · t − slack · calm seconds` (`systemPositions`). So switching calm on or off, or laying the sky out again, moves nothing: an orbit simply turns slower or faster from where it is.
+- `o` still pauses everything; calm only changes how fast orbits go while they move. Gallery cards, the Today hub and the roots are not urgency's to speed up, so calm leaves them as they are.
+- It is a setting of the brain window: remembered, and off by default. Positions already carry it, so a viewer is sent nothing new and needs nothing. Star brightness, which ring a body is on and the `urgency` number it is sent do not change: urgent things are still the bright, close ones.
+
 ### Star brightness is urgency
 
 A star's glow is `calm + heat · U`, with `U` the urgency of its **whole system**: a calm star is a solid body under the bloom threshold; an urgent one blooms. A project star starts higher. A glance at the sky says what is on fire and where, and flying into a bright star shows which of its planets is faster than the others.
@@ -70,8 +90,8 @@ The brain window publishes the scene to a viewer (`docs/UNREAL.md`, the companio
 
 | Field | |
 | --- | --- |
-| `kind` | the original names, **unchanged** so a viewer built to them keeps drawing what it drew: `sun` the vault or a drive · `star` a project folder · `planet` any other folder · `moon` a note · `picture` · `ghost` · `today` |
-| `body` | the cosmology's names, for the viewer built to this page: `galaxy` a drive or a one-folder vault · `origin` the root of several drives · `star` every folder · `planet` / `moon` a big / small file (a `picture` kind carries one of them in its radius and its size) · `ghost` · `hub` (Today). Absent from older builds: use `kind` |
+| `kind` | the original names, **unchanged** so a viewer built to them keeps drawing what it drew: `sun` the vault or a drive · `star` a project folder, or a board with pictures orbiting it · `planet` any other folder · `moon` a note · `picture` · `ghost` · `today` |
+| `body` | the cosmology's names, for the viewer built to this page: `galaxy` a drive or a one-folder vault · `origin` the root of several drives · `star` every folder and every board sun · `planet` / `moon` a big / small file (a `picture` kind carries one of them in its radius and its size) · `ghost` · `hub` (Today). Absent from older builds: use `kind` |
 | `radius` | in the brain's world units (the layout spaces orbits by it) |
 | `color` | the colour the brain draws it in |
 | `parent` | what it orbits |
@@ -85,7 +105,7 @@ The concept proves *what things mean*. The production build makes them beautiful
 
 | Stays exactly as here | Is free to become production quality |
 | --- | --- |
-| the five rules and the planet / moon thresholds | the look of a galaxy (a spiral of instanced stars and dust, not a sphere), stars (corona, flares, spectral colour), planets (PBR, atmosphere, real thumbnails as materials), moons |
+| the six rules and the planet / moon thresholds | the look of a galaxy (a spiral of instanced stars and dust, not a sphere), stars (corona, flares, spectral colour), planets (PBR, atmosphere, real thumbnails as materials), moons |
 | urgency from tasks, and the speed and brightness it drives | lighting, bloom, volumetrics, post-processing, sound |
 | positions from the brain window's layout | camera work, flight, picking, UI |
 | the `body` names (`galaxy` `star` `planet` `moon`) and the `urgency` number | meshes, materials, Niagara systems behind each of them |

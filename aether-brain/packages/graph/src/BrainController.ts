@@ -111,6 +111,8 @@ export class BrainController {
   layoutMode: LayoutMode = 'constellation'
   /** System layout: planets and moons orbit their parents over time. */
   motion = true
+  /** System layout: urgency speeds an orbit up less, never past a normal orbit (`calmSpeed`). */
+  calm = false
   /** The camera follows the selected node while it orbits (system layout, motion on). */
   follow = true
   activeTag: string | null = null
@@ -266,8 +268,9 @@ export class BrainController {
   setGraph(graph: GraphData): void {
     const fresh = !this.graph || this.graph.nodes.length === 0
     this.graph = graph
-    // `motion` may have been assigned directly: make sure the worker agrees.
+    // `motion` and `calm` may have been assigned directly: make sure the worker agrees.
     this.engine.setMotion(this.motion)
+    this.engine.setCalm(this.calm)
     this.engine.setGraph(graph, this.layoutMode)
     if (this.selected && !graph.index.has(this.selected)) this.selected = null
     if (this.hovered && !graph.index.has(this.hovered)) this.hovered = null
@@ -547,6 +550,14 @@ export class BrainController {
     this.touch()
   }
 
+  /** System layout: calm orbits on or off (nothing jumps: see `LayoutEngine.setCalm`). */
+  setCalm(on: boolean): void {
+    if (this.calm === on) return
+    this.calm = on
+    this.engine.setCalm(on)
+    this.touch()
+  }
+
   setBloom(v: boolean): void {
     if (this.bloom === v) return
     this.bloom = v
@@ -600,7 +611,8 @@ export class BrainController {
    */
   private nodeDistance(id: NoteId, p: [number, number, number], node: GraphNode | undefined): number {
     if (!node) return 44
-    if (node.kind === 'folder') return this.systemDistance(id, p, node)
+    // A folder star and a board sun are framed whole: with the planets or pictures that orbit it.
+    if (node.kind === 'folder' || node.board) return this.systemDistance(id, p, node)
     if (node.kind === 'today') return 90
     if (node.kind === 'image') {
       // A gallery card is bigger than a moon: come close enough for it to fill a third of the view.

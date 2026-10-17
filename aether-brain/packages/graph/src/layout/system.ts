@@ -5,7 +5,7 @@
  * flat disc), a folder is a star, a big file is a planet, a small file is a moon. Around a star, from the inside
  * out: urgent files (the hottest, fastest), small files (on rings, or on a Fibonacci shell when there are more than
  * 24 of them), big files, then the stars of its sub-folders. Bodies of one heat band share rings, so a ring has
- * one speed and **orbit speed is urgency** (`urgencySpeed`). Bodies never overlap: ring radii are spaced by the
+ * one speed and **orbit speed is urgency** (`urgencySpeed`, `calmSpeed` while calm). Bodies never overlap: ring radii are spaced by the
  * extents (subtree radii) of the bodies on them, and angles within a ring are allocated by extent. Orbit planes
  * and start
  * phases come from hashes of the node ids, so the same vault always lays out
@@ -55,6 +55,12 @@ export interface SystemLayout {
   phase: Float32Array
   /** Angular speed in rad/s (sign = direction; 0 for roots). */
   speed: Float32Array
+  /**
+   * What calm takes off `speed` (same sign, rad/s): the part of an urgent orbit's speed above `calmSpeed`. 0 for an
+   * orbit urgency does not speed up. Calm is a clock, not a layout: `systemPositions` takes `slack × calm seconds` off
+   * the angle, so switching it on or off, or laying the sky out again, moves nothing.
+   */
+  slack: Float32Array
   /** Quaternion per node (4 floats): orientation of the orbit plane around its parent. */
   plane: Float32Array
   /** 1 when the node sits on a spherical shell (many leaf moons) instead of a ring. */
@@ -127,6 +133,19 @@ const GALAXY_INCLINATION = 0.05
 export function urgencySpeed(u: number): number {
   const v = Number.isFinite(u) ? Math.min(1, Math.max(0, u)) : 0
   return 0.55 + 1.45 * v
+}
+
+/** Calm orbits (Shift+O): no orbit runs faster than a normal one, whatever its urgency. */
+export const CALM_MAX_SPEED = 1
+
+/**
+ * `urgencySpeed` when calm: the same order (a more urgent orbit is still a faster one), but the range is 0.55 for a
+ * calm orbit up to `CALM_MAX_SPEED` for an overdue one instead of 2.
+ */
+export function calmSpeed(u: number): number {
+  const v = Number.isFinite(u) ? Math.min(1, Math.max(0, u)) : 0
+  const floor = urgencySpeed(0)
+  return floor + (CALM_MAX_SPEED - floor) * v
 }
 
 /** Stable hash of a string to [0, 1). FNV-1a with a murmur3 finalizer. */
@@ -239,6 +258,7 @@ export function computeSystemLayout(input: SystemInput): SystemLayout {
   const orbitRadius = new Float32Array(n)
   const phase = new Float32Array(n)
   const speed = new Float32Array(n)
+  const slack = new Float32Array(n)
   const plane = new Float32Array(n * 4)
   const shell = new Uint8Array(n)
   const shellDir = new Float32Array(n * 3)
@@ -319,10 +339,11 @@ export function computeSystemLayout(input: SystemInput): SystemLayout {
     let outer = 0
     let ringNo = 0
 
-    const setOrbit = (c: number, r: number, a: number, w: number): void => {
+    const setOrbit = (c: number, r: number, a: number, w: number, calm: number): void => {
       orbitRadius[c] = r
       phase[c] = a
       speed[c] = w
+      slack[c] = calm
       plane[c * 4] = q[0]!
       plane[c * 4 + 1] = q[1]!
       plane[c * 4 + 2] = q[2]!
@@ -363,12 +384,14 @@ export function computeSystemLayout(input: SystemInput): SystemLayout {
         // One speed for the ring: its orbit's urgency is the mean of what rides it.
         let heat = 0
         for (let k = start; k < j; k++) heat += urgencyOf(list[k]!)
-        const w = orbitSpeed(r) * dir * urgencySpeed(heat / (j - start))
+        const mean = heat / (j - start)
+        const w = orbitSpeed(r) * dir * urgencySpeed(mean)
+        const calm = orbitSpeed(r) * dir * Math.max(0, urgencySpeed(mean) - calmSpeed(mean))
         let a0 = (seed + ringNo * 0.6180339887) * TAU
         for (let k = start; k < j; k++) {
           const c = list[k]!
           const a = ringAngle(extent[c]!, r) * scale
-          setOrbit(c, r, a0 + a / 2, w)
+          setOrbit(c, r, a0 + a / 2, w, calm)
           a0 += a
         }
         if (p >= 0) rings.push(p, r, q[0]!, q[1]!, q[2]!, q[3]!)
@@ -390,6 +413,7 @@ export function computeSystemLayout(input: SystemInput): SystemLayout {
       }
       const R = Math.max(base + maxE, ((2 * maxE + GAP) * Math.sqrt(m)) / FIB_SPACING)
       const w = orbitSpeed(R) * dir * urgencySpeed(heat / m)
+      const calm = orbitSpeed(R) * dir * Math.max(0, urgencySpeed(heat / m) - calmSpeed(heat / m))
       const a0 = seed * TAU
       for (let k = 0; k < m; k++) {
         const c = moons[k]!
@@ -400,7 +424,7 @@ export function computeSystemLayout(input: SystemInput): SystemLayout {
         shellDir[c * 3] = Math.cos(th) * rr
         shellDir[c * 3 + 1] = y
         shellDir[c * 3 + 2] = Math.sin(th) * rr
-        setOrbit(c, R, a0, w)
+        setOrbit(c, R, a0, w, calm)
       }
       outer = Math.max(outer, R + maxE)
       base = R + maxE + GAP
@@ -439,7 +463,7 @@ export function computeSystemLayout(input: SystemInput): SystemLayout {
   }
 
   const card = new Float32Array(n)
-  placeGalleries(input, anchor, extent, { orbitRadius, phase, speed, plane, shell, shellDir }, card)
+  placeGalleries(input, anchor, extent, { orbitRadius, phase, speed, slack, plane, shell, shellDir }, card)
 
   // Several roots (should not happen): static rings around the origin.
   if (rootCount > 1) {
@@ -450,7 +474,7 @@ export function computeSystemLayout(input: SystemInput): SystemLayout {
     place(-1, order.subarray(0, rootCount), GAP, 0, 0.125)
   }
 
-  return { parent, order, orbitRadius, phase, speed, plane, shell, shellDir, rings: new Float32Array(rings), extent, anchor, card }
+  return { parent, order, orbitRadius, phase, speed, slack, plane, shell, shellDir, rings: new Float32Array(rings), extent, anchor, card }
 }
 
 /**
@@ -486,7 +510,7 @@ function placeGalleries(
   input: SystemInput,
   anchor: Int32Array,
   extent: Float32Array,
-  out: Pick<SystemLayout, 'orbitRadius' | 'phase' | 'speed' | 'plane' | 'shell' | 'shellDir'>,
+  out: Pick<SystemLayout, 'orbitRadius' | 'phase' | 'speed' | 'slack' | 'plane' | 'shell' | 'shellDir'>,
   card: Float32Array,
 ): void {
   const n = anchor.length
@@ -519,6 +543,8 @@ function placeGalleries(
       out.orbitRadius[c] = R
       out.phase[c] = a0
       out.speed[c] = w
+      // A card that is also a moon had a ring speed (and its slack) above: the sphere's turn is not urgency's to speed up.
+      out.slack[c] = 0
       out.plane[c * 4] = 0
       out.plane[c * 4 + 1] = 0
       out.plane[c * 4 + 2] = 0
@@ -533,17 +559,19 @@ function placeGalleries(
  * pos[i] = pos[parent] + rot(plane[i]) · ring/shell offset(t) + offsets[i]
  * (a gallery card: pos[star] instead of pos[parent]).
  * `offsets` (user drags, xyz triples) move whole subtrees because children are
- * placed relative to their parent. Allocates nothing.
+ * placed relative to their parent. `calm` is how many of the `t` seconds the
+ * orbits were calm: each angle is `phase + speed · t − slack · calm`, so the
+ * clock, not the layout, carries calm (0 when never calm). Allocates nothing.
  */
-export function systemPositions(layout: SystemLayout, t: number, out: Float32Array, offsets?: Float32Array): void {
-  const { order, parent, orbitRadius, phase, speed, plane, shell, shellDir, anchor } = layout
+export function systemPositions(layout: SystemLayout, t: number, out: Float32Array, offsets?: Float32Array, calm = 0): void {
+  const { order, parent, orbitRadius, phase, speed, slack, plane, shell, shellDir, anchor } = layout
   const n = order.length
   if (out.length < n * 3) return
   const off = offsets && offsets.length >= n * 3 ? offsets : null
   for (let o = 0; o < n; o++) {
     const i = order[o]!
     const r = orbitRadius[i]!
-    const a = phase[i]! + speed[i]! * t
+    const a = phase[i]! + speed[i]! * t - slack[i]! * calm
     const ca = Math.cos(a)
     const sa = Math.sin(a)
     let lx: number
