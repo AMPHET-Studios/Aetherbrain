@@ -611,7 +611,8 @@ export class BrainController {
    */
   private nodeDistance(id: NoteId, p: [number, number, number], node: GraphNode | undefined): number {
     if (!node) return 44
-    if (node.kind === 'folder') return this.systemDistance(id, p, node)
+    // A folder star and a board sun are framed whole: with the planets or pictures that orbit it.
+    if (node.kind === 'folder' || node.board) return this.systemDistance(id, p, node)
     if (node.kind === 'today') return 90
     if (node.kind === 'image') {
       // A gallery card is bigger than a moon: come close enough for it to fill a third of the view.

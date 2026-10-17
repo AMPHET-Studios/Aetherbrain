@@ -3,6 +3,7 @@ import { AREAS, type Area } from '@aether/core'
 import {
   AREA_COLORS,
   AREA_LABELS,
+  BOARD_SUN_COLOR,
   IMAGE_COLOR,
   PICTURE_SIZES,
   PICTURE_SIZE_NAMES,
@@ -50,6 +51,8 @@ export function Legend() {
     return [...graph.tagCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 14)
   }, [graph])
   const pictures = useMemo(() => graph?.nodes.reduce((n, node) => (node.kind === 'image' ? n + 1 : n), 0) ?? 0, [graph])
+  /** Reference boards with pictures orbiting them (suns of the system layout). */
+  const boards = useMemo(() => graph?.nodes.reduce((n, node) => (node.board ? n + 1 : n), 0) ?? 0, [graph])
 
   if (!graph) return null
   const anyFilter = filters.areas.size > 0 || filters.tags.size > 0 || filters.types.size > 0 || !!filters.query
@@ -78,6 +81,11 @@ export function Legend() {
               <span title="Any small file">
                 <span className="text-ink">·</span> moon · small file
               </span>
+              {boards > 0 && (
+                <span title="A reference board with pictures on it is a sun: the pictures orbit it instead of their folders (open it from the Boards view, 8)">
+                  <span style={{ color: BOARD_SUN_COLOR, textShadow: `0 0 8px ${BOARD_SUN_COLOR}` }}>▣</span> sun · board · {boards}
+                </span>
+              )}
             </>
           )}
           {pictures > 0 && (

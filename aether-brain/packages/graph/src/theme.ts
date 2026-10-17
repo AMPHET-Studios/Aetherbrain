@@ -52,6 +52,8 @@ export const SUN_COLOR = '#fff1d6'
 export const TODAY_COLOR = '#8ff7ff'
 /** Picture moons: a pale moonlight white (the thumbnail is their real color). */
 export const IMAGE_COLOR = '#f4f1ff'
+/** A reference board with pictures orbiting it: a mint-white sun, cooler than the gold stars and warmer than the Today hub. */
+export const BOARD_SUN_COLOR = '#b8f7e2'
 
 /**
  * Planet color for a folder: a stable hashed hue with soft saturation. Hues in
@@ -127,9 +129,10 @@ export function nodeBaseColor(
   activeTag: string | null,
   ageOf: (n: GraphNode) => number,
 ): Color {
-  // Folders (the structure of the system layout), the Today hub and pictures ignore the color mode.
+  // Folders (the structure of the system layout), the Today hub, pictures and board suns ignore the color mode.
   if (n.kind === 'today') return cachedColor(TODAY_COLOR)
   if (n.kind === 'image') return cachedColor(IMAGE_COLOR)
+  if (n.board) return cachedColor(BOARD_SUN_COLOR)
   if (n.folder) {
     const role = n.folder.role
     if (role === 'root' || role === 'mount') return cachedColor(SUN_COLOR)
@@ -174,11 +177,14 @@ export const MOON_PICTURE_RADIUS = 1.0
  * Visual radius in world units (docs/COSMOLOGY.md). Galaxies (drives, a one-folder vault) are the biggest bodies; the
  * origin of a multi-root vault is small. Stars grow with what they hold, a project a little more. A planet is
  * a big picture, video or model (the radius of the picture size, extra large by default) or a document-sized note;
- * a moon is every small file. The Today hub is a fixed 4.6. The system layout spaces orbits by these radii.
+ * a moon is every small file. A reference board with pictures orbiting it is a sun: 4 and a little more for each doubling
+ * of its pictures, at most 9 (a star holds notes, a sun holds pictures, and must stay in scale with them). The Today hub
+ * is a fixed 4.6. The system layout spaces orbits by these radii.
  */
 export function nodeRadius(n: GraphNode, pictures: PictureSize = 'medium'): number {
   if (n.kind === 'today') return 4.6
   if (n.kind === 'image') return isPlanetNode(n) ? (PICTURE_RADIUS[pictures] ?? PICTURE_RADIUS.xl) : MOON_PICTURE_RADIUS
+  if (n.board) return Math.min(9, 4 + 0.9 * Math.log2(1 + n.board.pictures))
   if (n.folder) {
     const f = n.folder
     if (f.role === 'mount') return 16

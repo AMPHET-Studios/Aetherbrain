@@ -32,6 +32,7 @@ import { GALLERY_CHECK_MS, easeGrow, nearestStar, stepGrow } from '../gallery'
 import type { LayoutEngine } from '../layout/LayoutEngine'
 import {
   AREA_COLORS,
+  BOARD_SUN_COLOR,
   GHOST_COLOR,
   IMAGE_COLOR,
   STAR_COLOR,
@@ -54,6 +55,7 @@ import {
   createStarMaterial,
 } from './materials'
 import { frameloopFor } from './frameloop'
+import { shortFileLabel } from '../labels'
 import { shiftTarget } from './follow'
 import { todayLabel } from './labels'
 import { ThumbLayer, thumbTargets, type ThumbTargets } from './thumbLayer'
@@ -496,12 +498,20 @@ function buildBuffers(graph: GraphData, pictures: PictureSize): Buffers {
     let label = n.ghost ? `+ ${n.title}` : n.title
     if (f?.role === 'project') label = `★ ${label}`
     if (f && f.hiddenFolders > 0) label = `${label} +${f.hiddenFolders}`
+    if (n.board) {
+      // A board with pictures orbiting it is a sun: always named, like a project star.
+      landmarks.push(i)
+      labelColors[i] = BOARD_SUN_COLOR
+      label = `▣ ${label}`
+    }
     if (n.today) {
       landmarks.push(i)
       labelColors[i] = TODAY_COLOR
       label = todayLabel(n.today.total, n.today.overdue)
     } else if (n.image) {
       labelColors[i] = IMAGE_COLOR
+      // A board puts dozens of generated pictures side by side: their 70-character names would pile up. Hover shows the whole name.
+      label = shortFileLabel(label)
     }
     labels[i] = label
   })
@@ -1038,6 +1048,8 @@ const STAR_GLOW_HEAT = 1.25
 const PROJECT_GLOW_CALM = 1.15
 /** Big files (planets) are solid bodies, under the bloom threshold. */
 const PLANET_GLOW = 0.95
+/** A reference board with pictures orbiting it: a sun that blooms steadily, between a lit star and a galaxy. */
+const BOARD_SUN_GLOW = 1.7
 
 /** Brightness of a star for the urgency (0 to 1) of its whole system. */
 function starGlow(urgency: number, project: boolean): number {
@@ -1119,6 +1131,10 @@ function recolor(b: Buffers, c: BrainController, neighbors: Set<number>, labelSe
     } else if (role >= 0) {
       // A galaxy.
       gl = i === selI ? GALAXY_GLOW + 0.4 : i === hovI ? GALAXY_GLOW + 0.2 : GALAXY_GLOW
+    } else if (node.board) {
+      // A board with pictures orbiting it: a sun.
+      gl = i === selI ? BOARD_SUN_GLOW + 0.4 : i === hovI ? BOARD_SUN_GLOW + 0.2 : neighbors.has(i) ? BOARD_SUN_GLOW + 0.1 : BOARD_SUN_GLOW
+      b.labelColors[i] = BOARD_SUN_COLOR
     } else if (!node.ghost && isPlanetNode(node)) {
       // A document-sized note: a solid planet.
       solid = 1
@@ -1378,7 +1394,8 @@ function drawLabels(
     const far = Math.min(1, Math.max(0, (depth - 0.985) / 0.015))
     let alpha = emphasis >= 2 ? 1 : Math.max(always ? 0.6 : 0.18, 1 - far) * (emphasis === 1 ? 0.95 : 0.7)
     if (filtered) alpha *= 0.45
-    const label = b.labels[i] ?? node.title
+    // A picture under the pointer or selected shows its whole file name; the rest are shortened (see `shortFileLabel`).
+    const label = emphasis >= 2 && node.image ? node.title : (b.labels[i] ?? node.title)
     ctx.font = LABEL_FONTS[emphasis]
     ctx.globalAlpha = alpha
     ctx.lineWidth = 3.5

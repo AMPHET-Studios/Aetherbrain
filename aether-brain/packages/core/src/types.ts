@@ -177,6 +177,15 @@ export interface FolderNodeInfo {
   shownImages: number
 }
 
+/**
+ * Present on a reference board (`type: board`) in the system layout when pictures of its own orbit it: the board is a
+ * sun, a star of its own, and a picture on it orbits it instead of its folder (docs/COSMOLOGY.md).
+ */
+export interface BoardSunInfo {
+  /** Pictures (and videos) that orbit this board: those on it that no earlier board already holds. */
+  pictures: number
+}
+
 /** Present on image nodes. */
 export interface ImageNodeInfo {
   /** Vault path of the picture, extension included (`Projects/PORTALz/Art/gate.png`). */
@@ -246,14 +255,17 @@ export interface GraphNode {
   ghost: boolean
   /**
    * Structural parent for the system layout: a folder node id (or, for a
-   * ghost, the first note that links to it). null for the vault root and for
-   * every node when the graph was built without folders.
+   * ghost, the first note that links to it; for a picture on a reference
+   * board, that board). null for the vault root and for every node when the
+   * graph was built without folders.
    */
   parent: NoteId | null
   /** Present on folder nodes only. */
   folder?: FolderNodeInfo
   /** Present on image nodes only. */
   image?: ImageNodeInfo
+  /** Present on a reference board that has pictures orbiting it (the system layout only): a sun. */
+  board?: BoardSunInfo
   /** Present on the Today hub only. */
   today?: TodayNodeInfo
   inDegree: number

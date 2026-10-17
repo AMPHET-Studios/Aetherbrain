@@ -159,6 +159,16 @@ describe('the scene the brain window publishes', () => {
     expect(companionBody({ kind: 'today', ghost: false, wordCount: 0 } as never)).toBe('hub')
   })
 
+  it('sends a reference board with pictures orbiting it as a star (a sun of its own), and a plain board as the moon it is', () => {
+    const board = (pictures?: number) => ({ kind: 'note', type: 'board', ghost: false, wordCount: 20, ...(pictures ? { board: { pictures } } : {}) }) as never
+    // A viewer that draws every 'star' bright and named draws a board sun right; the cosmology calls it a star too.
+    expect(companionKind(board(13))).toBe('star')
+    expect(companionBody(board(13))).toBe('star')
+    // A board nothing orbits is a note.
+    expect(companionKind(board())).toBe('moon')
+    expect(companionBody(board())).toBe('moon')
+  })
+
   it('publishes the urgency of what is due: a note, and the folder star above it', () => {
     const files: VaultFile[] = [
       { path: 'Work/Gate/Plan.md', content: '# Plan\n\n- [ ] Ship the gate 📅 2026-09-29\n', mtime: 1 },

@@ -4,9 +4,9 @@ import { asString } from '../markdown/frontmatter'
 import type { DailyBrief } from '../markdown/brief'
 import { isProjectNote, projectFolderOf } from '../markdown/projects'
 import { noteUrgency, systemUrgency } from '../markdown/urgency'
-import { AssetResolver, TODAY_ID, imageKey, imageTitle, isAssetPath, isModelPath, isVideoPath } from '../vault/assets'
+import { AssetResolver, TODAY_ID, imageKey, imageTitle, isAssetPath, isImageId, isModelPath, isVideoPath } from '../vault/assets'
 import { folderUniverse, selectFolders, type FolderSelectOptions } from '../vault/folders'
-import { ancestorsOf, areaFromFolder, folderDepth, folderKey, folderOf, normalizeFolderPath } from '../vault/paths'
+import { ancestorsOf, areaFromFolder, folderDepth, folderKey, folderOf, isFolderId, normalizeFolderPath } from '../vault/paths'
 
 export interface FolderGraphOptions extends FolderSelectOptions {
   /** Every folder known on disk (vault paths). */
@@ -559,11 +559,15 @@ function addFolderSystem(
     }
   }
 
+  // A reference board is a sun: the pictures on it orbit it, not their folders.
+  assignBoardSuns(nodes, index, img.outlinks)
+
   // Image moons: the newest pictures of every shown folder, shallow folders first.
   const byFolder = img.images ? imagesByFolder(img.images) : null
   const shown = new Map<string, number>()
   for (const node of nodes) {
-    if (node.kind !== 'image') continue
+    // A picture on a board orbits the board: it is not one of its folder's moons.
+    if (node.kind !== 'image' || node.parent === null || !isFolderId(node.parent)) continue
     const f = folderPathOfParent(node.parent)
     shown.set(f, (shown.get(f) ?? 0) + 1)
   }
@@ -667,6 +671,29 @@ function addFolderSystem(
     })
   }
   return { selection, gallery }
+}
+
+/**
+ * Reference boards are suns (docs/COSMOLOGY.md): every picture or video a board links to orbits that board instead of
+ * its own folder, and the board is marked (`GraphNode.board`) so it is drawn as a star and laid out as a system. A
+ * picture on several boards orbits the first by id (the others keep their links); a board none of whose pictures is
+ * left to it stays a plain note. `nodes` lists notes in id order, so the choice is stable across rebuilds.
+ */
+function assignBoardSuns(nodes: GraphNode[], index: Map<NoteId, number>, outlinks: Map<NoteId, Set<NoteId>>): void {
+  const taken = new Set<NoteId>()
+  for (const board of nodes) {
+    if (board.kind !== 'note' || board.type !== 'board') continue
+    let pictures = 0
+    for (const target of [...(outlinks.get(board.id) ?? [])].filter(isImageId).sort()) {
+      if (taken.has(target)) continue
+      const picture = nodes[index.get(target) ?? -1]
+      if (!picture || picture.kind !== 'image') continue
+      taken.add(target)
+      picture.parent = board.id
+      pictures++
+    }
+    if (pictures > 0) board.board = { pictures }
+  }
 }
 
 /** Folder path of a parent id (`folder:a/b` → `a/b`). */

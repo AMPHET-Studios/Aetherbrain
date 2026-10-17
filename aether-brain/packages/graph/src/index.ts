@@ -1,4 +1,5 @@
 export * from './theme'
+export * from './labels'
 export * from './gallery'
 export * from './screen'
 export * from './layout/protocol'
