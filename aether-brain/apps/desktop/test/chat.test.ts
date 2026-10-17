@@ -388,7 +388,7 @@ describe('ChatHost', () => {
   }
 
   it('repairs settings, says what is missing, and keeps the key encrypted (only its last four characters reach the renderer)', async () => {
-    expect(chatSettings({ provider: 'x', claudeModel: 'gpt-4', ollamaUrl: '', saveChats: 'no' })).toEqual({ provider: 'claude', claudeModel: 'claude-opus-5-5', ollamaUrl: 'http://127.0.0.1:11434', ollamaModel: '', saveChats: true })
+    expect(chatSettings({ provider: 'x', claudeModel: 'gpt-4', ollamaUrl: '', saveChats: 'no' })).toEqual({ provider: 'claude', claudeModel: 'claude-opus-5-5', ollamaUrl: 'http://127.0.0.1:11434', ollamaModel: '', saveChats: true, nudges: true })
     const { h, saved, wanted } = host()
     expect(h.status()).toMatchObject({ ready: false, hasKey: false, missing: expect.stringMatching(/API key/) })
     await expect(h.configure({ apiKey: 'short' })).rejects.toThrow(/sk-ant-/)
@@ -410,6 +410,20 @@ describe('ChatHost', () => {
     await expect(h.configure({ provider: 'ollama', ollamaUrl: 'http://example.com:11434' })).rejects.toThrow(/this computer/)
     expect(await h.configure({ provider: 'ollama', ollamaModel: 'llama3.1' })).toMatchObject({ ready: true, provider: 'ollama' })
     expect(host({ vaultOpen: false }).h.status().missing).toMatch(/vault/)
+  })
+  it('keeps the nudges switch: on until turned off, repaired, saved, and told to the renderer', async () => {
+    // On for settings written before it, and for anything that is not a plain false.
+    for (const raw of [{}, { nudges: true }, { nudges: 'no' }, { nudges: 0 }, { nudges: null }]) expect(chatSettings(raw).nudges, JSON.stringify(raw)).toBe(true)
+    expect(chatSettings({ nudges: false }).nudges).toBe(false)
+    const { h, saved } = host()
+    expect(h.status().nudges).toBe(true)
+    expect((await h.configure({ nudges: false })).nudges).toBe(false)
+    expect((saved.at(-1) as { nudges?: boolean }).nudges).toBe(false)
+    // Only a real boolean changes it.
+    expect((await h.configure({ nudges: 'yes' as unknown as boolean })).nudges).toBe(false)
+    expect((await h.configure({ nudges: true })).nudges).toBe(true)
+    // The switch is about the cards, not about whether the chat works.
+    expect(h.status()).toMatchObject({ ready: false, missing: expect.stringMatching(/API key/) })
   })
 
   it('runs a turn through the engine, streams its events with the conversation id, and keeps the chat as a note', async () => {

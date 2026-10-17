@@ -43,6 +43,8 @@ export interface ChatStatusDto {
   ollamaModel: string
   /** Keep each conversation as a note in Me/Chats. */
   saveChats: boolean
+  /** A quiet card offers to plan the day (morning), check in on it (afternoon) and wrap it up (evening). */
+  nudges: boolean
   /** A vault is open (the chat works through it). */
   vaultOpen: boolean
   /** Everything needed to chat is there. */
@@ -59,6 +61,7 @@ export interface ChatPatch {
   ollamaUrl?: string
   ollamaModel?: string
   saveChats?: boolean
+  nudges?: boolean
 }
 
 /** How a turn ended. */
