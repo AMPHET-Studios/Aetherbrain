@@ -93,6 +93,13 @@ let sysTarget = new Float32Array(0)
 let offsets = new Float32Array(0)
 /** Orbit clock in seconds; only advances while motion is on, so pausing never jumps. */
 let sysTime = 0
+/**
+ * The part of `sysTime` spent calm (motion on and calm on): positions take each orbit's `slack` for that long off its
+ * angle (see `systemPositions`). A clock rather than a change to the layout, so toggling calm or laying the sky out
+ * again leaves every body where it is.
+ */
+let calmTime = 0
+let calm = false
 let lastTick = 0
 /** Transition start (ms), -1 when no transition is running. */
 let transitionStart = -1
@@ -367,7 +374,7 @@ function enterSystem(from: Float32Array, known: Uint8Array | null, keepOffsets: 
   sysIds = ids
   offsets = nextOffsets
   sysTarget = new Float32Array(n * 3)
-  systemPositions(next, sysTime, sysTarget, offsets)
+  systemPositions(next, sysTime, sysTarget, offsets, calmTime)
   sysFrom = from
   if (known) {
     // Parents come first in `order`, so a newborn moon starts where its planet starts.
@@ -414,8 +421,11 @@ function systemLoop(): void {
   const now = performance.now()
   const dt = Math.min(0.1, Math.max(0, (now - lastTick) / 1000))
   lastTick = now
-  if (motion) sysTime += dt
-  systemPositions(layout, sysTime, sysTarget, offsets)
+  if (motion) {
+    sysTime += dt
+    if (calm) calmTime += dt
+  }
+  systemPositions(layout, sysTime, sysTarget, offsets, calmTime)
   let settled: boolean
   let alpha = 0
   if (transitionStart >= 0) {
@@ -507,7 +517,7 @@ ctx.onmessage = (ev: MessageEvent<MainToWorker>) => {
         // Mid-transition the shown position is the orbit (which carries the offset) plus a fading
         // start offset, so the drag counts in full right away.
         if (!running) {
-          systemPositions(layout, sysTime, sysPos, offsets)
+          systemPositions(layout, sysTime, sysPos, offsets, calmTime)
           postSystem(false, 0)
         } else {
           // Several pins can arrive before the next frame: measure the next one from here.
@@ -543,7 +553,7 @@ ctx.onmessage = (ev: MessageEvent<MainToWorker>) => {
       if (layout) {
         // Re-run the system layout: forget drags and ease back into place.
         offsets.fill(0)
-        systemPositions(layout, sysTime, sysTarget, offsets)
+        systemPositions(layout, sysTime, sysTarget, offsets, calmTime)
         sysFrom = new Float32Array(sysPos.length)
         for (let i = 0; i < sysFrom.length; i++) sysFrom[i] = sysPos[i]! - sysTarget[i]!
         transitionStart = performance.now()
@@ -557,6 +567,10 @@ ctx.onmessage = (ev: MessageEvent<MainToWorker>) => {
       motion = msg.on
       // Off: the next frame is posted settled and the loop stops (a running transition finishes first).
       if (motion && layout) startSystemLoop()
+      break
+    case 'calm':
+      // Nothing moves now: the next frame just starts (or stops) adding to the calm clock.
+      calm = msg.on
       break
     case 'stop':
       stopLoop()

@@ -244,6 +244,14 @@ export const COMMANDS: Command[] = [
   },
   { id: 'layout', title: 'Cycle layout: constellation → orbit (time) → system (folders)', keys: 't', group: 'view', run: (s) => s.toggleLayout() },
   { id: 'motion', title: 'System layout: orbits moving / paused', keys: 'o', group: 'view', run: (s) => s.toggleMotion() },
+  {
+    id: 'calm',
+    title: 'System layout: calm orbits on / off',
+    hint: 'urgency speeds an orbit up less: none runs faster than a normal one',
+    keys: 'Shift+O',
+    group: 'view',
+    run: (s) => s.toggleCalm(),
+  },
   { id: 'depth-less', title: 'System layout: show fewer folder levels', keys: '[', group: 'view', run: (s) => s.setFolderDepth(s.settings.folderDepth - 1) },
   { id: 'depth-more', title: 'System layout: show more folder levels', keys: ']', group: 'view', run: (s) => s.setFolderDepth(s.settings.folderDepth + 1) },
   {

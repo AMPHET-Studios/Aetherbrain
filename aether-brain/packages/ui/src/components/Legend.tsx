@@ -38,8 +38,10 @@ export function Legend() {
   const layoutMode = useAether((s) => s.settings.layoutMode)
   const depth = useAether((s) => s.settings.folderDepth)
   const motion = useAether((s) => s.settings.motion)
+  const calm = useAether((s) => s.settings.calm)
   const setFolderDepth = useAether((s) => s.setFolderDepth)
   const toggleMotion = useAether((s) => s.toggleMotion)
+  const toggleCalm = useAether((s) => s.toggleCalm)
   const brief = useAether((s) => s.brief)
   const todayHub = useAether((s) => s.settings.todayHub)
   const showToday = useAether((s) => s.showToday)
@@ -122,6 +124,15 @@ export function Legend() {
               </span>
               <button type="button" className="hud-btn !h-6 !px-2" aria-pressed={motion} onClick={toggleMotion} title="Orbits moving / paused (o)">
                 {motion ? '↻ orbiting' : '❚❚ paused'}
+              </button>
+              <button
+                type="button"
+                className="hud-btn !h-6 !px-2"
+                aria-pressed={calm}
+                onClick={toggleCalm}
+                title="Calm orbits (⇧O): urgency speeds an orbit up less, so none runs faster than a normal one"
+              >
+                ☾ calm
               </button>
             </>
           )}

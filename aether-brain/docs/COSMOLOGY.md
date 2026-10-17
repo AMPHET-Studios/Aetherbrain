@@ -71,6 +71,15 @@ Bodies of the same heat share rings, so a ring has one speed (`packages/graph/sr
 - A ring's speed is the usual `0.9 / √radius` times `urgencySpeed(u) = 0.55 + 1.45·u`, with `u` the mean urgency of the ring: a calm orbit crawls at 0.55×, an overdue one runs at 2×. **Nothing ever stops**: the sky stays alive.
 - Moons beyond 24 go on a Fibonacci shell that turns as one, at the speed of their mean urgency (the urgent ones have left it for their own rings).
 
+### Calm mode
+
+Some days a sky of fast orbits is too much to look at. **Calm mode** (`⇧ O`, the legend's ☾ calm, the palette's *calm orbits*) keeps the same rings, the same order and the same brightness, and holds the speed to a normal orbit's pace:
+
+- A ring's speed is the usual `0.9 / √radius` times `calmSpeed(u) = 0.55 + 0.45·u` instead of `urgencySpeed(u)`: a low-urgency orbit still crawls at 0.55×, an overdue one runs at 1× (`CALM_MAX_SPEED`, a normal orbit), never 2×. A more urgent orbit is still a faster one, just by less.
+- It is a clock, not a layout. Every orbit carries `slack`, the speed calm takes off it (0 for an orbit urgency does not speed up), and the brain window counts the seconds spent calm: an angle is `phase + speed · t − slack · calm seconds` (`systemPositions`). So switching calm on or off, or laying the sky out again, moves nothing: an orbit simply turns slower or faster from where it is.
+- `o` still pauses everything; calm only changes how fast orbits go while they move. Gallery cards, the Today hub and the roots are not urgency's to speed up, so calm leaves them as they are.
+- It is a setting of the brain window: remembered, and off by default. Positions already carry it, so a viewer is sent nothing new and needs nothing. Star brightness, which ring a body is on and the `urgency` number it is sent do not change: urgent things are still the bright, close ones.
+
 ### Star brightness is urgency
 
 A star's glow is `calm + heat · U`, with `U` the urgency of its **whole system**: a calm star is a solid body under the bloom threshold; an urgent one blooms. A project star starts higher. A glance at the sky says what is on fire and where, and flying into a bright star shows which of its planets is faster than the others.

@@ -51,6 +51,8 @@ export class LayoutEngine {
   ringsVersion = 0
   /** System layout: planets and moons orbit while on (mirrors what the worker was told). */
   motion = true
+  /** System layout: no orbit runs faster than a normal one while on (mirrors what the worker was told). */
+  calm = false
   /** How big pictures are: their radius spaces the orbits (set before setGraph; see BrainController.setPictureSize). */
   pictureSize: PictureSize = 'medium'
   private worker: Worker | null = null
@@ -214,6 +216,13 @@ export class LayoutEngine {
     if (this.motion === on) return
     this.motion = on
     this.post({ type: 'motion', on })
+  }
+
+  /** System layout: calm orbits on or off. Nothing jumps: the worker only changes how fast the angles move on from here. */
+  setCalm(on: boolean): void {
+    if (this.calm === on) return
+    this.calm = on
+    this.post({ type: 'calm', on })
   }
 
   pin(id: string, x: number, y: number, z: number): void {
