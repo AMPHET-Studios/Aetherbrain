@@ -68,7 +68,7 @@ roots, the AI sees them as the top folders `D` and `F` (for example
 | --- | --- | --- |
 | **Claude Desktop** | The Aether Brain extension (`.mcpb`), or a config from the app | No. Claude runs its own copy. |
 | **Claude Code** (terminal) | One `claude mcp add` command | No |
-| **Claude Code**, and Claude Desktop's Code tab, wanting to look at your pictures and make the 3D view fly | The Aether Brain **plugin** | Yes, with the link on |
+| **Claude Code**, wanting it to look at your pictures and make the 3D view fly | The Aether Brain **plugin** | Yes, with the link on |
 | **ChatGPT** (web) | The app's **AI link**, a tunnel, and a connector in ChatGPT | Yes, with the link on |
 | **claude.ai** (web) | The same link and tunnel as ChatGPT, then a custom connector | Yes, with the link on |
 
@@ -159,7 +159,7 @@ the setup exe instead.
 
 ## The Claude plugin
 
-The plugin gives Claude (Claude Code, and the Code tab of Claude Desktop) a direct line to the
+The plugin gives Claude Code a direct line to the
 Aether Brain that is **open on your computer**. It sees the notes the app shows, and it can do
 three things that only the open app can:
 
@@ -172,14 +172,15 @@ three things that only the open app can:
 - **Point.** `show_in_brain` flies your 3D view to a note, a folder (its star), a picture or the Today hub.
   It leaves the camera alone while you are typing in a note, and the Aether Brain window has to be open.
 
-**Install** (once). In Claude Code:
+**Install** (once). Run these two lines in a terminal (PowerShell on Windows):
 
 ```
-/plugin marketplace add YEASTINFECTIONCHEESE/desktop-tutorial
-/plugin install aether-brain@aether-brain
+claude plugin marketplace add YEASTINFECTIONCHEESE/desktop-tutorial
+claude plugin install aether-brain@aether-brain
 ```
 
-Then, in Aether Brain, press <kbd>a</kbd> and switch **Link on**. The plugin needs Aether Brain 0.10.6 or newer
+Inside an interactive Claude Code session the same two are `/plugin marketplace add YEASTINFECTIONCHEESE/desktop-tutorial`
+and `/plugin install aether-brain@aether-brain`. Then, in Aether Brain, press <kbd>a</kbd> and switch **Link on**. The plugin needs Aether Brain 0.10.6 or newer
 and [Node.js](https://nodejs.org) 20 or newer (it starts a small program written for it).
 
 There is nothing to configure. The plugin's program (`bin/bridge.mjs`) finds the link by reading the app's own

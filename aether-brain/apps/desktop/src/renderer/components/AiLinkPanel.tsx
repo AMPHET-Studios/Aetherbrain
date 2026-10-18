@@ -9,10 +9,10 @@ import { ErrorLine, Overlay, Section } from './Overlay'
 const RELEASES = 'https://github.com/YEASTINFECTIONCHEESE/desktop-tutorial/releases'
 
 /**
- * What installs the Claude plugin, typed in Claude Code. The marketplace is this repository (its `.claude-plugin/marketplace.json`
+ * What installs the Claude plugin, typed in a terminal. The marketplace is this repository (its `.claude-plugin/marketplace.json`
  * names the plugin `aether-brain` in a marketplace called `aether-brain`); plugin-install.test.ts keeps this, the docs and that file in step.
  */
-const PLUGIN_COMMANDS = '/plugin marketplace add YEASTINFECTIONCHEESE/desktop-tutorial\n/plugin install aether-brain@aether-brain'
+const PLUGIN_COMMANDS = 'claude plugin marketplace add YEASTINFECTIONCHEESE/desktop-tutorial\nclaude plugin install aether-brain@aether-brain'
 
 /** The URL shape ChatGPT and claude.ai need: the tunnel's public address + the secret path. */
 function tunnelUrlTemplate(token: string): string {
@@ -299,7 +299,8 @@ export function AiLinkPanel() {
 
             <Client name="Claude plugin" note="Claude Code · needs this app open with the link on">
               <li>
-                Type these two lines in Claude Code once (it needs Node.js 20 or newer):
+                {windows ? 'Run these two lines once in PowerShell' : 'Run these two lines once in a terminal'} (it needs Node.js 20 or newer; inside Claude Code the same two are{' '}
+                <code className="font-mono text-ink">/plugin marketplace add …</code> and <code className="font-mono text-ink">/plugin install …</code>):
                 <Snippet text={PLUGIN_COMMANDS} what="the plugin commands" />
               </li>
               <li>

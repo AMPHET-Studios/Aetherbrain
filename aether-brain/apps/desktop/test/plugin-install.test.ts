@@ -59,8 +59,9 @@ describe('the marketplace and the plugin', () => {
 })
 
 describe('the install commands', () => {
-  const add = `/plugin marketplace add ${ownerAndRepo}`
-  const install = `/plugin install ${entry.name}@${marketplace.name}`
+  // In a terminal; inside an interactive Claude Code session the same two take a leading slash.
+  const add = `claude plugin marketplace add ${ownerAndRepo}`
+  const install = `claude plugin install ${entry.name}@${marketplace.name}`
 
   it('are the same in the app’s panel, the guide, the plugin’s README and the main README', () => {
     const panel = read(APP, 'apps', 'desktop', 'src', 'renderer', 'components', 'AiLinkPanel.tsx')
@@ -69,6 +70,9 @@ describe('the install commands', () => {
       const text = read(...file)
       expect(text, file.join('/')).toContain(add)
       expect(text, file.join('/')).toContain(install)
+      // The same two inside Claude Code.
+      expect(text, file.join('/')).toContain(`/plugin marketplace add ${ownerAndRepo}`)
+      expect(text, file.join('/')).toContain(`/plugin install ${entry.name}@${marketplace.name}`)
     }
     const readme = read(APP, 'README.md')
     expect(readme).toContain(add)

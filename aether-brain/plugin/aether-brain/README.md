@@ -9,12 +9,14 @@ A plugin that lets Claude work in your **live** [Aether Brain](../../README.md):
 
 ## Install
 
-In Claude Code (or the Code tab of Claude Desktop):
+In a terminal (PowerShell on Windows):
 
 ```
-/plugin marketplace add YEASTINFECTIONCHEESE/desktop-tutorial
-/plugin install aether-brain@aether-brain
+claude plugin marketplace add YEASTINFECTIONCHEESE/desktop-tutorial
+claude plugin install aether-brain@aether-brain
 ```
+
+Inside an interactive Claude Code session the same two are `/plugin marketplace add YEASTINFECTIONCHEESE/desktop-tutorial` and `/plugin install aether-brain@aether-brain`.
 
 Then open Aether Brain, press `a` and switch **Link on**.
 
