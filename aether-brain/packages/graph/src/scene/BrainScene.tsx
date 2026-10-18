@@ -32,6 +32,9 @@ import { GALLERY_CHECK_MS, easeGrow, nearestStar, stepGrow } from '../gallery'
 import type { LayoutEngine } from '../layout/LayoutEngine'
 import {
   AREA_COLORS,
+  BIO_STAR_GLOW,
+  BIO_STAR_HALO,
+  BIO_STAR_LABEL_COLOR,
   BOARD_SUN_COLOR,
   GHOST_COLOR,
   IMAGE_COLOR,
@@ -375,6 +378,8 @@ interface Buffers {
   isCard: Uint8Array
   /** Radius per node as the theme gives it (`radii` holds the drawn one: gallery cards grow from it). */
   baseRadii: Float32Array
+  /** How wide each node's aura is, in radii of its core: `HALO_RADII`, or `BIO_STAR_HALO` for the Bio star. */
+  haloK: Float32Array
   /** Orbit rings: one instanced LineSegments. */
   rings: LineSegments
   ringGeo: InstancedBufferGeometry
@@ -442,6 +447,10 @@ function buildBuffers(graph: GraphData, pictures: PictureSize): Buffers {
 
   const radii = new Float32Array(count)
   graph.nodes.forEach((n, i) => (radii[i] = nodeRadius(n, pictures)))
+  const haloK = new Float32Array(count).fill(HALO_RADII)
+  graph.nodes.forEach((n, i) => {
+    if (n.folder?.bio) haloK[i] = BIO_STAR_HALO
+  })
   const stars: number[] = []
   const cards: number[] = []
   const cardOnly: number[] = []
@@ -497,6 +506,12 @@ function buildBuffers(graph: GraphData, pictures: PictureSize): Buffers {
     }
     let label = n.ghost ? `+ ${n.title}` : n.title
     if (f?.role === 'project') label = `★ ${label}`
+    if (f?.bio) {
+      // The Bio star: always named, in its own blue.
+      landmarks.push(i)
+      labelColors[i] = BIO_STAR_LABEL_COLOR
+      label = `✚ ${label}`
+    }
     if (f && f.hiddenFolders > 0) label = `${label} +${f.hiddenFolders}`
     if (n.board) {
       // A board with pictures orbiting it is a sun: always named, like a project star.
@@ -590,6 +605,7 @@ function buildBuffers(graph: GraphData, pictures: PictureSize): Buffers {
     cardOnly: Uint8Array.from(cardOnly),
     isCard,
     baseRadii: new Float32Array(radii),
+    haloK,
     rings,
     ringGeo,
     ringCenter,
@@ -920,7 +936,7 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
         m4.makeScale(core, core, core)
         m4.setPosition(x, y, z)
         buffers.nodes.setMatrixAt(i, m4)
-        const h = pictured ? 0 : r * 3.2
+        const h = pictured ? 0 : r * buffers.haloK[i]!
         m4.makeScale(h, h, h)
         m4.setPosition(x, y, z)
         buffers.halos.setMatrixAt(i, m4)
@@ -1036,6 +1052,8 @@ function bodyPx(b: Buffers, i: number): number {
 /* Visual state                                                       */
 /* ------------------------------------------------------------------ */
 
+/** How wide a body's aura (its halo billboard) is, in radii of its core. */
+const HALO_RADII = 3.2
 const IDLE_GLOW = 1.35
 const NEIGHBOR_GLOW = 1.5
 const HOVER_GLOW = 1.7
@@ -1125,8 +1143,8 @@ function recolor(b: Buffers, c: BrainController, neighbors: Set<number>, labelSe
       solid = 1
       gl = i === selI ? IMAGE_GLOW + 0.25 : i === hovI ? IMAGE_GLOW + 0.15 : neighbors.has(i) ? IMAGE_GLOW + 0.07 : IMAGE_GLOW
     } else if (role === ROLE_FOLDER || role === ROLE_PROJECT) {
-      // A star, as bright as the urgency of its whole system.
-      const star = starGlow(node.urgency ?? 0, role === ROLE_PROJECT)
+      // A star, as bright as the urgency of its whole system. The Bio star burns at one full brightness, urgent or not.
+      const star = node.folder?.bio ? BIO_STAR_GLOW : starGlow(node.urgency ?? 0, role === ROLE_PROJECT)
       gl = i === selI ? star + 0.4 : i === hovI ? star + 0.2 : neighbors.has(i) ? star + 0.1 : star
     } else if (role >= 0) {
       // A galaxy.

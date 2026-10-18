@@ -12,15 +12,15 @@ import type { ScenePlan } from './companion-bound'
 /**
  * The original names, kept as they were for the viewers built to them: the vault or a drive is a 'sun', a project
  * folder a 'star', any other folder a 'planet', a note a 'moon'. A reference board with pictures orbiting it is a
- * 'star' too (it is a sun of its own: a viewer that draws every 'star' bright and named draws it right). The
- * cosmology's names are in `companionBody`.
+ * 'star' too (it is a sun of its own: a viewer that draws every 'star' bright and named draws it right), and so is the
+ * Bio star (the blue one, `folder.bio`), the biggest and brightest star there is. The cosmology's names are in `companionBody`.
  */
 export function companionKind(n: GraphNode): CompanionKind {
   if (n.kind === 'today') return 'today'
   if (n.kind === 'image') return 'picture'
   if (n.folder) {
     const role = n.folder.role
-    return role === 'root' || role === 'mount' ? 'sun' : role === 'project' ? 'star' : 'planet'
+    return role === 'root' || role === 'mount' ? 'sun' : role === 'project' || n.folder.bio ? 'star' : 'planet'
   }
   if (n.board) return 'star'
   return n.ghost ? 'ghost' : 'moon'

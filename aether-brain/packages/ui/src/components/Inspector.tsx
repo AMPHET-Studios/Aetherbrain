@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   TODAY_ID,
+  bioStatus,
   findUnlinkedMentions,
   folderOf,
   folderPathOf,
@@ -18,7 +19,7 @@ import {
   type GraphNode,
   type NoteId,
 } from '@aether/core'
-import { AREA_LABELS, IMAGE_COLOR, STAR_COLOR, SUN_COLOR, TODAY_COLOR, starColor } from '@aether/graph'
+import { AREA_LABELS, BIO_STAR_LABEL_COLOR, IMAGE_COLOR, STAR_COLOR, SUN_COLOR, TODAY_COLOR, starColor } from '@aether/graph'
 import { listBoards } from '../board/boardRegistry'
 import { picturesUnder, useAether } from '../store'
 import { cx, plural, relativeTime, truncate, MOD } from '../util'
@@ -266,6 +267,7 @@ function FolderInspector({ node }: { node: GraphNode }) {
   const createFolder = useAether((s) => s.createFolder)
   const createNote = useAether((s) => s.createNote)
   const makeProject = useAether((s) => s.makeProject)
+  const makeBio = useAether((s) => s.makeBio)
   const selectProject = useAether((s) => s.selectProject)
   const setView = useAether((s) => s.setView)
   const reveal = useAether((s) => s.reveal)
@@ -276,6 +278,8 @@ function FolderInspector({ node }: { node: GraphNode }) {
   const assets = useAether((s) => s.assets)
   const starPictures = useMemo(() => (info.role === 'project' ? picturesUnder(assets, info.path) : 0), [assets, info.role, info.path])
   const galleryOpen = graph?.gallery?.star === node.id
+  /** The Bio star: how many of its pages the vault lacks (the card adds them on a click). */
+  const bioMissing = useMemo(() => (info.bio ? bioStatus(info.path, notes.keys()).missing.length : 0), [info.bio, info.path, notes])
   const [adding, setAdding] = useState<'note' | 'folder' | null>(null)
   const [name, setName] = useState('')
   /** Bumped per palette request so the field mounts again and takes the focus. */
@@ -319,8 +323,8 @@ function FolderInspector({ node }: { node: GraphNode }) {
     setName('')
     setAsked((n) => n + 1)
   }, [formRequest, readOnly, onDisk, canMkdir])
-  const role = info.role === 'folder' && info.inProject ? 'Planet of a project' : ROLE_LABEL[info.role]
-  const color = info.role === 'project' ? STAR_COLOR : info.role === 'folder' ? starColor(info.path) : SUN_COLOR
+  const role = info.bio ? '✚ Bio star' : info.role === 'folder' && info.inProject ? 'Planet of a project' : ROLE_LABEL[info.role]
+  const color = info.bio ? BIO_STAR_LABEL_COLOR : info.role === 'project' ? STAR_COLOR : info.role === 'folder' ? starColor(info.path) : SUN_COLOR
   const projectNote = info.projectId ? notes.get(info.projectId) : undefined
   const where = info.role === 'root' ? (adapter?.location ?? '') : `${info.path}/`
 
@@ -363,6 +367,24 @@ function FolderInspector({ node }: { node: GraphNode }) {
             </span>
           )}
         </div>
+        {info.bio && (
+          <div className="mt-3 rounded-lg border border-[rgba(116,173,255,0.4)] bg-[rgba(116,173,255,0.08)] p-2.5 text-[11.5px] leading-snug" aria-label="About the Bio star">
+            <div className="text-ink">Your notes on sleep, food, meds, exercise, drugs and mental health live here.</div>
+            <div className="mt-1 text-faint">
+              They stay on this computer. If you chat with Claude, what the chat reads from them goes to Anthropic; with Ollama nothing leaves.
+            </div>
+            {bioMissing > 0 && !readOnly && (
+              <button
+                type="button"
+                className="hud-btn primary mt-2"
+                onClick={() => void makeBio()}
+                title="Writes only the pages that are missing; nothing already there is touched"
+              >
+                ✚ Add the {bioMissing} missing {bioMissing === 1 ? 'page' : 'pages'}
+              </button>
+            )}
+          </div>
+        )}
         <div className="mt-3 flex flex-wrap gap-1.5">
           {(info.hiddenFolders > 0 || expanded) && (
             <button type="button" className="hud-btn primary" onClick={() => toggleFolder(info.path)} title="Expand / collapse (x)">
@@ -392,7 +414,8 @@ function FolderInspector({ node }: { node: GraphNode }) {
               ★ Project board <kbd>p</kbd>
             </button>
           ) : (
-            info.role === 'folder' && (
+            info.role === 'folder' &&
+            !info.bio && (
               <button type="button" className="hud-btn" disabled={readOnly} onClick={() => void makeProject(info.path)} title={`Writes ${info.path}/${node.title}.md — the folder becomes a star`}>
                 ★ Make project
               </button>

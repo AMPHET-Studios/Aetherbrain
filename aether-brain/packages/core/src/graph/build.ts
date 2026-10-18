@@ -15,6 +15,12 @@ export interface FolderGraphOptions extends FolderSelectOptions {
   rootTitle: string
   /** Display labels for mounts, e.g. { D: 'D:\\' }. */
   mountLabels?: Record<string, string>
+  /**
+   * The Bio star's folder as the vault spells it (`Bio`, or `D/Bio` in a vault of several roots; `BIO_FOLDER` under the
+   * vault's home). When that folder exists it is always shown, and its node is marked `folder.bio`. A folder that is not
+   * there is not made up, and a drive (a mount) is never the Bio star.
+   */
+  bio?: string | null
 }
 
 export interface ImageGraphOptions {
@@ -514,6 +520,11 @@ function addFolderSystem(
     homeOf.set(c.id, c.folder)
   }
 
+  // The Bio star: the asked-for folder when the vault has it. Never made up (a pinned folder that is not on disk would be drawn),
+  // and a drive is never it.
+  const bioAsked = opts.bio ? normalizeFolderPath(opts.bio) : ''
+  const bio = bioAsked !== '' && known.has(bioAsked) && !(opts.multiRoot && folderDepth(bioAsked) === 1) ? bioAsked : null
+
   const selection = selectFolders(
     opts.all,
     ids.map((id) => notes.get(id)!.meta.path),
@@ -524,7 +535,7 @@ function addFolderSystem(
       // A project star always shows its planets (its direct subfolders), however
       // deep the project folder sits on a drive (F/Lunco/PORTALz is depth 3).
       expanded: [...(opts.expanded ?? []), ...projectAt.keys()],
-      pinned: [...(opts.pinned ?? []), ...projectAt.keys()],
+      pinned: [...(opts.pinned ?? []), ...projectAt.keys(), ...(bio !== null ? [bio] : [])],
     },
   )
   const visible = selection.visible
@@ -653,6 +664,7 @@ function addFolderSystem(
         role,
         depth,
         ...(role === 'root' && !opts.multiRoot ? { galaxy: true } : {}),
+        ...(bio !== null && path === bio ? { bio: true } : {}),
         projectId,
         inProject: ancestorsOf(path).some((a) => projectAt.has(a)),
         childFolders: selection.childCount.get(path) ?? 0,

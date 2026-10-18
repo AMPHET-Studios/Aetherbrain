@@ -15,6 +15,7 @@ const GROUPS: HelpGroup[] = [
       [`${MOD} N · c`, 'Quick capture → Inbox'],
       ['y · 7', 'Today — the daily brief (☀ hub)'],
       ['i', 'Import AI chats (Claude / ChatGPT export)'],
+      ['⇧ I', 'Bio star: fly to it (or offer to make it)'],
       ['d', "Today's daily note"],
       ['1 2 3 4 5 6', 'Graph · Editor · Capture · Search · Review · Projects'],
       ['p', 'Projects board (a selected ★ star: its board)'],

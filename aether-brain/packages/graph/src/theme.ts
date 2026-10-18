@@ -54,6 +54,27 @@ export const TODAY_COLOR = '#8ff7ff'
 export const IMAGE_COLOR = '#f4f1ff'
 /** A reference board with pictures orbiting it: a mint-white sun, cooler than the gold stars and warmer than the Today hub. */
 export const BOARD_SUN_COLOR = '#b8f7e2'
+/**
+ * The Bio star (the folder `Bio`: sleep, food, meds, exercise, drugs, mental health): the one blue star, far from every gold one.
+ * This is its BODY: the scene multiplies it by `BIO_STAR_GLOW` and shows the result with no tone mapping, so a body this deep
+ * (green held low) comes out on screen as a bright blue (about #3f9eff). A lighter blue here (#3d9bff) clipped to cyan (#64f3ff,
+ * hue 185°) at that glow: the green channel passes 1 first.
+ */
+export const BIO_STAR_COLOR = '#2563ff'
+/** The Bio star's blue for text and small marks (its name in the sky, the dot and the card of its inspector): the body is too deep to read on a dark panel. */
+export const BIO_STAR_LABEL_COLOR = '#74adff'
+/**
+ * How brightly the Bio star burns, always (it does not follow urgency): brighter than a board sun, than a galaxy and than the most
+ * urgent star there can be (a project star with everything overdue is 2.4); only the Today hub (2.6) outshines it. Blue carries
+ * about half the light of gold at the same glow, so it needs the headroom to read as the brightest; its rim blooms white-blue.
+ */
+export const BIO_STAR_GLOW = 2.5
+/**
+ * How wide the Bio star's aura is, in radii of its core: 5.4 where every other body's is 3.2 (`HALO_RADII` in the scene). A deep blue
+ * has little light for the bloom to pick up, so from far away the star would be a small blue dot; the wide soft halo is what
+ * makes it a blue giant at any distance.
+ */
+export const BIO_STAR_HALO = 5.4
 
 /**
  * Planet color for a folder: a stable hashed hue with soft saturation. Hues in
@@ -135,6 +156,7 @@ export function nodeBaseColor(
   if (n.board) return cachedColor(BOARD_SUN_COLOR)
   if (n.folder) {
     const role = n.folder.role
+    if (n.folder.bio) return cachedColor(BIO_STAR_COLOR)
     if (role === 'root' || role === 'mount') return cachedColor(SUN_COLOR)
     if (role === 'project') return cachedColor(STAR_COLOR)
     return cachedColor(starColor(n.folder.path))
@@ -179,7 +201,8 @@ export const MOON_PICTURE_RADIUS = 1.0
  * a big picture, video or model (the radius of the picture size, extra large by default) or a document-sized note;
  * a moon is every small file. A reference board with pictures orbiting it is a sun: 4 and a little more for each doubling
  * of its pictures, at most 9 (a star holds notes, a sun holds pictures, and must stay in scale with them). The Today hub
- * is a fixed 4.6. The system layout spaces orbits by these radii.
+ * is a fixed 4.6. The Bio star is bigger than any other star (9.5 to 11; a project star tops out at 9.2, a board sun at 9, and every drive is 16).
+ * The system layout spaces orbits by these radii.
  */
 export function nodeRadius(n: GraphNode, pictures: PictureSize = 'medium'): number {
   if (n.kind === 'today') return 4.6
@@ -190,6 +213,8 @@ export function nodeRadius(n: GraphNode, pictures: PictureSize = 'medium'): numb
     if (f.role === 'mount') return 16
     if (f.role === 'root') return f.galaxy ? 16 : 6
     const held = Math.log2(1 + f.totalNotes + f.childFolders + 0.25 * f.images)
+    // The Bio star is the biggest star there is: 9.5 even when empty (a project star tops out at 9.2), a little more for each doubling of what it holds, at most 11.
+    if (f.bio) return Math.min(11, 9.5 + 0.3 * held)
     const star = Math.min(8, 3.4 + 0.6 * held)
     return f.role === 'project' ? star + 1.2 : star
   }

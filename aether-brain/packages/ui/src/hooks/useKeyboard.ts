@@ -183,7 +183,13 @@ export function handleKey(e: KeyboardEvent): void {
     case 'd':
       void s.openDaily()
       return
+    case 'I':
     case 'i':
+      // Shift+I: the Bio star (fly to it, or offer to make it). Shift decides, as for Shift+G.
+      if (e.shiftKey) {
+        s.goToBio()
+        return
+      }
       // Import AI chats: the system file dialog (the key press is the gesture it needs).
       if (s.adapter && !s.adapter.readOnly) importChatsFromDialog()
       return

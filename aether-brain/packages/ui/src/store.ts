@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import {
   AREA_FOLDER,
+  BIO_FOLDER,
   SearchIndex,
   TODAY_ID,
   addTask as addTaskToNote,
@@ -52,6 +53,7 @@ import {
   normalizePath,
   parseNote,
   parseWikilinkRaw,
+  planBio,
   planChatImport,
   portableFolderRef,
   projectFolderOf,
@@ -408,6 +410,18 @@ function folderCaseIndex(folders: Set<string>): Map<string, string> {
   return index
 }
 
+/**
+ * Where the Bio star's folder is, as the vault spells it: `Bio` under the vault's home (`D/Bio` with several roots), or the
+ * spelling an existing folder has (`bio` on Windows is the same folder). When there is none it is the plain name: the graph
+ * only marks a folder that exists, and `makeBio` makes it under that name.
+ */
+function bioFolderIn(folders: Set<string>, home: string): string {
+  const want = `${home}${BIO_FOLDER}`
+  if (folders.has(want)) return want
+  const known = folderCaseIndex(folders).get(want.toLowerCase())
+  return known !== undefined && known.length === want.length ? known : want
+}
+
 /** What a brief row shows or acts on, as one comparable string. */
 function briefRowKey(t: BriefTask): string {
   return [t.noteId, t.line, t.text, t.reason, t.noteTitle, t.notePath, t.projectId, t.projectTitle, t.section].join('\u0000')
@@ -576,6 +590,14 @@ export interface AetherState {
    * count) and the first failure, if any.
    */
   makeProjects(folderPaths: readonly string[]): Promise<{ made: number; failed: number; error: string | null }>
+  /**
+   * Make the Bio star: the folder `Bio` at the vault's home with a page each for sleep, food, meds, exercise, drugs and mental
+   * health (`planBio`). Only the missing pages are written, never over anything, and the camera flies to the star. Resolves
+   * with how many pages it wrote (0: they were all there, or it could not).
+   */
+  makeBio(): Promise<number>
+  /** Fly to the Bio star (⇧I); when the vault has none yet, a toast offers to make it. */
+  goToBio(): void
   /** Show a file or folder in the OS file manager (desktop). */
   reveal(path: string): Promise<void>
   /** A form a command asked for; the component that owns it opens it and clears this (`window.prompt` does not exist in Electron). */
@@ -944,6 +966,8 @@ export const useAether = create<AetherState>()((set, get) => {
       maxDepth: settings.folderDepth,
       expanded: expandedFolders,
       multiRoot: roots.length > 1,
+      // The Bio star, when the vault has its folder: the one big, bright, blue star.
+      bio: bioFolderIn(folders, homePrefixOf(roots)),
     }
     return opts
   }
@@ -2580,6 +2604,63 @@ export const useAether = create<AetherState>()((set, get) => {
       if (failed) get().toast(`★ ${stars}; ${failed} could not be: ${error}`, made ? 'info' : 'error')
       else get().toast(`★ ${stars}`, 'success', { label: 'Projects board', run: () => get().setView('projects') })
       return { made, failed, error }
+    },
+
+    async makeBio() {
+      const { adapter, status } = get()
+      if (!adapter || status !== 'ready') {
+        get().toast('Open a vault first to make the Bio star', 'error')
+        return 0
+      }
+      if (adapter.readOnly) {
+        get().toast('This vault is read-only', 'error')
+        return 0
+      }
+      // The vault's own spelling of the folder when it is there already (`bio` on Windows is `Bio`).
+      const dir = canonicalFolder(`${get().homePrefix()}${BIO_FOLDER}`)
+      const plan = planBio(dir, get().notes.keys())
+      let wrote = 0
+      try {
+        const taken = new Set([...get().notes.keys()].map((k) => k.toLowerCase()))
+        await batched(async () => {
+          for (const page of plan.create) {
+            // Never numbered and never over anything: a page the disk already has (one the brain has not seen yet) is left alone.
+            const made = await createNew(page.path, page.content, { suffix: false, taken })
+            if (!made) continue
+            wrote++
+            // Held with the adapter's own reports and applied together when the batch ends: one rebuild for all the pages.
+            get().applyExternal([{ kind: 'add', path: made.path, content: made.content, mtime: Date.now() }])
+          }
+        })
+      } catch (err) {
+        get().toast(`Could not finish the Bio star: ${errText(err)}`, 'error')
+        return wrote
+      }
+      const there = plan.present.length + (plan.create.length - wrote)
+      get().toast(
+        wrote === 0
+          ? 'The Bio star is complete: every page is there'
+          : there === 0
+            ? `✚ Bio star made: ${wrote} pages in ${dir}`
+            : `✚ Bio star: added ${wrote} ${wrote === 1 ? 'page' : 'pages'} (${there} ${there === 1 ? 'was' : 'were'} already there)`,
+        wrote === 0 ? 'info' : 'success',
+      )
+      get().showFolder(dir)
+      return wrote
+    },
+
+    goToBio() {
+      const { adapter, folders } = get()
+      const dir = canonicalFolder(`${get().homePrefix()}${BIO_FOLDER}`)
+      if (folders.has(dir) || [...get().notes.keys()].some((k) => k.startsWith(`${dir}/`))) {
+        get().showFolder(dir)
+        return
+      }
+      get().toast(
+        'No Bio star yet',
+        'info',
+        adapter && !adapter.readOnly && get().status === 'ready' ? { label: 'Make it', run: () => void get().makeBio() } : undefined,
+      )
     },
 
     async hideFolder(path) {
