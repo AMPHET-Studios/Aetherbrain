@@ -33,9 +33,9 @@ const bundle = await fs.readFile(bundlePath).catch(() => {
 const icon = await fs.readFile(iconPath)
 
 // Tool names and descriptions come from the server itself, so the manifest never drifts.
-const { TOOLS } = await import(pathToFileURL(bundlePath).href)
-if (!TOOLS || typeof TOOLS !== 'object') {
-  console.error('[pack-mcpb] the bundle does not export TOOLS')
+const { TOOLS, HOST_TOOLS } = await import(pathToFileURL(bundlePath).href)
+if (!TOOLS || typeof TOOLS !== 'object' || !Array.isArray(HOST_TOOLS)) {
+  console.error('[pack-mcpb] the bundle does not export TOOLS and HOST_TOOLS')
   process.exit(1)
 }
 
@@ -74,7 +74,10 @@ const manifest = {
       ],
     },
   },
-  tools: Object.entries(TOOLS).map(([name, t]) => ({ name, description: t.description })),
+  // Not the tools only the running app offers (it has the pictures and the window; this stdio server has neither).
+  tools: Object.entries(TOOLS)
+    .filter(([name]) => !HOST_TOOLS.includes(name))
+    .map(([name, t]) => ({ name, description: t.description })),
   tools_generated: false,
   keywords: ['notes', 'markdown', 'second brain', 'pkm', 'projects', 'tasks', 'obsidian', 'para'],
   compatibility: {

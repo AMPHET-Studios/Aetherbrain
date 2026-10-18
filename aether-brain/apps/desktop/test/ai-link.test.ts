@@ -26,6 +26,7 @@ import {
   type AiLinkSettings,
   type LinkVault,
   type McpModule,
+  type PictureHost,
 } from '../src/main/ai-link.js'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
@@ -344,6 +345,20 @@ describe('AiLinkHost', () => {
     expect(server.log.closedBrains).toBe(1)
     expect(server.log.opens.map((o) => o.roots[0])).toEqual(['/v/notes', '/v/other'])
     expect(st.running).toBe(true)
+  })
+
+  it('lends the app’s pictures and window to the link, and only what it was given', async () => {
+    const pictures: PictureHost = { find: async () => ({ pictures: [], more: false }), look: async () => null }
+    const show = vi.fn()
+    const given = makeHost({ enabled: true }, { pictures, show })
+    await given.host.setVault(VAULT, PRELOAD)
+    expect(given.server.log.links[0]!.pictures).toBe(pictures)
+    expect(given.server.log.links[0]!.show).toBe(show)
+    // Without them the link is started without the keys at all (the tools stay unlisted), not with undefined ones.
+    const bare = makeHost({ enabled: true })
+    await bare.host.setVault(VAULT, PRELOAD)
+    expect(Object.keys(bare.server.log.links[0]!)).not.toContain('pictures')
+    expect(Object.keys(bare.server.log.links[0]!)).not.toContain('show')
   })
 
   it('forwards activity and stops everything on quit', async () => {

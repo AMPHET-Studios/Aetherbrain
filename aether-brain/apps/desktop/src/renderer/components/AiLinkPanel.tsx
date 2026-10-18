@@ -8,6 +8,12 @@ import { ErrorLine, Overlay, Section } from './Overlay'
 
 const RELEASES = 'https://github.com/YEASTINFECTIONCHEESE/desktop-tutorial/releases'
 
+/**
+ * What installs the Claude plugin, typed in Claude Code. The marketplace is this repository (its `.claude-plugin/marketplace.json`
+ * names the plugin `aether-brain` in a marketplace called `aether-brain`); plugin-install.test.ts keeps this, the docs and that file in step.
+ */
+const PLUGIN_COMMANDS = '/plugin marketplace add YEASTINFECTIONCHEESE/desktop-tutorial\n/plugin install aether-brain@aether-brain'
+
 /** The URL shape ChatGPT and claude.ai need: the tunnel's public address + the secret path. */
 function tunnelUrlTemplate(token: string): string {
   return `https://<your-tunnel>/mcp/${token}`
@@ -115,7 +121,7 @@ function Client({ name, note, children }: { name: string; note?: string; childre
 /** One line of status next to the switches. */
 function linkState(st: AiLinkStatus, hasVault: boolean): { text: string; tone: 'ok' | 'off' | 'wait' | 'error' } {
   if (st.running) return { text: `Listening on ${st.host}:${st.port}. Only this computer can reach it (a tunnel can share it).`, tone: 'ok' }
-  if (!st.enabled) return { text: 'Off. Claude Desktop and Claude Code work without it; ChatGPT and claude.ai need it.', tone: 'off' }
+  if (!st.enabled) return { text: 'Off. Claude Desktop and Claude Code work without it; the Claude plugin, ChatGPT and claude.ai need it.', tone: 'off' }
   if (st.error) return { text: 'Not running (see the error above).', tone: 'error' }
   return { text: hasVault ? 'Starting…' : 'Starts once a vault folder is open.', tone: 'wait' }
 }
@@ -288,6 +294,17 @@ export function AiLinkPanel() {
               <li>
                 Start <code className="font-mono text-ink">claude</code> anywhere and ask about your notes; <code className="font-mono text-ink">/mcp</code> shows the
                 link.
+              </li>
+            </Client>
+
+            <Client name="Claude plugin" note="Claude Code · needs this app open with the link on">
+              <li>
+                Type these two lines in Claude Code once (it needs Node.js 20 or newer):
+                <Snippet text={PLUGIN_COMMANDS} what="the plugin commands" />
+              </li>
+              <li>
+                Claude can then send in a screenshot or picture file, look at your pictures and fly this view to things. With the link off or this app closed it says
+                so, and the tools appear by themselves once it is on.
               </li>
             </Client>
 

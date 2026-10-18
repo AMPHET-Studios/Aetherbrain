@@ -22,7 +22,7 @@ import {
   pictureTitle,
   readLocalPicture,
 } from '../src/mcp/pictures.js'
-import { Brain, TOOLS, createMcpServer, startHttpLink, type ActivityEvent, type McpServerOptions } from '../src/mcp/server.js'
+import { Brain, MAX_BODY_BYTES, TOOLS, createMcpServer, startHttpLink, type ActivityEvent, type McpServerOptions } from '../src/mcp/server.js'
 import { lf } from './lf'
 
 /**
@@ -181,10 +181,23 @@ describe('data (base64)', () => {
     expect(() => decodePictureData('data:image/png;base64,')).toThrow(/empty/)
   })
 
-  it('refuses more than the HTTP link could carry, and says what to use instead', () => {
+  it('refuses more than a picture can be, and says what to use instead', () => {
     expect(() => decodePictureData('A'.repeat(MAX_PICTURE_DATA_CHARS + 4))).toThrow(/too long.*file or path/)
-    // The cap leaves room for the rest of a request under the link's 1 MiB.
-    expect(MAX_PICTURE_DATA_CHARS).toBeLessThan(1_048_576 - 100_000)
+    // The cap is a whole 40 MB picture as base64, and the link's request cap leaves room for it and the rest of a request.
+    expect(MAX_PICTURE_DATA_CHARS).toBeGreaterThanOrEqual(Math.ceil((40 * 1024 * 1024 * 4) / 3))
+    expect(MAX_PICTURE_DATA_CHARS + 1_000_000).toBeLessThan(MAX_BODY_BYTES)
+  })
+
+  it('reads a big picture without making copies of its text: bare, with a data: address, and URL-safe', () => {
+    const big = png(5, 5, 6_000_000)
+    const text = b64(big)
+    expect(text.length).toBeGreaterThan(8_000_000)
+    expect(decodePictureData(text).length).toBe(big.length)
+    expect(decodePictureData(`data:image/png;base64,${text}`).length).toBe(big.length)
+    // A stray character deep inside a long text is still found.
+    expect(() => decodePictureData(`${text.slice(0, 7_000_000)}!${text.slice(7_000_000)}`)).toThrow(/not base64/)
+    expect(() => decodePictureData('====')).toThrow(/not base64/)
+    expect(() => decodePictureData('AAAA===')).toThrow(/not base64/)
   })
 })
 
@@ -613,7 +626,7 @@ describe('the guide to the AI link', () => {
   })
 
   it('says in both places a person reads about it that one picture file may come from outside the folders chosen', () => {
-    expect(guide).toContain('**reach outside the folders you chose,** with one exception: when you ask Claude Desktop or Claude Code to save a picture')
+    expect(guide).toContain('**reach outside the folders you chose,** with one exception: when you ask Claude Desktop, Claude Code or the Claude plugin to save a picture')
     const manifest = readFileSync(path.resolve(here, '../scripts/pack-mcpb.mjs'), 'utf8')
     expect(manifest).toContain('with one exception: when you ask Claude to save a picture, it may copy a picture file you name from anywhere on this computer into your Inbox')
     expect(manifest).toContain('only .md notes, folders and pictures are ever created')
@@ -621,7 +634,7 @@ describe('the guide to the AI link', () => {
   })
 
   it('tells the person who runs the link that path is for Claude on this computer only, and why file is host-limited', () => {
-    expect(guide).toContain('`path` works only for Claude Desktop and Claude Code')
+    expect(guide).toContain('`path` works only for Claude Desktop, Claude Code and the Claude plugin')
     expect(guide).toContain('the link a tunnel reaches (ChatGPT, claude.ai) refuses it')
     expect(guide).toContain("`file` downloads only from ChatGPT's file hosts")
   })
@@ -649,17 +662,31 @@ describe('save_image over the HTTP link (ChatGPT, claude.ai)', () => {
     expect(errorOf(local)).toMatch(/Claude Desktop or Claude Code runs this server/)
   })
 
-  it('carries the biggest picture its cap allows inside one request', async () => {
+  it('carries a picture of many megabytes in one request (the plugin’s bridge sends a screenshot it read from disk)', async () => {
     const b = await open()
     const link = await startHttpLink({ brain: b, port: 0, token: TOKEN, readOnly: false })
     cleanups.push(() => link.close())
     const client = new Client({ name: 'http-test', version: '1.0.0' })
     await client.connect(new StreamableHTTPClientTransport(new URL(link.url)))
     cleanups.push(() => client.close())
-    // As many base64 characters as the tool accepts: one request, under the link's 1 MiB.
-    const raw = Math.floor((MAX_PICTURE_DATA_CHARS * 3) / 4) - 3
-    const r = (await client.callTool({ name: 'save_image', arguments: { data: b64(png(3, 3, raw - 33)), name: 'max.png' } })) as Result
-    expect(json(r).picture.bytes).toBe(raw)
+    // 12 MB: sixteen times the old cap of one request (1 MiB), a request of 16 MB of text.
+    const raw = 12 * 1024 * 1024
+    const r = (await client.callTool({ name: 'save_image', arguments: { data: b64(png(3, 3, raw - 33)), name: 'screenshot.png' } })) as Result
+    expect(json(r).picture).toMatchObject({ path: 'Inbox/Pictures/screenshot.png', bytes: raw })
+    expect((await fs.stat(path.join(root, 'Inbox', 'Pictures', 'screenshot.png'))).size).toBe(raw)
+  })
+
+  it('still refuses a body past its cap, and answers a wrong token before reading any of it', async () => {
+    const b = await open()
+    const link = await startHttpLink({ brain: b, port: 0, token: TOKEN, readOnly: false })
+    cleanups.push(() => link.close())
+    const base = link.url.replace(/\/mcp\/.*/, '')
+    const big = 'x'.repeat(MAX_BODY_BYTES + 1_000)
+    const post = (url: string, body: string) => fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' }, body })
+    const tooBig = await post(link.url, JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: { pad: big } }))
+    expect(tooBig.status).toBeGreaterThanOrEqual(400)
+    const stranger = await post(`${base}/mcp/not-the-token-0123456789`, JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }))
+    expect(stranger.status).toBe(401)
   })
 })
 

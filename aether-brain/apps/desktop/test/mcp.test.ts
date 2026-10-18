@@ -15,6 +15,7 @@ import { FsVault } from '../src/main/fsvault.js'
 import { MAX_LINE_ARG, MAX_TEXT_ARG } from '../src/mcp/tools.js'
 import {
   Brain,
+  HOST_TOOLS,
   TOOLS,
   appendText,
   clientFromUserAgent,
@@ -25,6 +26,9 @@ import {
   type ActivityEvent,
   type BrainOptions,
 } from '../src/mcp/server.js'
+
+/** The tools a server without the app's pictures and window lists (stdio, the standalone HTTP link, the bundle). */
+const OFFERED = Object.keys(TOOLS).filter((n) => !(HOST_TOOLS as readonly string[]).includes(n))
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const BUNDLE = path.resolve(here, '../dist/mcp/aether-mcp.mjs')
@@ -145,7 +149,7 @@ describe('tools/list', () => {
   it('offers every tool with titles, hints and "Use this when" descriptions', async () => {
     const client = await connect(await open())
     const { tools } = await client.listTools()
-    expect(tools.map((t) => t.name).sort()).toEqual(Object.keys(TOOLS).sort())
+    expect(tools.map((t) => t.name).sort()).toEqual([...OFFERED].sort())
     for (const t of tools) {
       expect(t.title, t.name).toBeTruthy()
       expect(t.description, t.name).toMatch(/^Use this when/)
@@ -167,7 +171,7 @@ describe('tools/list', () => {
     const client = await connect(b, true)
     const names = (await client.listTools()).tools.map((t) => t.name).sort()
     const reads = Object.entries(TOOLS)
-      .filter(([, t]) => !t.write)
+      .filter(([n, t]) => !t.write && OFFERED.includes(n))
       .map(([n]) => n)
       .sort()
     expect(names).toEqual(reads)
@@ -1192,7 +1196,7 @@ describe('HTTP link', () => {
     const client = new Client({ name: 'http-test', version: '1.0.0' })
     await client.connect(transport)
     cleanups.push(() => client.close())
-    expect((await client.listTools()).tools).toHaveLength(Object.keys(TOOLS).length)
+    expect((await client.listTools()).tools).toHaveLength(OFFERED.length)
     const r = (await client.callTool({ name: 'search', arguments: { query: 'glyph' } })) as Result
     expect((r.structuredContent as { results: unknown[] }).results.length).toBeGreaterThan(0)
     const c = (await client.callTool({ name: 'capture', arguments: { text: 'Via HTTP' } })) as Result
@@ -1309,7 +1313,7 @@ describe.skipIf(!existsSync(BUNDLE))('bundle (dist/mcp/aether-mcp.mjs)', () => {
     await client.connect(transport)
     cleanups.push(() => client.close())
     expect(client.getServerVersion()?.name).toBe('aether-brain')
-    expect((await client.listTools()).tools).toHaveLength(Object.keys(TOOLS).length)
+    expect((await client.listTools()).tools).toHaveLength(OFFERED.length)
     const r = (await client.callTool({ name: 'search', arguments: { query: 'glyph' } })) as Result
     expect((r.structuredContent as { results: { id: string }[] }).results.map((x) => x.id)).toContain('Projects/PORTALz/Art/Glyphs')
     const c = (await client.callTool({ name: 'add_task', arguments: { project: 'PORTALz', text: 'From the bundle' } })) as Result
@@ -1356,6 +1360,8 @@ describe.skipIf(!existsSync(BUNDLE))('bundle (dist/mcp/aether-mcp.mjs)', () => {
     expect(zip.subarray(30, 30 + zip.readUInt16LE(26)).toString()).toBe('manifest.json')
     const body = zip.subarray(start, start + size)
     const manifest = JSON.parse((method === 8 ? inflateRawSync(body) : body).toString('utf8'))
+    // The tools the extension's server really has: not the ones that need the running app (its pictures, its window).
+    expect(manifest.tools.map((t: { name: string }) => t.name).sort()).toEqual([...OFFERED].sort())
     expect(manifest.user_config.exclude).toMatchObject({ type: 'string', title: 'Skip these folders', required: false })
     expect(manifest.server.mcp_config.args).toContain('--exclude-list=${user_config.exclude}')
     expect(manifest.server.mcp_config.args.at(-1)).toBe('${user_config.vaults}')

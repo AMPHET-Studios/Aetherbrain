@@ -59,6 +59,41 @@ interface HttpLink {
   close(): Promise<void>
 }
 
+/** A picture, video or 3D model as find_pictures lists it (the bundle's `FoundPicture`). */
+export interface FoundPicture {
+  /** Vault path. */
+  path: string
+  kind: 'picture' | 'video' | 'model'
+  bytes: number | null
+  /** Last change, epoch ms. */
+  modified: number | null
+}
+
+/** One picture looked at (the bundle's `LookedAt`): a PNG still and what the file itself is. */
+export interface LookedAt {
+  png: Uint8Array
+  path: string
+  kind: 'picture' | 'video' | 'model'
+  bytes: number
+  width: number | null
+  height: number | null
+}
+
+/** What the app lends the link so its AI can see pictures (the bundle's `PictureHost`): only the app has the thumbnail helper. */
+export interface PictureHost {
+  find(query: string, opts: { folder?: string; limit: number }): Promise<{ pictures: FoundPicture[]; more: boolean }>
+  look(path: string, px: number): Promise<LookedAt | null>
+}
+
+/** What show_in_brain asks the window to show (the bundle's `ShowTarget`). */
+export interface ShowTarget {
+  kind: 'note' | 'folder' | 'picture' | 'today'
+  /** Vault path ('' for the Today hub). */
+  path: string
+  /** A note: open it in the editor as well. */
+  open: boolean
+}
+
 /** The part of the bundle's exports the host uses. */
 export interface McpModule {
   Brain: { open(opts: BrainOptions): Promise<Brain> }
@@ -69,6 +104,8 @@ export interface McpModule {
     token: string
     readOnly: boolean
     onActivity?: (a: ActivityEvent) => void
+    pictures?: PictureHost
+    show?: (target: ShowTarget) => void | Promise<void>
   }): Promise<HttpLink>
 }
 
@@ -244,6 +281,10 @@ export interface AiLinkHostOptions {
   platform?: string
   /** How the bundle is loaded (tests inject a fake). Default: dynamic import of `bundlePath`. */
   load?: (bundlePath: string) => Promise<McpModule>
+  /** The app's pictures, lent to the link: with it the AI can find and look at pictures (find_pictures, get_image). */
+  pictures?: PictureHost
+  /** Show something in the app's window: with it the AI can point the 3D view at things (show_in_brain). */
+  show?: (target: ShowTarget) => void | Promise<void>
 }
 
 const vaultKey = (v: LinkVault | null): string => (v ? JSON.stringify([v.roots, v.exclude]) : '')
@@ -494,6 +535,8 @@ export class AiLinkHost {
           token,
           readOnly,
           onActivity: (a) => this.activity(a),
+          ...(this.opts.pictures ? { pictures: this.opts.pictures } : {}),
+          ...(this.opts.show ? { show: this.opts.show } : {}),
         })
         this.linkKey = lkey
       }

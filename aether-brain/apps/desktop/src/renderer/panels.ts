@@ -6,7 +6,7 @@
 import { useEffect, useSyncExternalStore, type RefObject } from 'react'
 import { folderKey, idFromPath, imageKey, isAssetPath } from '@aether/core'
 import { useAether } from '@aether/ui'
-import type { AiActivityDto } from '../shared/ipc'
+import type { AiActivityDto, AiShowDto } from '../shared/ipc'
 
 /** roots: vault folders · drives: pick whole drives to mirror · ai: the AI link · library: the librarian · find: Find projects. */
 export type PanelId = 'roots' | 'drives' | 'ai' | 'library' | 'find'
@@ -111,6 +111,37 @@ export function flyToPath(path: string): void {
     if (cancelFly === stop) cancelFly = null
   }
   cancelFly = stop
+}
+
+/**
+ * An AI asked to show something (show_in_brain): fly to it and select it, the same way the app's own "go to" does. A picture
+ * that is not in the graph yet becomes a moon to be (the store knows how), a folder is shown as a star, a note can open in the
+ * editor too. Never takes the camera away from a note being typed: it says so instead.
+ */
+export function showForAi(t: AiShowDto): void {
+  const s = useAether.getState()
+  if (s.status !== 'ready') return
+  const name = t.kind === 'today' ? 'the Today hub' : t.path.slice(t.path.lastIndexOf('/') + 1).replace(/\.md$/i, '') || 'the vault'
+  if (s.dirty) {
+    s.toast(`An AI wants to show you ${name}. Save your note, then ask again.`, 'info')
+    return
+  }
+  switch (t.kind) {
+    case 'today':
+      s.showToday()
+      return
+    case 'folder':
+      s.showFolder(t.path)
+      return
+    case 'picture':
+      s.showPicture(t.path)
+      return
+    case 'note': {
+      const id = idFromPath(t.path)
+      if (t.open && s.notes.has(id)) s.openNote(id, { fly: true })
+      else flyToPath(t.path)
+    }
+  }
 }
 
 /* ------------------------------------------------------------------ */
