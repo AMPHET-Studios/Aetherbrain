@@ -4,7 +4,7 @@
  * useSyncExternalStore: the app store stays free of desktop concerns.
  */
 import { useEffect, useSyncExternalStore, type RefObject } from 'react'
-import { folderKey, idFromPath } from '@aether/core'
+import { folderKey, idFromPath, imageKey, isAssetPath } from '@aether/core'
 import { useAether } from '@aether/ui'
 import type { AiActivityDto } from '../shared/ipc'
 
@@ -92,7 +92,8 @@ let cancelFly: (() => void) | null = null
 export function flyToPath(path: string): void {
   cancelFly?.()
   cancelFly = null
-  const id = /\.md$/i.test(path) ? idFromPath(path) : folderKey(path)
+  // A note, a picture an AI sent (save_image), or else a folder (create_folder).
+  const id = /\.md$/i.test(path) ? idFromPath(path) : isAssetPath(path) ? imageKey(path) : folderKey(path)
   const tryFly = (): boolean => {
     const s = useAether.getState()
     if (s.status !== 'ready' || !s.graph?.index.has(id)) return false

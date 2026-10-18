@@ -152,7 +152,8 @@ describe('tools/list', () => {
       expect(t.inputSchema.type).toBe('object')
       expect(typeof t.annotations?.readOnlyHint, t.name).toBe('boolean')
       expect(typeof t.annotations?.destructiveHint, t.name).toBe('boolean')
-      expect(t.annotations?.openWorldHint, t.name).toBe(false)
+      // Every tool stays on this computer, except save_image: given a ChatGPT file it downloads it from ChatGPT's file hosts.
+      expect(t.annotations?.openWorldHint, t.name).toBe(t.name === 'save_image')
       expect(t.annotations?.readOnlyHint, t.name).toBe(!TOOLS[t.name as keyof typeof TOOLS].write)
     }
     expect(tools.find((t) => t.name === 'search')?.outputSchema).toBeTruthy()

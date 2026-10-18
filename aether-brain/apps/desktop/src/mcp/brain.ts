@@ -92,9 +92,11 @@ import type {
   VaultFile,
   VaultRootInfo,
 } from '@aether/core'
+import { assetBytes, imageKindOf, imageSize, type ImageKind } from '../main/assets.js'
 import { FsVault } from '../main/fsvault.js'
 import { VaultWatcher } from '../main/watcher.js'
 import { PLAYBOOK_BODY, PLAYBOOK_TITLE } from './companion.js'
+import { PICTURES_FOLDER, PICTURE_EXT, pictureStem, pictureTitle } from './pictures.js'
 import {
   ABOUT_ME_SECTIONS,
   ABOUT_ME_TITLE,
@@ -117,6 +119,16 @@ import {
   type CheckInRow,
 } from './me.js'
 import type { VaultChangeDto } from '../shared/ipc.js'
+
+/** A picture `savePicture` wrote: where it is, how big, what kind, and its size in pixels when its header says. */
+export interface PictureSaved {
+  path: string
+  name: string
+  bytes: number
+  kind: ImageKind
+  width?: number
+  height?: number
+}
 
 /** Files + folders a host already read, so the brain skips its own scan. */
 export interface BrainPreload {
@@ -1421,6 +1433,56 @@ export class Brain {
       const base = noteBase(basenameOf(made.path)) || 'Capture'
       const note = await this.addNote(d, dir, base, made.content)
       return this.ref(note)
+    })
+  }
+
+  /**
+   * A new picture in the vault (the AI link's save_image). The bytes must be a real picture of at most 40 MB (`assetBytes`) and
+   * are written with FsVault.createBinary, which fails with EEXIST when anything is at the path in any letter case: a picture
+   * is never replaced, the next name (` 2`, ` 3` …) is tried. It goes to `folder`, else `<home>Inbox/Pictures`, under the name
+   * it came with and the extension its bytes really have. With a title or text a note is made as well (in `folder`, else the
+   * Inbox) that shows the picture: `![[its vault path]]`, then the text.
+   */
+  savePicture(input: { bytes: Uint8Array; name?: string; folder?: string; title?: string; text?: string; tags?: string[] }) {
+    return this.exclusive(async () => {
+      this.assertWritable()
+      const bytes = assetBytes(input.bytes)
+      // assetBytes refused anything that is not a picture, so the kind is there.
+      const kind = imageKindOf(bytes) as ImageKind
+      const d = await this.state()
+      const dir = input.folder?.trim() ? this.targetFolder(d, input.folder) : this.canonical(d, `${this.home}${PICTURES_FOLDER}`)
+      const existed = dir === '' || this.folders.has(dir)
+      const stem = pictureStem(input.name)
+      let file = ''
+      for (let n = 1; n <= 500 && !file; n++) {
+        const candidate = `${n === 1 ? stem : `${stem} ${n}`}.${PICTURE_EXT[kind]}`
+        const p = dir ? `${dir}/${candidate}` : candidate
+        if (WIN_RESERVED.test(candidate) || isIgnoredPath(p) || this.vault.isIgnored(p)) continue
+        try {
+          await this.vault.createBinary(p, bytes)
+          file = candidate
+        } catch (err) {
+          if (!isExistsError(err)) throw err
+        }
+      }
+      if (!file) throw new Error(`No free file name for "${stem}" in ${dir || 'the vault root'}`)
+      const saved = dir ? `${dir}/${file}` : file
+      if (!existed) {
+        this.pending.push({ kind: 'addDir', path: dir })
+        this.sync()
+      }
+      let note: ParsedNote | null = null
+      if (input.title?.trim() || input.text?.trim()) {
+        const body = [`![[${saved}]]`, input.text?.trim() ?? ''].filter(Boolean).join('\n\n')
+        // Titled from the picture when it has none of its own: the first line of the body is the embed, which makes no title.
+        const title = input.title?.trim() || pictureTitle(file.slice(0, file.lastIndexOf('.')))
+        const made = inboxNote({ text: body, title, tags: cleanTags(input.tags ?? []) })
+        const noteDir = input.folder?.trim() ? dir : this.canonical(d, `${this.home}Inbox`)
+        note = await this.addNote(d, noteDir, noteBase(basenameOf(made.path)) || 'Picture', made.content)
+      }
+      const size = imageSize(bytes)
+      const picture: PictureSaved = { path: saved, name: file, bytes: bytes.length, kind, ...(size ?? {}) }
+      return { picture, embed: `![[${saved}]]`, note: note ? { ...this.ref(note), folder: note.meta.folder } : null }
     })
   }
 
