@@ -6,7 +6,7 @@
 import { useEffect, useSyncExternalStore, type RefObject } from 'react'
 import { folderKey, idFromPath, imageKey, isAssetPath } from '@aether/core'
 import { useAether } from '@aether/ui'
-import type { AiActivityDto, AiShowDto } from '../shared/ipc'
+import type { AiActivityDto, AiShowDto, TunnelStatusDto } from '../shared/ipc'
 
 /** roots: vault folders · drives: pick whole drives to mirror · ai: the AI link · library: the librarian · find: Find projects. */
 export type PanelId = 'roots' | 'drives' | 'ai' | 'library' | 'find'
@@ -142,6 +142,19 @@ export function showForAi(t: AiShowDto): void {
       else flyToPath(t.path)
     }
   }
+}
+
+let tunnelWasOn = false
+
+/**
+ * The tunnel for ChatGPT and claude.ai changed: say when it opens the brain to the internet, and when it ends (and why, when it ended
+ * by itself). A state that is not a change (the same tunnel again, off when it was never on) says nothing.
+ */
+export function reportTunnel(t: TunnelStatusDto): void {
+  const s = useAether.getState()
+  if (t.state === 'on' && !tunnelWasOn) s.toast('Tunnel on: ChatGPT and claude.ai can reach your brain. Stop it in the AI link panel (a).', 'info')
+  else if (t.state === 'off' && tunnelWasOn) s.toast(t.error ?? 'Tunnel stopped', t.error ? 'error' : 'info')
+  tunnelWasOn = t.state === 'on'
 }
 
 /* ------------------------------------------------------------------ */

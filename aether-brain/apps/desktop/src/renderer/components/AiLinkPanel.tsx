@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { useAether } from '@aether/ui'
-import type { AiLinkPatch, AiLinkStatus } from '../../shared/ipc'
+import type { AetherBridge, AiLinkPatch, AiLinkStatus, TunnelStatusDto } from '../../shared/ipc'
 import { ElectronVaultAdapter } from '../vault/electron'
 import { activityFailed, clientLabel, errorText, flyToPath, openPanel, useActivity, type FeedItem } from '../panels'
 import { CompanionSection } from './CompanionSection'
@@ -114,6 +114,134 @@ function Client({ name, note, children }: { name: string; note?: string; childre
         {note && <span className="text-[11.5px] text-faint">{note}</span>}
       </div>
       <ol className="flex list-decimal flex-col gap-1.5 pl-5 text-[12.5px] leading-relaxed text-dim marker:text-faint">{children}</ol>
+    </div>
+  )
+}
+
+/**
+ * The tunnel for ChatGPT and claude.ai as a button: download cloudflared once (asked first, with what it is and where from), start the
+ * tunnel (the link is switched on for it), show the address ready to paste, stop. The state lives in main: it changes by itself too
+ * (a tunnel that ends, a download's progress), so this listens.
+ */
+function TunnelControl({ bridge, token, showToken }: { bridge: AetherBridge; token: string; showToken: boolean }) {
+  const [t, setT] = useState<TunnelStatusDto | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [asking, setAsking] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let alive = true
+    bridge.tunnelStatus().then(
+      (s) => alive && setT(s),
+      (err: unknown) => alive && setError(errorText(err)),
+    )
+    const off = bridge.onTunnelState((s) => alive && setT(s))
+    return () => {
+      alive = false
+      off()
+    }
+  }, [bridge])
+
+  const run = async (call: () => Promise<TunnelStatusDto>) => {
+    if (busy) return
+    setBusy(true)
+    setError(null)
+    try {
+      setT(await call())
+    } catch (err) {
+      setError(errorText(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (!t) return <p className="mt-1.5 text-[12px] text-faint">{error ?? 'Looking for cloudflared…'}</p>
+  const problem = error ?? t.error
+  const full = t.url ? `${t.url}/mcp/${token}` : ''
+  const warning = 'Anyone with this URL can use your brain, including its pictures, until you stop the tunnel.'
+  return (
+    <div className="mt-1.5 flex flex-col gap-1.5">
+      {t.downloading ? (
+        <p className="text-[12px] text-dim" aria-live="polite">
+          Downloading cloudflared… {Math.min(100, Math.floor((t.downloading.done / t.downloading.total) * 100))}%
+        </p>
+      ) : t.state === 'on' && t.url ? (
+        <>
+          <Snippet text={full} display={showToken ? full : masked(full, token)} what="the ChatGPT connection URL" />
+          <div className="flex flex-wrap items-center gap-2">
+            <button type="button" className="hud-btn" disabled={busy} onClick={() => void run(() => bridge.tunnelStop())}>
+              Stop tunnel
+            </button>
+            <span className="text-[11.5px] leading-relaxed text-inbox">
+              A new address can take a few seconds, sometimes a minute or two, before it answers on your network. {warning}
+            </span>
+          </div>
+        </>
+      ) : t.state === 'starting' ? (
+        <div className="flex items-center gap-2">
+          <span className="text-[12px] text-dim" aria-live="polite">
+            Starting the tunnel…
+          </span>
+          <button type="button" className="hud-btn" disabled={busy} onClick={() => void run(() => bridge.tunnelStop())}>
+            Cancel
+          </button>
+        </div>
+      ) : t.program ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <button type="button" className="hud-btn active" disabled={busy} onClick={() => void run(() => bridge.tunnelStart())}>
+            Start tunnel
+          </button>
+          <span className="text-[11.5px] leading-relaxed text-faint">
+            Switches the link on if it is off, then opens the tunnel. {warning}
+          </span>
+        </div>
+      ) : t.download ? (
+        asking ? (
+          <div className="rounded-lg border border-[var(--line)] bg-black/30 px-3 py-2 text-[12px] leading-relaxed text-dim">
+            Download <span className="text-ink">{t.download.file}</span> ({t.download.mb} MB) from {t.download.from} into this app&rsquo;s data folder? The app checks it against a
+            checksum it already knows and throws it away if it differs.
+            <div className="mt-2 flex gap-2">
+              <button
+                type="button"
+                className="hud-btn active"
+                disabled={busy}
+                onClick={() => {
+                  setAsking(false)
+                  void run(() => bridge.tunnelDownload())
+                }}
+              >
+                Download ({t.download.mb} MB)
+              </button>
+              <button type="button" className="hud-btn" onClick={() => setAsking(false)}>
+                Not now
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="flex flex-wrap items-center gap-2">
+            <button type="button" className="hud-btn" disabled={busy} onClick={() => setAsking(true)}>
+              Download cloudflared…
+            </button>
+            <span className="text-[11.5px] leading-relaxed text-faint">
+              The tunnel needs one small program, cloudflared ({t.download.mb} MB). You are asked before anything is downloaded.
+            </span>
+          </div>
+        )
+      ) : (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-[11.5px] leading-relaxed text-faint">
+            The tunnel needs cloudflared on this computer: install it (for example <code className="font-mono text-ink">brew install cloudflared</code>), then check again.
+          </span>
+          <button type="button" className="hud-btn" disabled={busy} onClick={() => void run(() => bridge.tunnelStatus())}>
+            Check again
+          </button>
+        </div>
+      )}
+      {problem && (
+        <p className="text-[12px] text-danger" role="alert">
+          {problem}
+        </p>
+      )}
     </div>
   )
 }
@@ -309,23 +437,24 @@ export function AiLinkPanel() {
               </li>
             </Client>
 
-            <Client name="ChatGPT" note="needs the link on and a tunnel">
-              <li>Switch the link on (above).</li>
+            <Client name="ChatGPT" note="needs a tunnel: a button gives your brain a public address">
               <li>
-                Give it a public HTTPS address: install cloudflared and run this; it prints an https://…trycloudflare.com address.
-                <Snippet text={tunnelCommand(st.port)} what="the tunnel command" />
+                Press Start tunnel. It switches the link on if it is off and gives your brain a public https address ChatGPT can reach; the connection URL
+                appears here, ready to copy. A new address comes with every start.
+                <TunnelControl bridge={bridge} token={st.token} showToken={showToken} />
               </li>
               <li>In ChatGPT: Settings → Security and login → turn on Developer mode.</li>
-              <li>
-                Go to chatgpt.com/plugins → + → Connection: this URL with &lt;your-tunnel&gt; replaced by the address from step 2; Authentication: No
-                authentication.
-                <Snippet text={tunnelUrl} display={showToken ? tunnelUrl : masked(tunnelUrl, st.token)} what="the ChatGPT connection URL" />
+              <li>Go to chatgpt.com/plugins → + → Connection: the URL from step 1; Authentication: No authentication.</li>
+              <li className="text-faint">
+                Rather run the tunnel yourself? Install cloudflared and run this, then use https://&lt;your-tunnel&gt;/mcp/… as the URL:
+                <Snippet text={tunnelCommand(st.port)} what="the tunnel command" />
+                <Snippet text={tunnelUrl} display={showToken ? tunnelUrl : masked(tunnelUrl, st.token)} what="the ChatGPT connection URL template" />
               </li>
             </Client>
 
             <Client name="claude.ai (web)" note="same tunnel as ChatGPT">
-              <li>Switch the link on and run the tunnel (ChatGPT steps 1–2).</li>
-              <li>In claude.ai: Settings → Connectors → Add custom connector, and paste the same https://&lt;your-tunnel&gt;/mcp/… URL.</li>
+              <li>Press Start tunnel (ChatGPT step 1).</li>
+              <li>In claude.ai: Settings → Connectors → Add custom connector, and paste the same connection URL.</li>
             </Client>
           </Section>
 

@@ -89,6 +89,11 @@ const IPC = {
   aiConfigure: 'ai:configure',
   aiActivity: 'ai:activity',
   aiShow: 'ai:show',
+  tunnelStatus: 'tunnel:status',
+  tunnelDownload: 'tunnel:download',
+  tunnelStart: 'tunnel:start',
+  tunnelStop: 'tunnel:stop',
+  tunnelState: 'tunnel:state',
   copy: 'app:copy',
 } as const
 
@@ -254,6 +259,11 @@ const bridge: AetherBridge = {
   aiConfigure: (patch) => ipcRenderer.invoke(IPC.aiConfigure, patch),
   onAiActivity: (cb) => on(IPC.aiActivity, cb),
   onAiShow: (cb) => on(IPC.aiShow, cb),
+  tunnelStatus: () => ipcRenderer.invoke(IPC.tunnelStatus),
+  tunnelDownload: () => ipcRenderer.invoke(IPC.tunnelDownload),
+  tunnelStart: () => ipcRenderer.invoke(IPC.tunnelStart),
+  tunnelStop: () => ipcRenderer.invoke(IPC.tunnelStop),
+  onTunnelState: (cb) => on(IPC.tunnelState, cb),
   onChatEvent: (cb) => on(IPC.chatEvent, cb),
   copyText: (text) => ipcRenderer.invoke(IPC.copy, text),
   platform: process.platform,

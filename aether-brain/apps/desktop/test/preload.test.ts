@@ -227,6 +227,32 @@ describe('preload: an AI asks the window to show something', () => {
   })
 })
 
+describe('preload: the tunnel', () => {
+  it('invokes the four tunnel channels with no arguments, and nothing more', async () => {
+    await bridge.tunnelStatus()
+    await bridge.tunnelDownload()
+    await bridge.tunnelStart()
+    await bridge.tunnelStop()
+    // The channel names are the contract with main (and with the parity test of the two tables): literal here on purpose.
+    expect(electron.invoke.mock.calls).toEqual([['tunnel:status'], ['tunnel:download'], ['tunnel:start'], ['tunnel:stop']])
+  })
+
+  it('relays tunnel:state on its own channel until unsubscribed, without the Electron event', () => {
+    const seen: unknown[][] = []
+    const off = bridge.onTunnelState((...args: unknown[]) => void seen.push(args))
+    const fire = (channel: string, ...payload: unknown[]): void => {
+      for (const fn of electron.listeners.get(channel) ?? []) fn({ sender: 'secret' }, ...payload)
+    }
+    const on = { state: 'on', url: 'https://quiet-river-test.trycloudflare.com', error: null, program: 'path', download: null, downloading: null }
+    fire('tunnel:state', on, 'extra')
+    fire('ai:show', { kind: 'today', path: '', open: false })
+    off()
+    fire('tunnel:state', { ...on, state: 'off', url: null })
+    expect(seen).toEqual([[on]])
+    expect(electron.listeners.get('tunnel:state')).toEqual([])
+  })
+})
+
 describe('preload: Find projects', () => {
   it('invokes the find channels and relays progress until unsubscribed', async () => {
     await bridge.findProjects()

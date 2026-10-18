@@ -69,7 +69,7 @@ roots, the AI sees them as the top folders `D` and `F` (for example
 | **Claude Desktop** | The Aether Brain extension (`.mcpb`), or a config from the app | No. Claude runs its own copy. |
 | **Claude Code** (terminal) | One `claude mcp add` command | No |
 | **Claude Code**, wanting it to look at your pictures and make the 3D view fly | The Aether Brain **plugin** | Yes, with the link on |
-| **ChatGPT** (web) | The app's **AI link**, a tunnel, and a connector in ChatGPT | Yes, with the link on |
+| **ChatGPT** (web) | The app's **AI link** and its **Start tunnel** button, and a connector in ChatGPT | Yes, with the link on |
 | **claude.ai** (web) | The same link and tunnel as ChatGPT, then a custom connector | Yes, with the link on |
 
 To open the **AI link** panel, press <kbd>a</kbd> in the desktop app. It has
@@ -219,47 +219,61 @@ reach.
 Custom connectors that can **write** need ChatGPT's **Developer mode**. It is
 available on the web for Plus, Pro, Business, Enterprise and Edu plans.
 
-1. **Switch the link on.** In Aether Brain, press <kbd>a</kbd> and turn on **Link on**. The
-   panel shows the local URL, `http://127.0.0.1:7457/mcp/<token>`. The long random
-   `<token>` part is the password.
-2. **Start a tunnel** in a terminal and leave it running. Use one of these:
-   - [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/)
-     (free, no account needed for quick tunnels):
-     ```
-     cloudflared tunnel --url http://127.0.0.1:7457
-     ```
-     It prints an address like `https://some-random-words.trycloudflare.com`.
-   - [ngrok](https://ngrok.com/download):
-     ```
-     ngrok http 7457
-     ```
-     It prints an address like `https://abcd-1234.ngrok-free.app`.
-   - OpenAI's official tunnel client for developer-mode connectors: point it at the
-     local URL above, or let it run the server itself with the same command
-     Claude Code uses. Follow OpenAI's instructions to install it.
-3. **Turn on Developer mode** in ChatGPT: **Settings → Security and login →
+1. **Press Start tunnel.** In Aether Brain, press <kbd>a</kbd> and, under **Connect → ChatGPT**,
+   press **Start tunnel**. It switches the link on if it is off, opens a
+   [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/)
+   quick tunnel (free, no account) to the link's port, and shows the connection URL, ready to copy:
+   the tunnel's `https://….trycloudflare.com` address, then `/mcp/` and your token (the token is the password).
+   The first time, if cloudflared is not on your computer, the button offers to download it: one file,
+   `cloudflared-windows-amd64.exe` (52.8 MB, from Cloudflare's release 2026.10.1 on GitHub) into the app's own data folder,
+   and nothing is downloaded until you press **Download**. The app checks the file against a SHA-256 it already knows and throws it away if it
+   differs, and checks it again before every start. On macOS and Linux you install cloudflared yourself (for example `brew install cloudflared`)
+   and the button uses it.
+2. **Turn on Developer mode** in ChatGPT: **Settings → Security and login →
    Developer mode**.
-4. **Create the connector.** Go to [chatgpt.com/plugins](https://chatgpt.com/plugins),
+3. **Create the connector.** Go to [chatgpt.com/plugins](https://chatgpt.com/plugins),
    click **+** and create a new one:
    - **Name:** Aether Brain
-   - **Connection / MCP server URL:** the tunnel address + `/mcp/` + your token, for example
-     `https://some-random-words.trycloudflare.com/mcp/<token>`. The AI link panel
-     builds this URL for you under **Connect → ChatGPT**.
+   - **Connection / MCP server URL:** the URL the panel shows after step 1.
    - **Authentication:** No authentication. The token in the URL does that job.
    - Confirm that you trust the connector, then create it.
-5. In a chat, pick the **Aether Brain** connector (from the **+** / tools menu in
+4. In a chat, pick the **Aether Brain** connector (from the **+** / tools menu in
    Developer mode) and ask away. ChatGPT asks you to confirm before each change it
    makes; read-only tools run without asking.
 
 A quick tunnel gets a **new address every time you start it**. When that
-happens, edit the connector and paste the new URL. A named Cloudflare tunnel or
-a reserved ngrok domain keeps the same address.
+happens, edit the connector and paste the new URL. The tunnel is off every time the app starts, and it
+stops when you press **Stop tunnel**, when you switch the link off or change its port, and when you quit. If the app is
+killed while a tunnel runs, the next start of the app finds that cloudflared and stops it.
+
+### Running the tunnel yourself
+
+The button is the easy way, not the only one. Switch the link on (<kbd>a</kbd> → **Link on**; the panel shows the local URL,
+`http://127.0.0.1:7457/mcp/<token>`) and start a tunnel in a terminal, leaving it running:
+
+- cloudflared:
+  ```
+  cloudflared tunnel --url http://127.0.0.1:7457
+  ```
+  It prints an address like `https://some-random-words.trycloudflare.com`.
+- [ngrok](https://ngrok.com/download):
+  ```
+  ngrok http 7457
+  ```
+  It prints an address like `https://abcd-1234.ngrok-free.app`.
+- OpenAI's official tunnel client for developer-mode connectors: point it at the
+  local URL above, or let it run the server itself with the same command
+  Claude Code uses. Follow OpenAI's instructions to install it.
+
+The connection URL is the tunnel address + `/mcp/` + your token, for example
+`https://some-random-words.trycloudflare.com/mcp/<token>`. A named Cloudflare tunnel or a reserved ngrok domain
+keeps the same address.
 
 ## claude.ai in the browser
 
 This uses the same link and tunnel as ChatGPT:
 
-1. Do steps 1 and 2 of the ChatGPT section: switch the link on and start the tunnel.
+1. Do step 1 of the ChatGPT section: press **Start tunnel**.
 2. In claude.ai, open **Settings → Connectors → Add custom connector**. Give it a
    name and paste the same `https://…/mcp/<token>` URL, then click **Add**.
 3. In a chat, enable the connector from the tools menu.
@@ -358,9 +372,12 @@ tool changes nothing and replies with the current lines.
   they aren't affected.
 - **Pictures are checked.** `save_image` writes only a file whose first bytes really are a picture, never over one that is there, and only inside your vault folders. `path` works only for Claude Desktop, Claude Code and the Claude plugin (which run on your computer): the link a tunnel reaches (ChatGPT, claude.ai) refuses it, so a caller outside your computer cannot name your files. A network or device path is refused. `file` downloads only from ChatGPT's file hosts, over https, with no password in the address, and follows a redirect only to those hosts again, because an address an AI wrote could otherwise carry your notes out in its query string.
 - **Your pictures are as open as your notes.** With the app's link on, whoever holds the link can ask for a picture (`get_image`) as well as a note, and Read only does not stop that, because looking changes nothing. That includes ChatGPT or claude.ai through a tunnel. The plugin on your own computer uses the same link.
-- **Turn the link off when you don't need it,** and stop the tunnel (press Ctrl+C
-  in its window). Without the tunnel, the link is only reachable from your own
-  computer. It listens on `127.0.0.1` only.
+- **Turn the link off when you don't need it,** and stop the tunnel (**Stop tunnel** in the
+  panel, or Ctrl+C in the window of a tunnel you started yourself). Without the tunnel, the link is
+  only reachable from your own computer. It listens on `127.0.0.1` only. The **Start tunnel** button
+  opens your brain to the internet for as long as it runs: Cloudflare relays the traffic and anyone
+  who holds the full URL can use it. A toast says when it opens and when it ends, and it never
+  outlives the app, the link or the port it was started for.
 - **Use Read only** when you just want answers. This applies to the app's link,
   the extension setting and the `--read-only` flag.
 - **Watch what happens.** Every call through the link shows up in the Activity
@@ -384,9 +401,17 @@ tool changes nothing and replies with the current lines.
   `node bin/bridge.mjs --check` in the plugin's folder. It says whether the app has never been opened,
   the link is switched off (press <kbd>a</kbd> in the app and switch **Link on**), or the app is not running.
   If Claude cannot start the plugin at all, check that `node --version` works in a terminal (Node.js 20 or newer).
-- **ChatGPT says it can't connect**: check that the link is on, that the tunnel
-  window is still running, and that the connector URL uses the tunnel's *current*
-  address and ends in `/mcp/<token>`.
+- **ChatGPT says it can't connect**: check that the panel says **Stop tunnel** (so the tunnel
+  is on; a tunnel you started yourself must still be running), that the link is on, and that the
+  connector URL is the *current* one: it ends in `/mcp/<token>` and a new tunnel has a new
+  address. A fresh address can take a few seconds, sometimes a minute or two, before it answers on your
+  own computer, whose DNS may have looked it up a moment too early and remembers that it was not there yet. ChatGPT does not use your computer's DNS.
+- **Start tunnel says cloudflared is not on this computer**: press **Download cloudflared…** and
+  confirm (Windows), or install it yourself (macOS, Linux: `brew install cloudflared` or your package
+  manager) and press **Check again**. If a download says the file did not match, nothing was kept:
+  try again, and if it keeps failing the release the app knows may have been replaced.
+- **The tunnel stops by itself**: the panel and a toast say why (cloudflared's own last words:
+  no network, a refused request). It also stops when the link goes off or changes port.
 - **The first answer takes a while on a whole drive**: the first time, the server
   reads every note on `D:\` and `F:\`. After that, it keeps up with changes as
   they happen.
