@@ -55,6 +55,10 @@ export function TopBar({ onPickVault }: { onPickVault?: (() => void) | undefined
   const brief = useAether((s) => s.brief)
   const todaySelected = useAether((s) => s.selectedId === TODAY_ID)
   const showToday = useAether((s) => s.showToday)
+  const goHome = () => {
+    setView('graph')
+    useAether.getState().controller.resetCamera()
+  }
 
   // Neurons are notes; folder nodes (system layout) and pictures are counted apart, the Today hub not at all.
   let nodes = 0
@@ -72,14 +76,15 @@ export function TopBar({ onPickVault }: { onPickVault?: (() => void) | undefined
 
   return (
     <header className="panel flex items-center gap-1 px-2 py-1.5" role="banner">
-      <div className="mr-2 flex shrink-0 items-center gap-2 pl-1">
+      {/* The logo is a button like any other: it brings you home, to the graph with the whole brain in view (Home). */}
+      <button type="button" className="mr-2 flex shrink-0 items-center gap-2 rounded-md py-0.5 pl-1 pr-1.5 hover:bg-white/5" onClick={goHome} title="Fit the whole brain in view (Home)" aria-label="Aether Brain: fit the whole brain in view">
         <span
           className="inline-block h-3 w-3 rounded-full"
           style={{ background: 'radial-gradient(circle at 35% 35%, #fff, #8f7cff 45%, #4de2ff 100%)', boxShadow: '0 0 14px #8f7cff' }}
           aria-hidden
         />
         <span className="topbar-roomy whitespace-nowrap text-[13px] font-semibold tracking-wide text-white">Aether Brain</span>
-      </div>
+      </button>
 
       <nav className="flex shrink-0 items-center gap-0.5" aria-label="Views">
         {VIEWS.map((v) => (

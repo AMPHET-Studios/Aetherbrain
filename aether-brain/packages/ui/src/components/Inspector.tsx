@@ -102,8 +102,12 @@ export function Inspector() {
         <div className="mt-1 font-mono text-[10.5px] text-faint">{m.path}</div>
         <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11.5px] text-dim">
           <span title="Words">{m.wordCount} words</span>
-          <span title="Links out">↗ {out.length}</span>
-          <span title="Backlinks">↙ {inn.length}</span>
+          <JumpStat title="Links out" anchor="links-out" count={out.length}>
+            ↗ {out.length}
+          </JumpStat>
+          <JumpStat title="Backlinks" anchor="backlinks" count={inn.length}>
+            ↙ {inn.length}
+          </JumpStat>
           <span title="Created">✦ {relativeTime(m.created)}</span>
           <span title="Updated">✎ {relativeTime(m.updated)}</span>
         </div>
@@ -153,8 +157,8 @@ export function Inspector() {
               ))}
           </Section>
         )}
-        <LinkList title="Synapses out" ids={out} onOpen={openNote} onSelect={select} />
-        <LinkList title="Backlinks" ids={inn} onOpen={openNote} onSelect={select} />
+        <LinkList title="Synapses out" anchor="links-out" ids={out} onOpen={openNote} onSelect={select} />
+        <LinkList title="Backlinks" anchor="backlinks" ids={inn} onOpen={openNote} onSelect={select} />
         {mentions.length > 0 && (
           <Section title={`Unlinked mentions · ${mentions.length}`}>
             {mentions.slice(0, 8).map((x) => (
@@ -175,9 +179,27 @@ export function Inspector() {
   )
 }
 
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
+/**
+ * A count in an inspector's stats row that takes you to its list further down. With nothing to jump to (the list is empty, so it is
+ * not drawn) it stays a plain number, never a button that does nothing.
+ */
+function JumpStat({ title, anchor, count, children }: { title: string; anchor: string; count: number; children: React.ReactNode }) {
+  if (count <= 0) return <span title={title}>{children}</span>
   return (
-    <div className="mb-4">
+    <button
+      type="button"
+      className="hover:text-ink"
+      title={`${title} · jump to the list`}
+      onClick={(e) => e.currentTarget.closest('aside')?.querySelector(`[data-section="${anchor}"]`)?.scrollIntoView({ block: 'start', behavior: 'smooth' })}
+    >
+      {children}
+    </button>
+  )
+}
+
+function Section({ title, anchor, children }: { title: string; anchor?: string; children: React.ReactNode }) {
+  return (
+    <div className="mb-4" data-section={anchor}>
       <div className="section-title mb-1.5">{title}</div>
       {children}
     </div>
@@ -186,11 +208,14 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 
 function LinkList({
   title,
+  anchor,
   ids,
   onOpen,
   onSelect,
 }: {
   title: string
+  /** The name the stats row's jump links use for this list. */
+  anchor?: string
   ids: NoteId[]
   onOpen: (id: NoteId, o?: { fly?: boolean }) => void
   onSelect: (id: NoteId, o?: { fly?: boolean }) => void
@@ -198,7 +223,7 @@ function LinkList({
   const notes = useAether((s) => s.notes)
   if (ids.length === 0) return null
   return (
-    <Section title={`${title} · ${ids.length}`}>
+    <Section title={`${title} · ${ids.length}`} anchor={anchor}>
       {ids.map((id) => {
         const row = linkRow(id, notes.get(id)?.meta)
         return (
@@ -353,14 +378,18 @@ function FolderInspector({ node }: { node: GraphNode }) {
           {where}
         </div>
         <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11.5px] text-dim">
-          <span title="Notes directly in this folder">· {plural(info.notes, 'moon')}</span>
+          <JumpStat title="Notes directly in this folder" anchor="moons" count={children.moons.length}>
+            · {plural(info.notes, 'moon')}
+          </JumpStat>
           <span title="Notes anywhere under this folder">{plural(info.totalNotes, 'note')} in all</span>
-          <span title="Subfolders on disk">● {plural(info.childFolders, 'folder')}</span>
+          <JumpStat title="Subfolders on disk" anchor="planets" count={children.planets.length}>
+            ● {plural(info.childFolders, 'folder')}
+          </JumpStat>
           {info.hiddenFolders > 0 && <span className="text-inbox">+{info.hiddenFolders} hidden</span>}
           {info.images > 0 && (
-            <span title="Pictures directly in this folder · how many orbit it as moons (the newest)">
+            <JumpStat title="Pictures directly in this folder · how many orbit it as moons (the newest)" anchor="pictures" count={children.pictures.length}>
               🖼 {plural(info.images, 'picture')} · {info.shownImages} shown
-            </span>
+            </JumpStat>
           )}
         </div>
         <div className="mt-3 flex flex-wrap gap-1.5">
@@ -459,7 +488,7 @@ function FolderInspector({ node }: { node: GraphNode }) {
 
       <div className="scroll flex-1 border-t border-[var(--line)] px-4 py-3">
         {children.planets.length > 0 && (
-          <Section title={`Planets · ${children.planets.length}`}>
+          <Section title={`Planets · ${children.planets.length}`} anchor="planets">
             {children.planets.map((p) => (
               <div key={p.id} className="flex items-center gap-2 py-0.5">
                 <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: p.folder?.role === 'project' ? STAR_COLOR : starColor(p.folder?.path ?? '') }} />
@@ -481,8 +510,8 @@ function FolderInspector({ node }: { node: GraphNode }) {
             ))}
           </Section>
         )}
-        {children.moons.length > 0 && <LinkList title="Moons" ids={children.moons.map((n) => n.id)} onOpen={openNote} onSelect={select} />}
-        {children.pictures.length > 0 && <LinkList title="Pictures" ids={children.pictures.map((n) => n.id)} onOpen={openNote} onSelect={select} />}
+        {children.moons.length > 0 && <LinkList title="Moons" anchor="moons" ids={children.moons.map((n) => n.id)} onOpen={openNote} onSelect={select} />}
+        {children.pictures.length > 0 && <LinkList title="Pictures" anchor="pictures" ids={children.pictures.map((n) => n.id)} onOpen={openNote} onSelect={select} />}
         {children.planets.length === 0 && children.moons.length === 0 && children.pictures.length === 0 && (
           <div className="text-[12px] text-faint">Empty so far. Add a note or a folder above.</div>
         )}
@@ -853,7 +882,9 @@ function ImageInspector({ id }: { id: NoteId }) {
         <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11.5px] text-dim">
           {size !== null && <span title="File size">{formatBytes(size)}</span>}
           {mtime !== null && Number.isFinite(mtime) && <span title="Modified">✎ {relativeTime(new Date(mtime).toISOString())}</span>}
-          <span title="Notes that embed or link it">↙ {refs.length}</span>
+          <JumpStat title="Notes that embed or link it" anchor="embedded-in" count={refs.length}>
+            ↙ {refs.length}
+          </JumpStat>
         </div>
       </div>
 
@@ -915,7 +946,7 @@ function ImageInspector({ id }: { id: NoteId }) {
 
       <div className="scroll flex-1 border-t border-[var(--line)] px-4 py-3">
         {refs.length > 0 ? (
-          <LinkList title="Embedded in" ids={refs} onOpen={openNote} onSelect={select} />
+          <LinkList title="Embedded in" anchor="embedded-in" ids={refs} onOpen={openNote} onSelect={select} />
         ) : (
           <div className="text-[12px] text-faint">No note embeds it yet. Copy embed, then paste it into a note to link the two.</div>
         )}

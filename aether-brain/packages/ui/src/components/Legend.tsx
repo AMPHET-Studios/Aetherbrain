@@ -1,5 +1,5 @@
 import { useMemo } from 'react'
-import { AREAS, type Area } from '@aether/core'
+import { AREAS, type Area, type LegendBody } from '@aether/core'
 import {
   AREA_COLORS,
   AREA_LABELS,
@@ -23,6 +23,17 @@ import { cx } from '../util'
  */
 /** The picture size buttons' labels, like Windows' icon views. */
 const SIZE_LABELS: Record<PictureSize, string> = { medium: 'M', large: 'L', xl: 'XL' }
+
+/** One of the legend's kinds of body: a chip that lights up every body of that kind, and stops when pressed again. */
+function KindChip({ kind, title, children }: { kind: LegendBody; title: string; children: React.ReactNode }) {
+  const on = useAether((s) => s.filters.bodies.has(kind))
+  const toggleBody = useAether((s) => s.toggleBody)
+  return (
+    <button type="button" className={cx('chip', on && 'active')} aria-pressed={on} onClick={() => toggleBody(kind)} title={`${title} · click to light up all of them`}>
+      {children}
+    </button>
+  )
+}
 
 export function Legend() {
   const graph = useAether((s) => s.graph)
@@ -55,7 +66,7 @@ export function Legend() {
   const boards = useMemo(() => graph?.nodes.reduce((n, node) => (node.board ? n + 1 : n), 0) ?? 0, [graph])
 
   if (!graph) return null
-  const anyFilter = filters.areas.size > 0 || filters.tags.size > 0 || filters.types.size > 0 || !!filters.query
+  const anyFilter = filters.areas.size > 0 || filters.tags.size > 0 || filters.types.size > 0 || filters.bodies.size > 0 || !!filters.query
   const system = layoutMode === 'system'
 
   return (
@@ -69,29 +80,29 @@ export function Legend() {
           )}
           {system && (
             <>
-              <span title="A drive (or the whole vault): the folders on it lie on its disc">
+              <KindChip kind="galaxy" title="A drive (or the whole vault): the folders on it lie on its disc">
                 <span style={{ color: SUN_COLOR, textShadow: `0 0 8px ${SUN_COLOR}` }}>◉</span> galaxy · drive
-              </span>
-              <span title="A folder. The brighter the star, the more urgent its whole system; a project is the biggest">
+              </KindChip>
+              <KindChip kind="star" title="A folder. The brighter the star, the more urgent its whole system; a project is the biggest">
                 <span style={{ color: STAR_COLOR, textShadow: `0 0 8px ${STAR_COLOR}` }}>★</span> star · folder
-              </span>
-              <span title="A picture, video or big note, as an extra-large thumbnail. A faster orbit is more urgent">
+              </KindChip>
+              <KindChip kind="planet" title="A picture, video or big note, as an extra-large thumbnail. A faster orbit is more urgent">
                 <span style={{ color: IMAGE_COLOR }}>●</span> planet · big file
-              </span>
-              <span title="Any small file">
+              </KindChip>
+              <KindChip kind="moon" title="Any small file">
                 <span className="text-ink">·</span> moon · small file
-              </span>
+              </KindChip>
               {boards > 0 && (
-                <span title="A reference board with pictures on it is a sun: the pictures orbit it instead of their folders (open it from the Boards view, 8)">
+                <KindChip kind="sun" title="A reference board with pictures on it is a sun: the pictures orbit it instead of their folders (open it from the Boards view, 8)">
                   <span style={{ color: BOARD_SUN_COLOR, textShadow: `0 0 8px ${BOARD_SUN_COLOR}` }}>▣</span> sun · board · {boards}
-                </span>
+                </KindChip>
               )}
             </>
           )}
           {pictures > 0 && (
-            <span title={system ? "A picture file: each folder's newest ones orbit it, embedded ones link to their notes" : 'A picture file a note embeds (![[name.png]])'}>
+            <KindChip kind="picture" title={system ? "A picture file: each folder's newest ones orbit it, embedded ones link to their notes" : 'A picture file a note embeds (![[name.png]])'}>
               <span style={{ color: IMAGE_COLOR }}>🖼</span> picture · {pictures}
-            </span>
+            </KindChip>
           )}
           {pictures > 0 && (
             <span className="flex items-center gap-0.5" role="group" aria-label="Picture size (z)" title="Picture size: medium, large or extra large icons (z)">
@@ -189,6 +200,7 @@ export function Legend() {
         <div className="flex items-center gap-2 text-[11px] text-dim">
           <span>
             {filters.query ? `“${filters.query}” · ` : ''}
+            {filters.bodies.size ? `${[...filters.bodies].join(' + ')} · ` : ''}
             {activeTag ? `field #${activeTag} · ` : ''}
             dimming everything else
           </span>
