@@ -263,7 +263,8 @@ export async function runStdio(argv: string[]): Promise<void> {
     return
   }
 
-  const server = createMcpServer(brain, { readOnly: cli.readOnly, onActivity: logActivity })
+  // stdio: the client (Claude Desktop, Claude Code) runs on this computer, so save_image may read a picture file it names.
+  const server = createMcpServer(brain, { readOnly: cli.readOnly, onActivity: logActivity, localFiles: true })
   const transport = new StdioServerTransport()
   const shutdown = (): void => stop(() => server.close())
   process.stdin.on('end', shutdown)

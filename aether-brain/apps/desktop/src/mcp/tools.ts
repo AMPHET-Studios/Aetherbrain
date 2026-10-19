@@ -13,6 +13,7 @@ import { z } from 'zod'
 import { MAX_MESSAGE_CHARS, NOTE_TYPES } from '@aether/core'
 import type { Brain } from './brain.js'
 import { ABOUT_ME_AREAS, ABOUT_ME_SECTIONS, type AboutMeArea, type CheckIn } from './me.js'
+import { MAX_PICTURE_DATA_CHARS, decodePictureData, fetchPictureFile, fileHostsFromEnv, readLocalPicture, type PictureSource } from './pictures.js'
 
 /** One tool call, for the host's activity feed. */
 export interface ActivityEvent {
@@ -32,6 +33,15 @@ export interface McpServerOptions {
   onActivity?: (a: ActivityEvent) => void
   /** Client name for activity; defaults to the name the client gave in the MCP handshake. */
   getClient?: () => string
+  /**
+   * The client runs on this computer (stdio: Claude Desktop, Claude Code), so save_image may read a picture file it names. Off for
+   * the HTTP link a tunnel reaches and for the in-app chat: a caller that is not here has no business naming files here.
+   */
+  localFiles?: boolean
+  /** Hosts save_image may download a ChatGPT file from, besides ChatGPT's own (default: AETHER_FILE_HOSTS). */
+  fileHosts?: readonly string[]
+  /** `fetch` for save_image's downloads (tests pass their own). */
+  fetch?: typeof fetch
 }
 
 declare const __AETHER_VERSION__: string | undefined
@@ -46,7 +56,8 @@ How to work with it:
 - Name notes by title, alias, id or vault path (e.g. Projects/PORTALz.md). When a title is ambiguous the error lists the paths to use.
 - get_project and read_note list tasks with their line numbers; set_task_done, edit_task and delete_task take that line or the task's text. Adding or deleting a task moves the lines below it: use the tasks list add_task and delete_task return, or pass the text with the line.
 - daily_brief is the user's Today: overdue tasks, tasks due or scheduled today (📅 / ⏳ dates, #today, today's daily note) and the next task of each active project. Tick one off with set_task_done, passing the row's path as project and its line.
-- New notes go to the Inbox unless you give a folder. A new note never overwrites anything (a taken name gets " 2"), only .md notes and folders are created, and no tool deletes a note.
+- New notes go to the Inbox unless you give a folder. A new note never overwrites anything (a taken name gets " 2"), only .md notes, folders and (save_image) pictures are created, and no tool deletes a note.
+- To keep a picture the user shares (an image they attached or you made, a screenshot, a reference), call save_image: file for a ChatGPT attachment, path for a picture file on their computer (Claude Desktop and Claude Code), data (base64) only for small pictures. Add a title or text to make an Inbox note that shows it. A picture is never replaced.
 - A planet is a folder inside a project's home folder: create_folder with project and path.
 - Prefer small edits (edit_note, append_to_note, add_task) over rewriting whole notes, and keep the user's own words.
 - When the user asks to save or remember this conversation, call save_chat: a title, a short summary (next steps as tasks) and the messages as faithfully as you can. With the chat's url it refreshes that chat note instead of making a new one.
@@ -180,6 +191,12 @@ export const TOOLS = {
     title: 'Quick capture',
     write: true,
     description: 'Use this when the user wants to jot something down quickly: saves the text as a new note in the Inbox, titled from its first line.',
+  },
+  save_image: {
+    title: 'Save a picture',
+    write: true,
+    description:
+      "Use this when the user wants a picture kept in their brain: an image they attached or you made, a screenshot, a reference. It is saved as a new file (never over one that is there) in the Inbox's Pictures folder, or in the folder you give; with a title or text it also makes an Inbox note that shows it. Give the picture as exactly one of: file (ChatGPT: the attachment), path (a picture file on the user's computer; only Claude Desktop and Claude Code can use it) or data (base64, small pictures only).",
   },
   add_task: {
     title: 'Add a task',
@@ -344,6 +361,7 @@ export function createMcpServer(brain: Brain, opts: McpServerOptions): McpServer
     hints: ToolAnnotations,
     run: (args: ShapeOutput<S>) => Promise<Done>,
     output?: ZodRawShapeCompat,
+    meta?: Record<string, unknown>,
   ): void => {
     const info = TOOLS[name]
     if (info.write && readOnly) return
@@ -367,6 +385,7 @@ export function createMcpServer(brain: Brain, opts: McpServerOptions): McpServer
         inputSchema: input,
         ...(output ? { outputSchema: output } : {}),
         annotations: { title: info.title, ...hints },
+        ...(meta ? { _meta: meta } : {}),
       },
       // ToolCallback<S> is a conditional type TypeScript cannot resolve for a generic S; it is this signature.
       handler as unknown as ToolCallback<S>,
@@ -707,6 +726,66 @@ export function createMcpServer(brain: Brain, opts: McpServerOptions): McpServer
       const n = await brain.capture({ text, ...(title ? { title } : {}), ...(tags ? { tags } : {}) })
       return { text: reply(`Captured to ${n.path}.`, n), summary: `captured ${quote(n.title)}`, path: n.path }
     },
+  )
+
+  tool(
+    'save_image',
+    {
+      file: z
+        .object({
+          download_url: z.string().max(MAX_TEXT_ARG),
+          file_id: z.string().max(MAX_LINE_ARG),
+          mime_type: z.string().max(MAX_LINE_ARG).optional(),
+          file_name: z.string().max(MAX_LINE_ARG).optional(),
+        })
+        .optional()
+        .describe('ChatGPT: the picture the user attached or ChatGPT made, passed as ChatGPT gives it.'),
+      path: oneLine().optional().describe("The whole path of a picture file on the user's computer, e.g. C:\\Users\\me\\Downloads\\gate.png. Only when Claude Desktop or Claude Code runs this server."),
+      data: z
+        .string()
+        .max(MAX_PICTURE_DATA_CHARS + 1_000)
+        .optional()
+        .describe('The picture itself as base64 text (or a data:image/png;base64,… address), at most about 600 KB. Only for small pictures: you write every character.'),
+      name: oneLine().optional().describe('A file name for it, e.g. "gate-concept.png" (a file or path has its own). The extension follows what the picture really is.'),
+      folder: oneLine().optional().describe("Where to keep it (a vault path); default the Inbox's Pictures folder."),
+      title: oneLine().optional().describe('With a title or text an Inbox note is made that shows the picture: its title.'),
+      text: mdText().optional().describe('The idea, caption or notes that go with the picture (markdown), written under it in its note.'),
+      tags: tagsArg,
+    },
+    // Not the closed world every other tool lives in: with file it downloads from ChatGPT's file hosts.
+    { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+    async ({ file, path: filePath, data, name, folder, title, text, tags }) => {
+      const given = [file !== undefined, filePath !== undefined, data !== undefined].filter(Boolean).length
+      if (given !== 1) throw new Error("Give the picture as exactly one of file (ChatGPT's attachment), path (a picture file on this computer) or data (base64, small pictures)")
+      let source: PictureSource
+      if (file) {
+        source = await fetchPictureFile(file, { ...(opts.fetch ? { fetch: opts.fetch } : {}), hosts: opts.fileHosts ?? fileHostsFromEnv() })
+      } else if (filePath !== undefined) {
+        if (!opts.localFiles) {
+          throw new Error("path only works when Claude Desktop or Claude Code runs this server on the user's computer. Here, send the picture as file (ChatGPT) or data (base64, small pictures).")
+        }
+        source = await readLocalPicture(filePath)
+      } else {
+        source = { bytes: decodePictureData(data ?? ''), name: '' }
+      }
+      const r = await brain.savePicture({
+        bytes: source.bytes,
+        name: name?.trim() || source.name,
+        ...(folder ? { folder } : {}),
+        ...(title ? { title } : {}),
+        ...(text ? { text } : {}),
+        ...(tags ? { tags } : {}),
+      })
+      const note = r.note ? ` and the note ${r.note.path}, which shows it` : ''
+      return {
+        text: reply(`Saved the picture to ${r.picture.path}${note}. To show it in another note, write ${r.embed}.`, r),
+        summary: `saved the picture ${quote(r.picture.name)}`,
+        path: r.picture.path,
+      }
+    },
+    undefined,
+    // ChatGPT passes `file` as { download_url, file_id, mime_type?, file_name? } because the tool says it is a file parameter.
+    { 'openai/fileParams': ['file'] },
   )
 
   tool(

@@ -15,6 +15,7 @@ The link runs on your own computer and reads the folders you chose.
 - [Claude Code](#claude-code)
 - [ChatGPT](#chatgpt)
 - [claude.ai in the browser](#claudeai-in-the-browser)
+- [Sending pictures and ideas](#sending-pictures-and-ideas)
 - [Things to ask](#things-to-ask)
 - [Every tool](#every-tool)
 - [Keeping it safe](#keeping-it-safe)
@@ -33,6 +34,7 @@ The link runs on your own computer and reads the folders you chose.
 - create projects, rename them and change their status, summary, tags or folder
 - create folders, for example a new planet `Sound` inside your `PORTALz` project folder
 - save the conversation you're having as a chat note (*"save this chat to my brain"*), see [AI-CHATS.md](AI-CHATS.md)
+- save a picture you share (an image you attached or one it made, a screenshot) into your Inbox, with an idea note that shows it, see [Sending pictures and ideas](#sending-pictures-and-ideas)
 
 **It cannot:**
 
@@ -41,8 +43,8 @@ The link runs on your own computer and reads the folders you chose.
   where nothing exists yet, so it can't replace a note the link hasn't seen yet,
   a `README.md` or `CHANGELOG.md`, or a name that differs only in capitals. If a
   name is taken, it adds ` 2`, ` 3`, and so on.
-- **create anything except `.md` notes and folders.** It can't create images, scripts or programs.
-- **reach outside the folders you chose.** Every path is checked, including symlinks and junctions that point elsewhere.
+- **create anything except `.md` notes, folders and pictures.** It can't create scripts or programs. A picture is only ever a new file that really is a picture (PNG, JPEG, GIF, WebP, BMP or AVIF, at most 40 MB), saved under a name nothing has yet: it never replaces a picture that is there.
+- **reach outside the folders you chose,** with one exception: when you ask Claude Desktop or Claude Code to save a picture, `save_image` may copy a picture file you name from anywhere on your computer into your Inbox (never a network path, and only a file that really is a picture). Every other path is checked, including symlinks and junctions that point elsewhere.
 - **open hidden or system folders.** It always skips `Windows`, `Program Files`, `AppData`, `$RECYCLE.BIN`, `System Volume Information`, dot-folders, `node_modules`, and build and cache folders.
 - **open folders you told it to skip.** Where you set this depends on the setup:
   - the app's **AI link** (ChatGPT, claude.ai) uses the folders you excluded in the app (<kbd>v</kbd>);
@@ -207,6 +209,22 @@ This uses the same link and tunnel as ChatGPT:
    name and paste the same `https://…/mcp/<token>` URL, then click **Add**.
 3. In a chat, enable the connector from the tools menu.
 
+## Sending pictures and ideas
+
+An idea goes in with `capture` (a new note in the Inbox). A picture goes in with `save_image`, which saves it as a new file in **Inbox/Pictures** (or in the folder you name) and, when you give it a title or some text, also makes an Inbox note that shows it (`![[Inbox/Pictures/gate.png]]`, then your idea). In the 3D brain the picture is a moon of the Pictures star and the note is next to it.
+
+How each AI hands the picture over:
+
+| You use | What it sends | Good to know |
+| --- | --- | --- |
+| **Claude Code**, **Claude Desktop** | `path`: a picture file on your computer | The server runs on your computer, so a screenshot Claude just made, or a file you named, can be saved. A network path (`\\server\share`) is refused. |
+| **ChatGPT** | `file`: the picture you attached or ChatGPT made | Needs the setup in [ChatGPT](#chatgpt). ChatGPT passes a temporary download address, and Aether Brain downloads from ChatGPT's own file hosts only (`oaiusercontent.com`, `openai.com`, `chatgpt.com`). If it says it cannot download from another host, the person running Aether Brain can allow it by setting `AETHER_FILE_HOSTS` (comma-separated names) before starting the app. |
+| **Any AI** | `data`: the picture as base64 text | For small pictures only (about 600 KB): the AI has to write every character itself. |
+
+An AI cannot re-type the bytes of an image it was shown, so a picture you only pasted into a chat on claude.ai or in Claude Desktop cannot be sent unless it is a file on your computer: save it, then say where it is, or drop it in the Inbox/Pictures folder yourself (the brain shows every picture in its folders).
+
+*"Send this picture to my brain, with the idea: a gate that hums lower the closer you get"* · *"Save the screenshot you just made to my Aether Brain"* · *"Put this image in my Inbox and tag it concept-art"*
+
 ## Things to ask
 
 - *"Add a task to PORTALz: block out the gate chamber"*
@@ -244,6 +262,7 @@ Write tools (hidden when the link is read-only):
 | Tool | What it does |
 | --- | --- |
 | `capture` | Save a quick idea as a new note in the Inbox |
+| `save_image` | Save a picture (from `file`, `path` or `data`) as a new file in Inbox/Pictures or a folder you name, with an optional Inbox note that shows it; never replaces a picture |
 | `create_note` | A new note (Inbox by default, or any folder); never overwrites |
 | `append_to_note` | Add text at the end of a note, or under a heading |
 | `edit_note` | Replace one exact passage (it must appear exactly once) |
@@ -274,6 +293,7 @@ tool changes nothing and replies with the current lines.
   have leaked. The old URL stops working at once. Then paste the new URL into
   ChatGPT or claude.ai. Claude Desktop and Claude Code don't use the token, so
   they aren't affected.
+- **Pictures are checked.** `save_image` writes only a file whose first bytes really are a picture, never over one that is there, and only inside your vault folders. `path` works only for Claude Desktop and Claude Code (which run on your computer): the link a tunnel reaches (ChatGPT, claude.ai) refuses it, so a caller outside your computer cannot name your files. A network or device path is refused. `file` downloads only from ChatGPT's file hosts, over https, with no password in the address, and follows a redirect only to those hosts again, because an address an AI wrote could otherwise carry your notes out in its query string.
 - **Turn the link off when you don't need it,** and stop the tunnel (press Ctrl+C
   in its window). Without the tunnel, the link is only reachable from your own
   computer. It listens on `127.0.0.1` only.
