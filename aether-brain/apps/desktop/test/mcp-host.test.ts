@@ -328,9 +328,18 @@ describe('show_in_brain', () => {
     const w = windowSpy()
     const client = await connect(await open(), { show: w.show })
     await call(client, 'show_in_brain', { target: 'Projects/PORTALz/Art/gate.png', open: true })
-    await call(client, 'show_in_brain', { target: 'projects/portalz/art/GATE.png' })
     expect(w.shown[0]).toEqual({ kind: 'picture', path: 'Projects/PORTALz/Art/gate.png', open: false })
-    expect(w.shown[1]?.kind).toBe('picture')
+    // The same path in other letters is the same file only on a disk that ignores case (the default on Windows and on a Mac), so the
+    // answer follows the disk: found there, and "no picture" on Linux, where it names a file that is not there.
+    const other = 'projects/portalz/art/GATE.png'
+    const sameFile = await fs.stat(path.join(root, ...other.split('/'))).then(() => true, () => false)
+    const r = await call(client, 'show_in_brain', { target: other })
+    if (sameFile) {
+      expect(w.shown[1]?.kind).toBe('picture')
+    } else {
+      expect(errorOf(r)).toMatch(/^No picture "projects\/portalz\/art\/GATE\.png"/)
+      expect(w.shown).toHaveLength(1)
+    }
   })
 
   it('flies to the Today hub', async () => {
