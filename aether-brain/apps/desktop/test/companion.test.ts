@@ -169,6 +169,25 @@ describe('the scene the brain window publishes', () => {
     expect(companionBody(board())).toBe('moon')
   })
 
+  it('sends the Bio star as a star too, in its blue and bigger than the project star beside it', () => {
+    const files: VaultFile[] = [
+      { path: 'Projects/Forge.md', content: '---\nstatus: active\n---\n# Forge\n', mtime: 1 },
+      { path: 'Projects/Forge/Plan.md', content: '# Plan\n', mtime: 2 },
+      { path: 'Bio/Food.md', content: '# Food\n', mtime: 3 },
+    ]
+    const notes = new Map(files.map((f) => [f.path.replace(/\.md$/, ''), parseNote(f)]))
+    const g = buildGraph(notes, { folders: { all: ['Projects', 'Projects/Forge', 'Bio'], multiRoot: false, rootTitle: 'Vault', bio: 'Bio' } })
+    const dto = companionScene(g, { version: 1, vault: 'Vault', layout: 'system', colorMode: 'area', activeTag: null, selectedId: null })
+    const at = (id: string) => dto.nodes.find((n) => n.id === id)!
+    // A plain folder is a 'planet' for the viewers built to the old names; the Bio star is a star, with the colour and size the brain draws.
+    expect(at('folder:Bio')).toMatchObject({ kind: 'star', body: 'star', color: '#2563ff' })
+    expect(at('folder:Bio').radius).toBeGreaterThan(at('folder:Projects/Forge').radius)
+    expect(at('folder:Bio').radius).toBeGreaterThan(9.4)
+    expect(() => cleanGraph(dto)).not.toThrow()
+    expect(companionKind({ kind: 'folder', ghost: false, folder: { role: 'folder', bio: true } } as never)).toBe('star')
+    expect(companionKind({ kind: 'folder', ghost: false, folder: { role: 'folder' } } as never)).toBe('planet')
+  })
+
   it('publishes the urgency of what is due: a note, and the folder star above it', () => {
     const files: VaultFile[] = [
       { path: 'Work/Gate/Plan.md', content: '# Plan\n\n- [ ] Ship the gate 📅 2026-09-29\n', mtime: 1 },

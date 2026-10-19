@@ -159,6 +159,8 @@ export interface FolderNodeInfo {
   depth: number
   /** True for the vault root of a single-root vault: a galaxy itself (a multi-root vault's root is only the origin). */
   galaxy?: boolean
+  /** True for the Bio star: the folder `Bio` at the vault's home (`FolderGraphOptions.bio`), drawn as the one big, bright, blue star. */
+  bio?: boolean
   /** Project note bound to this folder (the star's note), if any. */
   projectId: NoteId | null
   /** True when some ancestor folder is a project folder (its planets and moons). */

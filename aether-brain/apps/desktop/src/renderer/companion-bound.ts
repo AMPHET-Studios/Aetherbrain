@@ -165,8 +165,8 @@ export function planBase(graph: GraphData, B: SceneBudget = COMPANION_BUDGET): B
   }
   let used = 0
 
-  // 1. Suns (the vault and its drives) and the Today hub always show.
-  for (let i = 0; i < n; i++) if (cls[i] === SUN || cls[i] === TODAY) used += take(i)
+  // 1. Suns (the vault and its drives), the Today hub and the Bio star always show.
+  for (let i = 0; i < n; i++) if (cls[i] === SUN || cls[i] === TODAY || nodes[i]!.folder?.bio) used += take(i)
 
   // 2. Project stars, the ones with the most notes first.
   const totalNotes = (i: number): number => nodes[i]!.folder?.totalNotes ?? 0

@@ -124,6 +124,36 @@ describe('which part of a big brain the viewer is sent', () => {
   })
 })
 
+describe('the Bio star in a brain that must be cut', () => {
+  // 160 folders of five notes each, and a Bio folder of two: far over the small budget, and a folder that small is the first to go.
+  const files: Record<string, string> = { 'Bio/Food.md': '# Food\n', 'Bio/Meds.md': '# Meds\n' }
+  for (let f = 0; f < 160; f++) for (let k = 0; k < 5; k++) files[`Area/T${String(f).padStart(3, '0')}/n${k}.md`] = `# T${f} n${k}\n`
+  const notes = new Map<NoteId, ParsedNote>()
+  for (const [path, content] of Object.entries(files)) {
+    const n = parseNote({ path, content })
+    notes.set(n.meta.id, n)
+  }
+  const folders = new Set(['Bio', 'Area', ...Array.from({ length: 160 }, (_, f) => `Area/T${String(f).padStart(3, '0')}`)])
+  const build = (bio: string | null): GraphData => buildGraph(notes, { folders: { all: folders, multiRoot: false, rootTitle: 'Vault', maxDepth: 3, bio } })
+  const kept = (g: GraphData): string[] => idsOf(g, planFor(g, planBase(g, SMALL), null, SMALL).keep)
+
+  it('is cut like any small folder when it is not the Bio star', () => {
+    const g = build(null)
+    expect(g.nodes.length).toBeGreaterThan(SMALL.nodes * 2)
+    expect(kept(g)).not.toContain('folder:Bio')
+  })
+
+  it('is always sent, with a page or two, like the drives and the Today hub', () => {
+    const g = build('Bio')
+    const ids = kept(g)
+    expect(g.nodes.length).toBeGreaterThan(SMALL.nodes * 2)
+    expect(ids).toContain('folder:Bio')
+    expect(ids.filter((id) => id.startsWith('Bio/')).length).toBeGreaterThanOrEqual(1)
+    // Still a cut: most of the brain is not sent.
+    expect(ids.length).toBeLessThan(g.nodes.length * 0.5)
+  })
+})
+
 describe('a brain that fits', () => {
   it('is sent whole, as before, apart from the note about how much it is', () => {
     const { graph } = vaultOf({ areas: 2, subs: 2, topics: 2, notes: 3, projects: 1 })

@@ -143,6 +143,8 @@ export class TunnelHost {
   private lines: string[] = []
   private partial = ''
   private lastProgress = 0
+  /** The pid file is written and removed one job at a time, in the order asked: a process that ends before its file has landed (a slow disk, a virus scanner) must not leave a pid file for a process that is gone. */
+  private pidWork: Promise<void> = Promise.resolve()
   private readonly platform: NodeJS.Platform
   private readonly arch: string
   private readonly env: NodeJS.ProcessEnv
@@ -317,7 +319,7 @@ export class TunnelHost {
     child.stderr?.on('data', onData)
     child.once('error', (err) => this.ended(`cloudflared could not start: ${err.message}`, child))
     child.once('exit', (code, signal) => this.ended(`cloudflared stopped${code !== null ? ` (exit code ${code})` : signal ? ` (${signal})` : ''}`, child))
-    if (child.pid) void this.writePid(child.pid)
+    if (child.pid) this.writePid(child.pid)
     this.timer = setTimeout(() => {
       if (this.child === child && this.state === 'starting') {
         this.ended('The tunnel did not come up in time. Is this computer online?', child)
@@ -371,13 +373,19 @@ export class TunnelHost {
     }
   }
 
-  private async writePid(pid: number): Promise<void> {
-    try {
-      await fs.mkdir(this.opts.dir, { recursive: true })
-      await fs.writeFile(path.join(this.opts.dir, PID_FILE), String(pid))
-    } catch {
-      /* the tunnel runs without a record: only a crashed app would leave it unfound */
-    }
+  private writePid(pid: number): void {
+    this.pidWork = this.pidWork.then(async () => {
+      try {
+        await fs.mkdir(this.opts.dir, { recursive: true })
+        await fs.writeFile(path.join(this.opts.dir, PID_FILE), String(pid))
+      } catch {
+        /* the tunnel runs without a record: only a crashed app would leave it unfound */
+      }
+    })
+  }
+
+  private dropPid(): void {
+    this.pidWork = this.pidWork.then(() => fs.rm(path.join(this.opts.dir, PID_FILE), { force: true }).catch(() => undefined))
   }
 
   /** Output of the process: kept (the last lines say what went wrong) and read for the address. */
@@ -415,7 +423,7 @@ export class TunnelHost {
     // Say why, with the last thing it said (cloudflared explains itself: no network, a refused request).
     const said = this.lines.filter((l) => !/^[|+\-\s]*$/.test(l)).slice(-2).join(' / ')
     this.error = asked ? null : `${message}${said ? `: ${said}` : ''}`
-    void fs.rm(path.join(this.opts.dir, PID_FILE), { force: true }).catch(() => undefined)
+    this.dropPid()
     this.emit()
   }
 }

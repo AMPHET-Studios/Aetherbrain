@@ -25,6 +25,17 @@ A reference board (`type: board`, the PureRef-style note of [REFERENCE-BOARD.md]
 - **A board with nothing to hold** (no pictures, only missing files, or every picture already on an earlier board) is a plain note. The other layouts do not change: there a board only links to its pictures.
 - **The viewer** is sent the board as a `star` (kind and body) with its pictures as children (`parent`), and the sun's radius, like any other body.
 
+## The Bio star
+
+One star in the sky is the user's own body and mind: the **Bio star**, a big, bright, blue star. It is the `Bio` folder at the vault's home (`Bio`, or `D/Bio` under the first drive of a vault with several roots), and it holds one page each for **Sleep schedule, Food, Meds, Exercise, Drugs and Mental health**.
+
+- **Making it.** The palette's *Create my Bio star* (or the *Make it* on the toast that `⇧ I` shows when there is none) writes the folder and the pages that are missing. It is create-only: a page that is there, under any letter case, is never touched, a deleted one comes back, and nothing is numbered or replaced. The pages are starting points in the user's own voice, headings and empty lists to fill in: no advice, no diagnosis, no phone numbers, nothing about changing a medicine (the coach keeps to the same rules). They hold no task, link or tag in their text, so nothing lands on the daily brief or in the graph by itself.
+- **Which folder.** Exactly the folder `Bio` at the vault's home, spelled as the vault spells it (`bio` on Windows is `Bio`). A folder called Bio anywhere else is an ordinary star, a drive named Bio is a drive, and a vault with no such folder has no Bio star: nothing is made up.
+- **How it looks.** The biggest star there is (radius 9.5, a little more for each doubling of what it holds, at most 11; a project star tops out at 9.2, a board sun at 9, a drive is 16), blue (`BIO_STAR_COLOR` is a deep body colour on purpose: the scene shows colour × glow with no tone mapping, so at the Bio star's glow it comes out a bright blue, where a lighter blue clipped to cyan), with a wider soft aura than any other body (`BIO_STAR_HALO`, 5.4 radii against 3.2) so it is a blue giant from far away too, always named (`✚ Bio`, in the lighter `BIO_STAR_LABEL_COLOR`, which its inspector uses too), burning at one brightness whatever the urgency (`BIO_STAR_GLOW`: more than the most urgent star, a galaxy or a board sun; only the Today hub outshines it). In every other way it is a folder: its pages orbit it, it orbits its drive, and it is always shown while it exists, however deep it sits.
+- **The inspector** of the Bio star says what lives there and who could see it, and adds the pages that are missing on a click.
+- **Who could see it.** The pages are plain markdown on this computer, like every note. With Claude as the chat's answerer, whatever the chat reads from them goes to Anthropic; with Ollama nothing leaves the computer ([BRAIN-CHAT.md](BRAIN-CHAT.md#your-bio-notes)).
+- **The viewer** is sent the Bio star as a `star` (kind and body) in its blue and its radius, and the scene cut always keeps it with a page or two, like the drives and the Today hub.
+
 ## Planet or moon
 
 A file is a **planet** when it is worth looking at as itself:
@@ -90,7 +101,7 @@ The brain window publishes the scene to a viewer (`docs/UNREAL.md`, the companio
 
 | Field | |
 | --- | --- |
-| `kind` | the original names, **unchanged** so a viewer built to them keeps drawing what it drew: `sun` the vault or a drive · `star` a project folder, or a board with pictures orbiting it · `planet` any other folder · `moon` a note · `picture` · `ghost` · `today` |
+| `kind` | the original names, **unchanged** so a viewer built to them keeps drawing what it drew: `sun` the vault or a drive · `star` a project folder, a board with pictures orbiting it, or the Bio star · `planet` any other folder · `moon` a note · `picture` · `ghost` · `today` |
 | `body` | the cosmology's names, for the viewer built to this page: `galaxy` a drive or a one-folder vault · `origin` the root of several drives · `star` every folder and every board sun · `planet` / `moon` a big / small file (a `picture` kind carries one of them in its radius and its size) · `ghost` · `hub` (Today). Absent from older builds: use `kind` |
 | `radius` | in the brain's world units (the layout spaces orbits by it) |
 | `color` | the colour the brain draws it in |

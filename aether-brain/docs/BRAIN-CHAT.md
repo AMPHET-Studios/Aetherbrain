@@ -26,6 +26,14 @@ Everything it learns lives in your own notes, in `Me/` (under the first vault fo
 
 Each conversation starts from what About me and your last two weeks of check-ins say. Start a **New** chat to pick up what changed since.
 
+## Your Bio notes
+
+The Bio star (`⇧ I`, see [The Bio star](COSMOLOGY.md#the-bio-star)) keeps your notes on sleep, food, meds, exercise, drugs and mental health in a `Bio` folder. They are ordinary notes in your vault, so the chat can find and read them like any other, but nothing reads them for you: a conversation does not start from them the way it starts from About me, and the chat opens one only when your question needs it ("what does my sleep schedule look like?", "plan my day around my workouts").
+
+Who could see them depends on who answers. With **Claude**, whatever the chat reads from them goes to Anthropic with your question; with **Ollama** nothing leaves this computer. If you would rather the chat never read them, `⇧ H` on the Bio star leaves the whole folder out of the brain, and so out of the chat's reach (nothing on disk changes; bring it back in Vault folders, `v`).
+
+The chat keeps to its usual rules with them: it does not diagnose, it never advises starting, stopping, skipping or changing the dose of a medicine, and it takes what you write about drugs without judgment.
+
 ## What it does
 
 - Looks things up before answering: search, read notes, today's brief, recent notes, projects.

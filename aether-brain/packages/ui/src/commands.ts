@@ -84,6 +84,22 @@ export const COMMANDS: Command[] = [
   { id: 'today', title: 'Today — daily brief', keys: 'y · 7', group: 'navigate', run: (s) => s.showToday() },
   { id: 'daily', title: "Open today's daily note", keys: 'd', group: 'note', run: (s) => s.openDaily() },
   {
+    id: 'bio-go',
+    title: 'Bio star — fly to it',
+    hint: 'sleep, food, meds, exercise, drugs, mental health',
+    keys: '⇧ I',
+    group: 'navigate',
+    run: (s) => s.goToBio(),
+  },
+  {
+    id: 'bio-make',
+    title: 'Create my Bio star (sleep, food, meds, exercise, drugs, mental health)',
+    hint: 'a big blue star with a page for each; nothing already there is touched',
+    group: 'vault',
+    when: writable,
+    run: (s) => s.makeBio(),
+  },
+  {
     id: 'open-selected',
     title: 'Open selected note in editor',
     keys: 'e · Enter',
