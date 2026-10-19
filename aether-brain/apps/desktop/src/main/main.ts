@@ -24,6 +24,7 @@ import {
   type ProjectScanDto,
   type ReadAssetResult,
   type SkippedInstallDto,
+  type TunnelStatusDto,
   type VaultChangeDto,
   type VaultFileDto,
   type InterruptedStartDto,
@@ -57,6 +58,7 @@ import {
 import { THUMB_IPC, Thumbnailer, VIDEO_SCHEME } from './thumbnailer.js'
 import { AiLinkHost, aiSettings, cleanPatch, type AiLinkSettings, type LinkVault } from './ai-link.js'
 import { makePictureHost } from './ai-pictures.js'
+import { TunnelHost } from './tunnel.js'
 import { ForgeHost, forgeSettings, type ForgeSettings } from './forge.js'
 import { BoardWindowHost, FlushGate, PictureLedger, boardHandlers, boardSettings, guardIpc, type BoardSettings } from './board-window.js'
 import { readAssetBytes, readAssetChecked } from './read-asset.js'
@@ -229,6 +231,8 @@ let opened = false
 let aiHeld: VaultChangeDto[][] | null = null
 let win: BrowserWindow | null = null
 let ai: AiLinkHost | null = null
+/** The tunnel that gives the AI link a public address for ChatGPT and claude.ai (off until the user presses Start). */
+let tunnel: TunnelHost | null = null
 let chat: ChatHost | null = null
 let library: LibraryHost | null = null
 let vision: VisionHelper | null = null
@@ -886,6 +890,37 @@ function createAiLink(): AiLinkHost {
   })
 }
 
+/**
+ * cloudflared is downloaded through a session of its own (in memory), as the vision model is: the app's own session refuses the web,
+ * and the system proxy applies to this one.
+ */
+const TUNNEL_DOWNLOAD_PARTITION = 'aether-tunnel-download'
+
+function createTunnel(): TunnelHost {
+  return new TunnelHost({
+    dir: path.join(app.getPath('userData'), 'tunnel'),
+    fetch: (url, init) => session.fromPartition(TUNNEL_DOWNLOAD_PARTITION).fetch(url, init),
+    emit: (s) => toRenderer(IPC.tunnelState, s),
+  })
+}
+
+function requireTunnel(): TunnelHost {
+  if (!tunnel) throw new Error('The tunnel is not ready yet')
+  return tunnel
+}
+
+/**
+ * Start the tunnel: it needs the AI link listening, so a press on Start switches the link on first when it is off (the user asked
+ * for ChatGPT to reach the brain, which is what the link is for).
+ */
+async function startTunnel(): Promise<TunnelStatusDto> {
+  const link = requireAi()
+  let st = link.status()
+  if (!st.enabled || !st.running) st = await link.configure({ enabled: true })
+  if (!st.running) throw new Error(st.error ?? 'The AI link did not start. Open a vault folder first.')
+  return requireTunnel().start(st.port)
+}
+
 /* ------------------------------------------------------------------ */
 /* The brain's chat                                                   */
 /* ------------------------------------------------------------------ */
@@ -1217,7 +1252,17 @@ function registerIpc(): void {
   ipc.on(VISION_IPC.ready, (e) => vision?.ready(e.sender))
   ipc.on(VISION_IPC.done, (e, id: unknown, answer: unknown) => vision?.done(e.sender, id, answer))
   ipc.handle(IPC.aiStatus, () => requireAi().status())
-  ipc.handle(IPC.aiConfigure, (_e, patch: unknown) => requireAi().configure(cleanPatch(patch)))
+  ipc.handle(IPC.aiConfigure, async (_e, patch: unknown) => {
+    const clean = cleanPatch(patch)
+    const st = await requireAi().configure(clean)
+    // The tunnel carries the link's port: with the link off or moved it has nothing to carry (and a new link must not be reachable by an old tunnel).
+    if (clean.enabled === false || clean.port !== undefined) void tunnel?.stop()
+    return st
+  })
+  ipc.handle(IPC.tunnelStatus, () => requireTunnel().status())
+  ipc.handle(IPC.tunnelDownload, () => requireTunnel().download())
+  ipc.handle(IPC.tunnelStart, () => startTunnel())
+  ipc.handle(IPC.tunnelStop, () => requireTunnel().stop())
   ipc.handle(IPC.copy, (_e, text: unknown) => clipboard.writeText(String(text)))
 }
 
@@ -1368,6 +1413,8 @@ app.on('before-quit', (e) => {
   vision?.stop()
   board?.flush()
   void chat?.close()
+  // The tunnel is told to end here, before the app is: a cloudflared left running would keep the next link on this port reachable.
+  void tunnel?.stop()
   void ai?.stop()
   companion?.quit()
 })
@@ -1383,6 +1430,9 @@ void app.whenReady().then(async () => {
   guard = new StartupGuard(path.join(app.getPath('userData'), 'startup.json'))
   if (loaded.migrated) void saveSettings()
   ai = createAiLink()
+  tunnel = createTunnel()
+  // A tunnel an earlier run left behind (the app was killed) is stopped before anything else can start a link on its port.
+  void tunnel.reap()
   chat = createChat()
   library = createLibrary()
   registerIpc()

@@ -23,7 +23,7 @@ async function fresh() {
   vi.stubGlobal('localStorage', new MemoryStorage())
   vi.resetModules()
   const { useAether } = await import('@aether/ui')
-  const { flyToPath, showForAi } = await import('../src/renderer/panels')
+  const { flyToPath, showForAi, reportTunnel } = await import('../src/renderer/panels')
   await useAether.getState().openVault(
     new MemoryVaultAdapter(
       [
@@ -33,7 +33,7 @@ async function fresh() {
       { folders: ['Projects/PORTALz/Sound'], assets: [{ path: 'Inbox/Pictures/gate-hum.png', data: new Uint8Array(10), mtime: 1 }] },
     ),
   )
-  return { s: () => useAether.getState(), set: useAether.setState, flyToPath, showForAi }
+  return { s: () => useAether.getState(), set: useAether.setState, flyToPath, showForAi, reportTunnel }
 }
 
 afterEach(() => void vi.unstubAllGlobals())
@@ -110,5 +110,47 @@ describe('an AI asks the window to show something (show_in_brain)', () => {
     showForAi({ kind: 'note', path: 'Projects/PORTALz.md', open: true })
     expect(s().selectedId).toBeNull()
     expect(s().editorId).toBeNull()
+  })
+})
+
+describe('the tunnel says what it did', () => {
+  const tunnel = (state: 'off' | 'starting' | 'on', error: string | null = null) => ({ state, url: state === 'on' ? 'https://quiet-river-test.trycloudflare.com' : null, error, program: 'path' as const, download: null, downloading: null })
+
+  it('says when it opens the brain to the internet, once, and when it ends', async () => {
+    const { s, reportTunnel } = await fresh()
+    const before = s().toasts.length
+    reportTunnel(tunnel('starting'))
+    expect(s().toasts.length).toBe(before)
+    reportTunnel(tunnel('on'))
+    expect(s().toasts.at(-1)).toMatchObject({ kind: 'info', text: 'Tunnel on: ChatGPT and claude.ai can reach your brain. Stop it in the AI link panel (a).' })
+    const afterOn = s().toasts.length
+    reportTunnel(tunnel('on'))
+    expect(s().toasts.length).toBe(afterOn)
+    reportTunnel(tunnel('off'))
+    expect(s().toasts.at(-1)).toMatchObject({ kind: 'info', text: 'Tunnel stopped' })
+  })
+
+  it('says why when it ended by itself', async () => {
+    const { s, reportTunnel } = await fresh()
+    reportTunnel(tunnel('on'))
+    reportTunnel(tunnel('off', 'cloudflared stopped (exit code 1): ERR connection reset'))
+    expect(s().toasts.at(-1)).toMatchObject({ kind: 'error', text: 'cloudflared stopped (exit code 1): ERR connection reset' })
+  })
+
+  it('says nothing for an off that was never an on (the panel just looked, or a start failed)', async () => {
+    const { s, reportTunnel } = await fresh()
+    const before = s().toasts.length
+    reportTunnel(tunnel('off'))
+    reportTunnel(tunnel('off', 'cloudflared is not on this computer yet'))
+    expect(s().toasts.length).toBe(before)
+  })
+
+  it('says it again for a second tunnel after the first one ended', async () => {
+    const { s, reportTunnel } = await fresh()
+    reportTunnel(tunnel('on'))
+    reportTunnel(tunnel('off'))
+    const n = s().toasts.length
+    reportTunnel(tunnel('on'))
+    expect(s().toasts.length).toBe(n + 1)
   })
 })
