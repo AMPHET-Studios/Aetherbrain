@@ -13,6 +13,7 @@ import { z } from 'zod'
 import { MAX_MESSAGE_CHARS, NOTE_TYPES } from '@aether/core'
 import type { Brain } from './brain.js'
 import { ABOUT_ME_AREAS, ABOUT_ME_SECTIONS, type AboutMeArea, type CheckIn } from './me.js'
+import { MAX_PICTURE_DATA_CHARS, decodePictureData, fetchPictureFile, fileHostsFromEnv, readLocalPicture, type PictureSource } from './pictures.js'
 
 /** One tool call, for the host's activity feed. */
 export interface ActivityEvent {
@@ -26,12 +27,68 @@ export interface ActivityEvent {
   write: boolean
 }
 
+/** A picture, video or 3D model of the vault as `find_pictures` lists it. */
+export interface FoundPicture {
+  /** Vault path. */
+  path: string
+  kind: 'picture' | 'video' | 'model'
+  bytes: number | null
+  /** Last change, epoch ms. */
+  modified: number | null
+}
+
+/** One picture looked at: the still the app made of it, and what the file itself is. */
+export interface LookedAt {
+  png: Uint8Array
+  /** Vault path. */
+  path: string
+  kind: 'picture' | 'video' | 'model'
+  bytes: number
+  /** Pixel size of the file itself (not of `png`), when its header says. */
+  width: number | null
+  height: number | null
+}
+
+/**
+ * The app's pictures, for the tools that look at them. Only the app can offer this: its hidden thumbnail helper decodes pictures,
+ * and no other process here ever does (the main process must not: decoding blocks its UI thread). A server without it has no
+ * find_pictures and no get_image.
+ */
+export interface PictureHost {
+  /** Pictures, videos and 3D models of the vault whose vault path has every word of `query` in it, inside `folder`, by path. */
+  find(query: string, opts: { folder?: string; limit: number }): Promise<{ pictures: FoundPicture[]; more: boolean }>
+  /** The picture at a vault path as PNG bytes of at most `px` on the longer side, with what the file is; null when it cannot be shown. */
+  look(path: string, px: number): Promise<LookedAt | null>
+}
+
+/** What show_in_brain asks the app to show: a note, a folder (its star), a picture or the Today hub. */
+export interface ShowTarget {
+  kind: 'note' | 'folder' | 'picture' | 'today'
+  /** Vault path ('' for the Today hub). */
+  path: string
+  /** A note: open it in the editor as well as flying there. */
+  open: boolean
+}
+
 export interface McpServerOptions {
   /** Offer read tools only (also implied by a read-only brain). */
   readOnly: boolean
   onActivity?: (a: ActivityEvent) => void
   /** Client name for activity; defaults to the name the client gave in the MCP handshake. */
   getClient?: () => string
+  /**
+   * The client runs on this computer (stdio: Claude Desktop, Claude Code), so save_image may read a picture file it names. Off for
+   * the HTTP link a tunnel reaches and for the in-app chat: a caller that is not here has no business naming files here.
+   */
+  localFiles?: boolean
+  /** Hosts save_image may download a ChatGPT file from, besides ChatGPT's own (default: AETHER_FILE_HOSTS). */
+  fileHosts?: readonly string[]
+  /** `fetch` for save_image's downloads (tests pass their own). */
+  fetch?: typeof fetch
+  /** The app's pictures: with it find_pictures and get_image exist (see `PictureHost`). */
+  pictures?: PictureHost
+  /** Show something in the app's 3D view: with it show_in_brain exists. Only the app has a window to show it in. */
+  show?: (target: ShowTarget) => void | Promise<void>
 }
 
 declare const __AETHER_VERSION__: string | undefined
@@ -46,11 +103,19 @@ How to work with it:
 - Name notes by title, alias, id or vault path (e.g. Projects/PORTALz.md). When a title is ambiguous the error lists the paths to use.
 - get_project and read_note list tasks with their line numbers; set_task_done, edit_task and delete_task take that line or the task's text. Adding or deleting a task moves the lines below it: use the tasks list add_task and delete_task return, or pass the text with the line.
 - daily_brief is the user's Today: overdue tasks, tasks due or scheduled today (📅 / ⏳ dates, #today, today's daily note) and the next task of each active project. Tick one off with set_task_done, passing the row's path as project and its line.
-- New notes go to the Inbox unless you give a folder. A new note never overwrites anything (a taken name gets " 2"), only .md notes and folders are created, and no tool deletes a note.
+- New notes go to the Inbox unless you give a folder. A new note never overwrites anything (a taken name gets " 2"), only .md notes, folders and (save_image) pictures are created, and no tool deletes a note.
+- To keep a picture the user shares (an image they attached or you made, a screenshot, a reference), call save_image: file for a ChatGPT attachment, path for a picture file on their computer (Claude Desktop and Claude Code), data (base64) only for small pictures. Add a title or text to make an Inbox note that shows it. A picture is never replaced.
 - A planet is a folder inside a project's home folder: create_folder with project and path.
 - Prefer small edits (edit_note, append_to_note, add_task) over rewriting whole notes, and keep the user's own words.
 - When the user asks to save or remember this conversation, call save_chat: a title, a short summary (next steps as tasks) and the messages as faithfully as you can. With the chat's url it refreshes that chat note instead of making a new one.
 - The brain also knows its user: when the conversation is personal (how they are, their family, health, goals, how they like to work), call about_me first. Ask before remembering anything personal, save it with remember_about_me (one fact, their words) and say what you saved. check_in records a short check-in; my_trends compares the last week with the weeks before; wellbeing_playbook holds the evidence and their early warning signs plan. You are a supportive companion, not a clinician: never diagnose or advise medication changes; their care team leads.`
+
+/** Added to INSTRUCTIONS only where the app's pictures are offered (`McpServerOptions.pictures`): a server without them has no such tools. */
+export const PICTURES_INSTRUCTIONS =
+  '- To look at a picture the user has (a reference, concept art, a screenshot you saved), find it with find_pictures and see it with get_image: you get the picture itself, to describe, compare or give feedback on.'
+/** Added to INSTRUCTIONS only where the app's window is offered (`McpServerOptions.show`). */
+export const SHOW_INSTRUCTIONS =
+  '- To point the user at something, call show_in_brain: their 3D view flies to the note, folder or picture and selects it (the Aether Brain window must be open).'
 
 /** Every tool: title, description (also used for the Claude Desktop extension manifest) and whether it writes. */
 export const TOOLS = {
@@ -181,6 +246,33 @@ export const TOOLS = {
     write: true,
     description: 'Use this when the user wants to jot something down quickly: saves the text as a new note in the Inbox, titled from its first line.',
   },
+  save_image: {
+    title: 'Save a picture',
+    write: true,
+    description:
+      "Use this when the user wants a picture kept in their brain: an image they attached or you made, a screenshot, a reference. It is saved as a new file (never over one that is there) in the Inbox's Pictures folder, or in the folder you give; with a title or text it also makes an Inbox note that shows it. Give the picture as exactly one of: file (ChatGPT: the attachment), path (a picture file on the user's computer; only Claude Desktop and Claude Code can use it) or data (base64, small pictures only).",
+  },
+  find_pictures: {
+    title: 'Find pictures',
+    write: false,
+    host: 'pictures',
+    description:
+      "Use this when you need to know which pictures the user has: lists pictures, videos and 3D models of their brain by words in the path (file name or folder), optionally only inside one folder, alphabetical by path, up to 100. Look at one with get_image.",
+  },
+  get_image: {
+    title: 'Look at a picture',
+    write: false,
+    host: 'pictures',
+    description:
+      "Use this when you need to see one of the user's pictures (concept art, a screenshot, a reference), to describe it, compare it or give feedback: returns the picture itself (a video's still frame, a 3D model's still), scaled to at most max_px on its longer side (default 768), with where it is, how big it is and the notes that show it. Name it by its vault path (from find_pictures or a note's embed), or by its file name when only one picture has it.",
+  },
+  show_in_brain: {
+    title: 'Show it in the brain',
+    write: false,
+    host: 'window',
+    description:
+      'Use this when the user wants to see something in their 3D brain, or when you point at something they should look at: flies the camera to a note, a folder (its star), a picture or the Today hub and selects it; with open: true a note also opens in the editor. The Aether Brain window must be open. Name a note by title, alias, id or vault path, a folder or a picture by its vault path, or pass "today".',
+  },
   add_task: {
     title: 'Add a task',
     write: true,
@@ -226,9 +318,15 @@ export const TOOLS = {
     write: true,
     description: 'Use this when two notes belong together: appends "- Related: [[to]]" to the first note (nothing happens when it already links there).',
   },
-} as const satisfies Record<string, { title: string; description: string; write: boolean }>
+} as const satisfies Record<string, { title: string; description: string; write: boolean; host?: 'pictures' | 'window' }>
 
 export type ToolName = keyof typeof TOOLS
+
+/**
+ * The tools only the app can offer: they need its pictures (its thumbnail helper) or its window. A server started without
+ * those hosts (stdio, the standalone HTTP link) does not list them.
+ */
+export const HOST_TOOLS: readonly ToolName[] = (Object.keys(TOOLS) as ToolName[]).filter((n) => 'host' in TOOLS[n])
 
 /** Read tools never change anything; writes are either additive or change what is there. */
 const READ: ToolAnnotations = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
@@ -250,7 +348,7 @@ export const MAX_LINE_ARG = 4_000
 export const MAX_LIST_ARG = 200
 /**
  * Most messages one save_chat call takes, and most characters in all
- * (messages + summary): below the HTTP link's 1 MiB request cap, so a too
+ * (messages + summary): far below the HTTP link's request cap (`MAX_BODY_BYTES`), so a too
  * long chat gets this tool's own answer, not a transport error.
  */
 export const MAX_CHAT_MESSAGES = 2_000
@@ -266,6 +364,8 @@ interface Done {
   text: string
   summary: string
   path?: string | null
+  /** Pictures the reply carries, as MCP image blocks after the text (base64). */
+  images?: { data: string; mimeType: string }[]
   structured?: Record<string, unknown>
 }
 
@@ -281,6 +381,18 @@ function quote(s: string, n = 60): string {
 
 function plural(n: number, one: string, many = `${one}s`): string {
   return `${n} ${n === 1 ? one : many}`
+}
+
+/** A byte count as a person reads it: "812 KB", "3.4 MB". */
+function bytesText(n: number): string {
+  if (n < 1024) return `${n} B`
+  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`
+}
+
+/** The file name of a vault path (always "/"-separated). */
+function lastName(path: string): string {
+  return path.slice(path.lastIndexOf('/') + 1)
 }
 
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/
@@ -321,12 +433,14 @@ const tagsArg = z.array(oneLine()).max(MAX_LIST_ARG).optional().describe('Tags w
  */
 export function createMcpServer(brain: Brain, opts: McpServerOptions): McpServer {
   const readOnly = opts.readOnly || brain.readOnly
+  const appLines = [opts.pictures ? PICTURES_INSTRUCTIONS : null, opts.show ? SHOW_INSTRUCTIONS : null].filter((l): l is string => l !== null)
+  const instructions = appLines.length ? `${INSTRUCTIONS}\n${appLines.join('\n')}` : INSTRUCTIONS
   const server = new McpServer(
     { name: 'aether-brain', title: 'Aether Brain', version: SERVER_VERSION },
     {
       instructions: readOnly
-        ? `${INSTRUCTIONS}\n\nThis link is read-only: you can search and read the vault, but not change it.`
-        : INSTRUCTIONS,
+        ? `${instructions}\n\nThis link is read-only: you can search and read the vault, but not change it.`
+        : instructions,
     },
   )
   const client = (): string => opts.getClient?.() ?? server.server.getClientVersion()?.name ?? 'AI client'
@@ -344,6 +458,7 @@ export function createMcpServer(brain: Brain, opts: McpServerOptions): McpServer
     hints: ToolAnnotations,
     run: (args: ShapeOutput<S>) => Promise<Done>,
     output?: ZodRawShapeCompat,
+    meta?: Record<string, unknown>,
   ): void => {
     const info = TOOLS[name]
     if (info.write && readOnly) return
@@ -351,7 +466,11 @@ export function createMcpServer(brain: Brain, opts: McpServerOptions): McpServer
       try {
         const done = await run(args)
         emit({ tool: name, summary: done.summary, path: done.path ?? null, write: info.write })
-        const content = [{ type: 'text' as const, text: done.text }]
+        // The text first: a client that does not pass images on (some ChatGPT connectors) still has the answer.
+        const content: CallToolResult['content'] = [
+          { type: 'text', text: done.text },
+          ...(done.images ?? []).map((i) => ({ type: 'image' as const, data: i.data, mimeType: i.mimeType })),
+        ]
         return done.structured ? { content, structuredContent: done.structured } : { content }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
@@ -367,6 +486,7 @@ export function createMcpServer(brain: Brain, opts: McpServerOptions): McpServer
         inputSchema: input,
         ...(output ? { outputSchema: output } : {}),
         annotations: { title: info.title, ...hints },
+        ...(meta ? { _meta: meta } : {}),
       },
       // ToolCallback<S> is a conditional type TypeScript cannot resolve for a generic S; it is this signature.
       handler as unknown as ToolCallback<S>,
@@ -708,6 +828,157 @@ export function createMcpServer(brain: Brain, opts: McpServerOptions): McpServer
       return { text: reply(`Captured to ${n.path}.`, n), summary: `captured ${quote(n.title)}`, path: n.path }
     },
   )
+
+  tool(
+    'save_image',
+    {
+      file: z
+        .object({
+          download_url: z.string().max(MAX_TEXT_ARG),
+          file_id: z.string().max(MAX_LINE_ARG),
+          mime_type: z.string().max(MAX_LINE_ARG).optional(),
+          file_name: z.string().max(MAX_LINE_ARG).optional(),
+        })
+        .optional()
+        .describe('ChatGPT: the picture the user attached or ChatGPT made, passed as ChatGPT gives it.'),
+      path: oneLine().optional().describe("The whole path of a picture file on the user's computer, e.g. C:\\Users\\me\\Downloads\\gate.png. Only when Claude Desktop or Claude Code runs this server."),
+      data: z
+        .string()
+        .max(MAX_PICTURE_DATA_CHARS + 1_000)
+        .optional()
+        .describe('The picture itself as base64 text (or a data:image/png;base64,… address), at most about 600 KB. Only for small pictures: you write every character.'),
+      name: oneLine().optional().describe('A file name for it, e.g. "gate-concept.png" (a file or path has its own). The extension follows what the picture really is.'),
+      folder: oneLine().optional().describe("Where to keep it (a vault path); default the Inbox's Pictures folder."),
+      title: oneLine().optional().describe('With a title or text an Inbox note is made that shows the picture: its title.'),
+      text: mdText().optional().describe('The idea, caption or notes that go with the picture (markdown), written under it in its note.'),
+      tags: tagsArg,
+    },
+    // Not the closed world every other tool lives in: with file it downloads from ChatGPT's file hosts.
+    { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+    async ({ file, path: filePath, data, name, folder, title, text, tags }) => {
+      const given = [file !== undefined, filePath !== undefined, data !== undefined].filter(Boolean).length
+      if (given !== 1) throw new Error("Give the picture as exactly one of file (ChatGPT's attachment), path (a picture file on this computer) or data (base64, small pictures)")
+      let source: PictureSource
+      if (file) {
+        source = await fetchPictureFile(file, { ...(opts.fetch ? { fetch: opts.fetch } : {}), hosts: opts.fileHosts ?? fileHostsFromEnv() })
+      } else if (filePath !== undefined) {
+        if (!opts.localFiles) {
+          throw new Error("path only works when Claude Desktop or Claude Code runs this server on the user's computer. Here, send the picture as file (ChatGPT) or data (base64, small pictures).")
+        }
+        source = await readLocalPicture(filePath)
+      } else {
+        source = { bytes: decodePictureData(data ?? ''), name: '' }
+      }
+      const r = await brain.savePicture({
+        bytes: source.bytes,
+        name: name?.trim() || source.name,
+        ...(folder ? { folder } : {}),
+        ...(title ? { title } : {}),
+        ...(text ? { text } : {}),
+        ...(tags ? { tags } : {}),
+      })
+      const note = r.note ? ` and the note ${r.note.path}, which shows it` : ''
+      return {
+        text: reply(`Saved the picture to ${r.picture.path}${note}. To show it in another note, write ${r.embed}.`, r),
+        summary: `saved the picture ${quote(r.picture.name)}`,
+        path: r.picture.path,
+      }
+    },
+    undefined,
+    // ChatGPT passes `file` as { download_url, file_id, mime_type?, file_name? } because the tool says it is a file parameter.
+    { 'openai/fileParams': ['file'] },
+  )
+
+  /* ------------------ the app's pictures and window ------------------ */
+
+  const pictures = opts.pictures
+  if (pictures) {
+    tool(
+      'find_pictures',
+      {
+        query: oneLine().optional().describe('Words that must all be in the picture\'s vault path (its file name or folders), e.g. "gate concept". Leave out to list a folder.'),
+        folder: oneLine().optional().describe('Only inside this folder (a vault path, e.g. "Projects/PORTALz/Art").'),
+        limit: z.number().int().min(1).max(100).optional().describe('How many to list (default 20, at most 100).'),
+      },
+      READ,
+      async ({ query, folder, limit }) => {
+        // An existing folder under its own spelling (or an error that says which ones there are); the root means no filter.
+        const dir = folder?.trim() ? await brain.folderPath(folder) : ''
+        const r = await pictures.find(query?.trim() ?? '', { ...(dir ? { folder: dir } : {}), limit: limit ?? 20 })
+        const line = r.pictures.length ? `${plural(r.pictures.length, 'picture')}${r.more ? ' (more exist: narrow the words or the folder)' : ''}.` : 'No pictures match.'
+        return { text: reply(line, r), summary: `looked for pictures${query?.trim() ? ` ${quote(query)}` : ''}`, path: dir || null }
+      },
+    )
+
+    tool(
+      'get_image',
+      {
+        picture: oneLine().min(1).describe("The picture: its vault path (from find_pictures or a note's embed), or its file name when only one picture has it."),
+        max_px: z.number().int().min(64).max(1024).optional().describe('Longest side of what you get back, in pixels (default 768).'),
+      },
+      READ,
+      async ({ picture, max_px }) => {
+        const px = max_px ?? 768
+        const asked = picture.trim()
+        let seen = await pictures.look(asked, px)
+        if (!seen) {
+          // Not a vault path: a file name, or part of a path, that one picture has.
+          const found = await pictures.find(asked, { limit: 6 })
+          if (!found.pictures.length) throw new Error(`No picture matches "${asked}". Use find_pictures to see the pictures.`)
+          if (found.pictures.length > 1) {
+            throw new Error(`"${asked}" matches ${found.more ? 'more than ' : ''}${found.pictures.length} pictures; pass the vault path of one: ${found.pictures.map((p) => p.path).join(', ')}`)
+          }
+          seen = await pictures.look(found.pictures[0]!.path, px)
+        }
+        if (!seen) throw new Error(`The picture could not be shown (too big, damaged, or not one the brain can draw): ${asked}`)
+        const notes = await brain.notesShowing(seen.path)
+        const what = seen.kind === 'picture' ? 'a picture' : seen.kind === 'video' ? "a video's still frame" : "a 3D model's still"
+        const size = seen.width && seen.height ? `${seen.width}×${seen.height}` : 'size unknown'
+        const shown = notes.length ? ` Notes that show it: ${notes.map((n) => quote(n.title, 60)).join(', ')}.` : ''
+        const info = { path: seen.path, kind: seen.kind, bytes: seen.bytes, width: seen.width, height: seen.height, scaledTo: px, notes }
+        return {
+          text: reply(`${seen.path}: ${what}, ${size}, ${bytesText(seen.bytes)}, shown scaled to at most ${px} px.${shown}`, info),
+          summary: `looked at ${quote(lastName(seen.path))}`,
+          path: seen.path,
+          images: [{ data: Buffer.from(seen.png).toString('base64'), mimeType: 'image/png' }],
+        }
+      },
+    )
+  }
+
+  const show = opts.show
+  if (show) {
+    tool(
+      'show_in_brain',
+      {
+        target: oneLine().min(1).describe('A note (title, alias, id or vault path), a folder or a picture (vault path), or "today" for the Today hub.'),
+        open: z.boolean().optional().describe('A note: open it in the editor too (default: only fly there and select it).'),
+      },
+      READ,
+      async ({ target, open }) => {
+        const raw = target.trim()
+        let where: ShowTarget
+        let name: string
+        if (/^today$/i.test(raw)) {
+          where = { kind: 'today', path: '', open: false }
+          name = 'the Today hub'
+        } else {
+          const found = await brain.locate(raw)
+          where = { kind: found.kind, path: found.path, open: open === true && found.kind === 'note' }
+          name = quote(found.title)
+        }
+        await show(where)
+        return {
+          text: reply(
+            `Asked the Aether Brain window to show ${name}${where.open ? ' and open it in the editor' : ''}: the 3D view flies there and selects it. (While the user is typing in a note it leaves the camera alone and only tells them.)`,
+            where,
+          ),
+          summary: `showed ${name}`,
+          path: where.kind === 'today' ? null : where.path,
+        }
+      },
+    )
+  }
 
   tool(
     'add_task',

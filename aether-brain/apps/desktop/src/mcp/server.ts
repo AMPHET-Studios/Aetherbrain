@@ -23,8 +23,8 @@ import { SERVER_VERSION, createMcpServer, type ActivityEvent } from './tools.js'
 
 export { Brain, appendText } from './brain.js'
 export type { BrainOptions, BrainPreload, FolderNode, NoteRef, ProjectBrief, TaskInfo, TaskSelector } from './brain.js'
-export { INSTRUCTIONS, SERVER_VERSION, TOOLS, createMcpServer } from './tools.js'
-export type { ActivityEvent, McpServerOptions, ToolName } from './tools.js'
+export { HOST_TOOLS, INSTRUCTIONS, PICTURES_INSTRUCTIONS, SERVER_VERSION, SHOW_INSTRUCTIONS, TOOLS, createMcpServer } from './tools.js'
+export type { ActivityEvent, FoundPicture, LookedAt, McpServerOptions, PictureHost, ShowTarget, ToolName } from './tools.js'
 export { MAX_BODY_BYTES, clientFromUserAgent, startHttpLink } from './http.js'
 export { BrainTools, ChatThread, isLoopbackUrl, sessionBlock, timeLine } from './chat.js'
 export type { ChatContext, ChatSettings, TurnOptions, TurnResult } from './chat.js'
@@ -263,7 +263,8 @@ export async function runStdio(argv: string[]): Promise<void> {
     return
   }
 
-  const server = createMcpServer(brain, { readOnly: cli.readOnly, onActivity: logActivity })
+  // stdio: the client (Claude Desktop, Claude Code) runs on this computer, so save_image may read a picture file it names.
+  const server = createMcpServer(brain, { readOnly: cli.readOnly, onActivity: logActivity, localFiles: true })
   const transport = new StdioServerTransport()
   const shutdown = (): void => stop(() => server.close())
   process.stdin.on('end', shutdown)

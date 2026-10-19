@@ -218,8 +218,8 @@ export interface VaultProgressDto {
   done: boolean
 }
 
-import type { ChatEventDto, ChatPatch, ChatReplyDto, ChatStatusDto } from './chat.js'
-export type { ChatEventDto, ChatPatch, ChatReplyDto, ChatStatusDto } from './chat.js'
+import type { ChatEventDto, ChatPatch, ChatReplyDto, ChatStatusDto, OllamaCheckDto } from './chat.js'
+export type { ChatEventDto, ChatPatch, ChatReplyDto, ChatStatusDto, OllamaCheckDto } from './chat.js'
 import type { LibraryEventDto, LibraryModelAction, LibraryPatch, LibraryStatusDto } from './library.js'
 export type * from './library.js'
 
@@ -362,6 +362,33 @@ export interface AiActivityDto {
   write: boolean
 }
 
+/**
+ * The tunnel that gives the AI link a public https address, for ChatGPT and claude.ai (a cloudflared quick tunnel, started by a
+ * button). Off every time the app starts; it never outlives the app, the link or the port it was started for.
+ */
+export interface TunnelStatusDto {
+  state: 'off' | 'starting' | 'on'
+  /** The public address while on (`https://….trycloudflare.com`, no path: the link's path and key come after it). */
+  url: string | null
+  /** Why it is not working, in words (a start that failed, a tunnel that ended by itself). */
+  error: string | null
+  /** cloudflared is on this computer: found on the PATH, or the copy this app downloaded; null when it is not. */
+  program: 'path' | 'app' | null
+  /** What a download would fetch, so the panel can say it before asking; null where the app cannot download it. */
+  download: { file: string; mb: number; from: string } | null
+  /** A download is running: bytes so far of the bytes expected. */
+  downloading: { done: number; total: number } | null
+}
+
+/** An AI asked the window to show something (show_in_brain): fly there and select it. */
+export interface AiShowDto {
+  kind: 'note' | 'folder' | 'picture' | 'today'
+  /** Vault path ('' for the Today hub). */
+  path: string
+  /** A note: open it in the editor as well. */
+  open: boolean
+}
+
 /* ---- the reference board's floating window ---- */
 
 /** The floating board window, for both windows' toolbars and the palette. */
@@ -434,6 +461,8 @@ export interface AetherBridge {
   /** The brain's chat: its settings and whether it can chat now. */
   chatStatus(): Promise<ChatStatusDto>
   chatConfigure(patch: ChatPatch): Promise<ChatStatusDto>
+  /** Ask Ollama on this computer (at the address in the chat's settings) which models it has. */
+  chatOllama(): Promise<OllamaCheckDto>
   /** Send a message in conversation `conv` (an id the renderer makes); events stream through onChatEvent. */
   chatSend(conv: string, text: string): Promise<ChatReplyDto>
   /** Stop the answer being written. */
@@ -577,6 +606,15 @@ export interface AetherBridge {
   aiStatus(): Promise<AiLinkStatus>
   aiConfigure(patch: AiLinkPatch): Promise<AiLinkStatus>
   onAiActivity(cb: (a: AiActivityDto) => void): () => void
+  /** An AI asked for something to be shown in the 3D view. */
+  onAiShow(cb: (s: AiShowDto) => void): () => void
+  /** The tunnel for ChatGPT and claude.ai: its state, a download of cloudflared (asked for by a press), start and stop. */
+  tunnelStatus(): Promise<TunnelStatusDto>
+  tunnelDownload(): Promise<TunnelStatusDto>
+  /** Switches the AI link on if it is off, then starts the tunnel to its port. */
+  tunnelStart(): Promise<TunnelStatusDto>
+  tunnelStop(): Promise<TunnelStatusDto>
+  onTunnelState(cb: (s: TunnelStatusDto) => void): () => void
   /** Copy text to the OS clipboard (the sandboxed renderer may not have clipboard access). */
   copyText(text: string): Promise<void>
 
@@ -606,6 +644,7 @@ export const IPC = {
   findProgress: 'vault:findProgress',
   chatStatus: 'chat:status',
   chatConfigure: 'chat:configure',
+  chatOllama: 'chat:ollama',
   chatSend: 'chat:send',
   chatStop: 'chat:stop',
   chatForget: 'chat:forget',
@@ -680,6 +719,14 @@ export const IPC = {
   aiStatus: 'ai:status',
   aiConfigure: 'ai:configure',
   aiActivity: 'ai:activity',
+  /** main → brain window: { kind, path, open } from an AI's show_in_brain. */
+  aiShow: 'ai:show',
+  tunnelStatus: 'tunnel:status',
+  tunnelDownload: 'tunnel:download',
+  tunnelStart: 'tunnel:start',
+  tunnelStop: 'tunnel:stop',
+  /** main → brain window: the tunnel's state changed (a start, a stop, a download's progress, a tunnel that ended). */
+  tunnelState: 'tunnel:state',
   copy: 'app:copy',
 } as const
 

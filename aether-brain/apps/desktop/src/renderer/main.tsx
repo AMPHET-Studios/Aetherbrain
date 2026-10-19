@@ -10,7 +10,7 @@ import { ChatPanel, registerChat } from './components/ChatPanel'
 import { NudgeCard } from './components/NudgeCard'
 import { LibraryPanel, registerLibrary } from './components/LibraryPanel'
 import { FindProjectsPanel, registerFindProjects } from './components/FindProjectsPanel'
-import { activityFailed, clientLabel, errorText, flyToPath, openPanel, pushActivity, samePath, togglePanel, usePanel } from './panels'
+import { activityFailed, clientLabel, errorText, flyToPath, openPanel, pushActivity, reportTunnel, samePath, showForAi, togglePanel, usePanel } from './panels'
 import { useForgeScreen } from './forge'
 import { SETTLE_MS, getInterrupted, interruptedMessage, rootsLabel, setInterrupted, subscribeInterrupted } from './startup'
 import './companion'
@@ -172,6 +172,8 @@ async function boot() {
     )
   })
   bridge?.onAiActivity(onAiActivity)
+  bridge?.onAiShow(showForAi)
+  bridge?.onTunnelState(reportTunnel)
   registerDesktopKeys()
   registerChat()
   registerLibrary()

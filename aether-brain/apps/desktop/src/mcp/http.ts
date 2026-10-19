@@ -13,7 +13,7 @@ import http, { type IncomingMessage, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import type { Brain } from './brain.js'
-import { createMcpServer, type ActivityEvent } from './tools.js'
+import { createMcpServer, type ActivityEvent, type PictureHost, type ShowTarget } from './tools.js'
 
 export interface HttpLink {
   /** Full local URL including the token path, e.g. http://127.0.0.1:7457/mcp/<token>. */
@@ -33,10 +33,18 @@ export interface HttpLinkOptions {
   token: string
   readOnly: boolean
   onActivity?: (a: ActivityEvent) => void
+  /** The app's pictures: with it the link lists find_pictures and get_image. Only the running app has them. */
+  pictures?: PictureHost
+  /** The app's window: with it the link lists show_in_brain. */
+  show?: (target: ShowTarget) => void | Promise<void>
 }
 
-/** Request body cap (1 MB). */
-export const MAX_BODY_BYTES = 1_048_576
+/**
+ * Request body cap (64 MiB): a whole picture of 40 MB as base64 text is 53 MiB (`MAX_PICTURE_DATA_CHARS`), which is what the
+ * plugin's bridge sends for a screenshot it read from disk. Only a request that carries the token is ever read, so this is the
+ * most an authenticated caller can make the app hold at once, not a way for a stranger to fill its memory.
+ */
+export const MAX_BODY_BYTES = 64 * 1024 * 1024
 
 const TOKEN_RE = /^[A-Za-z0-9_-]{16,256}$/
 
@@ -107,6 +115,8 @@ export async function startHttpLink(opts: HttpLinkOptions): Promise<HttpLink> {
     const server = createMcpServer(opts.brain, {
       readOnly: opts.readOnly,
       ...(opts.onActivity ? { onActivity: opts.onActivity } : {}),
+      ...(opts.pictures ? { pictures: opts.pictures } : {}),
+      ...(opts.show ? { show: opts.show } : {}),
       getClient: () => client,
     })
     const transport = new StreamableHTTPServerTransport({

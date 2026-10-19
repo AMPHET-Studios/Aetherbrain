@@ -36,3 +36,20 @@ export function isGalaxyNode(n: GraphNode): boolean {
   if (!f) return false
   return f.role === 'mount' || (f.role === 'root' && f.galaxy === true)
 }
+
+/** The kinds of body the legend names, and lets you light up (docs/COSMOLOGY.md). */
+export type LegendBody = 'galaxy' | 'star' | 'planet' | 'moon' | 'sun' | 'picture'
+export const LEGEND_BODIES: readonly LegendBody[] = ['galaxy', 'star', 'planet', 'moon', 'sun', 'picture']
+
+/**
+ * Which of the legend's kinds a node is. A drive (or a one-folder vault) is a galaxy, every other folder a star, a board with
+ * pictures orbiting it a sun, a big file a planet and a small one a moon. A picture is also a picture: a big one is a planet and a
+ * picture, a small one a moon and a picture. The Today hub is none of them.
+ */
+export function legendBodies(n: GraphNode): LegendBody[] {
+  if (n.kind === 'today') return []
+  if (n.folder) return [isGalaxyNode(n) ? 'galaxy' : 'star']
+  if (n.board) return ['sun']
+  if (n.kind === 'image') return isPlanetNode(n) ? ['planet', 'picture'] : ['moon', 'picture']
+  return [isPlanetNode(n) ? 'planet' : 'moon']
+}
