@@ -349,6 +349,27 @@ describe('stopping and ending', () => {
     second.say(`${BOX[3]}\n`)
     await vi.waitFor(() => expect(states.at(-1)?.state).toBe('on'))
   })
+
+  it('leaves no pid file when the process ends before its file has landed (a slow disk)', async () => {
+    await putOnPath()
+    // A busy machine or a virus scanner: the write of the pid file lands after the process is already gone.
+    const real = fs.writeFile.bind(fs)
+    let landed!: () => void
+    const done = new Promise<void>((resolve) => (landed = resolve))
+    vi.spyOn(fs, 'writeFile').mockImplementation((async (...args: Parameters<typeof real>) => {
+      await new Promise((r) => setTimeout(r, 80))
+      await real(...args)
+      landed()
+    }) as never)
+    const child = new FakeChild(4321)
+    const { host, states } = fakeHost({ spawn: (() => child) as unknown as TunnelHostOptions['spawn'] })
+    await host.start(7461)
+    child.emit('exit', 1, null)
+    expect(states.at(-1)).toMatchObject({ state: 'off' })
+    await done
+    // Whatever order the two disk jobs were asked in, the file is gone once both have run: a stale one would name a dead process.
+    await vi.waitFor(() => expect(existsSync(path.join(data, 'tunnel.pid'))).toBe(false))
+  })
 })
 
 describe('which cloudflared runs', () => {
@@ -639,7 +660,8 @@ ${then}`,
     await host.start(7461)
     await vi.waitFor(() => expect(states.at(-1)?.state).toBe('off'), { timeout: 10_000 })
     expect(states.at(-1)?.error).toBe('cloudflared stopped (exit code 3): INF Requesting new quick Tunnel on trycloudflare.com... / ERR failed to request quick Tunnel')
-    expect(existsSync(path.join(data, 'tunnel.pid'))).toBe(false)
+    // The file goes a moment after the state is told (a disk job), as after a stop.
+    await vi.waitFor(() => expect(existsSync(path.join(data, 'tunnel.pid'))).toBe(false))
   })
 
   it('gives up on a process that never says an address, and ends it', async () => {
