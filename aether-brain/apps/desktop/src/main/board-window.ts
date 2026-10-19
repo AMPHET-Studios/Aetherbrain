@@ -467,6 +467,9 @@ export const LEDGER_MAX = 200_000
  * The vault's pictures as they are now, for the floating window. `listAssets` is the last scan's snapshot (a picture dropped into
  * a board a minute ago is not in it, and the board would draw it as missing): this keeps what the watcher reported since (and what
  * the app created), on top of the scan's list. Cleared when a scan finishes, because the new list contains all of it.
+ *
+ * `wanted` says which file names are its business: pictures (the board's), or with `isAssetName` pictures, videos and 3D models too
+ * (the AI link's find_pictures lists all three).
  */
 export class PictureLedger {
   /** Path → the picture as last reported, or null for one that was removed. */
@@ -474,15 +477,17 @@ export class PictureLedger {
   /** Changes were dropped for lack of room: the list is partial. */
   overflowed = false
 
+  constructor(private readonly wanted: (name: string) => boolean = isImageName) {}
+
   clear(): void {
     this.delta.clear()
     this.overflowed = false
   }
 
-  /** Remember the picture changes among `changes` (notes, folders and videos are not its business). */
+  /** Remember the picture changes among `changes` (notes and folders are not its business; videos only when `wanted` takes them). */
   apply(changes: readonly VaultChangeDto[]): void {
     for (const c of changes) {
-      if (c.kind === 'addDir' || c.kind === 'unlinkDir' || !isImageName(c.path.slice(c.path.lastIndexOf('/') + 1))) continue
+      if (c.kind === 'addDir' || c.kind === 'unlinkDir' || !this.wanted(c.path.slice(c.path.lastIndexOf('/') + 1))) continue
       if (c.kind === 'unlink') this.put(c.path, null)
       else this.put(c.path, { path: c.path, ...(c.mtime !== undefined ? { mtime: c.mtime } : {}), ...(c.size !== undefined ? { size: c.size } : {}) })
     }
@@ -506,7 +511,7 @@ export class PictureLedger {
     const out: VaultAssetDto[] = []
     const seen = new Set<string>()
     for (const a of scan) {
-      if (!isImageName(a.path.slice(a.path.lastIndexOf('/') + 1))) continue
+      if (!this.wanted(a.path.slice(a.path.lastIndexOf('/') + 1))) continue
       const d = this.delta.get(a.path)
       if (d === null) continue
       out.push(d ?? { path: a.path })

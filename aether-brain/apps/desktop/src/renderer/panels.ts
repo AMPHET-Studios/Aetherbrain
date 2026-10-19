@@ -4,9 +4,9 @@
  * useSyncExternalStore: the app store stays free of desktop concerns.
  */
 import { useEffect, useSyncExternalStore, type RefObject } from 'react'
-import { folderKey, idFromPath } from '@aether/core'
+import { folderKey, idFromPath, imageKey, isAssetPath } from '@aether/core'
 import { useAether } from '@aether/ui'
-import type { AiActivityDto } from '../shared/ipc'
+import type { AiActivityDto, AiShowDto, TunnelStatusDto } from '../shared/ipc'
 
 /** roots: vault folders · drives: pick whole drives to mirror · ai: the AI link · library: the librarian · find: Find projects. */
 export type PanelId = 'roots' | 'drives' | 'ai' | 'library' | 'find'
@@ -92,7 +92,8 @@ let cancelFly: (() => void) | null = null
 export function flyToPath(path: string): void {
   cancelFly?.()
   cancelFly = null
-  const id = /\.md$/i.test(path) ? idFromPath(path) : folderKey(path)
+  // A note, a picture an AI sent (save_image), or else a folder (create_folder).
+  const id = /\.md$/i.test(path) ? idFromPath(path) : isAssetPath(path) ? imageKey(path) : folderKey(path)
   const tryFly = (): boolean => {
     const s = useAether.getState()
     if (s.status !== 'ready' || !s.graph?.index.has(id)) return false
@@ -110,6 +111,50 @@ export function flyToPath(path: string): void {
     if (cancelFly === stop) cancelFly = null
   }
   cancelFly = stop
+}
+
+/**
+ * An AI asked to show something (show_in_brain): fly to it and select it, the same way the app's own "go to" does. A picture
+ * that is not in the graph yet becomes a moon to be (the store knows how), a folder is shown as a star, a note can open in the
+ * editor too. Never takes the camera away from a note being typed: it says so instead.
+ */
+export function showForAi(t: AiShowDto): void {
+  const s = useAether.getState()
+  if (s.status !== 'ready') return
+  const name = t.kind === 'today' ? 'the Today hub' : t.path.slice(t.path.lastIndexOf('/') + 1).replace(/\.md$/i, '') || 'the vault'
+  if (s.dirty) {
+    s.toast(`An AI wants to show you ${name}. Save your note, then ask again.`, 'info')
+    return
+  }
+  switch (t.kind) {
+    case 'today':
+      s.showToday()
+      return
+    case 'folder':
+      s.showFolder(t.path)
+      return
+    case 'picture':
+      s.showPicture(t.path)
+      return
+    case 'note': {
+      const id = idFromPath(t.path)
+      if (t.open && s.notes.has(id)) s.openNote(id, { fly: true })
+      else flyToPath(t.path)
+    }
+  }
+}
+
+let tunnelWasOn = false
+
+/**
+ * The tunnel for ChatGPT and claude.ai changed: say when it opens the brain to the internet, and when it ends (and why, when it ended
+ * by itself). A state that is not a change (the same tunnel again, off when it was never on) says nothing.
+ */
+export function reportTunnel(t: TunnelStatusDto): void {
+  const s = useAether.getState()
+  if (t.state === 'on' && !tunnelWasOn) s.toast('Tunnel on: ChatGPT and claude.ai can reach your brain. Stop it in the AI link panel (a).', 'info')
+  else if (t.state === 'off' && tunnelWasOn) s.toast(t.error ?? 'Tunnel stopped', t.error ? 'error' : 'info')
+  tunnelWasOn = t.state === 'on'
 }
 
 /* ------------------------------------------------------------------ */

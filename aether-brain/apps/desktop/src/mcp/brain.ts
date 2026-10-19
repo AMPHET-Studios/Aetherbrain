@@ -21,6 +21,7 @@ import { createHash } from 'node:crypto'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
+  AssetResolver,
   LinkResolver,
   MAX_MESSAGE_CHARS,
   SearchIndex,
@@ -92,9 +93,11 @@ import type {
   VaultFile,
   VaultRootInfo,
 } from '@aether/core'
+import { assetBytes, imageKindOf, imageSize, type ImageKind } from '../main/assets.js'
 import { FsVault } from '../main/fsvault.js'
 import { VaultWatcher } from '../main/watcher.js'
 import { PLAYBOOK_BODY, PLAYBOOK_TITLE } from './companion.js'
+import { PICTURES_FOLDER, PICTURE_EXT, pictureStem, pictureTitle } from './pictures.js'
 import {
   ABOUT_ME_SECTIONS,
   ABOUT_ME_TITLE,
@@ -117,6 +120,16 @@ import {
   type CheckInRow,
 } from './me.js'
 import type { VaultChangeDto } from '../shared/ipc.js'
+
+/** A picture `savePicture` wrote: where it is, how big, what kind, and its size in pixels when its header says. */
+export interface PictureSaved {
+  path: string
+  name: string
+  bytes: number
+  kind: ImageKind
+  width?: number
+  height?: number
+}
 
 /** Files + folders a host already read, so the brain skips its own scan. */
 export interface BrainPreload {
@@ -1422,6 +1435,113 @@ export class Brain {
       const note = await this.addNote(d, dir, base, made.content)
       return this.ref(note)
     })
+  }
+
+  /**
+   * A new picture in the vault (the AI link's save_image). The bytes must be a real picture of at most 40 MB (`assetBytes`) and
+   * are written with FsVault.createBinary, which fails with EEXIST when anything is at the path in any letter case: a picture
+   * is never replaced, the next name (` 2`, ` 3` …) is tried. It goes to `folder`, else `<home>Inbox/Pictures`, under the name
+   * it came with and the extension its bytes really have. With a title or text a note is made as well (in `folder`, else the
+   * Inbox) that shows the picture: `![[its vault path]]`, then the text.
+   */
+  savePicture(input: { bytes: Uint8Array; name?: string; folder?: string; title?: string; text?: string; tags?: string[] }) {
+    return this.exclusive(async () => {
+      this.assertWritable()
+      const bytes = assetBytes(input.bytes)
+      // assetBytes refused anything that is not a picture, so the kind is there.
+      const kind = imageKindOf(bytes) as ImageKind
+      const d = await this.state()
+      const dir = input.folder?.trim() ? this.targetFolder(d, input.folder) : this.canonical(d, `${this.home}${PICTURES_FOLDER}`)
+      const existed = dir === '' || this.folders.has(dir)
+      const stem = pictureStem(input.name)
+      let file = ''
+      for (let n = 1; n <= 500 && !file; n++) {
+        const candidate = `${n === 1 ? stem : `${stem} ${n}`}.${PICTURE_EXT[kind]}`
+        const p = dir ? `${dir}/${candidate}` : candidate
+        if (WIN_RESERVED.test(candidate) || isIgnoredPath(p) || this.vault.isIgnored(p)) continue
+        try {
+          await this.vault.createBinary(p, bytes)
+          file = candidate
+        } catch (err) {
+          if (!isExistsError(err)) throw err
+        }
+      }
+      if (!file) throw new Error(`No free file name for "${stem}" in ${dir || 'the vault root'}`)
+      const saved = dir ? `${dir}/${file}` : file
+      if (!existed) {
+        this.pending.push({ kind: 'addDir', path: dir })
+        this.sync()
+      }
+      let note: ParsedNote | null = null
+      if (input.title?.trim() || input.text?.trim()) {
+        const body = [`![[${saved}]]`, input.text?.trim() ?? ''].filter(Boolean).join('\n\n')
+        // Titled from the picture when it has none of its own: the first line of the body is the embed, which makes no title.
+        const title = input.title?.trim() || pictureTitle(file.slice(0, file.lastIndexOf('.')))
+        const made = inboxNote({ text: body, title, tags: cleanTags(input.tags ?? []) })
+        const noteDir = input.folder?.trim() ? dir : this.canonical(d, `${this.home}Inbox`)
+        note = await this.addNote(d, noteDir, noteBase(basenameOf(made.path)) || 'Picture', made.content)
+      }
+      const size = imageSize(bytes)
+      const picture: PictureSaved = { path: saved, name: file, bytes: bytes.length, kind, ...(size ?? {}) }
+      return { picture, embed: `![[${saved}]]`, note: note ? { ...this.ref(note), folder: note.meta.folder } : null }
+    })
+  }
+
+  /**
+   * What `ref` names, for show_in_brain: a note (title, alias, id or vault path), else a folder, else a picture, video or 3D model
+   * of the vault by its vault path. When nothing matches, the answer is the note lookup's error (it lists the paths to use when a
+   * title is ambiguous).
+   */
+  async locate(ref: string): Promise<{ kind: 'note' | 'folder' | 'picture'; path: string; title: string }> {
+    const raw = ref.trim()
+    if (!raw) throw new Error('Name what to show: a note, a folder, a picture, or "today"')
+    const d = await this.state()
+    if (isAssetPath(raw)) {
+      const abs = (await this.vault.assetAbs(raw)) ?? (await this.vault.modelAbs(raw))
+      const vaultPath = abs === null ? null : this.vault.toVault(abs)
+      if (vaultPath === null) throw new Error(`No picture "${raw}" in the vault. Use find_pictures to see the pictures.`)
+      return { kind: 'picture', path: vaultPath, title: lastSegment(vaultPath) }
+    }
+    try {
+      const note = this.resolve(d, raw)
+      return { kind: 'note', path: note.meta.path, title: note.meta.title }
+    } catch (err) {
+      try {
+        const folder = this.resolveFolder(d, raw)
+        return { kind: 'folder', path: folder, title: this.folderName(folder) }
+      } catch {
+        throw err
+      }
+    }
+  }
+
+  /** An existing folder by vault path, root label, absolute path or unique name ('' is the vault root). */
+  async folderPath(ref: string): Promise<string> {
+    return this.resolveFolder(await this.state(), ref)
+  }
+
+  /**
+   * Notes that show or name a picture (up to `limit`, alphabetical by path): an embed or a link whose target is that picture, or a
+   * board's `pic` line. A target written as a bare file name counts when this picture is the one it would resolve to among the
+   * pictures of the vault (here: when it ends the same way, the best this process can know without a scan of every picture).
+   */
+  async notesShowing(picture: string, limit = 10): Promise<NoteRef[]> {
+    await this.state()
+    const want = normalizePath(picture).toLowerCase()
+    const resolver = new AssetResolver([normalizePath(picture)])
+    const hits: ParsedNote[] = []
+    for (const n of this.notes.values()) {
+      const hit = n.links.some((l) => {
+        if (l.kind === 'tag') return false
+        const target = l.literal ? l.raw : parseWikilinkRaw(l.raw).target
+        if (!isAssetPath(target)) return false
+        return l.literal ? normalizePath(target).toLowerCase() === want : resolver.resolve(target, n.meta.folder)?.toLowerCase() === want
+      })
+      if (hit) hits.push(n)
+    }
+    // The order the notes were read in says nothing; the same picture should always list the same notes first.
+    hits.sort((a, b) => (a.meta.path.toLowerCase() < b.meta.path.toLowerCase() ? -1 : a.meta.path.toLowerCase() > b.meta.path.toLowerCase() ? 1 : 0))
+    return hits.slice(0, limit).map((n) => this.ref(n))
   }
 
   /** Append text at the end of a note, or under one of its headings (created when missing). */

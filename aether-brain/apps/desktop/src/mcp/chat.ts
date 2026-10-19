@@ -41,8 +41,8 @@ export interface TurnResult {
   stop: string
 }
 
-/** Tools the chat leaves out: the ChatGPT-connector pair (search_notes / read_note do it better) and save_chat (the chat saves itself). */
-const SKIP_TOOLS = new Set(['search', 'fetch', 'save_chat'])
+/** Tools the chat leaves out: the ChatGPT-connector pair (search_notes / read_note do it better), save_chat (the chat saves itself) and save_image (the chat has no picture to keep). */
+const SKIP_TOOLS = new Set(['search', 'fetch', 'save_chat', 'save_image'])
 /** The tools a small local model gets. */
 const OLLAMA_TOOLS = new Set([
   'about_me',
