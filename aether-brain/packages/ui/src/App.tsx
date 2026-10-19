@@ -127,7 +127,9 @@ export function AetherApp({ sources, onPickVault, autoOpen }: AetherAppProps) {
 
       {/* HUD */}
       <div className="pointer-events-none absolute inset-0 flex flex-col p-3">
-        <div className="pointer-events-auto">
+        {/* Above the full-window views (Capture, Review, Projects, Boards: z-30) and below the search, the cheatsheet and the errors: the tabs and
+            buttons of the bar work on the first click in every view. Under those views they only closed the view, and a second click did the thing. */}
+        <div className="pointer-events-auto relative z-[35]">
           <ErrorBoundary what="the top bar">
             <TopBar onPickVault={onPickVault} />
           </ErrorBoundary>
@@ -149,21 +151,28 @@ export function AetherApp({ sources, onPickVault, autoOpen }: AetherAppProps) {
           </div>
           <div className="min-w-0 flex-1" />
           {/* Right: inspector */}
+          {/* The box is as tall as the inspector and no taller (self-start): one stretched to the whole row took the mouse under the panel too. */}
           {status === 'ready' && selectedId && view !== 'projects' && view !== 'boards' && (
-            <div className="pointer-events-auto flex max-h-full items-start">
+            <div className="pointer-events-auto flex max-h-full items-start self-start">
               <ErrorBoundary what="the inspector" onClose={() => useAether.getState().select(null)}>
                 <Inspector />
               </ErrorBoundary>
             </div>
           )}
         </div>
-        <div className="pointer-events-auto mt-3 flex items-end justify-between gap-3">
-          <ErrorBoundary what="the legend" quiet>
-            {status === 'ready' ? <Legend /> : <span />}
-          </ErrorBoundary>
-          <ErrorBoundary what="the hint" quiet>
-            <Hint />
-          </ErrorBoundary>
+        {/* Only the legend and the hint take the mouse. The strip itself is empty sky between them, and the 3D view needs its clicks, drags
+            and wheel there: a strip that took them all swallowed the bottom quarter of the window, and every body drawn in it. */}
+        <div className="pointer-events-none mt-3 flex items-end justify-between gap-3">
+          <div className="pointer-events-auto">
+            <ErrorBoundary what="the legend" quiet>
+              {status === 'ready' ? <Legend /> : <span />}
+            </ErrorBoundary>
+          </div>
+          <div className="pointer-events-auto">
+            <ErrorBoundary what="the hint" quiet>
+              <Hint />
+            </ErrorBoundary>
+          </div>
         </div>
       </div>
 

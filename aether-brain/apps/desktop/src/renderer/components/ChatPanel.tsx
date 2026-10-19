@@ -8,8 +8,8 @@
  */
 import { useEffect, useRef, useState, useSyncExternalStore, type KeyboardEvent } from 'react'
 import { todayIso } from '@aether/core'
-import { MarkdownPreview, registerCommands, registerHelpRows, registerKey, useAether } from '@aether/ui'
-import type { ChatEventDto, ChatStatusDto } from '../../shared/ipc'
+import { MarkdownPreview, registerCommands, registerHelpRows, registerKey, registerTopBarButton, useAether } from '@aether/ui'
+import type { ChatEventDto, ChatStatusDto, OllamaCheckDto } from '../../shared/ipc'
 import { ElectronVaultAdapter } from '../vault/electron'
 import { DAY_PROMPTS, answerNudge, type NudgeKind } from '../nudges'
 import { errorText, flyToPath, openPanel } from '../panels'
@@ -346,6 +346,81 @@ export function ChatPanel() {
   )
 }
 
+/** What the Ollama block of the settings says about this computer: running or not, and the models it has. */
+export function OllamaStatusView({
+  found,
+  model,
+  checking,
+  onPick,
+  onCheck,
+}: {
+  found: OllamaCheckDto | null
+  model: string
+  checking: boolean
+  onPick(name: string): void
+  onCheck(): void
+}) {
+  return (
+    <div className="mb-3 rounded-lg border border-[var(--line)] bg-black/30 px-3 py-2 leading-relaxed" role="status">
+      {!found ? (
+        <p className="text-dim">Looking for Ollama on this computer…</p>
+      ) : found.reachable ? (
+        <>
+          <p className="text-white">Ollama is running on this computer.</p>
+          {found.models.length ? (
+            <>
+              <p className="mt-1 text-dim">Its models: click one to use it.</p>
+              <div className="mt-1.5 flex flex-wrap gap-1.5">
+                {found.models.map((m) => (
+                  <button key={m} type="button" className={`hud-btn ${m === model ? 'primary' : ''}`} aria-pressed={m === model} onClick={() => onPick(m)}>
+                    {m}
+                  </button>
+                ))}
+              </div>
+            </>
+          ) : (
+            <p className="mt-1 text-dim">
+              It has no model yet. In a terminal, run <code className="text-white">ollama pull qwen3:8b</code> (about 5 GB; a model of 7 to 8 billion parameters is a good start), then check again.
+            </p>
+          )}
+        </>
+      ) : (
+        <>
+          <p className="text-white">Ollama is not running here{found.error ? ` (${found.error.toLowerCase()})` : ''}.</p>
+          <p className="mt-1 text-dim">
+            Install it from ollama.com and start it, then in a terminal run <code className="text-white">ollama pull qwen3:8b</code> (about 5 GB). Then check again.
+          </p>
+        </>
+      )}
+      <button type="button" className="hud-btn mt-2" onClick={onCheck} disabled={checking}>
+        {checking ? 'Looking…' : 'Check again'}
+      </button>
+    </div>
+  )
+}
+
+/** Looks when the settings open, and again on request. It asks about the saved address: save a changed one first. */
+function OllamaFinder({ model, onPick }: { model: string; onPick(name: string): void }) {
+  const [found, setFound] = useState<OllamaCheckDto | null>(null)
+  const [checking, setChecking] = useState(false)
+  const check = async () => {
+    if (!bridge) return
+    setChecking(true)
+    try {
+      setFound(await bridge.chatOllama())
+    } catch {
+      setFound({ url: '', reachable: false, models: [], error: 'The check failed' })
+    } finally {
+      setChecking(false)
+    }
+  }
+  useEffect(() => {
+    void check()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+  return <OllamaStatusView found={found} model={model} checking={checking} onPick={onPick} onCheck={() => void check()} />
+}
+
 function ChatSettings({ status }: { status: ChatStatusDto | null }) {
   const [key, setKey] = useState('')
   const [url, setUrl] = useState(status?.ollamaUrl ?? '')
@@ -381,6 +456,9 @@ function ChatSettings({ status }: { status: ChatStatusDto | null }) {
         </div>
       )}
       {!status.vaultOpen && <p className="mb-3 text-dim">Open a vault first: the chat works through your notes.</p>}
+      {!status.ready && status.vaultOpen && (
+        <p className="mb-3 leading-relaxed text-dim">The app has the chat, but the AI that answers is one you connect: Claude with your own key, or a model running on this computer through Ollama. Pick one below.</p>
+      )}
       <div className="section-title mb-1.5">Who answers</div>
       <div className="mb-3 flex gap-1.5">
         <button type="button" className={`hud-btn ${status.provider === 'claude' ? 'primary' : ''}`} disabled={busy} onClick={() => void configure({ provider: 'claude' })}>
@@ -444,6 +522,13 @@ function ChatSettings({ status }: { status: ChatStatusDto | null }) {
           }}
         >
           <div className="section-title mb-1.5">Ollama</div>
+          <OllamaFinder
+            model={ollamaModel}
+            onPick={(name) => {
+              setOllamaModel(name)
+              void configure({ ollamaUrl: url, ollamaModel: name }).then((next) => next?.ready && set({ settings: false }))
+            }}
+          />
           <label className="mb-1.5 block text-dim">
             Address
             <input className="input mt-1 !py-1.5 !text-[12.5px]" value={url} onChange={(e) => setUrl(e.target.value)} aria-label="Ollama address" />
@@ -483,6 +568,20 @@ export function registerChat(): void {
   if (!bridge) return
   bridge.onChatEvent(onEvent)
   registerKey('q', () => toggleChat())
+  // The chat is always one click away, not only on a key: a button in the top bar that shows pressed while the chat is open.
+  registerTopBarButton({
+    id: 'chat',
+    icon: '💬',
+    word: 'Chat',
+    title: 'Chat with your brain (q)',
+    key: 'q',
+    run: () => toggleChat(),
+    pressed: () => state.open,
+    subscribe: (cb) => {
+      subs.add(cb)
+      return () => subs.delete(cb)
+    },
+  })
   registerCommands([
     { id: 'chat', title: 'Chat with your brain', keys: 'q', group: 'navigate', run: () => toggleChat(true) },
     {

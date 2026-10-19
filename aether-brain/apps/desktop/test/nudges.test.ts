@@ -18,6 +18,7 @@ import {
   type NudgeKind,
 } from '../src/renderer/nudges'
 import { lf } from './lf'
+import { panel } from './chat-fake-bridge'
 
 /**
  * The day-planning nudges (docs/BRAIN-CHAT.md, "Plan my day, and the quiet cards"): when each card may show, what it says, how
@@ -189,62 +190,6 @@ describe('the documents', () => {
     expect(doc).toContain('there is no card for "something is due within the hour"')
   })
 })
-
-/* ------------------------------------------------------------------ */
-/* The chat panel with a fake bridge                                   */
-/* ------------------------------------------------------------------ */
-
-/** The chat panel module with a bridge that records what it is asked, in a fresh module state. */
-async function panel() {
-  vi.resetModules()
-  const calls = { send: [] as [string, string][], forget: [] as string[], configure: [] as { nudges?: boolean }[] }
-  let feed: ((e: unknown) => void) | null = null
-  let status = {
-    provider: 'claude',
-    claudeModel: 'claude-opus-5-5',
-    claudeModels: [],
-    hasKey: true,
-    keyHint: '…WXYZ',
-    keyStored: 'encrypted',
-    ollamaUrl: 'http://127.0.0.1:11434',
-    ollamaModel: '',
-    saveChats: true,
-    nudges: true,
-    vaultOpen: true,
-    ready: true,
-    missing: null,
-  }
-  const bridge = {
-    chatStatus: async () => status,
-    chatConfigure: async (patch: { nudges?: boolean }) => {
-      calls.configure.push(patch)
-      status = { ...status, ...patch }
-      return status
-    },
-    chatSend: async (conv: string, text: string) => {
-      calls.send.push([conv, text])
-      return { text: '', stop: 'end_turn', saved: null }
-    },
-    chatForget: async (conv: string) => void calls.forget.push(conv),
-    chatStop: async () => undefined,
-    onChatEvent: (cb: (e: unknown) => void) => {
-      feed = cb
-      return () => undefined
-    },
-  }
-  vi.stubGlobal('window', { aether: bridge, addEventListener: () => undefined, removeEventListener: () => undefined })
-  const chat = await import('../src/renderer/components/ChatPanel')
-  const ui = await import('@aether/ui')
-  const commands = await import('../../../packages/ui/src/commands')
-  chat.registerChat()
-  /** The model finishes answering `conv` (the panel is busy until it does). */
-  const finish = () => {
-    const conv = calls.send.at(-1)![0]
-    feed!({ conv, type: 'done', text: '', stop: 'end_turn' })
-  }
-  const nudges = await import('../src/renderer/nudges')
-  return { chat, ui, commands, calls, finish, nudges }
-}
 
 describe('Plan my day in the chat', () => {
   it('sends the prompt of its time of day and counts that as taking the card up', async () => {

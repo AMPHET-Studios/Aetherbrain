@@ -42,6 +42,8 @@ Every feature has a key. `⌘` is `Ctrl` on Windows/Linux. Single keys are ignor
 
 Legend chips (bottom-left): click an area or tag to filter (dims everything else); `⇧`-click a tag to show its **field** — a translucent sphere around the tag's centroid. Inspector tags: click = field, `⇧`-click = filter.
 
+**Every icon does something.** The legend's kinds of body (◉ galaxy, ★ star, ● planet, · moon, ▣ sun, 🖼 picture) are chips too: click one to light up everything of that kind (and `Esc`, or the legend's *clear*, to stop); they combine with the area and tag filters. In an inspector the counts (↗ links out, ↙ backlinks, and a folder's moons, folders and pictures) jump to their lists. The round logo at the top left brings you back to the graph with the whole brain in view (`Home`). The top bar works in every view (Capture, Review, Projects and Boards sit under it, not over it), and the 3D view takes the mouse everywhere the legend and the panels do not.
+
 ## System layout (folders as solar systems)
 
 The default layout, a cosmology (see [COSMOLOGY.md](COSMOLOGY.md)). Each drive is a **◉ galaxy** (several roots, e.g. `D:\` and `F:\`, are several galaxies); every folder is a **★ star**, a project's home folder the biggest; pictures, videos and long notes are **● planets** drawn as extra-large thumbnails; small files are the **· moons** orbiting the folder they live in. A **faster orbit** is a more urgent file and a **brighter star** a more urgent system: both come from the open tasks in your notes.

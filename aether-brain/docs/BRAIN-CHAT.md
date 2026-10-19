@@ -1,6 +1,6 @@
 # Chat in the brain
 
-Press `q` (desktop app) and a chat opens over the left of the 3D brain. It reads your notes, checks in on how you are, helps you plan, and remembers what you ask it to. Its answers link to your notes: click a link and the camera flies there.
+Click the 💬 Chat button in the top bar, or press `q` (desktop app), and a chat opens over the left of the 3D brain. It reads your notes, checks in on how you are, helps you plan, and remembers what you ask it to. Its answers link to your notes: click a link and the camera flies there.
 
 ## Setting it up
 
@@ -10,6 +10,8 @@ The first time, the chat shows its settings (⚙ brings them back).
 | --- | --- | --- |
 | **Claude** (recommended) | An Anthropic API key from console.anthropic.com → API keys (you pay per use). Pick Claude Opus 5.5 (understands you best), Sonnet 5.5 (faster, half the price) or Haiku 4.5 (fastest). | Your messages and the notes the chat reads to answer go to Anthropic. |
 | **Ollama** (on this computer) | [Ollama](https://ollama.com) running, and a model you pulled that can use tools, e.g. `ollama pull llama3.1` or `qwen2.5`. | Nothing. The address must be this computer (`http://127.0.0.1:11434`). |
+
+The app has the chat, but the AI that answers is not inside it: nothing is bundled (a model is about 5 GB). You connect one of the two above. In the chat's settings, the Ollama block looks for Ollama on this computer: it says when Ollama is not running (and how to get it: install it from ollama.com, then `ollama pull qwen3:8b`, about 5 GB), and when it is, it lists the models it has: click one to use it.
 
 The API key is encrypted with your system's keychain (Windows DPAPI, macOS Keychain, the Linux secret service) and stays in the main process; the chat window only ever sees its last four characters. Without a keychain it is kept until the app quits and never written down. **Remove** forgets it.
 
@@ -52,7 +54,7 @@ It is a supportive companion, not a therapist or a doctor. It never diagnoses an
 
 | Key | |
 | --- | --- |
-| `q` | Open or close the chat |
+| `q` | Open or close the chat (the 💬 Chat button in the top bar does the same) |
 | `Enter` / `Shift+Enter` | Send / new line |
 | `Esc` | Clear the message box; on an empty box, close the chat |
 

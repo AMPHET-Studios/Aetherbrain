@@ -92,7 +92,7 @@ export function handleKey(e: KeyboardEvent): void {
       return
     }
     if (s.editorId) return s.closeEditor()
-    if (s.filters.query || s.filters.areas.size || s.filters.tags.size || s.filters.types.size) return s.clearFilters()
+    if (s.filters.query || s.filters.areas.size || s.filters.tags.size || s.filters.types.size || s.filters.bodies.size) return s.clearFilters()
     if (s.selectedId) return s.select(null)
     return
   }

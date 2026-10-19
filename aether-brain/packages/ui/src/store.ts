@@ -42,6 +42,7 @@ import {
   isTodayId,
   isVirtualId,
   isVideoPath,
+  legendBodies,
   loadVault,
   mountOf,
   neighborhood,
@@ -69,6 +70,7 @@ import {
   type ChatImportPlan,
   type GraphData,
   type GraphOptionsFn,
+  type LegendBody,
   type NoteId,
   type NoteType,
   type ParsedNote,
@@ -116,6 +118,8 @@ export interface Filters {
   areas: Set<Area>
   tags: Set<string>
   types: Set<NoteType>
+  /** The legend's kinds of body (a galaxy, a star, a picture …): everything of a chosen kind lights up. */
+  bodies: Set<LegendBody>
   query: string
 }
 
@@ -538,6 +542,8 @@ export interface AetherState {
   setFilters(patch: Partial<Filters>): void
   toggleArea(area: Area): void
   toggleTag(tag: string): void
+  /** Light up (or stop lighting up) every body of one of the legend's kinds. */
+  toggleBody(body: LegendBody): void
   clearFilters(): void
   setActiveTag(tag: string | null): void
   setSettings(patch: Partial<Settings>): void
@@ -953,7 +959,7 @@ export const useAether = create<AetherState>()((set, get) => {
   const syncHighlight = () => {
     const { filters, graph, search, notes } = get()
     if (!graph) return
-    const anyFilter = filters.areas.size > 0 || filters.tags.size > 0 || filters.types.size > 0 || filters.query.trim().length > 0
+    const anyFilter = filters.areas.size > 0 || filters.tags.size > 0 || filters.types.size > 0 || filters.bodies.size > 0 || filters.query.trim().length > 0
     if (!anyFilter) {
       controller.setHighlight(null)
       return
@@ -968,16 +974,27 @@ export const useAether = create<AetherState>()((set, get) => {
       ids = new Set(search.search(q, { limit: 500 }).map((h) => h.id))
     }
     const out = new Set<NoteId>()
-    for (const n of notes.values()) {
-      const m = n.meta
-      if (ids && !ids.has(m.id)) continue
-      if (filters.areas.size && !filters.areas.has(m.area)) continue
-      if (filters.types.size && !filters.types.has(m.type)) continue
-      if (filters.tags.size && ![...filters.tags].every((t) => m.tags.includes(t))) continue
-      out.add(m.id)
+    /** A note passes the area, type, tag and search filters. */
+    const passes = (m: ParsedNote['meta']): boolean =>
+      !(ids && !ids.has(m.id)) && !(filters.areas.size && !filters.areas.has(m.area)) && !(filters.types.size && !filters.types.has(m.type)) && !(filters.tags.size && ![...filters.tags].every((t) => m.tags.includes(t)))
+    if (filters.bodies.size) {
+      // The legend's kinds light up every node of the kind (a folder, a picture, a board, a note), whatever it is. The other filters,
+      // when they are on too, still have to be passed: by notes, which are the only nodes with an area, a type or tags.
+      const others = filters.areas.size > 0 || filters.tags.size > 0 || filters.types.size > 0 || ids !== null
+      for (const node of graph.nodes) {
+        if (!legendBodies(node).some((b) => filters.bodies.has(b))) continue
+        if (others) {
+          const note = notes.get(node.id)
+          if (!note || !passes(note.meta)) continue
+        }
+        out.add(node.id)
+      }
+    } else {
+      for (const n of notes.values()) if (passes(n.meta)) out.add(n.meta.id)
     }
-    // System layout: keep the folders that hold a match lit, so the structure still reads.
-    if (graph.folderSelection) {
+    // System layout: keep the folders that hold a match lit, so the structure still reads (not for the legend's kinds: lighting a
+    // folder for every picture in it would light the whole sky).
+    if (graph.folderSelection && !filters.bodies.size) {
       for (const id of [...out]) {
         let p = nodeOf(graph, id)?.parent ?? null
         while (p !== null && !out.has(p)) {
@@ -1941,7 +1958,7 @@ export const useAether = create<AetherState>()((set, get) => {
     historyIndex: -1,
     paletteOpen: false,
     helpOpen: false,
-    filters: { areas: new Set(), tags: new Set(), types: new Set(), query: '' },
+    filters: { areas: new Set(), tags: new Set(), types: new Set(), bodies: new Set(), query: '' },
     settings,
     activeTag: null,
     toasts: [],
@@ -2345,8 +2362,14 @@ export const useAether = create<AetherState>()((set, get) => {
       else tags.add(tag)
       get().setFilters({ tags })
     },
+    toggleBody(body) {
+      const bodies = new Set(get().filters.bodies)
+      if (bodies.has(body)) bodies.delete(body)
+      else bodies.add(body)
+      get().setFilters({ bodies })
+    },
     clearFilters() {
-      set({ filters: { areas: new Set(), tags: new Set(), types: new Set(), query: '' } })
+      set({ filters: { areas: new Set(), tags: new Set(), types: new Set(), bodies: new Set(), query: '' } })
       syncHighlight()
     },
     setActiveTag(tag) {

@@ -136,7 +136,7 @@ export function Review() {
 
   return (
     <div className="absolute inset-0 z-30 flex items-stretch justify-end bg-black/30" onMouseDown={(e) => e.target === e.currentTarget && setView('graph')} role="dialog" aria-label="Review">
-      <div className="panel rise m-3 flex w-[720px] max-w-[95vw] flex-col overflow-hidden">
+      <div className="panel rise mx-3 mb-3 mt-16 flex w-[720px] max-w-[95vw] flex-col overflow-hidden">
         <div className="flex items-center gap-3 border-b border-[var(--line)] px-4 py-2.5">
           <span className="text-accent2">↻</span>
           <span className="text-[13px] font-semibold text-white">Review</span>

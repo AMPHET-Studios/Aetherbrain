@@ -1227,6 +1227,7 @@ function registerIpc(): void {
   )
   ipc.handle(IPC.chatStatus, () => requireChat().status())
   ipc.handle(IPC.chatConfigure, (_e, patch: unknown) => requireChat().configure(patch && typeof patch === 'object' ? (patch as ChatPatch) : {}))
+  ipc.handle(IPC.chatOllama, () => requireChat().ollamaCheck())
   ipc.handle(IPC.chatSend, (_e, conv: unknown, text: unknown) => requireChat().send(conv, text))
   ipc.handle(IPC.chatStop, (_e, conv: unknown) => requireChat().stop(conv))
   ipc.handle(IPC.chatForget, (_e, conv: unknown) => requireChat().forget(conv))
