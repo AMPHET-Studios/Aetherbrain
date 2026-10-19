@@ -80,6 +80,7 @@ The desktop app ships an [MCP](https://modelcontextprotocol.io) server, so your 
 
 - **Claude Desktop** — install `aether-brain-<version>.mcpb` from the Releases page (double-click it, or Settings → Extensions → Install Extension) and pick your folders or drives. Or press `a` in the app and paste the generated config.
 - **Claude Code** — press `a` in the app and copy the `claude mcp add …` command.
+- **The Claude plugin** (Claude Code) — in a terminal `claude plugin marketplace add YEASTINFECTIONCHEESE/desktop-tutorial`, then `claude plugin install aether-brain@aether-brain` (inside Claude Code: `/plugin marketplace add …` and `/plugin install …`), with the app open and its link on. Claude then works in the *live* brain: it can send in a screenshot or picture file you name (`save_image`), **look at your pictures** (`find_pictures`, `get_image`) and **fly your 3D view** to a note, folder or picture (`show_in_brain`). See [The Claude plugin](docs/AI-LINK.md#the-claude-plugin).
 - **ChatGPT** (and claude.ai on the web) — press `a`, switch the link on, expose it with a tunnel (`cloudflared tunnel --url http://127.0.0.1:7457`), and add the `https://…/mcp/<token>` URL as a developer-mode app / custom connector.
 
 Ask it "what's on today?": the `daily_brief` tool returns the same brief as the Today hub. The AI can only touch markdown notes and folders inside your vault roots, never deletes files, and can be set to read-only. Full guide, tool list and security notes: [docs/AI-LINK.md](docs/AI-LINK.md).

@@ -32,7 +32,7 @@ import {
   type VaultProgressDto,
 } from '../shared/ipc.js'
 import type { ChatPatch } from '../shared/chat.js'
-import { FsVault, isModelName, isVideoName, within } from './fsvault.js'
+import { FsVault, isAssetName, isModelName, isVideoName, within } from './fsvault.js'
 import { VaultWatcher } from './watcher.js'
 import { findProjects } from './projects.js'
 import { FilePager, type FilePage } from './pages.js'
@@ -56,6 +56,7 @@ import {
 } from './assets.js'
 import { THUMB_IPC, Thumbnailer, VIDEO_SCHEME } from './thumbnailer.js'
 import { AiLinkHost, aiSettings, cleanPatch, type AiLinkSettings, type LinkVault } from './ai-link.js'
+import { makePictureHost } from './ai-pictures.js'
 import { ForgeHost, forgeSettings, type ForgeSettings } from './forge.js'
 import { BoardWindowHost, FlushGate, PictureLedger, boardHandlers, boardSettings, guardIpc, type BoardSettings } from './board-window.js'
 import { readAssetBytes, readAssetChecked } from './read-asset.js'
@@ -234,6 +235,8 @@ let vision: VisionHelper | null = null
 let board: BoardWindowHost | null = null
 /** Pictures created or removed since the last scan, which `listAssets` does not have (the floating board window needs them). */
 const pictureLedger = new PictureLedger()
+/** The same for pictures, videos and 3D models together: what the AI link's find_pictures lists (the board's ledger is pictures only). */
+const assetLedger = new PictureLedger(isAssetName)
 /**
  * The save-before-close handshake of every window that can hold an unsaved board (the board window, the brain window with a docked
  * board) and of the app quitting: a window's first close, and the quit, wait for its page to say it saved (board-window.ts).
@@ -357,6 +360,7 @@ async function openVault(input: string[], opts?: OpenVaultOptions): Promise<Vaul
   aiHeld = null
   thumbs.clear()
   pictureLedger.clear()
+  assetLedger.clear()
   vault = next
   opened = true
   settings.roots = wanted
@@ -402,6 +406,7 @@ async function listFiles(): Promise<FilePage> {
     if (latest()) {
       // The new list has every picture the old changes were about; what the watcher reports from here on is new.
       pictureLedger.clear()
+      assetLedger.clear()
       w.seed({ files: scan.files.map((f) => f.path), folders: scan.folders, images: scan.assets.map((a) => a.path), imagesCapped: scan.assetsTruncated })
     }
     const found = scan.files.length
@@ -427,6 +432,7 @@ async function startWatcher(v: FsVault): Promise<VaultWatcher> {
     toAi(changes)
     // The floating board window gets the pictures (no note text) and the board it shows, to keep both right.
     pictureLedger.apply(changes)
+    assetLedger.apply(changes)
     board?.forward(changes)
   })
   watcher = w
@@ -649,6 +655,7 @@ async function createAsset(p: unknown, data: unknown): Promise<void> {
   const madeFolder = parent !== '' && (await v.stat(parent)) === null
   await v.createBinary(rel, bytes)
   pictureLedger.add(canonical, { mtime: Date.now(), size: bytes.length })
+  assetLedger.add(canonical, { mtime: Date.now(), size: bytes.length })
   const changes: VaultChangeDto[] = madeFolder ? [{ kind: 'addDir', path: parent }] : []
   changes.push({ kind: 'add', path: canonical, mtime: Date.now(), size: bytes.length })
   toAi(changes)
@@ -853,6 +860,29 @@ function createAiLink(): AiLinkHost {
     serverScript,
     execPath: process.execPath,
     portable: !!process.env['PORTABLE_EXECUTABLE_DIR'],
+    // What only the running app can offer the AI: the pictures (through the helper that decodes them) and the window.
+    pictures: makePictureHost({
+      // The last scan with what the watcher reported since: a picture an AI sent a moment ago is found at once.
+      paths: () => {
+        const scan = vault?.lastScan
+        return scan ? assetLedger.list(scan.assets).map((a) => a.path) : null
+      },
+      stat: (paths) => {
+        const v = requireVault()
+        return v.statAssets(paths.map((p) => ({ path: p, abs: v.abs(p) })))
+      },
+      open: async (p) => {
+        const v = vault
+        if (!v) return null
+        const abs = (await v.assetAbs(p)) ?? (await v.modelAbs(p))
+        return abs ? { abs, path: v.toVault(abs) ?? p } : null
+      },
+      thumbnail: (p, px) => within(thumbnail(p, px), THUMB_TIMEOUT, null),
+    }),
+    show: (target) => {
+      if (!win || win.isDestroyed()) throw new Error('The Aether Brain window is not open. Ask the user to open the app, then try again.')
+      toRenderer(IPC.aiShow, target)
+    },
   })
 }
 

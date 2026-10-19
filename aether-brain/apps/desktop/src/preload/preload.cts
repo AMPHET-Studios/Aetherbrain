@@ -88,6 +88,7 @@ const IPC = {
   aiStatus: 'ai:status',
   aiConfigure: 'ai:configure',
   aiActivity: 'ai:activity',
+  aiShow: 'ai:show',
   copy: 'app:copy',
 } as const
 
@@ -252,6 +253,7 @@ const bridge: AetherBridge = {
   aiStatus: () => ipcRenderer.invoke(IPC.aiStatus),
   aiConfigure: (patch) => ipcRenderer.invoke(IPC.aiConfigure, patch),
   onAiActivity: (cb) => on(IPC.aiActivity, cb),
+  onAiShow: (cb) => on(IPC.aiShow, cb),
   onChatEvent: (cb) => on(IPC.chatEvent, cb),
   copyText: (text) => ipcRenderer.invoke(IPC.copy, text),
   platform: process.platform,

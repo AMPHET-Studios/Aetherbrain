@@ -208,6 +208,25 @@ describe('preload: the reference board', () => {
   })
 })
 
+describe('preload: an AI asks the window to show something', () => {
+  it('relays ai:show payloads on their own channel until unsubscribed, without the Electron event', () => {
+    const seen: unknown[][] = []
+    const off = bridge.onAiShow((...args: unknown[]) => void seen.push(args))
+    const fire = (channel: string, ...payload: unknown[]): void => {
+      for (const fn of electron.listeners.get(channel) ?? []) fn({ sender: 'secret' }, ...payload)
+    }
+    fire('ai:show', { kind: 'note', path: 'Projects/PORTALz.md', open: true }, 'extra')
+    // Another channel's events never reach it.
+    fire('ai:activity', { tool: 'search' })
+    off()
+    fire('ai:show', { kind: 'today', path: '', open: false })
+    expect(seen).toEqual([[{ kind: 'note', path: 'Projects/PORTALz.md', open: true }]])
+    expect(electron.listeners.get('ai:show')).toEqual([])
+    // The channel name is the contract with main (and with the parity test of the two tables): literal here on purpose.
+    expect(IPC.aiShow).toBe('ai:show')
+  })
+})
+
 describe('preload: Find projects', () => {
   it('invokes the find channels and relays progress until unsubscribed', async () => {
     await bridge.findProjects()

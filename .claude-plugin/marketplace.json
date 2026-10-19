@@ -1,0 +1,19 @@
+{
+  "name": "aether-brain",
+  "owner": {
+    "name": "Aether Brain contributors"
+  },
+  "metadata": {
+    "description": "Plugins for Aether Brain, the local-first 3D second brain."
+  },
+  "plugins": [
+    {
+      "name": "aether-brain",
+      "source": "./aether-brain/plugin/aether-brain",
+      "description": "Work in your live Aether Brain from Claude: send it pictures and ideas, look at the pictures in it, and make its 3D view fly to things.",
+      "version": "0.10.5",
+      "category": "productivity",
+      "keywords": ["notes", "second brain", "markdown", "pictures", "mcp"]
+    }
+  ]
+}

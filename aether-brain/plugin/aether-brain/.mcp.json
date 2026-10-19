@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "aether-brain": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/bin/bridge.mjs"]
+    }
+  }
+}

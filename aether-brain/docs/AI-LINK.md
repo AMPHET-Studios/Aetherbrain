@@ -13,6 +13,7 @@ The link runs on your own computer and reads the folders you chose.
 - [Which setup do I need?](#which-setup-do-i-need)
 - [Claude Desktop](#claude-desktop)
 - [Claude Code](#claude-code)
+- [The Claude plugin](#the-claude-plugin)
 - [ChatGPT](#chatgpt)
 - [claude.ai in the browser](#claudeai-in-the-browser)
 - [Sending pictures and ideas](#sending-pictures-and-ideas)
@@ -35,6 +36,7 @@ The link runs on your own computer and reads the folders you chose.
 - create folders, for example a new planet `Sound` inside your `PORTALz` project folder
 - save the conversation you're having as a chat note (*"save this chat to my brain"*), see [AI-CHATS.md](AI-CHATS.md)
 - save a picture you share (an image you attached or one it made, a screenshot) into your Inbox, with an idea note that shows it, see [Sending pictures and ideas](#sending-pictures-and-ideas)
+- while the app is open: look at your pictures (`find_pictures`, `get_image`: it gets the picture itself to describe or give feedback on) and fly your 3D view to a note, folder or picture (`show_in_brain`), see [The Claude plugin](#the-claude-plugin)
 
 **It cannot:**
 
@@ -44,7 +46,7 @@ The link runs on your own computer and reads the folders you chose.
   a `README.md` or `CHANGELOG.md`, or a name that differs only in capitals. If a
   name is taken, it adds ` 2`, ` 3`, and so on.
 - **create anything except `.md` notes, folders and pictures.** It can't create scripts or programs. A picture is only ever a new file that really is a picture (PNG, JPEG, GIF, WebP, BMP or AVIF, at most 40 MB), saved under a name nothing has yet: it never replaces a picture that is there.
-- **reach outside the folders you chose,** with one exception: when you ask Claude Desktop or Claude Code to save a picture, `save_image` may copy a picture file you name from anywhere on your computer into your Inbox (never a network path, and only a file that really is a picture). Every other path is checked, including symlinks and junctions that point elsewhere.
+- **reach outside the folders you chose,** with one exception: when you ask Claude Desktop, Claude Code or the Claude plugin to save a picture, `save_image` may copy a picture file you name from anywhere on your computer into your Inbox (never a network path, and only a file that really is a picture). Every other path is checked, including symlinks and junctions that point elsewhere.
 - **open hidden or system folders.** It always skips `Windows`, `Program Files`, `AppData`, `$RECYCLE.BIN`, `System Volume Information`, dot-folders, `node_modules`, and build and cache folders.
 - **open folders you told it to skip.** Where you set this depends on the setup:
   - the app's **AI link** (ChatGPT, claude.ai) uses the folders you excluded in the app (<kbd>v</kbd>);
@@ -66,6 +68,7 @@ roots, the AI sees them as the top folders `D` and `F` (for example
 | --- | --- | --- |
 | **Claude Desktop** | The Aether Brain extension (`.mcpb`), or a config from the app | No. Claude runs its own copy. |
 | **Claude Code** (terminal) | One `claude mcp add` command | No |
+| **Claude Code**, wanting it to look at your pictures and make the 3D view fly | The Aether Brain **plugin** | Yes, with the link on |
 | **ChatGPT** (web) | The app's **AI link**, a tunnel, and a connector in ChatGPT | Yes, with the link on |
 | **claude.ai** (web) | The same link and tunnel as ChatGPT, then a custom connector | Yes, with the link on |
 
@@ -153,6 +156,58 @@ run `claude mcp remove aether-brain --scope user` and then the new command. It
 also contains the path of the Aether Brain program, so with the **Portable** exe
 (whose path changes every launch) it stops working; install Aether Brain with
 the setup exe instead.
+
+## The Claude plugin
+
+The plugin gives Claude Code a direct line to the
+Aether Brain that is **open on your computer**. It sees the notes the app shows, and it can do
+three things that only the open app can:
+
+- **Send in.** Claude saves a screenshot or a picture file you name straight into your Inbox
+  (`save_image` with a `path`: any picture file up to 40 MB), with your idea written next to it.
+- **Look.** `find_pictures` lists your pictures, videos and 3D models by words in their path;
+  `get_image` hands Claude the picture itself (a video's still frame, a 3D model's still, at most
+  1024 px on the long side) to describe, compare or give feedback on. The reply also names the notes
+  that show it, so Claude can read what you meant by it.
+- **Point.** `show_in_brain` flies your 3D view to a note, a folder (its star), a picture or the Today hub.
+  It leaves the camera alone while you are typing in a note, and the Aether Brain window has to be open.
+
+**Install** (once). Run these two lines in a terminal (PowerShell on Windows):
+
+```
+claude plugin marketplace add YEASTINFECTIONCHEESE/desktop-tutorial
+claude plugin install aether-brain@aether-brain
+```
+
+Inside an interactive Claude Code session the same two are `/plugin marketplace add YEASTINFECTIONCHEESE/desktop-tutorial`
+and `/plugin install aether-brain@aether-brain`. Then, in Aether Brain, press <kbd>a</kbd> and switch **Link on**. The plugin needs Aether Brain 0.10.6 or newer
+and [Node.js](https://nodejs.org) 20 or newer (it starts a small program written for it).
+
+There is nothing to configure. The plugin's program (`bin/bridge.mjs`) finds the link by reading the app's own
+`settings.json` (`%APPDATA%\Aether Brain` on Windows, `~/Library/Application Support/Aether Brain` on a Mac,
+`~/.config/Aether Brain` on Linux) and forwards Claude's messages to `http://127.0.0.1:<port>`. The address is always
+your own computer; the key in that file is never printed or sent anywhere else. If you changed the port or made a
+new key, it follows without a restart.
+
+**If the app is closed or the link is off,** Claude is told so, with what to do: the plugin lists one tool,
+`aether_brain_status`, and answers every call with the reason (the app is not running, the link is switched off,
+and so on). Open the app and switch the link on and the real tools appear in Claude by themselves within a few
+seconds; nothing needs restarting. To see what the plugin sees, run `node bin/bridge.mjs --check` in the plugin's
+folder (it prints whether the app answers and exits).
+
+**Why `save_image` can take a path here.** The link refuses file paths from anyone who reaches it directly, because a
+caller that comes through a tunnel must not name files on your computer. The plugin's program runs on your computer, as you,
+like the extension and the Claude Code command do. It reads the picture with the same checks (a whole path, a picture's
+file name, never a network or device path, a link judged where it leads, bytes that really are a picture, at most 40 MB)
+and sends the bytes on. Nobody else can use that door.
+
+**How it differs from the other setups.** The extension and the `claude mcp add` command run their own copy of the server on your
+folders, so they work with the app closed, but they cannot show Claude your pictures or move your 3D view. The plugin needs the app open.
+You can use both.
+
+**ChatGPT cannot use a plugin like this.** ChatGPT only calls servers on the internet, so it keeps using the tunnel
+([ChatGPT](#chatgpt)). Through the same link it gets the same tools, `find_pictures`, `get_image` and `show_in_brain` among them
+(`get_image` answers with a line of text first, then the picture, for a connector that shows images).
 
 ## ChatGPT
 
@@ -257,12 +312,20 @@ Read tools (always available):
 | `my_trends` | Your check-ins over 7–90 days: the last week against the weeks before (mood, sleep, energy, stress, medication), with plain-fact notices |
 | `wellbeing_playbook` | Your Wellbeing playbook (or one section of it): the evidence behind wellbeing advice, your early warning signs plan, the people you lean on |
 
+Tools only the open app offers (the extension and the command do not have them; they change nothing in your vault, so they stay on when the link is read-only):
+
+| Tool | What it does |
+| --- | --- |
+| `find_pictures` | The pictures, videos and 3D models, by words in their path, optionally inside one folder, alphabetical, up to 100 |
+| `get_image` | One picture itself, scaled to at most `max_px` (64–1024, default 768) on its longer side, with where it is, how big it is and the notes that show it |
+| `show_in_brain` | Fly the 3D view to a note, folder, picture or the Today hub and select it (a note can open in the editor too) |
+
 Write tools (hidden when the link is read-only):
 
 | Tool | What it does |
 | --- | --- |
 | `capture` | Save a quick idea as a new note in the Inbox |
-| `save_image` | Save a picture (from `file`, `path` or `data`) as a new file in Inbox/Pictures or a folder you name, with an optional Inbox note that shows it; never replaces a picture |
+| `save_image` | Save a picture (from `file`, `path` or `data`) as a new file in Inbox/Pictures or a folder you name, with an optional Inbox note that shows it; never replaces a picture. `path` works for the stdio setups and the plugin; `data` takes up to 40 MB as base64 but an AI writes every character itself, so it is for small pictures |
 | `create_note` | A new note (Inbox by default, or any folder); never overwrites |
 | `append_to_note` | Add text at the end of a note, or under a heading |
 | `edit_note` | Replace one exact passage (it must appear exactly once) |
@@ -293,7 +356,8 @@ tool changes nothing and replies with the current lines.
   have leaked. The old URL stops working at once. Then paste the new URL into
   ChatGPT or claude.ai. Claude Desktop and Claude Code don't use the token, so
   they aren't affected.
-- **Pictures are checked.** `save_image` writes only a file whose first bytes really are a picture, never over one that is there, and only inside your vault folders. `path` works only for Claude Desktop and Claude Code (which run on your computer): the link a tunnel reaches (ChatGPT, claude.ai) refuses it, so a caller outside your computer cannot name your files. A network or device path is refused. `file` downloads only from ChatGPT's file hosts, over https, with no password in the address, and follows a redirect only to those hosts again, because an address an AI wrote could otherwise carry your notes out in its query string.
+- **Pictures are checked.** `save_image` writes only a file whose first bytes really are a picture, never over one that is there, and only inside your vault folders. `path` works only for Claude Desktop, Claude Code and the Claude plugin (which run on your computer): the link a tunnel reaches (ChatGPT, claude.ai) refuses it, so a caller outside your computer cannot name your files. A network or device path is refused. `file` downloads only from ChatGPT's file hosts, over https, with no password in the address, and follows a redirect only to those hosts again, because an address an AI wrote could otherwise carry your notes out in its query string.
+- **Your pictures are as open as your notes.** With the app's link on, whoever holds the link can ask for a picture (`get_image`) as well as a note, and Read only does not stop that, because looking changes nothing. That includes ChatGPT or claude.ai through a tunnel. The plugin on your own computer uses the same link.
 - **Turn the link off when you don't need it,** and stop the tunnel (press Ctrl+C
   in its window). Without the tunnel, the link is only reachable from your own
   computer. It listens on `127.0.0.1` only.
@@ -316,6 +380,10 @@ tool changes nothing and replies with the current lines.
 - **One drive is missing from the answers**: the log says `Vault folder not found:
   F:\ (skipped; the other folders are served)`. That drive wasn't reachable when
   Claude Desktop started. Plug it in and restart Claude Desktop.
+- **The plugin says Aether Brain is not available**: ask Claude to call `aether_brain_status`, or run
+  `node bin/bridge.mjs --check` in the plugin's folder. It says whether the app has never been opened,
+  the link is switched off (press <kbd>a</kbd> in the app and switch **Link on**), or the app is not running.
+  If Claude cannot start the plugin at all, check that `node --version` works in a terminal (Node.js 20 or newer).
 - **ChatGPT says it can't connect**: check that the link is on, that the tunnel
   window is still running, and that the connector URL uses the tunnel's *current*
   address and ends in `/mcp/<token>`.

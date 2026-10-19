@@ -23,7 +23,7 @@ async function fresh() {
   vi.stubGlobal('localStorage', new MemoryStorage())
   vi.resetModules()
   const { useAether } = await import('@aether/ui')
-  const { flyToPath } = await import('../src/renderer/panels')
+  const { flyToPath, showForAi } = await import('../src/renderer/panels')
   await useAether.getState().openVault(
     new MemoryVaultAdapter(
       [
@@ -33,7 +33,7 @@ async function fresh() {
       { folders: ['Projects/PORTALz/Sound'], assets: [{ path: 'Inbox/Pictures/gate-hum.png', data: new Uint8Array(10), mtime: 1 }] },
     ),
   )
-  return { s: () => useAether.getState(), flyToPath }
+  return { s: () => useAether.getState(), set: useAether.setState, flyToPath, showForAi }
 }
 
 afterEach(() => void vi.unstubAllGlobals())
@@ -58,5 +58,57 @@ describe('the brain flies to what an AI wrote', () => {
     s().select(null)
     flyToPath('Projects/PORTALz/Sound')
     expect(s().selectedId).toBe('folder:Projects/PORTALz/Sound')
+  })
+})
+
+describe('an AI asks the window to show something (show_in_brain)', () => {
+  it('flies to a note and selects it, without opening it unless asked', async () => {
+    const { s, showForAi } = await fresh()
+    s().select(null)
+    showForAi({ kind: 'note', path: 'Projects/PORTALz.md', open: false })
+    expect(s().selectedId).toBe('Projects/PORTALz')
+    expect(s().editorId).toBeNull()
+  })
+
+  it('opens a note in the editor when asked to', async () => {
+    const { s, showForAi } = await fresh()
+    s().select(null)
+    showForAi({ kind: 'note', path: 'Projects/PORTALz.md', open: true })
+    expect(s().selectedId).toBe('Projects/PORTALz')
+    expect(s().editorId).toBe('Projects/PORTALz')
+    expect(s().view).toBe('editor')
+  })
+
+  it('shows a folder as its star, a picture as its moon and the Today hub', async () => {
+    const { s, showForAi } = await fresh()
+    s().select(null)
+    showForAi({ kind: 'folder', path: 'Projects/PORTALz/Sound', open: false })
+    expect(s().selectedId).toBe('folder:Projects/PORTALz/Sound')
+    showForAi({ kind: 'picture', path: 'Inbox/Pictures/gate-hum.png', open: false })
+    expect(s().selectedId).toBe('image:Inbox/Pictures/gate-hum.png')
+    // Looking at a picture must not open the picture app: that is what Enter does, not what an AI's "show" does.
+    showForAi({ kind: 'today', path: '', open: false })
+    expect(s().selectedId).toBe('today:')
+  })
+
+  it('leaves the camera alone while a note is being typed, and says so', async () => {
+    const { s, set, showForAi } = await fresh()
+    s().openNote('Projects/PORTALz')
+    set({ dirty: true })
+    showForAi({ kind: 'folder', path: 'Projects/PORTALz/Sound', open: false })
+    expect(s().selectedId).toBe('Projects/PORTALz')
+    expect(s().toasts.at(-1)?.text).toBe('An AI wants to show you Sound. Save your note, then ask again.')
+    showForAi({ kind: 'today', path: '', open: false })
+    expect(s().selectedId).toBe('Projects/PORTALz')
+    expect(s().toasts.at(-1)?.text).toBe('An AI wants to show you the Today hub. Save your note, then ask again.')
+  })
+
+  it('does nothing before a vault is ready', async () => {
+    const { s, set, showForAi } = await fresh()
+    s().select(null)
+    set({ status: 'idle' })
+    showForAi({ kind: 'note', path: 'Projects/PORTALz.md', open: true })
+    expect(s().selectedId).toBeNull()
+    expect(s().editorId).toBeNull()
   })
 })

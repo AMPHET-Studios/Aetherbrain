@@ -3,8 +3,9 @@
  * of them is written. Pure Node, tested without Electron or a network.
  *
  * Three sources, each with the rules its trust deserves:
- *  - `data`: the picture itself as base64 text. Small only (the HTTP link refuses a request over 1 MiB), and the model has to
- *    type every character of it, so it is for icons and sketches, not photographs.
+ *  - `data`: the picture itself as base64 text. A model has to type every character of it, so for a model it is for icons and
+ *    sketches (about 600 KB), not photographs; the plugin's bridge, which reads a file from disk and sends it as `data`, can send
+ *    a whole picture (up to 40 MB, the HTTP link's request cap leaves room for it).
  *  - `path`: a file on this computer. Only for a client that runs the server here (Claude Desktop, Claude Code: stdio), never
  *    for the HTTP link a tunnel reaches. A network or device path (`\\server\share`, `\\?\`) is refused outright (Windows would
  *    send the user's credentials to it), the file must be a real picture of a name Aether Brain shows, and a symlink is followed
@@ -22,8 +23,12 @@ import { slugifyTitle, todayIso } from '@aether/core'
 import { MAX_ASSET_BYTES, type ImageKind } from '../main/assets.js'
 import { isImageName } from '../main/fsvault.js'
 
-/** Most base64 characters a `data` argument may carry: the HTTP link refuses a request over 1 MiB, and this leaves room for the rest of it. */
-export const MAX_PICTURE_DATA_CHARS = 850_000
+/**
+ * Most base64 characters a `data` argument may carry: a whole 40 MB picture (`MAX_ASSET_BYTES`) is 55.9 million, so the plugin's
+ * bridge can send a screenshot it read from disk. A model that has to type the characters itself cannot get anywhere near this:
+ * for it, `data` is for icons and sketches (about 600 KB). The HTTP link's request cap (`MAX_BODY_BYTES`) leaves room for it.
+ */
+export const MAX_PICTURE_DATA_CHARS = 56_000_000
 /** Where a picture goes when no folder is given, under the vault's home. */
 export const PICTURES_FOLDER = 'Inbox/Pictures'
 /**
@@ -84,15 +89,28 @@ export function decodePictureData(raw: string): Uint8Array {
     if (!/;base64$/i.test(url[2] ?? '')) throw new Error('data must be base64: bare base64 text, or a data:image/png;base64,… address')
     s = s.slice(url[0].length)
   }
-  s = s.replace(/\s+/g, '')
+  // A picture can be tens of megabytes of text: no copy of it is made unless it has whitespace in it.
+  if (/\s/.test(s)) s = s.replace(/\s+/g, '')
   if (!s) throw new Error('data is empty')
   if (s.length > MAX_PICTURE_DATA_CHARS) {
-    throw new Error(`data is too long: ${s.length.toLocaleString('en-US')} characters (at most ${MAX_PICTURE_DATA_CHARS.toLocaleString('en-US')}, a picture of about 600 KB). Use file or path for a bigger picture.`)
+    throw new Error(`data is too long: ${s.length.toLocaleString('en-US')} characters (at most ${MAX_PICTURE_DATA_CHARS.toLocaleString('en-US')}, a picture of 40 MB). Use file or path for a bigger one.`)
   }
-  // URL-safe base64 (`-` `_`) is read too.
-  s = s.replace(/-/g, '+').replace(/_/g, '/')
-  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(s)) throw new Error('data is not base64 text')
+  if (!isBase64Text(s)) throw new Error('data is not base64 text')
+  // Node reads both alphabets (`+` `/` and the URL-safe `-` `_`), which is why both were let through above.
   return new Uint8Array(Buffer.from(s, 'base64'))
+}
+
+/** True when `s` is base64 (either alphabet, up to two `=` at the end), checked by a loop that makes no copy of a long string. */
+function isBase64Text(s: string): boolean {
+  let end = s.length
+  while (end > 0 && s.charCodeAt(end - 1) === 61 /* = */) end--
+  if (s.length - end > 2 || end === 0) return false
+  for (let i = 0; i < end; i++) {
+    const c = s.charCodeAt(i)
+    const ok = (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c === 43 || c === 47 || c === 45 || c === 95
+    if (!ok) return false
+  }
+  return true
 }
 
 /* ------------------------------ path ------------------------------- */

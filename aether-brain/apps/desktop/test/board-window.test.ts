@@ -9,7 +9,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { newBoardNote } from '@aether/core'
 import { IPC, type AetherBridge, type BoardStatusDto, type ReadAssetResult, type VaultAssetDto, type VaultChangeDto } from '../src/shared/ipc.js'
 import { ECHO_TEXTS, MAX_NAME_TRIES, PICTURE_CHANGE_MS, boardFolderOfPath, createFloatingBoardHost, numberedName, sniffMime } from '../src/renderer/board-host.js'
-import { FsVault } from '../src/main/fsvault.js'
+import { FsVault, isAssetName } from '../src/main/fsvault.js'
 import { CRASH_WINDOW_MS } from '../src/main/crash.js'
 import { lf } from './lf.js'
 import {
@@ -542,6 +542,13 @@ describe('PictureLedger', () => {
     // A folder named like a picture is still a folder.
     ledger.apply([ch('addDir', 'Art/folder.png')])
     expect(ledger.list([])).toEqual([])
+  })
+
+  it('takes videos and 3D models too when asked to (what the AI link lists), and still never notes or folders', () => {
+    const ledger = new PictureLedger(isAssetName)
+    expect(ledger.list([{ path: 'a.png' }, { path: 'clip.mp4' }, { path: 'robot.glb' }, { path: 'n.md' }, { path: 'c.txt' }])).toEqual([{ path: 'a.png' }, { path: 'clip.mp4' }, { path: 'robot.glb' }])
+    ledger.apply([ch('add', 'new.MOV', { mtime: 2 }), ch('add', 'Refs/new.glb', { size: 9 }), ch('unlink', 'clip.mp4'), ch('add', 'n.md', { content: 'x' }), ch('addDir', 'Art/folder.glb')])
+    expect(ledger.list([{ path: 'a.png' }, { path: 'clip.mp4' }])).toEqual([{ path: 'a.png' }, { path: 'new.MOV', mtime: 2 }, { path: 'Refs/new.glb', size: 9 }])
   })
 
   it('forgets everything when a scan finishes (the new list has it all)', () => {

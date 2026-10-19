@@ -362,6 +362,15 @@ export interface AiActivityDto {
   write: boolean
 }
 
+/** An AI asked the window to show something (show_in_brain): fly there and select it. */
+export interface AiShowDto {
+  kind: 'note' | 'folder' | 'picture' | 'today'
+  /** Vault path ('' for the Today hub). */
+  path: string
+  /** A note: open it in the editor as well. */
+  open: boolean
+}
+
 /* ---- the reference board's floating window ---- */
 
 /** The floating board window, for both windows' toolbars and the palette. */
@@ -577,6 +586,8 @@ export interface AetherBridge {
   aiStatus(): Promise<AiLinkStatus>
   aiConfigure(patch: AiLinkPatch): Promise<AiLinkStatus>
   onAiActivity(cb: (a: AiActivityDto) => void): () => void
+  /** An AI asked for something to be shown in the 3D view. */
+  onAiShow(cb: (s: AiShowDto) => void): () => void
   /** Copy text to the OS clipboard (the sandboxed renderer may not have clipboard access). */
   copyText(text: string): Promise<void>
 
@@ -680,6 +691,8 @@ export const IPC = {
   aiStatus: 'ai:status',
   aiConfigure: 'ai:configure',
   aiActivity: 'ai:activity',
+  /** main → brain window: { kind, path, open } from an AI's show_in_brain. */
+  aiShow: 'ai:show',
   copy: 'app:copy',
 } as const
 
