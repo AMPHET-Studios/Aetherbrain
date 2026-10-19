@@ -11,7 +11,7 @@
       "name": "aether-brain",
       "source": "./aether-brain/plugin/aether-brain",
       "description": "Work in your live Aether Brain from Claude: send it pictures and ideas, look at the pictures in it, and make its 3D view fly to things.",
-      "version": "0.10.6",
+      "version": "0.10.7",
       "category": "productivity",
       "keywords": ["notes", "second brain", "markdown", "pictures", "mcp"]
     }
