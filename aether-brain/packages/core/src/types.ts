@@ -161,6 +161,11 @@ export interface FolderNodeInfo {
   galaxy?: boolean
   /** True for the Bio star: the folder `Bio` at the vault's home (`FolderGraphOptions.bio`), drawn as the one big, bright, blue star. */
   bio?: boolean
+  /**
+   * True for the Bio star before its folder exists (`FolderGraphOptions.bioPlaceholder`): a star with nothing in it, standing
+   * where the folder will be, that the inspector's button makes real. It has no folder on disk to reveal, leave out or open.
+   */
+  placeholder?: boolean
   /** Project note bound to this folder (the star's note), if any. */
   projectId: NoteId | null
   /** True when some ancestor folder is a project folder (its planets and moons). */

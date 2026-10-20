@@ -1,4 +1,4 @@
-import type { GraphData, GraphNode, NoteId } from '@aether/core'
+import type { GraphData, GraphNode, NoteId, SunLevel } from '@aether/core'
 import { GALLERY_DWELL_MS, GALLERY_FOLD_MS, GALLERY_FRAMING_MS, GALLERY_REACH_MS, nearestStar as starNearCamera } from './gallery'
 import { LayoutEngine } from './layout/LayoutEngine'
 import type { LayoutMode } from './layout/protocol'
@@ -12,6 +12,11 @@ export type ThumbnailLoader = (path: string, size: number) => Promise<Blob | nul
 
 export interface BrainEvents {
   onSelect?: (id: NoteId | null) => void
+  /**
+   * The user clicked this body in the 3D view (after `onSelect`): what a click does that a search or the keyboard does not,
+   * open a sun and play its sound.
+   */
+  onPick?: (id: NoteId) => void
   onOpen?: (id: NoteId) => void
   onHover?: (id: NoteId | null) => void
   /**
@@ -196,6 +201,58 @@ export class BrainController {
   private reachTimer: ReturnType<typeof setTimeout> | null = null
   /** Asks again once the camera has dwelt near a star (or the first framing is over). */
   private dwellTimer: ReturnType<typeof setTimeout> | null = null
+  /**
+   * Suns open into planets, then moons. Off: every body shows, always (the other layouts, and anyone who wants the old crowd).
+   * On: a sun shows its planets from level 1 and its moons from level 2; a closed one (level 0) shows only itself (the folders
+   * directly under a galaxy are always shown, so a closed vault is a field of suns).
+   */
+  suns = true
+  /** The level of every sun that was not given one of its own. */
+  private sunDefault: SunLevel = 0
+  private sunOwn = new Map<NoteId, SunLevel>()
+  /** Bumped whenever a sun's level changes; the scene rebuilds its levels when it moves. */
+  sunVersion = 0
+
+  /** How open a sun is (a folder's star, a board's sun, a galaxy). */
+  sunLevel(id: NoteId): SunLevel {
+    return this.sunOwn.get(id) ?? this.sunDefault
+  }
+
+  /** The level of the suns with none of their own. */
+  get sunDefaultLevel(): SunLevel {
+    return this.sunDefault
+  }
+
+  /** Open or close one sun. */
+  setSunLevel(id: NoteId, level: SunLevel): void {
+    if (this.sunLevel(id) === level) return
+    if (level === this.sunDefault) this.sunOwn.delete(id)
+    else this.sunOwn.set(id, level)
+    this.sunVersion++
+    this.touch()
+  }
+
+  /** Replace every level at once: the suns' own levels (those that differ from the default) and the default. */
+  setSunLevels(defaultLevel: SunLevel, own: ReadonlyMap<NoteId, SunLevel> | null = null): void {
+    this.sunDefault = defaultLevel
+    this.sunOwn = new Map()
+    if (own) for (const [id, level] of own) if (level !== defaultLevel) this.sunOwn.set(id, level)
+    this.sunVersion++
+    this.touch()
+  }
+
+  /** The suns that have a level of their own (the ones the user opened or closed by hand). */
+  get sunLevelsOwn(): ReadonlyMap<NoteId, SunLevel> {
+    return this.sunOwn
+  }
+
+  setSuns(on: boolean): void {
+    if (this.suns === on) return
+    this.suns = on
+    this.sunVersion++
+    this.touch()
+  }
+
   /** Bumped whenever a visual property changes; the scene diffs against it. */
   version = 0
 
@@ -636,8 +693,9 @@ export class BrainController {
       far = Math.max(far, Math.sqrt(dx * dx + dy * dy + dz * dz) + nodeRadius(c, this.pictureSize) * 3)
     }
     const r = nodeRadius(node, this.pictureSize)
-    // A sphere of radius `far` fills the 55° view at far / sin(27.5°) ≈ 2.17 far.
-    return Math.min(3000, far > r * 2 ? far * 2.3 : 34 + r * 14)
+    // A sphere of radius `far` fills the 55° view at far / sin(27.5°) ≈ 2.17 far. Never closer than 13 radii of the star itself: a big
+    // star with a small system (the Bio star's moons orbit close) would otherwise fill the view, and a closed sun shows no system at all.
+    return Math.min(3000, far > r * 2 ? Math.max(far * 2.3, r * 13) : 34 + r * 14)
   }
 
   resetCamera(): void {

@@ -1,4 +1,4 @@
-import { folderPathOf, imageFileName, imagePathOf, isFolderId, isImageId, isImagePath, type NoteId } from '@aether/core'
+import { folderPathOf, imageFileName, imagePathOf, isFolderId, isImageId, isImagePath, isSunNode, type NoteId } from '@aether/core'
 import { PICTURE_SIZES, PICTURE_SIZE_NAMES } from '@aether/graph'
 import { getActiveBoard } from './board/active'
 import { BOARD_COMMANDS } from './board/commands'
@@ -22,6 +22,17 @@ export interface Command {
 export function noteTarget(s: AetherState): NoteId | null {
   if (s.editorId) return s.editorId
   return s.selectedId && s.notes.has(s.selectedId) ? s.selectedId : null
+}
+
+/** The sun the selection is, or belongs to (a body's folder, a picture's board), or null: what `s` opens a level further. */
+export function sunTargetOf(s: AetherState): NoteId | null {
+  const g = s.graph
+  if (!g || !s.selectedId || s.settings.layoutMode !== 'system' || !s.settings.suns) return null
+  const node = g.nodes[g.index.get(s.selectedId) ?? -1]
+  if (!node) return null
+  if (isSunNode(node)) return node.id
+  const parent = node.parent ? g.nodes[g.index.get(node.parent) ?? -1] : undefined
+  return parent && isSunNode(parent) ? parent.id : null
 }
 
 /** Vault path of the selected folder node, or null when the selection is not a folder. */
@@ -267,6 +278,36 @@ export const COMMANDS: Command[] = [
     keys: 'Shift+O',
     group: 'view',
     run: (s) => s.toggleCalm(),
+  },
+  {
+    id: 'sun-next',
+    title: 'Sun: show the next level (closed → planets → planets and moons)',
+    hint: 'a click on a closed sun opens its planets; the bar at the bottom picks a level',
+    keys: 's',
+    group: 'view',
+    when: (s) => sunTargetOf(s) !== null,
+    run: (s) => s.cycleSun(sunTargetOf(s)!),
+  },
+  {
+    id: 'suns-all',
+    title: 'Suns: open every one, or close every one',
+    keys: 'Shift+S',
+    group: 'view',
+    run: (s) => s.toggleAllSuns(),
+  },
+  {
+    id: 'suns-setting',
+    title: 'Suns: open on click / always show every planet and moon',
+    group: 'view',
+    run: (s) => s.toggleSuns(),
+  },
+  {
+    id: 'sound',
+    title: 'Sound: a note for every click on / off',
+    hint: 'a note for each star, planet and moon you click, a run when a sun opens',
+    keys: 'Shift+M',
+    group: 'view',
+    run: (s) => s.toggleSound(),
   },
   { id: 'depth-less', title: 'System layout: show fewer folder levels', keys: '[', group: 'view', run: (s) => s.setFolderDepth(s.settings.folderDepth - 1) },
   { id: 'depth-more', title: 'System layout: show more folder levels', keys: ']', group: 'view', run: (s) => s.setFolderDepth(s.settings.folderDepth + 1) },

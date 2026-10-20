@@ -55,6 +55,9 @@ The default layout, a cosmology (see [COSMOLOGY.md](COSMOLOGY.md)). Each drive i
 | `[` · `]`   | Show fewer / more folder levels without expanding (1–8, default 3) |
 | `o`         | Orbits moving / paused (the camera follows a selected planet while it moves) |
 | `⇧ O`       | Calm orbits on / off: urgency still orders the sky, but no orbit runs faster than a normal one (see [Calm mode](COSMOLOGY.md#calm-mode)) |
+| `s`         | Open the selected ★ sun one level further: closed → planets → planets and moons → closed (on a planet or moon: its sun). A click on a closed sun opens its planets, and the bar at the bottom of the view picks a level |
+| `⇧ S`       | Open every sun, or close every one |
+| `⇧ M`       | Sound on / off: a note for every star, planet and moon you click, a run when a sun opens |
 | `⇧ G`       | Star gallery: every picture of the selected ★ star (or of the star the selection belongs to, else the nearest star) floats around it in 3D, and the camera flies there; again: fold it |
 | `t`         | Leave / come back to the system layout                            |
 
