@@ -11,6 +11,8 @@ import {
   asString,
   basenameOf,
   blankNote,
+  bodyOwners,
+  bodyTiers,
   buildGraph,
   critiqueBaseName,
   critiqueNote,
@@ -40,6 +42,7 @@ import {
   isImagePath,
   isModelPath,
   isProjectNote,
+  isSunNode,
   isTodayId,
   isVirtualId,
   isVideoPath,
@@ -62,6 +65,7 @@ import {
   setProjectFields,
   setTaskDone,
   slugifyTitle,
+  sunCounts,
   splitFrontmatter,
   todayIso,
   updateFrontmatter,
@@ -77,6 +81,8 @@ import {
   type NoteType,
   type ParsedNote,
   type ProjectPatch,
+  type SunCounts,
+  type SunLevel,
   type VaultAdapter,
   type VaultAsset,
   type VaultChange,
@@ -111,6 +117,7 @@ import {
   type AddedToBoard,
   type PictureToAdd,
 } from './board/boardRegistry'
+import { playBody, playSun, soundSupported } from './audio/sounds'
 import { listProjects, moveTaskOnBoard } from './projects'
 import { plural, stillOf, truncate } from './util'
 
@@ -174,6 +181,10 @@ export interface Settings {
   todayHub: boolean
   /** System layout: a project star's pictures float around it in 3D when the camera comes close (Shift+G any time). */
   starGalleries: boolean
+  /** System layout: suns open into planets, then moons (a click opens one). Off: every body shows, always. */
+  suns: boolean
+  /** A click on a star, a planet or a moon plays a note; opening a sun plays a run (Shift+M mutes). */
+  sound: boolean
   /** Settings version; 2 = the solar-system layout became the default. */
   v: number
 }
@@ -182,6 +193,8 @@ const SETTINGS_KEY = 'aether:settings'
 const REVIEW_KEY = 'aether:review'
 /** Expanded folders, per vault location. */
 const EXPANDED_KEY = 'aether:expanded:'
+/** How open each sun is, per vault location: the suns opened by hand and the level of the rest. */
+const SUNS_KEY = 'aether:suns:'
 /** The board last open, per vault location (the `8` key goes back to it). */
 const LAST_BOARD_KEY = 'aether:board:'
 const SETTINGS_VERSION = 2
@@ -232,6 +245,8 @@ const DEFAULT_SETTINGS: Settings = {
   pictureSize: 'xl',
   todayHub: true,
   starGalleries: true,
+  suns: true,
+  sound: true,
   v: SETTINGS_VERSION,
 }
 
@@ -278,12 +293,45 @@ function loadSettings(): Settings {
   if (!isPictureSize(s.pictureSize)) s.pictureSize = DEFAULT_SETTINGS.pictureSize
   s.todayHub = s.todayHub !== false
   s.starGalleries = s.starGalleries !== false
+  s.suns = s.suns !== false
+  s.sound = s.sound !== false
   if (stored && !(typeof stored.v === 'number' && stored.v >= SETTINGS_VERSION)) {
     s.layoutMode = 'system'
     s.v = SETTINGS_VERSION
     saveJson(SETTINGS_KEY, s)
   }
   return s
+}
+
+const asSunLevel = (n: unknown): SunLevel => (n === 1 || n === 2 ? n : 0)
+
+/** The sun levels saved for the vault at `location`: the default and the suns with a level of their own. */
+function loadSuns(location: string): { def: SunLevel; own: Record<string, SunLevel> } {
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem(SUNS_KEY + location) ?? 'null')
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      const p = parsed as { def?: unknown; own?: unknown }
+      const own: Record<string, SunLevel> = {}
+      if (p.own && typeof p.own === 'object' && !Array.isArray(p.own)) {
+        for (const [id, level] of Object.entries(p.own as Record<string, unknown>)) own[id] = asSunLevel(level)
+      }
+      return { def: asSunLevel(p.def), own }
+    }
+  } catch {
+    /* no storage, or garbage in it */
+  }
+  return { def: 0, own: {} }
+}
+
+/** What each sun holds, who owns each body and what each one needs, for a graph (computed once per graph, not once per call). */
+const cosmosCache = new WeakMap<GraphData, { counts: Map<NoteId, SunCounts>; owners: Int32Array; tiers: Uint8Array }>()
+function cosmosOf(graph: GraphData): { counts: Map<NoteId, SunCounts>; owners: Int32Array; tiers: Uint8Array } {
+  let c = cosmosCache.get(graph)
+  if (!c) {
+    c = { counts: sunCounts(graph), owners: bodyOwners(graph), tiers: bodyTiers(graph) }
+    cosmosCache.set(graph, c)
+  }
+  return c
 }
 
 function loadExpanded(location: string): Set<string> {
@@ -570,6 +618,31 @@ export interface AetherState {
   toggleMotion(): void
   /** System layout: calm orbits on / off (⇧O). */
   toggleCalm(): void
+  /**
+   * Suns open into planets, then moons. The level of each sun the user opened or closed by hand (the rest are at `sunDefault`):
+   * 0 closed, 1 its planets, 2 its planets and its moons.
+   */
+  sunOwn: Record<NoteId, SunLevel>
+  sunDefault: SunLevel
+  /** How open a sun is now. */
+  sunLevelOf(id: NoteId): SunLevel
+  setSunLevel(id: NoteId, level: SunLevel): void
+  /** Step a sun through its levels (closed → planets → planets and moons → closed; a level with nothing in it is skipped). */
+  cycleSun(id: NoteId, direction?: 1 | -1): void
+  /** The user chose a level for a sun (the sun bar): it sets it and plays the run, rising when it opens further, falling when it closes. */
+  chooseSun(id: NoteId, level: SunLevel): void
+  /** Open or close every sun at once. */
+  setAllSuns(level: SunLevel): void
+  /** Open every sun, or close every one when any is open (⇧S). */
+  toggleAllSuns(): void
+  /** Suns open and close on / off (settings.suns). */
+  toggleSuns(): void
+  /** What the sun holds: planets, moons and what is always shown. */
+  sunCountsOf(id: NoteId): SunCounts
+  /** A click on a body in the 3D view: its sound, and a closed sun opens. */
+  pickBody(id: NoteId): void
+  /** Notes sound on / off (⇧M). */
+  toggleSound(): void
 
   /** Where new notes go: '' for one root, `<first mount>/` for several. */
   homePrefix(): string
@@ -892,12 +965,14 @@ export const useAether = create<AetherState>()((set, get) => {
   controller.hubLabels = settings.hubLabels
   controller.motion = settings.motion
   controller.calm = settings.calm
+  controller.suns = settings.suns
   controller.showThumbnails = settings.thumbnails
   controller.galleries = settings.starGalleries
   controller.pictureSize = settings.pictureSize
 
   controller.events = {
     onSelect: (id) => get().select(id),
+    onPick: (id) => get().pickBody(id),
     onOpen: (id) => get().openNote(id, { fly: true }),
     onHover: (id) => set({ hoveredId: id }),
     onGallery: (star) => get().setGallery(star),
@@ -906,6 +981,27 @@ export const useAether = create<AetherState>()((set, get) => {
   }
   /** The first gallery of a session says how it works (later ones open quietly). */
   let galleryHinted = false
+
+  /**
+   * Selecting a body a closed sun is holding back (a search, a link, a jump from the keyboard) opens the suns it hangs in, as far
+   * as it needs: its sun at the level of its tier, that sun's sun at the level of its own, and so on up to a galaxy.
+   */
+  const openSunsFor = (id: NoteId): void => {
+    const { graph, settings } = get()
+    if (!graph || !settings.suns || settings.layoutMode !== 'system') return
+    const i = graph.index.get(id)
+    if (i === undefined) return
+    const { owners, tiers } = cosmosOf(graph)
+    let cur = i
+    for (let hop = 0; hop < 16; hop++) {
+      const o = owners[cur]!
+      if (o < 0) break
+      const need = tiers[cur]! as SunLevel
+      const sun = graph.nodes[o]!.id
+      if (need > get().sunLevelOf(sun)) get().setSunLevel(sun, need)
+      cur = o
+    }
+  }
 
   /**
    * Video stills and model stills already asked for, by path, size and file
@@ -974,6 +1070,8 @@ export const useAether = create<AetherState>()((set, get) => {
       multiRoot: roots.length > 1,
       // The Bio star, when the vault has its folder: the one big, bright, blue star.
       bio: bioFolderIn(folders, homePrefixOf(roots)),
+      // No Bio folder yet: a dormant blue star stands where it will be, so it can be seen and made with one click (a vault that can't be written to has nothing to make it with).
+      bioPlaceholder: !!adapter && !adapter.readOnly,
     }
     return opts
   }
@@ -1972,6 +2070,8 @@ export const useAether = create<AetherState>()((set, get) => {
     roots: [],
     folders: new Set(),
     expandedFolders: new Set(),
+    sunOwn: {},
+    sunDefault: 0,
     view: 'graph',
     selectedId: null,
     hoveredId: null,
@@ -2006,6 +2106,8 @@ export const useAether = create<AetherState>()((set, get) => {
       controller.thumbnails = null
       controller.resetGallery()
       stills.clear()
+      const suns = loadSuns(adapter.location)
+      controller.setSunLevels(suns.def, new Map(Object.entries(suns.own)))
       set({
         adapter,
         roots: adapter.roots ?? [],
@@ -2013,6 +2115,8 @@ export const useAether = create<AetherState>()((set, get) => {
         assets: new Map(),
         brief: null,
         expandedFolders: loadExpanded(adapter.location),
+        sunOwn: suns.own,
+        sunDefault: suns.def,
         status: 'loading',
         error: null,
         selectedId: null,
@@ -2073,6 +2177,7 @@ export const useAether = create<AetherState>()((set, get) => {
 
     select(id, opts) {
       set({ selectedId: id })
+      if (id) openSunsFor(id)
       controller.setSelected(id)
       if (id && opts?.fly) controller.flyTo(id)
     },
@@ -2116,6 +2221,7 @@ export const useAether = create<AetherState>()((set, get) => {
         historyIndex: Math.min(h.length, 50) - 1,
         view: opts?.view ?? (get().view === 'review' ? 'review' : 'editor'),
       })
+      openSunsFor(id)
       controller.setSelected(id)
       if (opts?.fly !== false) controller.flyTo(id)
     },
@@ -2135,6 +2241,7 @@ export const useAether = create<AetherState>()((set, get) => {
       const note = isVirtualId(id) ? undefined : get().notes.get(id)
       if (note) {
         set({ editorId: id, draft: note.raw, dirty: false, selectedId: id })
+        openSunsFor(id)
         controller.setSelected(id)
         controller.flyTo(id)
       }
@@ -2149,6 +2256,7 @@ export const useAether = create<AetherState>()((set, get) => {
       const note = isVirtualId(id) ? undefined : get().notes.get(id)
       if (note) {
         set({ editorId: id, draft: note.raw, dirty: false, selectedId: id })
+        openSunsFor(id)
         controller.setSelected(id)
         controller.flyTo(id)
       }
@@ -2413,6 +2521,7 @@ export const useAether = create<AetherState>()((set, get) => {
       controller.setHubLabels(next.hubLabels)
       controller.setMotion(next.motion)
       controller.setCalm(next.calm)
+      controller.setSuns(next.suns)
       controller.showThumbnails = next.thumbnails
       controller.galleries = next.starGalleries
       controller.pictureSize = next.pictureSize
@@ -2462,6 +2571,83 @@ export const useAether = create<AetherState>()((set, get) => {
       const calm = !get().settings.calm
       get().setSettings({ calm })
       get().toast(calm ? 'Calm orbits: none runs faster than a normal orbit' : 'Orbits at their urgent speed')
+    },
+
+    sunLevelOf(id) {
+      return get().sunOwn[id] ?? get().sunDefault
+    },
+    setSunLevel(id, level) {
+      const { sunOwn, sunDefault, adapter } = get()
+      const own = { ...sunOwn }
+      if (level === sunDefault) delete own[id]
+      else own[id] = level
+      set({ sunOwn: own })
+      controller.setSunLevel(id, level)
+      if (adapter) saveJson(SUNS_KEY + adapter.location, { def: sunDefault, own })
+    },
+    sunCountsOf(id) {
+      const g = get().graph
+      return (g && cosmosOf(g).counts.get(id)) ?? { planets: 0, systems: 0, moons: 0 }
+    },
+    cycleSun(id, direction = 1) {
+      const node = nodeOf(get().graph, id)
+      if (!node || !isSunNode(node)) return
+      const counts = get().sunCountsOf(id)
+      // The levels with something to show: closed always, planets (and sub-folders) when it has some, moons when it has some.
+      const levels: SunLevel[] = [0]
+      if (counts.planets + counts.systems > 0) levels.push(1)
+      if (counts.moons > 0) levels.push(2)
+      if (levels.length === 1) {
+        get().toast(`${node.title} has nothing to open`)
+        return
+      }
+      const at = levels.indexOf(get().sunLevelOf(id))
+      const next = levels[(Math.max(0, at) + direction + levels.length) % levels.length]!
+      const before = get().sunLevelOf(id)
+      get().setSunLevel(id, next)
+      if (get().settings.sound) playSun(next, before)
+    },
+    chooseSun(id, level) {
+      const before = get().sunLevelOf(id)
+      get().setSunLevel(id, level)
+      if (get().settings.sound) playSun(level, before)
+    },
+    setAllSuns(level) {
+      const { adapter } = get()
+      set({ sunOwn: {}, sunDefault: level })
+      controller.setSunLevels(level, null)
+      if (adapter) saveJson(SUNS_KEY + adapter.location, { def: level, own: {} })
+      get().toast(level === 0 ? 'Every sun closed' : level === 1 ? 'Every sun open: planets' : 'Every sun open: planets and moons')
+    },
+    toggleAllSuns() {
+      const { sunDefault, sunOwn } = get()
+      const anyOpen = sunDefault > 0 || Object.values(sunOwn).some((l) => l > 0)
+      get().setAllSuns(anyOpen ? 0 : 2)
+    },
+    toggleSuns() {
+      const suns = !get().settings.suns
+      get().setSettings({ suns })
+      get().toast(suns ? 'Suns open and close: click one to see its planets, then its moons' : 'Every planet and moon shows, always')
+    },
+    pickBody(id) {
+      const g = get().graph
+      const node = nodeOf(g, id)
+      if (!node) return
+      if (get().settings.sound) playBody(node)
+      // A click opens a closed sun, at the first level that has something to show.
+      if (get().settings.layoutMode !== 'system' || !get().settings.suns || !isSunNode(node)) return
+      if (get().sunLevelOf(id) !== 0) return
+      const c = get().sunCountsOf(id)
+      const level: SunLevel = c.planets + c.systems > 0 ? 1 : c.moons > 0 ? 2 : 0
+      if (level === 0) return
+      get().setSunLevel(id, level)
+      get().select(id, { fly: true })
+      if (get().settings.sound) playSun(level, 0)
+    },
+    toggleSound() {
+      const sound = !get().settings.sound
+      get().setSettings({ sound })
+      get().toast(sound ? (soundSupported() ? 'Sound on' : 'Sound on (this computer has no audio to play it)') : 'Sound off')
     },
 
     homePrefix() {
@@ -2675,7 +2861,7 @@ export const useAether = create<AetherState>()((set, get) => {
     goToBio() {
       const { adapter, folders } = get()
       const dir = canonicalFolder(`${get().homePrefix()}${BIO_FOLDER}`)
-      if (folders.has(dir) || [...get().notes.keys()].some((k) => k.startsWith(`${dir}/`))) {
+      if (folders.has(dir) || [...get().notes.keys()].some((k) => k.startsWith(`${dir}/`)) || get().graph?.index.has(folderKey(dir))) {
         get().showFolder(dir)
         return
       }

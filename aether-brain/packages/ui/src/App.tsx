@@ -5,6 +5,7 @@ import { FULL_PANEL_VIEWS, useAether, type AetherState } from './store'
 import { useKeyboard } from './hooks/useKeyboard'
 import { TopBar } from './components/TopBar'
 import { Legend } from './components/Legend'
+import { SunDial } from './components/SunDial'
 import { Inspector } from './components/Inspector'
 import { Editor } from './components/Editor'
 import { CommandPalette } from './components/CommandPalette'
@@ -169,6 +170,11 @@ export function AetherApp({ sources, onPickVault, autoOpen }: AetherAppProps) {
             </ErrorBoundary>
           </div>
           <div className="pointer-events-auto">
+            <ErrorBoundary what="the sun bar" quiet>
+              {status === 'ready' ? <SunDial /> : <span />}
+            </ErrorBoundary>
+          </div>
+          <div className="pointer-events-auto">
             <ErrorBoundary what="the hint" quiet>
               <Hint />
             </ErrorBoundary>
@@ -224,7 +230,7 @@ function Hint() {
             {node.folder?.role === 'project' ? '★ ' : ''}
             {h}
           </span>{' '}
-          · {node.folder?.totalNotes ?? 0} notes · click to select · double-click to expand
+          · {node.folder?.totalNotes ?? 0} notes · click to open its planets · double-click to go deeper
         </span>
       ) : node?.kind === 'today' ? (
         <span>

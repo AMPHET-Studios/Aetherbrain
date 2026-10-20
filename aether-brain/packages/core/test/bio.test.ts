@@ -5,9 +5,12 @@ import {
   bioNotePath,
   bioNoteText,
   bioStatus,
+  bodyOwners,
+  bodyTiers,
   buildGraph,
   extractTasks,
   folderKey,
+  isSunNode,
   parseNote,
   planBio,
   type GraphData,
@@ -198,5 +201,103 @@ describe('the Bio star in the graph', () => {
     const g = build(files, ['Bio', 'Work'], { bio: 'Bio' })
     expect(nodeOf(g, 'Bio/Food')?.parent).toBe(folderKey('Bio'))
     expect(nodeOf(g, folderKey('Bio'))?.folder).toMatchObject({ notes: 1, totalNotes: 1 })
+  })
+})
+
+describe('the dormant Bio star: a star that is waiting for its folder', () => {
+  function notesOf(files: Record<string, string>): Map<NoteId, ParsedNote> {
+    const m = new Map<NoteId, ParsedNote>()
+    for (const [path, content] of Object.entries(files)) {
+      const n = parseNote({ path, content })
+      m.set(n.meta.id, n)
+    }
+    return m
+  }
+  const build = (
+    files: Record<string, string>,
+    folders: string[],
+    o: { bio?: string | null; multiRoot?: boolean; maxDepth?: number; bioPlaceholder?: boolean } = {},
+  ): GraphData =>
+    buildGraph(notesOf(files), {
+      folders: {
+        all: new Set(folders),
+        rootTitle: 'Vault',
+        multiRoot: o.multiRoot ?? false,
+        maxDepth: o.maxDepth ?? 3,
+        ...(o.bio !== undefined ? { bio: o.bio } : {}),
+        ...(o.bioPlaceholder !== undefined ? { bioPlaceholder: o.bioPlaceholder } : {}),
+      },
+    })
+  const nodeOf = (g: GraphData, id: string): GraphNode | undefined => g.nodes[g.index.get(id) ?? -1]
+  const work = { 'Work/Plan.md': '# Plan\n' }
+
+  it('stands where the folder will be when it is asked for and the vault has none: blue, empty, named Bio, under the galaxy', () => {
+    const g = build(work, ['Work'], { bio: 'Bio', bioPlaceholder: true })
+    const star = nodeOf(g, folderKey('Bio'))!
+    expect(star.kind).toBe('folder')
+    expect(star.title).toBe('Bio')
+    expect(star.parent).toBe(folderKey(''))
+    expect(star.folder).toMatchObject({ path: 'Bio', role: 'folder', depth: 1, bio: true, placeholder: true, notes: 0, totalNotes: 0, childFolders: 0, hiddenFolders: 0, images: 0 })
+    // One star more than there would be, and nothing else: no link, no note, no ghost.
+    const without = build(work, ['Work'], { bio: 'Bio' })
+    expect(g.nodes.length).toBe(without.nodes.length + 1)
+    expect(g.edges.length).toBe(without.edges.length)
+    expect(g.nodes.filter((n) => n.folder?.bio)).toHaveLength(1)
+  })
+
+  it('is not made unless asked: the default, and an explicit no, leave the sky as it was', () => {
+    for (const bioPlaceholder of [undefined, false]) {
+      const g = build(work, ['Work'], { bio: 'Bio', ...(bioPlaceholder === undefined ? {} : { bioPlaceholder }) })
+      expect(nodeOf(g, folderKey('Bio')), String(bioPlaceholder)).toBeUndefined()
+    }
+  })
+
+  it('needs the folder to be named: asked to stand with no name for it, it stands nowhere', () => {
+    for (const bio of [undefined, null, '']) {
+      const g = build(work, ['Work'], { bioPlaceholder: true, ...(bio === undefined ? {} : { bio }) })
+      expect(g.nodes.some((n) => n.folder?.bio), String(bio)).toBe(false)
+    }
+  })
+
+  it('gives way to the real folder: with it there is one star, the real one, with no mark of being dormant', () => {
+    const g = build({ ...work, 'Bio/Food.md': '# Food\n' }, ['Bio', 'Work'], { bio: 'Bio', bioPlaceholder: true })
+    const stars = g.nodes.filter((n) => n.folder?.bio)
+    expect(stars.map((n) => n.id)).toEqual([folderKey('Bio')])
+    expect(stars[0]!.folder?.placeholder).toBeUndefined()
+    expect(stars[0]!.folder?.notes).toBe(1)
+  })
+
+  it('has the id of the real folder, so making the folder turns it into the real star in place', () => {
+    const before = nodeOf(build(work, ['Work'], { bio: 'Bio', bioPlaceholder: true }), folderKey('Bio'))!
+    const after = nodeOf(build({ ...work, 'Bio/Food.md': '# Food\n' }, ['Bio', 'Work'], { bio: 'Bio', bioPlaceholder: true }), folderKey('Bio'))!
+    expect(after.id).toBe(before.id)
+    expect(after.parent).toBe(before.parent)
+  })
+
+  it('never takes a drive: in a vault of several roots a top-level Bio would be a drive, so nothing stands for it', () => {
+    const g = build({}, ['D', 'F'], { multiRoot: true, bio: 'Bio', bioPlaceholder: true })
+    expect(nodeOf(g, folderKey('Bio'))).toBeUndefined()
+  })
+
+  it('stands under the first drive of a vault with several roots', () => {
+    const g = build({ 'D/Work/Plan.md': '# Plan\n' }, ['D', 'D/Work', 'F'], { multiRoot: true, bio: 'D/Bio', bioPlaceholder: true })
+    const star = nodeOf(g, folderKey('D/Bio'))!
+    expect(star.parent).toBe(folderKey('D'))
+    expect(star.folder).toMatchObject({ path: 'D/Bio', depth: 2, bio: true, placeholder: true })
+  })
+
+  it('takes the spelling it is given and finds a folder that is there under it', () => {
+    // The store passes the vault's own spelling: with bio/ on disk the real one is there and nothing is dormant.
+    const g = build({ 'bio/Food.md': '# Food\n' }, ['bio'], { bio: 'bio', bioPlaceholder: true })
+    expect(g.nodes.filter((n) => n.folder?.bio).map((n) => n.id)).toEqual([folderKey('bio')])
+    expect(nodeOf(g, folderKey('bio'))!.folder?.placeholder).toBeUndefined()
+  })
+
+  it('is not an open sun: nothing to open, and the galaxy is its sun', () => {
+    const g = build(work, ['Work'], { bio: 'Bio', bioPlaceholder: true })
+    const star = nodeOf(g, folderKey('Bio'))!
+    expect(isSunNode(star)).toBe(false)
+    expect(bodyTiers(g)[g.index.get(star.id)!]).toBe(0)
+    expect(bodyOwners(g)[g.index.get(star.id)!]).toBe(g.index.get(folderKey('')))
   })
 })

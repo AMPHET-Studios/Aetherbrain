@@ -65,8 +65,11 @@ describe('making the Bio star', () => {
     const { s, subscribe } = await freshStore()
     const adapter = vault()
     await s().openVault(adapter)
-    // No Bio folder, no Bio star.
-    expect(s().graph!.nodes.some((n) => n.folder?.bio)).toBe(false)
+    // No Bio folder yet: only the dormant star, standing where it will be, with nothing on disk behind it.
+    const dormant = s().graph!.nodes.filter((n) => n.folder?.bio)
+    expect(dormant.map((n) => n.id)).toEqual(['folder:Bio'])
+    expect(dormant[0]!.folder?.placeholder).toBe(true)
+    expect(s().folders.has('Bio')).toBe(false)
     let rebuilds = 0
     const unsub = subscribe((n, p) => {
       if (n.graph !== p.graph) rebuilds++
@@ -81,6 +84,8 @@ describe('making the Bio star', () => {
     }
     const star = s().graph!.nodes.find((n) => n.id === 'folder:Bio')!
     expect(star.folder?.bio).toBe(true)
+    // The same star, made real in place: the same id, no longer dormant.
+    expect(star.folder?.placeholder).toBeUndefined()
     expect(star.folder?.notes).toBe(6)
     expect(s().selectedId).toBe('folder:Bio')
     expect(s().toasts.at(-1)).toMatchObject({ text: '✚ Bio star made: 6 pages in Bio', kind: 'success' })
@@ -180,9 +185,23 @@ describe('going to the Bio star', () => {
     expect(s().selectedId).toBe('folder:Bio')
   })
 
-  it('with none yet, says so and offers to make it; the toast’s action (the u key) makes it', async () => {
+  it('with none yet, flies to the dormant star, whose card offers to make it; nothing is written', async () => {
+    const { s, inspector } = await freshStore()
+    const adapter = vault()
+    await s().openVault(adapter)
+    s().goToBio()
+    expect(s().selectedId).toBe('folder:Bio')
+    expect(s().toasts.at(-1)?.text).not.toBe('No Bio star yet')
+    expect(await adapter.read('Bio/Food.md')).toBeNull()
+    expect(s().notes.has('Bio/Food')).toBe(false)
+    expect(await inspector()).toContain('Make my Bio star')
+  })
+
+  it('in a layout without folders there is no star to fly to: says so and offers to make it; the toast’s action (the u key) makes it', async () => {
     const { s } = await freshStore()
     await s().openVault(vault())
+    s().setSettings({ layoutMode: 'constellation' })
+    expect(s().graph!.nodes.some((n) => n.folder?.bio)).toBe(false)
     s().goToBio()
     expect(s().toasts.at(-1)).toMatchObject({ text: 'No Bio star yet' })
     expect(s().toasts.at(-1)?.action?.label).toBe('Make it')
@@ -281,6 +300,76 @@ describe('the Bio star’s inspector', () => {
     expect(out).toContain('Star · folder')
     expect(out).not.toContain('Bio star')
     expect(out).toContain('Make project')
+  })
+})
+
+describe('the dormant Bio star: seen before it is made', () => {
+  it('stands in a writable vault that has no Bio folder, and drawing it writes nothing', async () => {
+    const { s } = await freshStore()
+    const adapter = vault()
+    await s().openVault(adapter)
+    const star = s().graph!.nodes.find((n) => n.id === 'folder:Bio')
+    expect(star?.folder).toMatchObject({ bio: true, placeholder: true, notes: 0, totalNotes: 0, role: 'folder' })
+    // It hangs from the vault's galaxy like any folder directly under it.
+    expect(star?.parent).toBe('folder:')
+    expect(s().folders.has('Bio')).toBe(false)
+    expect([...s().notes.keys()].some((k) => k.startsWith('Bio/'))).toBe(false)
+    expect(await adapter.read('Bio/Food.md')).toBeNull()
+  })
+
+  it('is not there in a read-only vault: there is nothing to make it with', async () => {
+    const { s } = await freshStore()
+    await s().openVault(vault({ readOnly: true }))
+    expect(s().graph!.nodes.some((n) => n.folder?.bio)).toBe(false)
+  })
+
+  it('is one star, never two: a vault that has the folder gets the real one only', async () => {
+    const { s } = await freshStore()
+    await s().openVault(vault({ files: [...FILES, { path: 'Bio/Food.md', content: '# Food\n' }] }))
+    const stars = s().graph!.nodes.filter((n) => n.folder?.bio)
+    expect(stars.map((n) => n.id)).toEqual(['folder:Bio'])
+    expect(stars[0]!.folder?.placeholder).toBeUndefined()
+  })
+
+  it('has a card that says it is waiting and offers one button, with no folder actions to take on disk', async () => {
+    const { s, inspector } = await freshStore()
+    await s().openVault(vault())
+    s().select('folder:Bio')
+    const out = await inspector()
+    expect(out).toContain('✚ Bio star · not made yet')
+    expect(out).toContain('Your Bio star is waiting.')
+    expect(out).toContain('Nothing is written until you press the button.')
+    expect(out).toContain('✚ Make my Bio star')
+    expect(out).toContain('Bio/ · not on disk yet')
+    // Nothing on disk yet: no notes or folders to add, no counts to show, not something to turn into a project.
+    expect(out).not.toContain('Note here')
+    expect(out).not.toContain('Folder here')
+    expect(out).not.toContain('Make project')
+    expect(out).not.toContain('notes in all')
+  })
+
+  it('has nothing to open: it is not a sun itself, so the sun bar stays away and the s key turns its galaxy, not it', async () => {
+    const { s } = await freshStore()
+    const { sunTargetOf } = await import('../src/commands')
+    await s().openVault(vault())
+    s().select('folder:Bio')
+    // The sun of a body is the one it orbits: the vault's galaxy.
+    expect(sunTargetOf(s())).toBe('folder:')
+    const node = s().graph!.nodes.find((n) => n.id === 'folder:Bio')!
+    const { isSunNode } = await import('@aether/core')
+    expect(isSunNode(node)).toBe(false)
+  })
+
+  it('becomes the real star when it is made: the same id and the same selection', async () => {
+    const { s, inspector } = await freshStore()
+    await s().openVault(vault())
+    s().select('folder:Bio')
+    expect(await s().makeBio()).toBe(6)
+    expect(s().selectedId).toBe('folder:Bio')
+    const out = await inspector()
+    expect(out).toContain('✚ Bio star<')
+    expect(out).not.toContain('not made yet')
+    expect(out).toContain('Note here')
   })
 })
 

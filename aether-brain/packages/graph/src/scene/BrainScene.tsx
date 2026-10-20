@@ -26,7 +26,7 @@ import {
   Vector3,
 } from 'three'
 import type { CameraControlsImpl } from '@react-three/drei'
-import { isPlanetNode, type GraphData, type GraphNode, type NoteId } from '@aether/core'
+import { bodyOrder, bodyOwners, bodyTiers, isPlanetNode, type GraphData, type GraphNode, type NoteId } from '@aether/core'
 import { BrainController, DEFAULT_FAR, DEFAULT_MAX_DISTANCE, cameraRange } from '../BrainController'
 import { GALLERY_CHECK_MS, easeGrow, nearestStar, stepGrow } from '../gallery'
 import type { LayoutEngine } from '../layout/LayoutEngine'
@@ -55,11 +55,13 @@ import {
   createNebulaMaterial,
   createNodeMaterial,
   createRingMaterial,
-  createStarMaterial,
 } from './materials'
 import { frameloopFor } from './frameloop'
 import { shortFileLabel } from '../labels'
 import { shiftTarget } from './follow'
+import { bakeSky, createSkyDome, createSkyStars, type BakedSky } from './sky'
+import { LABEL_PRIORITY, LabelPlacer } from './labelPlace'
+import { applyReveal, easeReveal, revealTargets, ringReps, ringReveal, stepReveal } from './reveal'
 import { todayLabel } from './labels'
 import { ThumbLayer, thumbTargets, type ThumbTargets } from './thumbLayer'
 import { ScreenLayer } from './screenLayer'
@@ -251,41 +253,29 @@ function CameraRig({ controller }: { controller: BrainController }) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Backdrop: stars + nebula haze                                       */
+/* Backdrop: the Milky Way, nebulae and stars                          */
 /* ------------------------------------------------------------------ */
+
+/** How fast the whole sky turns, radians a second: slow enough to be felt only over minutes. */
+const SKY_SPIN = 0.003
 
 function Backdrop() {
   const camera = useThree((s) => s.camera)
+  const gl = useThree((s) => s.gl)
   const sky = useMemo(() => new Group(), [])
-  const stars = useMemo(() => {
-    const n = 2600
-    const pos = new Float32Array(n * 3)
-    const size = new Float32Array(n)
-    const phase = new Float32Array(n)
-    let seed = 1337
-    const rnd = () => {
-      seed = (seed * 1664525 + 1013904223) >>> 0
-      return seed / 4294967296
-    }
-    for (let i = 0; i < n; i++) {
-      const r = 900 + rnd() * 700
-      const th = rnd() * Math.PI * 2
-      const ph = Math.acos(2 * rnd() - 1)
-      pos[i * 3] = r * Math.sin(ph) * Math.cos(th)
-      pos[i * 3 + 1] = r * Math.cos(ph)
-      pos[i * 3 + 2] = r * Math.sin(ph) * Math.sin(th)
-      size[i] = 1.2 + rnd() * rnd() * 4
-      phase[i] = rnd() * Math.PI * 2
-    }
-    const g = new BufferGeometry()
-    g.setAttribute('position', new Float32BufferAttribute(pos, 3))
-    g.setAttribute('aSize', new Float32BufferAttribute(size, 1))
-    g.setAttribute('aPhase', new Float32BufferAttribute(phase, 1))
-    const p = new Points(g, createStarMaterial())
-    p.frustumCulled = false
-    return p
-  }, [])
-  const nebulae = useMemo(() => {
+  // The Milky Way, the nebulae and the distant galaxies: painted into a cube map once, when the scene starts.
+  const [baked, setBaked] = useState<BakedSky | null | undefined>(undefined)
+  useEffect(() => {
+    const b = bakeSky(gl)
+    setBaked(b)
+    return () => b?.dispose()
+  }, [gl])
+  const dome = useMemo(() => (baked ? createSkyDome(baked.texture) : null), [baked])
+  useEffect(() => () => dome?.geometry.dispose(), [dome])
+  const stars = useMemo(() => createSkyStars(), [])
+  // No float cube target on this GPU: the old plain haze, three soft discs.
+  const haze = useMemo(() => {
+    if (baked !== null) return []
     const geo = new PlaneGeometry(1, 1)
     const spots: [number, number, number, number, number][] = [
       [-700, 260, -900, 1500, 0],
@@ -300,19 +290,22 @@ function Backdrop() {
       m.frustumCulled = false
       return m
     })
-  }, [])
+  }, [baked])
   useFrame((_, dt) => {
     const mat = stars.material as ShaderMaterial
     mat.uniforms['uTime']!.value += dt
-    stars.rotation.y += dt * 0.004
+    mat.uniforms['uScale']!.value = gl.getPixelRatio()
+    // The stars and the baked sky turn together (they are children of one group), so the stars stay in the band of the Milky Way.
+    sky.rotation.y += dt * SKY_SPIN
     // The sky is infinitely far away: it travels with the camera (a solar
     // system can be far larger than the star shell).
     sky.position.copy(camera.position)
   })
   return (
     <primitive object={sky}>
+      {dome && <primitive object={dome} />}
       <primitive object={stars} />
-      {nebulae.map((m, i) => (
+      {haze.map((m, i) => (
         <primitive key={i} object={m} />
       ))}
     </primitive>
@@ -361,6 +354,30 @@ interface Buffers {
   labels: string[]
   /** Label color per node (depends on the color mode; set by recolor). */
   labelColors: string[]
+  /** 1 per node whose label was drawn last frame: it keeps its place against labels of its own rank (no flicker as bodies pass). */
+  labelShown: Uint8Array
+  /** Suns open into planets, then moons (reveal.ts): the sun of each body, its tier, the level of each sun, who is shown, how far out of its sun each body is. */
+  owner: Int32Array
+  order: Int32Array
+  tier: Uint8Array
+  level: Uint8Array
+  target: Uint8Array
+  reveal: Float32Array
+  /** Where each body is drawn: its place on its orbit, pulled toward its sun by how little of it is revealed. */
+  drawPos: Float32Array
+  /** Per ring: a body on it (the ring shows when that body does), the ring's own alpha, and how far it is revealed. */
+  ringRep: Int32Array
+  ringBase: Float32Array
+  ringShow: Float32Array
+  /** engine.ringsVersion the ring bodies were found for (-1: not yet), and the controller's sunVersion the levels were read at (-1: not yet). */
+  ringRepsFor: number
+  /** The layout frame the ring bodies were last searched at, how many times, and whether every ring has found its body. */
+  ringRepsAt: number
+  ringRepsTries: number
+  ringRepsOk: boolean
+  sunSeen: number
+  /** False until the first frame has put every body where it belongs: a fresh scene does not unfold. */
+  revealReady: boolean
   /** Root, mounts, project stars and the Today hub: always labelled. */
   landmarks: number[]
   /** 1 per landmark node. */
@@ -573,6 +590,7 @@ function buildBuffers(graph: GraphData, pictures: PictureSize): Buffers {
   rings.visible = false
   rings.renderOrder = 0
 
+  const owner = bodyOwners(graph)
   return {
     graph,
     count,
@@ -596,6 +614,23 @@ function buildBuffers(graph: GraphData, pictures: PictureSize): Buffers {
     role,
     labels,
     labelColors,
+    labelShown: new Uint8Array(count),
+    owner,
+    order: bodyOrder(owner),
+    tier: bodyTiers(graph),
+    level: new Uint8Array(count),
+    target: new Uint8Array(count).fill(1),
+    reveal: new Float32Array(count).fill(1),
+    drawPos: new Float32Array(count * 3),
+    ringRep: new Int32Array(ringCap).fill(-1),
+    ringBase: new Float32Array(ringCap),
+    ringShow: new Float32Array(ringCap).fill(1),
+    ringRepsFor: -1,
+    ringRepsAt: -1,
+    ringRepsTries: 0,
+    ringRepsOk: false,
+    sunSeen: -1,
+    revealReady: false,
     landmarks,
     landmark,
     edgeBeam,
@@ -736,6 +771,8 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
         controller.engine.release(d.id, true)
       } else {
         controller.events.onSelect?.(d.id)
+        // A click (not a drag, not a search): what only a click does, such as opening a sun and its sound.
+        controller.events.onPick?.(d.id)
       }
     }
     const onDbl = (e: MouseEvent) => {
@@ -902,6 +939,8 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
     if (ringsChanged) {
       syncRings(buffers, eng.rings)
       buffers.ringsVersion = eng.ringsVersion
+      buffers.ringRepsOk = false
+      buffers.ringRepsTries = 0
     }
     if (ringsChanged || versionChanged) styleRings(buffers, controller)
     buffers.rings.visible = controller.layoutMode === 'system' && buffers.ringCount > 0
@@ -909,23 +948,61 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
     const selI = controller.selected ? (g.index.get(controller.selected) ?? -1) : -1
     const hovI = st.hovered
 
+    // Suns open into planets, then moons: which bodies are shown, and how far out of their sun each one is. Targets follow the
+    // selection, a search and the suns' levels (all of which touch the controller); the unfolding itself runs every frame it moves.
+    const sunsOn = controller.layoutMode === 'system' && controller.suns
+    if (fresh || versionChanged || buffers.sunSeen !== controller.sunVersion) {
+      if (fresh || buffers.sunSeen !== controller.sunVersion) {
+        for (let i = 0; i < n; i++) if (g.nodes[i]!.folder !== undefined || g.nodes[i]!.board !== undefined) buffers.level[i] = controller.sunLevel(g.nodes[i]!.id)
+        buffers.sunSeen = controller.sunVersion
+      }
+      const lit = controller.highlight
+      revealTargets(
+        { count: n, tier: buffers.tier, owner: buffers.owner, order: buffers.order, level: buffers.level, card: buffers.isCard, selected: selI, lit: lit ? (i) => lit.has(g.nodes[i]!.id) : null, all: !sunsOn },
+        buffers.target,
+      )
+    }
+    const instantReveal = !buffers.revealReady
+    buffers.revealReady = true
+    const revealChanged = stepReveal(buffers.reveal, buffers.target, n, dt, instantReveal)
+    if (revealChanged || instantReveal) {
+      // A body's drawn size follows how much of it is out (the gallery cards have their own growth, below).
+      for (let i = 0; i < n; i++) {
+        if (buffers.isCard[i] === 1) continue
+        const r = buffers.reveal[i]!
+        buffers.radii[i] = r >= 1 ? (buffers.baseRadii[i] ?? 1) : (buffers.baseRadii[i] ?? 1) * easeReveal(r)
+      }
+    }
+    // Which body each ring carries (once the layout has answered): a ring shows and hides with it.
+    let repsFresh = false
+    if (!buffers.ringRepsOk && eng.answered && buffers.ringsVersion === eng.ringsVersion && (buffers.ringRepsFor !== eng.ringsVersion || eng.frame - buffers.ringRepsAt >= 12)) {
+      const missing = ringReps(buffers.ringParent, buffers.ringRadius.array as Float32Array, buffers.ringCount, buffers.childStart, buffers.childList, pos, buffers.ringRep)
+      buffers.ringRepsFor = eng.ringsVersion
+      buffers.ringRepsAt = eng.frame
+      // Every ring found its body, or the layout has had its chances (a body can be out of its ring while it is dragged).
+      buffers.ringRepsOk = missing === 0 || ++buffers.ringRepsTries >= 8
+      repsFresh = true
+    }
+    const dp = buffers.drawPos
+    if (positionsChanged || revealChanged || instantReveal || fresh) applyReveal(pos, dp, buffers.owner, buffers.reveal, n)
+
     // Star gallery cards grow out of their star, and shrink when it folds.
     const cardsChanged = sizeCards(buffers, controller, eng, st, dt)
 
     // Pictures: pick, load and place them; a change in who shows one reshapes the cores below.
     const now = performance.now()
-    const thumbsChanged = thumbs.update(buffers, controller, pos, selI, hovI, size.width, size.height, now)
+    const thumbsChanged = thumbs.update(buffers, controller, dp, selI, hovI, size.width, size.height, now)
     screenLayer.update(controller, g, pos, eng.extents, camera, now, dt)
 
-    if (positionsChanged || versionChanged || thumbsChanged || cardsChanged) {
+    if (positionsChanged || versionChanged || thumbsChanged || cardsChanged || revealChanged) {
       // Instance matrices for cores + halos. A node showing its picture keeps
       // a small core behind it and no halo: the picture is the body. A gallery
       // card still waiting for its picture is a picture moon's pale body.
       const shown = buffers.thumbs.shown
       for (let i = 0; i < n; i++) {
-        const x = pos[i * 3] ?? 0
-        const y = pos[i * 3 + 1] ?? 0
-        const z = pos[i * 3 + 2] ?? 0
+        const x = dp[i * 3] ?? 0
+        const y = dp[i * 3 + 1] ?? 0
+        const z = dp[i * 3 + 2] ?? 0
         let r = buffers.radii[i] ?? 1
         if (buffers.isCard[i] === 1 && shown[i] !== 1) r = Math.min(r, buffers.baseRadii[i] ?? 1)
         if (i === selI) r *= 1.35
@@ -948,16 +1025,18 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
       const idx = buffers.edgeIdx
       for (let e = 0; e < idx.length; e++) {
         const ni = idx[e] ?? 0
-        ep[e * 3] = pos[ni * 3] ?? 0
-        ep[e * 3 + 1] = pos[ni * 3 + 1] ?? 0
-        ep[e * 3 + 2] = pos[ni * 3 + 2] ?? 0
+        ep[e * 3] = dp[ni * 3] ?? 0
+        ep[e * 3 + 1] = dp[ni * 3 + 1] ?? 0
+        ep[e * 3 + 2] = dp[ni * 3 + 2] ?? 0
       }
       buffers.edgePos.needsUpdate = true
 
       // Tag field.
       updateField(buffers, controller)
     }
-    if ((positionsChanged || ringsChanged || versionChanged) && buffers.rings.visible) placeRings(buffers, pos)
+    // A ring is as visible as the body it carries: closing a sun folds its rings away with its planets and moons.
+    if (ringsChanged || versionChanged || revealChanged || repsFresh || buffers.ringRepsFor === eng.ringsVersion) revealRings(buffers, revealChanged || ringsChanged || versionChanged || repsFresh)
+    if ((positionsChanged || ringsChanged || versionChanged || revealChanged) && buffers.rings.visible) placeRings(buffers, dp)
 
     // Project to screen for picking + labels.
     camera.getWorldPosition(camPos)
@@ -965,7 +1044,7 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
     const tanHalf = Math.tan((camera.fov * Math.PI) / 360)
     const s = buffers.screen
     for (let i = 0; i < n; i++) {
-      v3.set(pos[i * 3] ?? 0, pos[i * 3 + 1] ?? 0, pos[i * 3 + 2] ?? 0)
+      v3.set(dp[i * 3] ?? 0, dp[i * 3 + 1] ?? 0, dp[i * 3 + 2] ?? 0)
       const dist = v3.distanceTo(camPos)
       v3.project(camera)
       s[i * 4] = (v3.x * 0.5 + 0.5) * size.width
@@ -1025,6 +1104,8 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
  * hovered or selected).
  */
 function hits(b: Buffers, i: number, dx: number, dy: number, selI: number, hovI: number, viewHeight: number): boolean {
+  // Folded into its sun (or only just coming out): not there to point at.
+  if ((b.reveal[i] ?? 1) < 0.55) return false
   const picture = b.thumbs.shown[i] === 1
   if (b.isCard[i] === 1) {
     // A gallery card still growing out of its star (or folding into it) is not there yet,
@@ -1089,10 +1170,10 @@ const EDGE_BASE_SYSTEM = 0.12
  * as light (a highlighted link is weight 1).
  */
 const BEAM_HI_SYSTEM = 1.6
-const RING_ALPHA = 0.13
-const RING_ALPHA_DIMMED = 0.07
-const RING_ALPHA_SIBLINGS = 0.3
-const RING_ALPHA_SELECTED = 0.6
+const RING_ALPHA = 0.26
+const RING_ALPHA_DIMMED = 0.1
+const RING_ALPHA_SIBLINGS = 0.42
+const RING_ALPHA_SELECTED = 0.85
 
 function recolor(b: Buffers, c: BrainController, neighbors: Set<number>, labelSet: Set<number>): void {
   const g = b.graph
@@ -1275,6 +1356,16 @@ function syncRings(b: Buffers, rings: Float32Array): void {
   b.ringQuat.needsUpdate = true
 }
 
+/** Each ring as bright as its own style says, times how far the body it carries is out of its sun. */
+function revealRings(b: Buffers, changed: boolean): void {
+  if (b.ringCount === 0) return
+  ringReveal(b.ringRep, b.reveal, b.ringCount, b.ringShow)
+  if (!changed) return
+  const alpha = b.ringAlpha.array as Float32Array
+  for (let k = 0; k < b.ringCount; k++) alpha[k] = (b.ringBase[k] ?? 0) * (b.ringShow[k] ?? 1)
+  b.ringAlpha.needsUpdate = true
+}
+
 /** Ring tint (the parent's color, lifted toward white) and alpha: the selected node's system is brighter. */
 function styleRings(b: Buffers, c: BrainController): void {
   const selI = c.selected ? (b.graph.index.get(c.selected) ?? -1) : -1
@@ -1287,6 +1378,7 @@ function styleRings(b: Buffers, c: BrainController): void {
     let a = RING_ALPHA
     if (selI >= 0) a = p === selI ? RING_ALPHA_SELECTED : p === selParent ? RING_ALPHA_SIBLINGS : RING_ALPHA_DIMMED
     alpha[k] = a
+    b.ringBase[k] = a
     color[k * 3] = 0.45 + 0.55 * (base[p * 3] ?? 1)
     color[k * 3 + 1] = 0.45 + 0.55 * (base[p * 3 + 1] ?? 1)
     color[k * 3 + 2] = 0.45 + 0.55 * (base[p * 3 + 2] ?? 1)
@@ -1360,7 +1452,30 @@ const LABEL_FONTS = [
 /** Screen radius (px) above which a node gets a label: planets earlier than notes. */
 const LABEL_MIN_PX = 10
 const PLANET_LABEL_MIN_PX = 6
-const ZOOM_LABELS = 60
+/** Text height (px) per emphasis, for the box a label takes. */
+const LABEL_HEIGHT = [13, 14, 15] as const
+/** Most labels weighed in a frame; the pointed-at and the landmarks come first, so the cap only ever costs the faintest. */
+const MAX_LABEL_CANDIDATES = 520
+/** What a label that was drawn last frame is worth against its rank: enough to keep its place, not to beat a higher rank. */
+const LABEL_STICKY = 40_000
+
+/** The labels a frame weighs, in parallel arrays: nothing is allocated per frame. */
+const cand = {
+  n: 0,
+  idx: new Int32Array(MAX_LABEL_CANDIDATES),
+  prio: new Float32Array(MAX_LABEL_CANDIDATES),
+  emph: new Uint8Array(MAX_LABEL_CANDIDATES),
+  x: new Float32Array(MAX_LABEL_CANDIDATES),
+  top: new Float32Array(MAX_LABEL_CANDIDATES),
+  w: new Float32Array(MAX_LABEL_CANDIDATES),
+  alpha: new Float32Array(MAX_LABEL_CANDIDATES),
+  keep: new Uint8Array(MAX_LABEL_CANDIDATES),
+  text: new Array<string>(MAX_LABEL_CANDIDATES).fill(''),
+}
+const candOrder: number[] = []
+const placer = new LabelPlacer()
+/** Measured text widths per emphasis (a label's text rarely changes): measuring every label every frame would cost more than drawing it. */
+const labelWidths: [Map<string, number>, Map<string, number>, Map<string, number>] = [new Map(), new Map(), new Map()]
 
 function drawLabels(
   canvas: HTMLCanvasElement | null,
@@ -1391,10 +1506,17 @@ function drawLabels(
   const s = b.screen
   const g = b.graph
   const highlight = c.highlight
-
   const shown = b.thumbs.shown
-  /** emphasis: 0 zoom-adaptive, 1 candidate, 2 hovered/selected. `always`: landmarks (root, mounts, project stars, the Today hub). */
-  const draw = (i: number, emphasis: 0 | 1 | 2, always = false) => {
+  cand.n = 0
+
+  /**
+   * Offer a label: it is weighed with the others and drawn only if it clears the ones of a higher rank.
+   * emphasis: 0 zoom-adaptive, 1 candidate, 2 hovered/selected. `always`: landmarks (root, mounts, project stars, the Today hub).
+   */
+  const offer = (i: number, emphasis: 0 | 1 | 2, rank: number, always = false) => {
+    const k = cand.n
+    if (k >= MAX_LABEL_CANDIDATES) return
+    if ((b.reveal[i] ?? 1) < 0.6) return
     const depth = s[i * 4 + 2] ?? 2
     if (depth > 1 || depth < -1) return
     const x = s[i * 4] ?? 0
@@ -1414,37 +1536,76 @@ function drawLabels(
     if (filtered) alpha *= 0.45
     // A picture under the pointer or selected shows its whole file name; the rest are shortened (see `shortFileLabel`).
     const label = emphasis >= 2 && node.image ? node.title : (b.labels[i] ?? node.title)
-    ctx.font = LABEL_FONTS[emphasis]
-    ctx.globalAlpha = alpha
-    ctx.lineWidth = 3.5
-    ctx.strokeStyle = 'rgba(4,5,13,0.85)'
-    ctx.strokeText(label, x, y + r + 6)
-    ctx.fillStyle = emphasis >= 2 ? '#ffffff' : (b.labelColors[i] ?? '#e8ecff')
-    ctx.fillText(label, x, y + r + 6)
+    const widths = labelWidths[emphasis]
+    let w = widths.get(label)
+    if (w === undefined) {
+      ctx.font = LABEL_FONTS[emphasis]
+      w = ctx.measureText(label).width
+      if (widths.size > 6000) widths.clear()
+      widths.set(label, w)
+    }
+    cand.idx[k] = i
+    cand.prio[k] = rank + (b.labelShown[i] === 1 ? LABEL_STICKY : 0)
+    cand.emph[k] = emphasis
+    cand.x[k] = x
+    cand.top[k] = y + r + 6
+    cand.w[k] = w
+    cand.alpha[k] = alpha
+    cand.text[k] = label
+    cand.n = k + 1
   }
 
-  // Zoom-adaptive: anything drawn large enough gets a label (planets sooner).
-  let notes = 0
-  let planets = 0
+  // Most important first: the cap, if it bites, only costs the faintest.
+  if (selI >= 0) offer(selI, 2, LABEL_PRIORITY.selected)
+  if (hovI >= 0 && hovI !== selI) offer(hovI, 2, LABEL_PRIORITY.hovered)
+  for (const i of b.landmarks) if (!labelSet.has(i) && i !== selI && i !== hovI) offer(i, 1, LABEL_PRIORITY.landmark, true)
+  for (const i of labelSet) if (i !== selI && i !== hovI && b.isCard[i] !== 1) offer(i, 1, b.landmark[i] === 1 ? LABEL_PRIORITY.landmark : LABEL_PRIORITY.linked, b.landmark[i] === 1)
+  // Zoom-adaptive: anything drawn large enough gets a label (planets sooner), the biggest first.
   for (let i = 0; i < b.count; i++) {
     if (labelSet.has(i) || i === selI || i === hovI) continue
-    if (b.landmark[i] === 1) continue // landmarks are drawn below
+    if (b.landmark[i] === 1) continue // landmarks are offered above
     if (b.isCard[i] === 1) continue // a gallery is pictures: their names show on hover
-    const role = b.role[i]!
     const px = s[i * 4 + 3] ?? 0
-    if (role === ROLE_FOLDER) {
-      if (px > PLANET_LABEL_MIN_PX && planets < ZOOM_LABELS) {
-        draw(i, 0)
-        planets++
-      }
-    } else if (px > LABEL_MIN_PX && notes < ZOOM_LABELS) {
-      draw(i, 0)
-      notes++
+    if (b.role[i] === ROLE_FOLDER) {
+      if (px > PLANET_LABEL_MIN_PX) offer(i, 0, LABEL_PRIORITY.planet + px)
+    } else if (px > LABEL_MIN_PX) {
+      offer(i, 0, LABEL_PRIORITY.note + px)
     }
   }
-  for (const i of b.landmarks) if (!labelSet.has(i) && i !== selI && i !== hovI) draw(i, 1, true)
-  for (const i of labelSet) if (i !== selI && i !== hovI && b.isCard[i] !== 1) draw(i, 1, b.landmark[i] === 1)
-  if (hovI >= 0 && hovI !== selI) draw(hovI, 2)
-  if (selI >= 0) draw(selI, 2)
+
+  // Keep, in rank order, every label whose box clears the kept ones; the pointed-at are always kept.
+  const n = cand.n
+  candOrder.length = n
+  for (let k = 0; k < n; k++) candOrder[k] = k
+  candOrder.sort((a, z) => cand.prio[z]! - cand.prio[a]!)
+  placer.reset()
+  b.labelShown.fill(0)
+  for (let q = 0; q < n; q++) {
+    const k = candOrder[q]!
+    const w = cand.w[k]!
+    const left = cand.x[k]! - w / 2
+    const h = LABEL_HEIGHT[cand.emph[k]!]!
+    if (cand.emph[k] === 2) {
+      placer.add(left, cand.top[k]!, w, h)
+      cand.keep[k] = 1
+    } else {
+      cand.keep[k] = placer.tryPlace(left, cand.top[k]!, w, h) ? 1 : 0
+    }
+    if (cand.keep[k] === 1) b.labelShown[cand.idx[k]!] = 1
+  }
+  // Painted least important first, so what the user points at lies on top.
+  for (let q = n - 1; q >= 0; q--) {
+    const k = candOrder[q]!
+    if (cand.keep[k] !== 1) continue
+    const i = cand.idx[k]!
+    const emphasis = cand.emph[k]! as 0 | 1 | 2
+    ctx.font = LABEL_FONTS[emphasis]
+    ctx.globalAlpha = cand.alpha[k]!
+    ctx.lineWidth = 3.5
+    ctx.strokeStyle = 'rgba(4,5,13,0.85)'
+    ctx.strokeText(cand.text[k]!, cand.x[k]!, cand.top[k]!)
+    ctx.fillStyle = emphasis >= 2 ? '#ffffff' : (b.labelColors[i] ?? '#e8ecff')
+    ctx.fillText(cand.text[k]!, cand.x[k]!, cand.top[k]!)
+  }
   ctx.globalAlpha = 1
 }

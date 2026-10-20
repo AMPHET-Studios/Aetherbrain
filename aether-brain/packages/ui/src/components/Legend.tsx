@@ -50,6 +50,8 @@ export function Legend() {
   const depth = useAether((s) => s.settings.folderDepth)
   const motion = useAether((s) => s.settings.motion)
   const calm = useAether((s) => s.settings.calm)
+  const sound = useAether((s) => s.settings.sound)
+  const toggleSound = useAether((s) => s.toggleSound)
   const setFolderDepth = useAether((s) => s.setFolderDepth)
   const toggleMotion = useAether((s) => s.toggleMotion)
   const toggleCalm = useAether((s) => s.toggleCalm)
@@ -144,6 +146,15 @@ export function Legend() {
                 title="Calm orbits (⇧O): urgency speeds an orbit up less, so none runs faster than a normal one"
               >
                 ☾ calm
+              </button>
+              <button
+                type="button"
+                className="hud-btn !h-6 !px-2"
+                aria-pressed={sound}
+                onClick={toggleSound}
+                title="Sound (⇧M): a note for every star, planet and moon you click"
+              >
+                {sound ? '♪ sound' : '♪ muted'}
               </button>
             </>
           )}

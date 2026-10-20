@@ -326,39 +326,6 @@ export function createThumbMaterial(): ShaderMaterial {
   })
 }
 
-/** Starfield points, cheap and dim so they never bloom. */
-export function createStarMaterial(): ShaderMaterial {
-  return new ShaderMaterial({
-    uniforms: { uTime: { value: 0 } },
-    vertexShader: /* glsl */ `
-      attribute float aSize;
-      attribute float aPhase;
-      varying float vPhase;
-      void main() {
-        vPhase = aPhase;
-        vec4 mv = modelViewMatrix * vec4(position, 1.0);
-        gl_PointSize = aSize * (300.0 / -mv.z);
-        gl_Position = projectionMatrix * mv;
-      }
-    `,
-    fragmentShader: /* glsl */ `
-      uniform float uTime;
-      varying float vPhase;
-      void main() {
-        vec2 p = gl_PointCoord - 0.5;
-        float d = length(p) * 2.0;
-        float a = smoothstep(1.0, 0.2, d);
-        float tw = 0.6 + 0.4 * sin(uTime * 0.8 + vPhase);
-        vec3 col = mix(vec3(0.55, 0.62, 0.95), vec3(0.95, 0.9, 1.0), vPhase / 6.283);
-        gl_FragColor = vec4(col * a * tw * 0.55, a * tw * 0.55);
-      }
-    `,
-    transparent: true,
-    depthWrite: false,
-    blending: AdditiveBlending,
-  })
-}
-
 /** Translucent tag "field" — a soft sphere around a tag's centroid. */
 export function createFieldMaterial(color: Color): ShaderMaterial {
   return new ShaderMaterial({

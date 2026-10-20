@@ -30,11 +30,46 @@ A reference board (`type: board`, the PureRef-style note of [REFERENCE-BOARD.md]
 One star in the sky is the user's own body and mind: the **Bio star**, a big, bright, blue star. It is the `Bio` folder at the vault's home (`Bio`, or `D/Bio` under the first drive of a vault with several roots), and it holds one page each for **Sleep schedule, Food, Meds, Exercise, Drugs and Mental health**.
 
 - **Making it.** The palette's *Create my Bio star* (or the *Make it* on the toast that `⇧ I` shows when there is none) writes the folder and the pages that are missing. It is create-only: a page that is there, under any letter case, is never touched, a deleted one comes back, and nothing is numbered or replaced. The pages are starting points in the user's own voice, headings and empty lists to fill in: no advice, no diagnosis, no phone numbers, nothing about changing a medicine (the coach keeps to the same rules). They hold no task, link or tag in their text, so nothing lands on the daily brief or in the graph by itself.
-- **Which folder.** Exactly the folder `Bio` at the vault's home, spelled as the vault spells it (`bio` on Windows is `Bio`). A folder called Bio anywhere else is an ordinary star, a drive named Bio is a drive, and a vault with no such folder has no Bio star: nothing is made up.
+- **Which folder.** Exactly the folder `Bio` at the vault's home, spelled as the vault spells it (`bio` on Windows is `Bio`). A folder called Bio anywhere else is an ordinary star and a drive named Bio is a drive. A vault with no such folder, that can be written to, shows the star **dormant**: the same blue star, named `✚ Bio`, standing where the folder will be with nothing in it (`folder.placeholder`; `FolderGraphOptions.bioPlaceholder`, which the store asks for), so it can be seen before it is made. Drawing it writes nothing and makes no folder; the inspector's *Make my Bio star* does, and the dormant star becomes the real one in place (the same id, so the selection stays). A dormant star is not a sun (nothing in it to open), it hangs from the galaxy, and a read-only vault has none.
 - **How it looks.** The biggest star there is (radius 9.5, a little more for each doubling of what it holds, at most 11; a project star tops out at 9.2, a board sun at 9, a drive is 16), blue (`BIO_STAR_COLOR` is a deep body colour on purpose: the scene shows colour × glow with no tone mapping, so at the Bio star's glow it comes out a bright blue, where a lighter blue clipped to cyan), with a wider soft aura than any other body (`BIO_STAR_HALO`, 5.4 radii against 3.2) so it is a blue giant from far away too, always named (`✚ Bio`, in the lighter `BIO_STAR_LABEL_COLOR`, which its inspector uses too), burning at one brightness whatever the urgency (`BIO_STAR_GLOW`: more than the most urgent star, a galaxy or a board sun; only the Today hub outshines it). In every other way it is a folder: its pages orbit it, it orbits its drive, and it is always shown while it exists, however deep it sits.
-- **The inspector** of the Bio star says what lives there and who could see it, and adds the pages that are missing on a click.
+- **The inspector** of the Bio star says what lives there and who could see it, and adds the pages that are missing on a click. On a dormant star it says the star is waiting and that nothing is written until the button is pressed, and the one button makes it.
 - **Who could see it.** The pages are plain markdown on this computer, like every note. With Claude as the chat's answerer, whatever the chat reads from them goes to Anthropic; with Ollama nothing leaves the computer ([BRAIN-CHAT.md](BRAIN-CHAT.md#your-bio-notes)).
-- **The viewer** is sent the Bio star as a `star` (kind and body) in its blue and its radius, and the scene cut always keeps it with a page or two, like the drives and the Today hub.
+- **The viewer** is sent the Bio star as a `star` (kind and body) in its blue and its radius, and the scene cut always keeps it with a page or two, like the drives and the Today hub. A dormant one is sent too, as a star with no children.
+
+## Suns open into planets, then moons
+
+A sun (a folder's star, a drive's galaxy, a board's sun) is something you open. A closed sun shows only itself, so a big vault is a field of stars to pick from, not a wall of dots.
+
+| Level | Shows |
+| --- | --- |
+| **Closed** (0) | the star alone |
+| **Planets** (1) | its planets (a big picture, video or model, a long note) and the stars of its sub-folders, orbiting it |
+| **Planets + moons** (2) | those and its moons: every small file, and the links to notes that do not exist yet |
+
+- **Always shown.** The galaxy, the folders directly under it (so a closed vault is a field of stars), the Today hub, the selected body, the cards of an open star gallery, and what a search or a filter lights up.
+- **Opening.** A click on a closed star opens its planets (its moons, when it has no planets), the camera flies in and a rising run of notes plays. The bar at the bottom of the 3D view then picks *Closed*, *Planets* or *Planets + moons* for the selected sun, with what it holds (`1 planet · 2 folders · 7 moons`); a level it has nothing for is off. `s` steps the selected sun (or the sun of the selected body) through the levels it has something for, `⇧ S` opens every sun or closes every one.
+- **Each sun is its own**, and the levels are saved for the vault. A body is shown only while the sun it orbits is shown (`bodyOwners`, `bodyTiers`, `bodyOrder` in `packages/core/src/vault/cosmos.ts`): a sub-folder's planets wait for its own star to open. Counts for the bar come from `sunCounts`.
+- **Selecting a hidden body** (a search, a link, `Tab`, back and forward) opens the stars above it as far as it needs, so what you asked for is always there, and the opening is saved like any other.
+- **The unfolding.** When a sun opens its bodies grow out of it along their own orbits, and when it closes they fold back into it (about half a second, `REVEAL_SECONDS` in `scene/reveal.ts`); their orbit rings come and go with them, and a link to a hidden body ends at its sun. A fresh scene starts with every body where it belongs.
+- **Switching it off** (the palette's *Suns: open on click / always show every planet and moon*) shows every body, always, as before. The other layouts never fold anything: they have no suns.
+- **The viewer** is still sent the whole scene: the levels are how the brain window looks at it, not part of the contract it sends.
+
+## The sky
+
+Behind the bodies is a procedural sky, so the brain sits in space and not on a black page: a Milky Way band tilted across the home view with dark dust lanes and a warm bright centre, four soft emission nebulae (rose, teal, violet and gold), two faint galaxies far beyond ours and about 16,000 real stars (sharp however far you zoom: most are pinpoints, a few are bright, and they crowd along the band).
+
+- The soft parts are painted once, when the scene starts, into a cube map and shown on a dome at the far plane that turns with the view and never moves with it; nothing is a file. `scene/skyData.ts` holds the constants and the stars (a pure function of a seed: the same sky every time), `scene/skyShader.ts` the GLSL, `scene/sky.ts` the three.js objects. If the bake fails the scene falls back to a plain haze.
+- It stays under the bloom threshold (`SKY_MAX_LINEAR`, 0.6 of 1), so it never glows like a body.
+- Orbit rings are drawn brighter than a faint hint (the selected system's brightest), and labels are placed most important first (`scene/labelPlace.ts`): a label that would print on top of one already placed is left out, and last frame's labels are kept when two compete, so names do not flicker.
+
+## Sound
+
+A click on a star, a planet or a moon plays a short note of its own; opening or closing a sun plays a run of notes, rising when it opens and falling when it closes. `⇧ M` turns it on and off (a setting, on by default); the day-planning nudge cards stay silent, as their own contract says.
+
+- **Every body has its own note**, always the same: a hash of its id (FNV-1a) picks a degree of the major pentatonic scale, which has no wrong notes, so any run of clicks is a tune. Big bodies are low and small ones high: a galaxy (as a chord) and a star sound in the octave below middle C, a planet, a picture and a board's sun in the octave of middle C, a moon, a ghost and the Today hub an octave above.
+- **Each kind its own instrument**: a star is a warm bell with a soft thump under it, a planet a round pluck, a picture a glassy shimmer, a moon a bright tick, a ghost a soft, quiet pluck, the Today hub and a board's sun sparkle.
+- **Everything is made on the spot** with Web Audio (oscillators and a reverb made of decaying noise, a compressor, at most 14 notes at once): no sound file is shipped, nothing is downloaded, nothing leaves the computer. A page with no Web Audio is silent, and the context is only made on the first click (a browser wants one before it will play).
+- `packages/ui/src/audio/sounds.ts`; `soundPlan` and `sunRun` are the pure parts, tested as numbers.
 
 ## Planet or moon
 

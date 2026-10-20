@@ -329,8 +329,10 @@ function FolderInspector({ node }: { node: GraphNode }) {
   }, [graph, node.id])
 
   const readOnly = !adapter || adapter.readOnly
-  // The vault root of a multi-root vault is not a folder on disk; a drive can't be a project.
-  const onDisk = !(info.role === 'root' && roots.length > 1)
+  /** The Bio star before its folder exists: nothing on disk yet, so nothing to reveal, leave out or add to. */
+  const dormant = info.placeholder === true
+  // The vault root of a multi-root vault is not a folder on disk; a drive can't be a project; a dormant star has no folder yet.
+  const onDisk = !(info.role === 'root' && roots.length > 1) && !dormant
   const canMkdir = !!adapter?.createFolder
   const canImport = !!adapter?.createAsset
 
@@ -348,10 +350,10 @@ function FolderInspector({ node }: { node: GraphNode }) {
     setName('')
     setAsked((n) => n + 1)
   }, [formRequest, readOnly, onDisk, canMkdir])
-  const role = info.bio ? '✚ Bio star' : info.role === 'folder' && info.inProject ? 'Planet of a project' : ROLE_LABEL[info.role]
+  const role = info.bio ? (dormant ? '✚ Bio star · not made yet' : '✚ Bio star') : info.role === 'folder' && info.inProject ? 'Planet of a project' : ROLE_LABEL[info.role]
   const color = info.bio ? BIO_STAR_LABEL_COLOR : info.role === 'project' ? STAR_COLOR : info.role === 'folder' ? starColor(info.path) : SUN_COLOR
   const projectNote = info.projectId ? notes.get(info.projectId) : undefined
-  const where = info.role === 'root' ? (adapter?.location ?? '') : `${info.path}/`
+  const where = info.role === 'root' ? (adapter?.location ?? '') : dormant ? `${info.path}/ · not on disk yet` : `${info.path}/`
 
   const submit = async () => {
     const value = name.trim()
@@ -381,24 +383,30 @@ function FolderInspector({ node }: { node: GraphNode }) {
         <div className="mt-1 truncate font-mono text-[10.5px] text-faint" title={where}>
           {where}
         </div>
-        <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11.5px] text-dim">
-          <JumpStat title="Notes directly in this folder" anchor="moons" count={children.moons.length}>
-            · {plural(info.notes, 'moon')}
-          </JumpStat>
-          <span title="Notes anywhere under this folder">{plural(info.totalNotes, 'note')} in all</span>
-          <JumpStat title="Subfolders on disk" anchor="planets" count={children.planets.length}>
-            ● {plural(info.childFolders, 'folder')}
-          </JumpStat>
-          {info.hiddenFolders > 0 && <span className="text-inbox">+{info.hiddenFolders} hidden</span>}
-          {info.images > 0 && (
-            <JumpStat title="Pictures directly in this folder · how many orbit it as moons (the newest)" anchor="pictures" count={children.pictures.length}>
-              🖼 {plural(info.images, 'picture')} · {info.shownImages} shown
+        {!dormant && (
+          <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11.5px] text-dim">
+            <JumpStat title="Notes directly in this folder" anchor="moons" count={children.moons.length}>
+              · {plural(info.notes, 'moon')}
             </JumpStat>
-          )}
-        </div>
+            <span title="Notes anywhere under this folder">{plural(info.totalNotes, 'note')} in all</span>
+            <JumpStat title="Subfolders on disk" anchor="planets" count={children.planets.length}>
+              ● {plural(info.childFolders, 'folder')}
+            </JumpStat>
+            {info.hiddenFolders > 0 && <span className="text-inbox">+{info.hiddenFolders} hidden</span>}
+            {info.images > 0 && (
+              <JumpStat title="Pictures directly in this folder · how many orbit it as moons (the newest)" anchor="pictures" count={children.pictures.length}>
+                🖼 {plural(info.images, 'picture')} · {info.shownImages} shown
+              </JumpStat>
+            )}
+          </div>
+        )}
         {info.bio && (
           <div className="mt-3 rounded-lg border border-[rgba(116,173,255,0.4)] bg-[rgba(116,173,255,0.08)] p-2.5 text-[11.5px] leading-snug" aria-label="About the Bio star">
-            <div className="text-ink">Your notes on sleep, food, meds, exercise, drugs and mental health live here.</div>
+            <div className="text-ink">
+              {dormant
+                ? 'Your Bio star is waiting. It holds your own notes on sleep, food, meds, exercise, drugs and mental health: six pages to fill in. Nothing is written until you press the button.'
+                : 'Your notes on sleep, food, meds, exercise, drugs and mental health live here.'}
+            </div>
             <div className="mt-1 text-faint">
               They stay on this computer. If you chat with Claude, what the chat reads from them goes to Anthropic; with Ollama nothing leaves.
             </div>
@@ -407,9 +415,9 @@ function FolderInspector({ node }: { node: GraphNode }) {
                 type="button"
                 className="hud-btn primary mt-2"
                 onClick={() => void makeBio()}
-                title="Writes only the pages that are missing; nothing already there is touched"
+                title={dormant ? `Makes the folder ${info.path} with six starting pages: headings and empty lists, nothing else` : 'Writes only the pages that are missing; nothing already there is touched'}
               >
-                ✚ Add the {bioMissing} missing {bioMissing === 1 ? 'page' : 'pages'}
+                {dormant ? '✚ Make my Bio star' : `✚ Add the ${bioMissing} missing ${bioMissing === 1 ? 'page' : 'pages'}`}
               </button>
             )}
           </div>

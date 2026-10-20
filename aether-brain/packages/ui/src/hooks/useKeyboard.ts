@@ -1,6 +1,6 @@
 import { useEffect } from 'react'
 import { folderPathOf, imagePathOf, isFolderId, isImageId, isTodayId } from '@aether/core'
-import { selectedProject } from '../commands'
+import { selectedProject, sunTargetOf } from '../commands'
 import { keyToCommand } from '../board/commands'
 import { importChatsFromDialog } from '../components/chats'
 import { focusBrief } from '../components/Inspector'
@@ -243,9 +243,29 @@ export function handleKey(e: KeyboardEvent): void {
         return
       }
       break
+    case 'M':
     case 'm':
+      // Shift+M: sound on / off. m: colour mode. Shift decides, as for Shift+G.
+      if (e.shiftKey) {
+        s.toggleSound()
+        return
+      }
       s.cycleColorMode()
       return
+    case 'S':
+    case 's': {
+      // Shift+S: open every sun, or close every one. s: the selected sun (or the sun of the selected body) one level further.
+      if (e.shiftKey) {
+        s.toggleAllSuns()
+        return
+      }
+      const sun = sunTargetOf(s)
+      if (sun) {
+        s.cycleSun(sun)
+        return
+      }
+      break
+    }
     case 'z':
       s.cyclePictureSize()
       return

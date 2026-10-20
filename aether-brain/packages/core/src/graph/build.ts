@@ -18,9 +18,15 @@ export interface FolderGraphOptions extends FolderSelectOptions {
   /**
    * The Bio star's folder as the vault spells it (`Bio`, or `D/Bio` in a vault of several roots; `BIO_FOLDER` under the
    * vault's home). When that folder exists it is always shown, and its node is marked `folder.bio`. A folder that is not
-   * there is not made up, and a drive (a mount) is never the Bio star.
+   * there is not made up (unless `bioPlaceholder` asks for the dormant star), and a drive (a mount) is never the Bio star.
    */
   bio?: string | null
+  /**
+   * With `bio`: when the vault has no such folder, a dormant Bio star (`folder.placeholder`) stands where it will be, so the
+   * user can see it and make it with one click. Nothing is written by drawing it; it has the folder's own id, so making the
+   * folder turns it into the real star in place.
+   */
+  bioPlaceholder?: boolean
 }
 
 export interface ImageGraphOptions {
@@ -681,6 +687,44 @@ function addFolderSystem(
       updated: null,
       wordCount: 0,
     })
+  }
+  // The dormant Bio star: only when asked, only for a folder the vault does not have, and never a drive.
+  if (opts.bioPlaceholder && bioAsked !== '' && !known.has(bioAsked) && !(opts.multiRoot && folderDepth(bioAsked) === 1)) {
+    const id = folderKey(bioAsked)
+    if (!index.has(id)) {
+      index.set(id, nodes.length)
+      nodes.push({
+        id,
+        title: bioAsked.slice(bioAsked.lastIndexOf('/') + 1),
+        area: areaFromFolder(`${bioAsked}/x`) ?? 'untagged',
+        type: 'moc',
+        tags: [],
+        kind: 'folder',
+        ghost: false,
+        parent: folderKey(nearestVisible(folderOf(bioAsked))),
+        folder: {
+          path: bioAsked,
+          role: 'folder',
+          depth: folderDepth(bioAsked),
+          bio: true,
+          placeholder: true,
+          projectId: null,
+          inProject: false,
+          childFolders: 0,
+          hiddenFolders: 0,
+          notes: 0,
+          totalNotes: 0,
+          images: 0,
+          shownImages: 0,
+        },
+        inDegree: 0,
+        outDegree: 0,
+        degree: 0,
+        created: null,
+        updated: null,
+        wordCount: 0,
+      })
+    }
   }
   return { selection, gallery }
 }
