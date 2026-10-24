@@ -42,6 +42,8 @@ export const THUMB_IPC = {
   video: 'thumbs:video',
   /** main → helper: (id, binary glTF bytes, side): a 3D model drawn lit from one side, a square of that side. */
   model: 'thumbs:model',
+  /** main → helper: (id, model address, size in bytes, side): the same for a model too big to send, read in pieces from the address. */
+  modelFile: 'thumbs:modelfile',
 } as const
 
 /**
@@ -82,7 +84,20 @@ export interface ModelJob {
   px: number
 }
 
-export type ThumbJob = PictureJob | VideoJob | ModelJob
+/**
+ * One 3D model too big to send: where the helper's session serves it (a one-job address, in ranges), how many bytes it has, and the
+ * side of the square still. The helper reads from it only what it draws.
+ */
+export interface ModelFileJob {
+  modelUrl: string
+  size: number
+  px: number
+}
+
+export type ThumbJob = PictureJob | VideoJob | ModelJob | ModelFileJob
+
+/** Longest a model read in pieces may take: a few hundred MB off a disk, the textures decoded, the drawing itself. */
+export const MODEL_FILE_TIMEOUT = 60_000
 
 /**
  * A job that got no answer through no fault of its picture (the helper could
@@ -119,6 +134,8 @@ export class ThumbQueue extends HelperQueue<ThumbJob, Uint8Array> {
       stopped: 'Thumbnails stopped',
       timeoutMs: opts.timeoutMs ?? THUMB_JOB_TIMEOUT,
       concurrency: opts.concurrency ?? THUMB_CONCURRENCY,
+      // A model read in pieces is allowed longer than a picture (never less than the usual limit, which a test may set).
+      timeoutFor: (job) => ('modelUrl' in job ? Math.max(MODEL_FILE_TIMEOUT, opts.timeoutMs ?? 0) : undefined),
     })
   }
 }
@@ -190,10 +207,32 @@ export class Thumbnailer {
     return this.queue.render({ model: bytes, px })
   }
 
-  /** One request of the helper's session for a video address: the file of a job running now, else 404. */
-  serve(url: string, range: string | null): Promise<Response> {
+  /**
+   * 3D model of `size` bytes at `abs` (a binary glTF, checked by `modelKindOf`), too big to send whole: the helper is handed a one-job
+   * address and reads from it the pieces it draws (the mesh and one picture), then sends the PNG. It may read the file only until the
+   * job ends.
+   */
+  async renderModelFile(abs: string, size: number, px: number): Promise<Uint8Array | null> {
+    const token = randomUUID()
+    const end = new AbortController()
+    this.videos.set(token, { abs, mime: 'model/gltf-binary', end })
+    try {
+      return await this.queue.render({ modelUrl: VIDEO_URL_PREFIX + token, size, px })
+    } finally {
+      this.videos.delete(token)
+      end.abort()
+    }
+  }
+
+  /** One request of the helper's session for a video or model address: the file of a job running now, else 404. */
+  serve(url: string, range: string | null, method = 'GET'): Promise<Response> {
     const video = url.startsWith(VIDEO_URL_PREFIX) ? this.videos.get(url.slice(VIDEO_URL_PREFIX.length)) : undefined
     if (!video) return Promise.resolve(new Response(null, { status: 404 }))
+    // The page asks first whether it may send a Range header from its own origin (a CORS pre-check): yes, to this address.
+    if (method === 'OPTIONS') {
+      const headers = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET', 'Access-Control-Allow-Headers': 'range', 'Access-Control-Max-Age': '600' }
+      return Promise.resolve(new Response(null, { status: 204, headers }))
+    }
     return serveVideo(video.abs, video.mime, range, video.end.signal)
   }
 
@@ -247,6 +286,7 @@ export class Thumbnailer {
       id,
       send: (jobId, job) => {
         if ('url' in job) wc.send(THUMB_IPC.video, jobId, job.url, job.px)
+        else if ('modelUrl' in job) wc.send(THUMB_IPC.modelFile, jobId, job.modelUrl, job.size, job.px)
         else if ('model' in job) wc.send(THUMB_IPC.model, jobId, job.model, job.px)
         else wc.send(THUMB_IPC.job, jobId, job.bytes, job.type, job.width, job.height)
       },
@@ -269,7 +309,7 @@ export class Thumbnailer {
     this.sessionReady = true
     const ses = this.opts.electron.session.fromPartition(THUMB_PARTITION)
     ses.webRequest.onBeforeRequest((details, cb) => cb({ cancel: details.url !== THUMB_PAGE && !details.url.startsWith(VIDEO_URL_PREFIX) }))
-    ses.protocol.handle(VIDEO_SCHEME, (req) => this.serve(req.url, req.headers.get('range')))
+    ses.protocol.handle(VIDEO_SCHEME, (req) => this.serve(req.url, req.headers.get('range'), req.method))
     ses.setPermissionRequestHandler((_wc, _permission, cb) => cb(false))
     ses.setPermissionCheckHandler(() => false)
   }

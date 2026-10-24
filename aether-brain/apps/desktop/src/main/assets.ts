@@ -401,6 +401,11 @@ export type ModelKind = 'glb'
 
 /** Largest model file the thumbnail helper is sent whole (what a picture is allowed too). */
 export const MAX_MODEL_BYTES = MAX_THUMB_FILE_BYTES
+/**
+ * Largest model file the helper reads at all: a bigger one than `MAX_MODEL_BYTES` is not sent, the helper reads the pieces it draws from
+ * (a Meshy export of 300 MB is mostly texture maps), so its size costs the disk a few reads and main nothing.
+ */
+export const MAX_MODEL_FILE_BYTES = 2 * 1024 * 1024 * 1024
 /** Bytes read from the start of a model to tell it: the 12-byte header and the first chunk's length and type. */
 export const GLB_HEAD_BYTES = 20
 
@@ -463,7 +468,8 @@ export function byteRange(header: string | null, size: number): { start: number;
  * it can be drawn and saved.
  */
 export async function serveVideo(abs: string, mime: string, rangeHeader: string | null, signal?: AbortSignal): Promise<Response> {
-  const cors = { 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-store' }
+  // The helper's page reads Content-Range when it reads a model in pieces: a page of another origin may not, unless it is exposed.
+  const cors = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Expose-Headers': 'Content-Range, Content-Length, Accept-Ranges', 'Cache-Control': 'no-store' }
   // A job already over opens nothing.
   if (signal?.aborted) return new Response(null, { status: 410, headers: cors })
   const st = await fs.stat(abs).catch(() => null)
