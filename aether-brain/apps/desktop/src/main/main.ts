@@ -42,6 +42,7 @@ import { BRAIN_WINDOW_NAME, MemoryTrail, type MemorySample, crashMessage, crashR
 import {
   GLB_HEAD_BYTES,
   MAX_MODEL_BYTES,
+  MAX_MODEL_FILE_BYTES,
   MAX_THUMB_FILE_BYTES,
   ThumbCache,
   VIDEO_HEAD_BYTES,
@@ -67,6 +68,8 @@ import { ChatHost, chatSettings, type ChatSettingsStored } from './chat-host.js'
 import { LibraryHost, librarySettings, type LibrarySettings } from './library-host.js'
 import { VISION_IPC, VISION_SCHEME, VisionHelper } from './library/vision.js'
 import { VisionModel } from './library/vision-model.js'
+import { ModelBaker } from './model-baker.js'
+import { ModelIconCache } from './model-icons.js'
 import type { LibraryModelAction, LibraryPatch } from '../shared/library.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -363,6 +366,7 @@ async function openVault(input: string[], opts?: OpenVaultOptions): Promise<Vaul
   watcher = null
   aiHeld = null
   thumbs.clear()
+  baker.stop()
   pictureLedger.clear()
   assetLedger.clear()
   vault = next
@@ -417,6 +421,8 @@ async function listFiles(): Promise<FilePage> {
     const files = await v.readAll(scan.files, (done) => progress({ phase: 'reading', files: done, found, dirs: scan.dirs, done: false }))
     progress({ phase: 'done', files: files.length, found, dirs: scan.dirs, done: true })
     if (latest()) void ai?.setVault(linkVault(v), { files, folders: scan.folders })
+    // The models of this vault are drawn ahead of need, a little while after it is up.
+    if (latest()) baker.start()
     return filePager.start(files)
   } finally {
     // setVault above already set the link's target, so these land after the snapshot.
@@ -437,6 +443,7 @@ async function startWatcher(v: FsVault): Promise<VaultWatcher> {
     // The floating board window gets the pictures (no note text) and the board it shows, to keep both right.
     pictureLedger.apply(changes)
     assetLedger.apply(changes)
+    baker.add(changedModels(changes))
     board?.forward(changes)
   })
   watcher = w
@@ -540,6 +547,16 @@ async function reveal(p: unknown, fromBoardPage = false): Promise<void> {
 /** Thumbnails already made, and the ones being made (two requests for the same one share the work). */
 const thumbs = new ThumbCache()
 const thumbsInFlight = new Map<string, Promise<Uint8Array | null>>()
+/**
+ * The pictures of 3D models are also kept on disk, in the app's own data folder (never in the vault), so a launch does not draw them
+ * again; and the baker draws every model of a vault a little after it opens, ahead of need (see model-baker.ts).
+ */
+const modelIcons = new ModelIconCache(path.join(app.getPath('userData'), 'model-icons'))
+/** The sizes baked for a model: what the brain asks for (512, drawn into 256 px layers) and what a board asks for (256). */
+const MODEL_ICON_SIZES = [512, 256]
+/** Model pictures the helper really drew since the app started: how the baker tells work from a look at the disk. */
+let modelIconsDrawn = 0
+const baker = new ModelBaker(bakeModelIcons, modelsToBake)
 /** Decodes pictures in a hidden helper renderer, never in this process (see thumbnailer.ts). */
 const thumbnailer = new Thumbnailer({
   electron: { BrowserWindow, session },
@@ -580,13 +597,14 @@ async function thumbnail(p: unknown, size: unknown): Promise<Uint8Array | null> 
   const st = await fs.stat(abs).catch(() => null)
   const video = isVideoName(path.basename(abs))
   const model = isModelName(path.basename(abs))
-  if (!st?.isFile() || st.size === 0 || (!video && st.size > MAX_THUMB_FILE_BYTES)) return null
+  // A picture is read whole (at most 64 MB), a video is streamed, and a model too big to send is read in pieces by the helper.
+  if (!st?.isFile() || st.size === 0 || (!video && !model && st.size > MAX_THUMB_FILE_BYTES) || (model && st.size > MAX_MODEL_FILE_BYTES)) return null
   const key = ThumbCache.key(abs, st.mtimeMs, st.size, px)
   const hit = thumbs.get(key)
   if (hit !== undefined) return hit
   let job = thumbsInFlight.get(key)
   if (!job) {
-    job = (video ? renderVideoThumb(abs, px) : model ? renderModelThumb(abs, px) : renderThumb(abs, px))
+    job = (video ? renderVideoThumb(abs, px) : model ? renderModelIcon(abs, st.mtimeMs, st.size, px) : renderThumb(abs, px))
       .then(
         (png) => {
           // A picture that cannot be decoded is an answer too (null, cached for this version of the
@@ -619,13 +637,57 @@ async function renderThumb(abs: string, px: number): Promise<Uint8Array | null> 
 /**
  * A 3D model's still, drawn by the thumbnail helper: main reads the file here
  * (asynchronously, never more than 64 MB), checks that it starts like a binary
- * glTF and sends the bytes; it parses and draws nothing itself. A file that
- * is not one gets no thumbnail (a plain moon).
+ * glTF and sends the bytes; it parses and draws nothing itself. A bigger file is
+ * not read here: main checks its first bytes and the helper reads the pieces it
+ * draws. A file that is not a binary glTF gets no thumbnail (a plain moon).
  */
-async function renderModelThumb(abs: string, px: number): Promise<Uint8Array | null> {
+async function renderModelThumb(abs: string, size: number, px: number): Promise<Uint8Array | null> {
+  // A model too big to send (a Meshy export is 80 to 325 MB, mostly texture maps) is not read here at all: main checks its first bytes
+  // and the helper reads the pieces it draws, from a one-job address.
+  if (size > MAX_MODEL_BYTES) {
+    if (!modelKindOf(await readHead(abs, GLB_HEAD_BYTES), size)) return null
+    return thumbnailer.renderModelFile(abs, size, px)
+  }
   const bytes = await readUpTo(abs, MAX_MODEL_BYTES)
   if (!bytes || !modelKindOf(bytes)) return null
   return thumbnailer.renderModel(bytes, px)
+}
+
+/**
+ * A model's picture, from the disk when an earlier launch (or the baker) made it, else drawn by the helper and kept. A model the helper
+ * could not draw is kept as "no picture" for a day. A drawing that got no answer at all (the helper stopped) is not kept.
+ */
+async function renderModelIcon(abs: string, mtimeMs: number, size: number, px: number): Promise<Uint8Array | null> {
+  const key = ModelIconCache.key(abs, mtimeMs, size, px)
+  const kept = await modelIcons.get(key)
+  if (kept !== undefined) return kept
+  const png = await renderModelThumb(abs, size, px)
+  modelIconsDrawn++
+  await modelIcons.set(key, png).catch(() => undefined)
+  return png
+}
+
+/** The baker's job for one model of the vault: both sizes of its picture. True when the helper had to draw any of them. */
+async function bakeModelIcons(rel: string): Promise<boolean> {
+  const before = modelIconsDrawn
+  for (const px of MODEL_ICON_SIZES) await thumbnail(rel, px)
+  return modelIconsDrawn > before
+}
+
+/** The models of the open vault, newest first where their dates are known: what the baker works through. */
+function modelsToBake(): string[] {
+  const scan = vault?.lastScan
+  if (!scan) return []
+  return assetLedger
+    .list(scan.assets)
+    .filter((a) => isModelName(path.posix.basename(a.path)))
+    .sort((a, b) => (b.mtime ?? 0) - (a.mtime ?? 0))
+    .map((a) => a.path)
+}
+
+/** The models among some changes that are new or were rewritten. */
+function changedModels(changes: readonly VaultChangeDto[]): string[] {
+  return changes.filter((c) => (c.kind === 'add' || c.kind === 'change') && isModelName(path.posix.basename(c.path))).map((c) => c.path)
 }
 
 /**
@@ -1385,6 +1447,7 @@ app.on('activate', () => {
 /** Set once every page has been asked to save for this quit: the quit then goes on, and the closes it makes pass through. */
 let quitSaved = false
 app.on('before-quit', (e) => {
+  baker.stop()
   if (!quitSaved) {
     // The pages that can hold an unsaved board save first (1.5 s at most; a page that is gone, crashed or still loading is not
     // waited for, so a broken page never keeps the app from quitting).

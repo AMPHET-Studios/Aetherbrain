@@ -18,7 +18,7 @@ export interface QueueHelper<J> {
   destroy(hung: boolean): void
 }
 
-export interface HelperQueueOptions {
+export interface HelperQueueOptions<J = unknown> {
   /** What the helper is called in errors (`thumbnail helper`). */
   name: string
   /** The error a job that got no answer through no fault of its own rejects with. */
@@ -29,6 +29,8 @@ export interface HelperQueueOptions {
   timeoutMs: number
   /** Longest the helper may take to say it listens. */
   startTimeoutMs?: number
+  /** A job that is allowed longer (or less) than `timeoutMs`: its own limit, or undefined for the usual one. */
+  timeoutFor?: (job: J) => number | undefined
   /** Jobs in flight at once. */
   concurrency: number
 }
@@ -70,7 +72,7 @@ export class HelperQueue<J, R> {
   constructor(
     private spawn: () => QueueHelper<J>,
     private accept: (answer: unknown) => R | null,
-    private opts: HelperQueueOptions,
+    private opts: HelperQueueOptions<J>,
   ) {
     this.timeoutMs = opts.timeoutMs
     this.concurrency = opts.concurrency
@@ -180,7 +182,7 @@ export class HelperQueue<J, R> {
 
   private dispatch(helper: QueueHelper<J>, w: Waiting<J, R>): void {
     const id = ++this.seq
-    const timer = setTimeout(() => this.timeout(id), this.timeoutMs)
+    const timer = setTimeout(() => this.timeout(id), this.opts.timeoutFor?.(w.job) ?? this.timeoutMs)
     this.running.set(id, { w, timer })
     try {
       helper.send(id, w.job)

@@ -23,6 +23,7 @@ const IPC = {
   done: 'thumbs:done',
   video: 'thumbs:video',
   model: 'thumbs:model',
+  modelFile: 'thumbs:modelfile',
 } as const
 
 /** Addresses main hands out for videos (VIDEO_URL_PREFIX in src/main/thumbnailer.ts). */
@@ -203,11 +204,18 @@ const GLB_LIMITS = {
   /** Embedded texture bytes decoded for an average colour, and how many materials look at one. */
   textureBytes: 32 * 1024 * 1024,
   materials: 32,
+  /** One embedded picture bigger than this is not decoded; a drawn texture is this many pixels square (UVs are 0..1, so the shape of the original does not matter). */
+  imageBytes: 24 * 1024 * 1024,
+  textureSide: 512,
+  /** Bytes read from a model that is not sent whole: the mesh data it draws (a Meshy export of 300 MB is mostly texture maps it never reads). */
+  rangedBytes: 224 * 1024 * 1024,
   /** Time to draw, in ms: what is drawn by then is the picture. */
   budgetMs: 6_000,
 }
 
 type Rgb = readonly [number, number, number]
+
+const NO_TINTS: ReadonlyMap<number, Rgb> = new Map()
 
 /** The parts of a glTF document this reads. It comes from a file: every field may be anything, so each is checked. */
 interface GltfDoc {
@@ -218,8 +226,9 @@ interface GltfDoc {
   accessors?: { bufferView?: number; byteOffset?: number; componentType?: number; normalized?: boolean; count?: number; type?: string; sparse?: unknown }[]
   bufferViews?: { buffer?: number; byteOffset?: number; byteLength?: number; byteStride?: number; extensions?: Record<string, unknown> }[]
   buffers?: { byteLength?: number; uri?: string }[]
-  materials?: { pbrMetallicRoughness?: { baseColorFactor?: number[]; baseColorTexture?: { index?: number } } }[]
-  textures?: { source?: number }[]
+  materials?: { pbrMetallicRoughness?: { baseColorFactor?: number[]; baseColorTexture?: { index?: number } }; alphaMode?: string; alphaCutoff?: number }[]
+  textures?: { source?: number; sampler?: number }[]
+  samplers?: { wrapS?: number; wrapT?: number }[]
   images?: { bufferView?: number; mimeType?: string }[]
 }
 
@@ -281,11 +290,51 @@ const COMPONENT: Record<number, { size: number; read: (v: DataView, at: number) 
 }
 const ACCESSOR_COMPONENTS: Record<string, number> = { SCALAR: 1, VEC2: 2, VEC3: 3, VEC4: 4 }
 
+/** Where an accessor's elements lie in the BIN chunk, once every rule of `readAccessor` is met. */
+interface Span {
+  /** The first byte of the first element, and one past the last byte of the last one. */
+  first: number
+  end: number
+  count: number
+  type: { size: number; read: (v: DataView, at: number) => number; max: number }
+  /** Bytes in one element, and from the start of one to the start of the next. */
+  element: number
+  stride: number
+  scaled: boolean
+}
+
 /**
- * The values of accessor `index` as `comps` numbers per element, or null when it cannot be read: not in the file's own
- * buffer, sparse, compressed, the wrong type, more than `maxCount` elements, or reaching outside its buffer view or the
+ * Where accessor `index` lies in a BIN chunk of `binLength` bytes, as `comps` numbers per element, or null when it cannot be read: not
+ * in the file's own buffer, sparse, compressed, the wrong type, more than `maxCount` elements, or reaching outside its buffer view or the
  * buffer. `allowed`: the component types the caller takes (a normalized integer is turned into 0..1 or -1..1).
  */
+function accessorSpan(doc: GltfDoc, binLength: number, index: unknown, comps: number, maxCount: number, allowed: readonly number[]): Span | null {
+  if (!isIndex(index)) return null
+  // Buffer 0 is the BIN chunk only when it names no file: one that does is data this never reads.
+  if (doc.buffers?.[0]?.uri !== undefined) return null
+  const acc = doc.accessors?.[index]
+  if (!acc || typeof acc !== 'object' || acc.sparse !== undefined) return null
+  const type = isIndex(acc.componentType) ? COMPONENT[acc.componentType] : undefined
+  const count = acc.count
+  if (!type || !allowed.includes(acc.componentType as number) || ACCESSOR_COMPONENTS[String(acc.type)] !== comps) return null
+  if (!isIndex(count) || count === 0 || count > maxCount) return null
+  const view = isIndex(acc.bufferView) ? doc.bufferViews?.[acc.bufferView] : undefined
+  // The file's own buffer only (index 0, the BIN chunk): nothing is fetched from anywhere.
+  if (!view || typeof view !== 'object' || (view.buffer ?? 0) !== 0 || view.extensions?.['EXT_meshopt_compression'] !== undefined) return null
+  const viewStart = view.byteOffset ?? 0
+  const viewLength = view.byteLength
+  if (!isIndex(viewStart) || !isIndex(viewLength) || viewStart + viewLength > binLength) return null
+  const element = type.size * comps
+  const stride = isIndex(view.byteStride) && view.byteStride >= element ? view.byteStride : element
+  const offset = acc.byteOffset ?? 0
+  if (!isIndex(offset)) return null
+  const first = viewStart + offset
+  const end = first + stride * (count - 1) + element
+  if (end > viewStart + viewLength) return null
+  return { first, end, count, type, element, stride, scaled: acc.normalized === true && type.max > 0 }
+}
+
+/** The values of accessor `index` as `comps` numbers per element, or null when it cannot be read (see `accessorSpan`). */
 function readAccessor<T extends Float32Array | Uint32Array>(
   g: Glb,
   index: unknown,
@@ -295,36 +344,16 @@ function readAccessor<T extends Float32Array | Uint32Array>(
   make: (length: number) => T,
 ): T | null {
   const bin = g.bin
-  if (!bin || !isIndex(index)) return null
-  // Buffer 0 is the BIN chunk only when it names no file: one that does is data this never reads.
-  if (g.doc.buffers?.[0]?.uri !== undefined) return null
-  const acc = g.doc.accessors?.[index]
-  if (!acc || typeof acc !== 'object' || acc.sparse !== undefined) return null
-  const type = isIndex(acc.componentType) ? COMPONENT[acc.componentType] : undefined
-  const count = acc.count
-  if (!type || !allowed.includes(acc.componentType as number) || ACCESSOR_COMPONENTS[String(acc.type)] !== comps) return null
-  if (!isIndex(count) || count === 0 || count > maxCount) return null
-  const view = isIndex(acc.bufferView) ? g.doc.bufferViews?.[acc.bufferView] : undefined
-  // The file's own buffer only (index 0, the BIN chunk): nothing is fetched from anywhere.
-  if (!view || typeof view !== 'object' || (view.buffer ?? 0) !== 0 || view.extensions?.['EXT_meshopt_compression'] !== undefined) return null
-  const viewStart = view.byteOffset ?? 0
-  const viewLength = view.byteLength
-  if (!isIndex(viewStart) || !isIndex(viewLength) || viewStart + viewLength > bin.length) return null
-  const element = type.size * comps
-  const stride = isIndex(view.byteStride) && view.byteStride >= element ? view.byteStride : element
-  const offset = acc.byteOffset ?? 0
-  if (!isIndex(offset)) return null
-  const first = viewStart + offset
-  const end = first + stride * (count - 1) + element
-  if (end > viewStart + viewLength) return null
+  if (!bin) return null
+  const s = accessorSpan(g.doc, bin.length, index, comps, maxCount, allowed)
+  if (!s) return null
   const data = new DataView(bin.buffer, bin.byteOffset, bin.byteLength)
-  const out = make(count * comps)
-  const scaled = acc.normalized === true && type.max > 0
-  for (let i = 0; i < count; i++) {
-    const at = first + i * stride
+  const out = make(s.count * comps)
+  for (let i = 0; i < s.count; i++) {
+    const at = s.first + i * s.stride
     for (let c = 0; c < comps; c++) {
-      const x = type.read(data, at + c * type.size)
-      out[i * comps + c] = scaled ? Math.max(x / type.max, -1) : x
+      const x = s.type.read(data, at + c * s.type.size)
+      out[i * comps + c] = s.scaled ? Math.max(x / s.type.max, -1) : x
     }
   }
   return out
@@ -334,6 +363,8 @@ function readAccessor<T extends Float32Array | Uint32Array>(
 interface Prim {
   pos: Float32Array
   nrm: Float32Array | null
+  /** The first texture coordinates (two numbers a vertex), when the primitive has them. */
+  uv: Float32Array | null
   tri: Uint32Array
   material: number
 }
@@ -370,6 +401,7 @@ function trianglesOf(mode: number, idx: Uint32Array | null, vertices: number): U
 const POSITION_TYPES = [5126, 5120, 5121, 5122, 5123]
 const NORMAL_TYPES = [5126, 5120, 5122]
 const INDEX_TYPES = [5121, 5123, 5125]
+const UV_TYPES = [5126, 5121, 5123]
 
 /** The drawable primitives of mesh `index` (triangles only; points and lines are left out); `budget.vertices` is spent as they are read. */
 function meshPrims(g: Glb, index: number, budget: { vertices: number }): Prim[] {
@@ -385,12 +417,19 @@ function meshPrims(g: Glb, index: number, budget: { vertices: number }): Prim[] 
     const vertices = pos.length / 3
     budget.vertices -= vertices
     const normals = readAccessor(g, p.attributes?.['NORMAL'], 3, vertices, NORMAL_TYPES, (n) => new Float32Array(n))
+    const uv = readAccessor(g, p.attributes?.['TEXCOORD_0'], 2, vertices, UV_TYPES, (n) => new Float32Array(n))
     let idx: Uint32Array | null = null
     if (p.indices !== undefined) {
       idx = readAccessor(g, p.indices, 1, GLB_LIMITS.triangles * 3, INDEX_TYPES, (n) => new Uint32Array(n))
       if (!idx) continue
     }
-    out.push({ pos, nrm: normals && normals.length === pos.length ? normals : null, tri: trianglesOf(mode, idx, vertices), material: isIndex(p.material) ? p.material : -1 })
+    out.push({
+      pos,
+      nrm: normals && normals.length === pos.length ? normals : null,
+      uv: uv && uv.length === vertices * 2 ? uv : null,
+      tri: trianglesOf(mode, idx, vertices),
+      material: isIndex(p.material) ? p.material : -1,
+    })
   }
   return out
 }
@@ -534,6 +573,8 @@ export interface RasterOptions {
   budgetMs?: number
   /** Most triangles drawn; a model with more is drawn with every n-th. Default GLB_LIMITS.triangles. */
   maxTriangles?: number
+  /** Base colour textures by material index (`loadTextures`): a primitive with UVs and a texture is drawn in the texture's colours. */
+  textures?: ReadonlyMap<number, Tex>
 }
 
 /**
@@ -588,6 +629,8 @@ export function rasterGlb(g: Glb, side: number, tints: ReadonlyMap<number, Rgb> 
   const half = n / 2
   const every = Math.max(1, Math.ceil(triangles / (opts.maxTriangles ?? GLB_LIMITS.triangles)))
   const colors = new Map<number, Rgb>()
+  const textures = opts.textures
+  const texel = new Float64Array(4)
   let scratch = new Float32Array(0)
   let normals = new Float32Array(0)
   // The clock is read every 256 triangles and every couple of million pixels filled (a few huge triangles are slow too).
@@ -622,8 +665,12 @@ export function rasterGlb(g: Glb, side: number, tints: ReadonlyMap<number, Rgb> 
         normals[i + 2] = nz / l
       }
     }
-    let color = colors.get(prim.material)
-    if (!color) colors.set(prim.material, (color = materialColor(g, prim.material, tints)))
+    // A textured primitive takes its colours from the texture: only the material's factor is left to multiply it by.
+    const uv = prim.uv
+    const tex = uv ? textures?.get(prim.material) : undefined
+    const colorKey = prim.material * 2 + (tex ? 1 : 0)
+    let color = colors.get(colorKey)
+    if (!color) colors.set(colorKey, (color = materialColor(g, prim.material, tex ? NO_TINTS : tints)))
     const [cr, cg, cb] = color
     const tri = prim.tri
     for (let t = 0; t + 2 < tri.length; t += 3 * every) {
@@ -633,6 +680,7 @@ export function rasterGlb(g: Glb, side: number, tints: ReadonlyMap<number, Rgb> 
       }
       const a = tri[t]! * 3, b = tri[t + 1]! * 3, d = tri[t + 2]! * 3
       if (a >= pos.length || b >= pos.length || d >= pos.length) continue
+      const ua = tri[t]! * 2, ub = tri[t + 1]! * 2, ud = tri[t + 2]! * 2
       const ax = scratch[a]!, ay = scratch[a + 1]!, az = scratch[a + 2]!
       const bx = scratch[b]!, by = scratch[b + 1]!, bz = scratch[b + 2]!
       const dx = scratch[d]!, dy = scratch[d + 1]!, dz = scratch[d + 2]!
@@ -689,8 +737,17 @@ export function rasterGlb(g: Glb, side: number, tints: ReadonlyMap<number, Rgb> 
           const z = w0 * az + w1 * bz + w2 * dz
           const at = y * n + x
           if (z >= depth[at]!) continue
+          let tr = 1, tg = 1, tb = 1
+          if (tex && uv) {
+            sampleTex(tex, w0 * uv[ua]! + w1 * uv[ub]! + w2 * uv[ud]!, w0 * uv[ua + 1]! + w1 * uv[ub + 1]! + w2 * uv[ud + 1]!, texel)
+            // A see-through texel of a masked or blended material lets what is behind it show.
+            if (texel[3]! < tex.cutoff) continue
+            tr = texel[0]! / 255
+            tg = texel[1]! / 255
+            tb = texel[2]! / 255
+          }
           depth[at] = z
-          let r = fr, gr = fg, bl = fb
+          let r = fr * tr, gr = fg * tg, bl = fb * tb
           if (smooth) {
             let nx = w0 * normals[a]! + w1 * normals[b]! + w2 * normals[d]!
             let ny = w0 * normals[a + 1]! + w1 * normals[b + 1]! + w2 * normals[d + 1]!
@@ -705,9 +762,9 @@ export function rasterGlb(g: Glb, side: number, tints: ReadonlyMap<number, Rgb> 
               nz = -nz
             }
             const k = modelBrightness(Math.max(0, nx * LIGHT[0] + ny * LIGHT[1] + nz * LIGHT[2]), -nz)
-            r = cr * k
-            gr = cg * k
-            bl = cb * k
+            r = cr * k * tr
+            gr = cg * k * tg
+            bl = cb * k * tb
           }
           const o = at * 3
           px[o] = r * 255
@@ -759,54 +816,351 @@ export function rasterGlb(g: Glb, side: number, tints: ReadonlyMap<number, Rgb> 
   return any ? out : null
 }
 
-/** The average colour of each material's base colour texture (embedded PNG or JPEG only), by material index; failures are left out. */
-async function textureTints(g: Glb): Promise<Map<number, Rgb>> {
-  const out = new Map<number, Rgb>()
-  const bin = g.bin
-  const materials = g.doc.materials
-  if (!bin || !Array.isArray(materials)) return out
-  let spent = 0
-  for (let m = 0; m < Math.min(materials.length, GLB_LIMITS.materials); m++) {
-    const texture = materials[m]?.pbrMetallicRoughness?.baseColorTexture?.index
-    const source = isIndex(texture) ? g.doc.textures?.[texture]?.source : undefined
-    const image = isIndex(source) ? g.doc.images?.[source] : undefined
-    const view = image && isIndex(image.bufferView) ? g.doc.bufferViews?.[image.bufferView] : undefined
-    const type = image?.mimeType
-    if (!view || (view.buffer ?? 0) !== 0 || (type !== 'image/png' && type !== 'image/jpeg')) continue
-    const start = view.byteOffset ?? 0
-    const length = view.byteLength
-    if (!isIndex(start) || !isIndex(length) || length === 0 || start + length > bin.length || spent + length > GLB_LIMITS.textureBytes) continue
-    spent += length
-    try {
-      // One pixel: the decoder averages the whole picture down to it.
-      const bitmap = await createImageBitmap(new Blob([bin.slice(start, start + length) as Uint8Array<ArrayBuffer>], { type }), {
-        resizeWidth: 1,
-        resizeHeight: 1,
-        resizeQuality: 'high',
-      })
-      try {
-        const canvas = canvasOf(1, 1)
-        const ctx = canvas.getContext('2d', { willReadFrequently: true })
-        if (!ctx) continue
-        ctx.drawImage(bitmap, 0, 0)
-        const [r, gr, b, a] = ctx.getImageData(0, 0, 1, 1).data
-        // A see-through picture has no colour to speak of.
-        if ((a ?? 0) >= 128) out.set(m, [(r ?? 255) / 255, (gr ?? 255) / 255, (b ?? 255) / 255])
-      } finally {
-        bitmap.close()
-      }
-    } catch {
-      // A texture that does not decode: the material keeps its factor.
-    }
-  }
-  return out
+/* ---- base colour textures ---- */
+
+/**
+ * A base colour texture, decoded and made `GLB_LIMITS.textureSide` pixels square for drawing (UVs are 0..1, so the shape of the
+ * original does not matter).
+ */
+export interface Tex {
+  width: number
+  height: number
+  /** RGBA, sRGB, straight alpha. */
+  data: Uint8ClampedArray
+  /** The sampler's wrap modes (glTF: 10497 repeat, 33071 clamp to edge, 33648 mirrored repeat). */
+  wrapS: number
+  wrapT: number
+  /** A texel with less alpha than this (0..255) is not drawn: the material's alpha mask or blend; 0 for an opaque material. */
+  cutoff: number
 }
 
-/** PNG bytes of the model in `bytes` drawn as a square of `side` px, or null when there is nothing to draw. */
-async function modelStill(bytes: Uint8Array, side: number): Promise<Uint8Array | null> {
-  const glb = parseGlb(bytes)
-  if (!glb) return null
-  const pixels = rasterGlb(glb, side, await textureTints(glb))
+const WRAP_REPEAT = 10497
+const WRAP_CLAMP = 33071
+const WRAP_MIRROR = 33648
+
+/** Texel `i` of `n` under a wrap mode. */
+function wrapTexel(i: number, n: number, mode: number): number {
+  if (mode === WRAP_CLAMP) return i < 0 ? 0 : i >= n ? n - 1 : i
+  const period = mode === WRAP_MIRROR ? n * 2 : n
+  let w = i % period
+  if (w < 0) w += period
+  return mode === WRAP_MIRROR && w >= n ? period - 1 - w : w
+}
+
+/** The colour of `tex` at (u, v), bilinear: R, G, B and A, each 0..255, into `out`. A coordinate that is not a number is 0. */
+export function sampleTex(tex: Tex, u: number, v: number, out: Float64Array): void {
+  const x = (Number.isFinite(u) ? u : 0) * tex.width - 0.5
+  const y = (Number.isFinite(v) ? v : 0) * tex.height - 0.5
+  const x0 = Math.floor(x)
+  const y0 = Math.floor(y)
+  const fx = x - x0
+  const fy = y - y0
+  const xa = wrapTexel(x0, tex.width, tex.wrapS)
+  const xb = wrapTexel(x0 + 1, tex.width, tex.wrapS)
+  const ya = wrapTexel(y0, tex.height, tex.wrapT)
+  const yb = wrapTexel(y0 + 1, tex.height, tex.wrapT)
+  const d = tex.data
+  const w = tex.width
+  const a = (ya * w + xa) * 4
+  const b = (ya * w + xb) * 4
+  const c = (yb * w + xa) * 4
+  const e = (yb * w + xb) * 4
+  const w00 = (1 - fx) * (1 - fy)
+  const w10 = fx * (1 - fy)
+  const w01 = (1 - fx) * fy
+  const w11 = fx * fy
+  for (let k = 0; k < 4; k++) out[k] = d[a + k]! * w00 + d[b + k]! * w10 + d[c + k]! * w01 + d[e + k]! * w11
+}
+
+/** The average colour of the texels of `tex` that are not see-through (sRGB, 0..1), or null when there are none. */
+function averageColor(tex: Tex): Rgb | null {
+  const d = tex.data
+  let r = 0, g = 0, b = 0, n = 0
+  for (let i = 0; i + 3 < d.length; i += 4) {
+    if (d[i + 3]! < 128) continue
+    r += d[i]!
+    g += d[i + 1]!
+    b += d[i + 2]!
+    n++
+  }
+  return n ? [r / n / 255, g / n / 255, b / n / 255] : null
+}
+
+/** Material `m`'s base colour picture, when it is one embedded in the file's own buffer: its image index, buffer view and type. */
+function baseColorImage(doc: GltfDoc, m: number): { image: number; view: NonNullable<GltfDoc['bufferViews']>[number]; type: string; sampler: number | undefined } | null {
+  const texture = doc.materials?.[m]?.pbrMetallicRoughness?.baseColorTexture?.index
+  const entry = isIndex(texture) ? doc.textures?.[texture] : undefined
+  const source = entry && isIndex(entry.source) ? entry.source : undefined
+  const image = source !== undefined ? doc.images?.[source] : undefined
+  const view = image && isIndex(image.bufferView) ? doc.bufferViews?.[image.bufferView] : undefined
+  const type = image?.mimeType
+  if (source === undefined || !view || typeof view !== 'object' || (view.buffer ?? 0) !== 0 || (type !== 'image/png' && type !== 'image/jpeg')) return null
+  return { image: source, view, type, sampler: entry && isIndex(entry.sampler) ? entry.sampler : undefined }
+}
+
+/** The pixels of a PNG or JPEG scaled to a square of `side` (RGBA), or null when it does not decode. */
+async function decodePixels(bytes: Uint8Array, type: string, side: number): Promise<Uint8ClampedArray | null> {
+  try {
+    const bitmap = await createImageBitmap(new Blob([bytes as Uint8Array<ArrayBuffer>], { type }), {
+      resizeWidth: side,
+      resizeHeight: side,
+      resizeQuality: 'medium',
+    })
+    try {
+      const canvas = canvasOf(side, side)
+      const ctx = canvas.getContext('2d', { willReadFrequently: true })
+      if (!ctx) return null
+      ctx.drawImage(bitmap, 0, 0)
+      return ctx.getImageData(0, 0, side, side).data
+    } finally {
+      bitmap.close()
+    }
+  } catch {
+    // A texture that does not decode: the material keeps its factor.
+    return null
+  }
+}
+
+/**
+ * The base colour textures of the model (embedded PNG or JPEG only), decoded for drawing, by material index, and each one's
+ * average colour: what a primitive without UVs is drawn in. Failures are left out.
+ */
+export async function loadTextures(g: Glb): Promise<{ textures: Map<number, Tex>; tints: Map<number, Rgb> }> {
+  const textures = new Map<number, Tex>()
+  const tints = new Map<number, Rgb>()
+  const bin = g.bin
+  const materials = g.doc.materials
+  if (!bin || !Array.isArray(materials)) return { textures, tints }
+  const side = GLB_LIMITS.textureSide
+  const decoded = new Map<number, Uint8ClampedArray | null>()
+  let spent = 0
+  for (let m = 0; m < Math.min(materials.length, GLB_LIMITS.materials); m++) {
+    const found = baseColorImage(g.doc, m)
+    if (!found) continue
+    let data = decoded.get(found.image)
+    if (data === undefined) {
+      const start = found.view.byteOffset ?? 0
+      const length = found.view.byteLength
+      if (!isIndex(start) || !isIndex(length) || length === 0 || length > GLB_LIMITS.imageBytes || start + length > bin.length || spent + length > GLB_LIMITS.textureBytes) continue
+      spent += length
+      data = await decodePixels(bin.slice(start, start + length), found.type, side)
+      decoded.set(found.image, data)
+    }
+    if (!data) continue
+    const sampler = found.sampler !== undefined ? g.doc.samplers?.[found.sampler] : undefined
+    const material = materials[m]
+    const mode = material?.alphaMode
+    const cutoffAt = material?.alphaCutoff
+    const cutoffFactor = isFiniteNumber(cutoffAt) ? Math.min(1, Math.max(0, cutoffAt)) : 0.5
+    const tex: Tex = {
+      width: side,
+      height: side,
+      data,
+      wrapS: sampler && isIndex(sampler.wrapS) ? sampler.wrapS : WRAP_REPEAT,
+      wrapT: sampler && isIndex(sampler.wrapT) ? sampler.wrapT : WRAP_REPEAT,
+      cutoff: mode === 'MASK' ? Math.round(255 * cutoffFactor) : mode === 'BLEND' ? 128 : 0,
+    }
+    textures.set(m, tex)
+    const average = averageColor(tex)
+    if (average) tints.set(m, average)
+  }
+  return { textures, tints }
+}
+
+/* ---- a model too big to be sent whole: read in pieces ---- */
+
+/** A file to read in pieces: its size, and `read(start, length)`, which gives exactly those bytes or null. */
+export interface RangeSource {
+  size: number
+  read(start: number, length: number): Promise<Uint8Array | null>
+}
+
+/** Pieces of the BIN chunk read together when they lie within this many bytes of each other, and never more than this many at once. */
+const RUN_GAP = 1 << 20
+const RUN_MAX = 48 << 20
+
+/** One piece of the BIN chunk the drawing needs: a mesh accessor's elements, or an embedded picture (`accessor` or `image` is -1). */
+interface Piece {
+  start: number
+  length: number
+  accessor: number
+  image: number
+  element: number
+  stride: number
+}
+
+/**
+ * A model out of a file that is not read whole (a Meshy export of 300 MB is mostly texture maps nothing here draws): the JSON, then
+ * only the pieces of the BIN chunk that the drawing reads (the positions, normals, UVs and indices of the primitives it draws, and the
+ * base colour pictures), laid end to end in a smaller buffer, with the document's accessors and pictures pointing at the copies.
+ * What `rasterGlb` draws from the result is what it would draw from the whole file. Null when the file is no binary glTF, a read
+ * fails, or there is no data to draw. The file is untrusted: every offset is checked, and what is read is bounded (`rangedBytes`,
+ * or `opts.maxBytes`: tests lower it).
+ */
+export async function readGlbRanged(src: RangeSource, opts: { maxBytes?: number } = {}): Promise<Glb | null> {
+  const maxBytes = opts.maxBytes ?? GLB_LIMITS.rangedBytes
+  const size = src.size
+  if (!isIndex(size) || size < 20) return null
+  const head = await src.read(0, 20)
+  if (!head || head.length !== 20) return null
+  const hv = new DataView(head.buffer, head.byteOffset, head.byteLength)
+  const total = hv.getUint32(8, true)
+  const jsonLength = hv.getUint32(12, true)
+  if (hv.getUint32(0, true) !== GLB_MAGIC || hv.getUint32(4, true) !== 2) return null
+  if (total < 20 || total > size || hv.getUint32(16, true) !== GLB_CHUNK_JSON) return null
+  if (jsonLength === 0 || jsonLength > GLB_LIMITS.json || 20 + jsonLength > total) return null
+  const jsonBytes = await src.read(20, jsonLength)
+  if (!jsonBytes || jsonBytes.length !== jsonLength) return null
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(new TextDecoder().decode(jsonBytes))
+  } catch {
+    return null
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null
+  const doc = parsed as GltfDoc
+
+  // The BIN chunk comes right after the JSON chunk (each is padded to four bytes).
+  const binAt = 20 + ((jsonLength + 3) & ~3)
+  if (binAt + 8 > total) return null
+  const binHead = await src.read(binAt, 8)
+  if (!binHead || binHead.length !== 8) return null
+  const bv = new DataView(binHead.buffer, binHead.byteOffset, binHead.byteLength)
+  const binLength = bv.getUint32(0, true)
+  if (bv.getUint32(4, true) !== GLB_CHUNK_BIN || binLength > total - binAt - 8) return null
+  const binStart = binAt + 8
+
+  // Which accessors the drawing will read: the same primitives, in the same order, under the same budgets as `meshPrims`.
+  const spans = new Map<number, Span>()
+  let geometryBytes = 0
+  const budget = { vertices: GLB_LIMITS.vertices }
+  const seen = new Set<number>()
+  const view: Glb = { doc, bin: null }
+  plan: for (const at of placements(view)) {
+    if (seen.has(at.mesh)) continue
+    seen.add(at.mesh)
+    const list = doc.meshes?.[at.mesh]?.primitives
+    if (!Array.isArray(list)) continue
+    for (const p of list.slice(0, 256)) {
+      if (!p || typeof p !== 'object') continue
+      const mode = p.mode ?? 4
+      if (mode !== 4 && mode !== 5 && mode !== 6) continue
+      const positionAt = p.attributes?.['POSITION']
+      const position = accessorSpan(doc, binLength, positionAt, 3, budget.vertices, POSITION_TYPES)
+      if (!position) continue
+      const vertices = position.count
+      budget.vertices -= vertices
+      const found: [number, Span][] = [[positionAt as number, position]]
+      const normalAt = p.attributes?.['NORMAL']
+      const normal = accessorSpan(doc, binLength, normalAt, 3, vertices, NORMAL_TYPES)
+      if (normal && normal.count === vertices) found.push([normalAt as number, normal])
+      const uvAt = p.attributes?.['TEXCOORD_0']
+      const uv = accessorSpan(doc, binLength, uvAt, 2, vertices, UV_TYPES)
+      if (uv && uv.count === vertices) found.push([uvAt as number, uv])
+      if (p.indices !== undefined) {
+        const indices = accessorSpan(doc, binLength, p.indices, 1, GLB_LIMITS.triangles * 3, INDEX_TYPES)
+        // A primitive whose indices cannot be read is left out, as `meshPrims` leaves it out.
+        if (!indices) continue
+        found.push([p.indices, indices])
+      }
+      // A primitive is taken whole or not at all.
+      let extra = 0
+      for (const [index, s] of found) if (!spans.has(index)) extra += s.end - s.first
+      if (geometryBytes + extra > maxBytes) break plan
+      for (const [index, s] of found) spans.set(index, s)
+      geometryBytes += extra
+    }
+  }
+
+  // The base colour pictures of the materials.
+  const images = new Map<number, { start: number; length: number }>()
+  let imageBytes = 0
+  const materials = doc.materials
+  if (Array.isArray(materials)) {
+    for (let m = 0; m < Math.min(materials.length, GLB_LIMITS.materials); m++) {
+      const found = baseColorImage(doc, m)
+      if (!found || images.has(found.image)) continue
+      const start = found.view.byteOffset ?? 0
+      const length = found.view.byteLength
+      if (!isIndex(start) || !isIndex(length) || length === 0 || length > GLB_LIMITS.imageBytes || start + length > binLength || imageBytes + length > GLB_LIMITS.textureBytes) continue
+      imageBytes += length
+      images.set(found.image, { start, length })
+    }
+  }
+  if (!spans.size) return null
+
+  const pieces: Piece[] = []
+  for (const [accessor, s] of spans) pieces.push({ start: s.first, length: s.end - s.first, accessor, image: -1, element: s.element, stride: s.stride })
+  for (const [image, im] of images) pieces.push({ start: im.start, length: im.length, accessor: -1, image, element: 0, stride: 0 })
+  pieces.sort((a, b) => a.start - b.start)
+
+  // Read them in file order, neighbours together, and lay them end to end.
+  const compact = new Uint8Array(geometryBytes + imageBytes)
+  const views: NonNullable<GltfDoc['bufferViews']> = Array.isArray(doc.bufferViews) ? [...doc.bufferViews] : []
+  const accessors: NonNullable<GltfDoc['accessors']> = Array.isArray(doc.accessors) ? [...doc.accessors] : []
+  const pictures: NonNullable<GltfDoc['images']> = Array.isArray(doc.images) ? [...doc.images] : []
+  let put = 0
+  for (let i = 0; i < pieces.length; ) {
+    const first = pieces[i]!
+    let runEnd = first.start + first.length
+    let j = i
+    while (j + 1 < pieces.length) {
+      const next = pieces[j + 1]!
+      const end = Math.max(runEnd, next.start + next.length)
+      if (next.start - runEnd > RUN_GAP || end - first.start > RUN_MAX) break
+      runEnd = end
+      j++
+    }
+    const run = await src.read(binStart + first.start, runEnd - first.start)
+    if (!run || run.length !== runEnd - first.start) return null
+    for (let k = i; k <= j; k++) {
+      const piece = pieces[k]!
+      const from = piece.start - first.start
+      compact.set(run.subarray(from, from + piece.length), put)
+      views.push({ buffer: 0, byteOffset: put, byteLength: piece.length, ...(piece.stride > piece.element ? { byteStride: piece.stride } : {}) })
+      const at = views.length - 1
+      if (piece.accessor >= 0) accessors[piece.accessor] = { ...accessors[piece.accessor], bufferView: at, byteOffset: 0 }
+      else pictures[piece.image] = { ...pictures[piece.image], bufferView: at }
+      put += piece.length
+    }
+    i = j + 1
+  }
+  return { doc: { ...doc, accessors, bufferViews: views, images: pictures, buffers: [{ byteLength: compact.length }] }, bin: compact }
+}
+
+/** How long one piece of a model may take to arrive from main. */
+const RANGE_TIMEOUT_MS = 12_000
+
+/** A model file served to this page on a one-job address (main says how big it is), read in pieces with HTTP ranges. */
+function urlSource(url: string, size: number): RangeSource {
+  return {
+    size,
+    read: async (start, length) => {
+      if (!isIndex(start) || !isIndex(length) || length === 0 || start + length > size) return null
+      const stop = new AbortController()
+      const timer = setTimeout(() => stop.abort(), RANGE_TIMEOUT_MS)
+      try {
+        const res = await fetch(url, { headers: { Range: `bytes=${start}-${start + length - 1}` }, signal: stop.signal })
+        // Only a range answer counts: a server that sends the whole file instead is not read.
+        if (res.status !== 206) {
+          void res.body?.cancel()
+          return null
+        }
+        const bytes = new Uint8Array(await res.arrayBuffer())
+        return bytes.length === length ? bytes : null
+      } catch {
+        return null
+      } finally {
+        clearTimeout(timer)
+      }
+    },
+  }
+}
+
+/** PNG bytes of the model drawn as a square of `side` px, textures and all, or null when there is nothing to draw. */
+async function drawModel(glb: Glb, side: number): Promise<Uint8Array | null> {
+  const { textures, tints } = await loadTextures(glb)
+  const pixels = rasterGlb(glb, side, tints, { textures })
   if (!pixels) return null
   const canvas = canvasOf(side, side)
   const ctx = canvas.getContext('2d')
@@ -814,6 +1168,26 @@ async function modelStill(bytes: Uint8Array, side: number): Promise<Uint8Array |
   ctx.putImageData(new ImageData(pixels as Uint8ClampedArray<ArrayBuffer>, side, side), 0, 0)
   return pngBytes(canvas)
 }
+
+/** PNG bytes of the model in `bytes` (a whole binary glTF) drawn as a square of `side` px, or null when there is nothing to draw. */
+async function modelStill(bytes: Uint8Array, side: number): Promise<Uint8Array | null> {
+  const glb = parseGlb(bytes)
+  return glb ? drawModel(glb, side) : null
+}
+
+/** The same for a model on a one-job address that is read in pieces (`size` bytes: main's own count). */
+async function modelStillFile(url: string, size: number, side: number): Promise<Uint8Array | null> {
+  const glb = await readGlbRanged(urlSource(url, size))
+  return glb ? drawModel(glb, side) : null
+}
+
+ipcRenderer.on(IPC.modelFile, (_e, id: unknown, url: unknown, size: unknown, px: unknown) => {
+  const job = typeof url === 'string' && url.startsWith(VIDEO_URL) && isIndex(size) && side(px) ? modelStillFile(url, size, px) : Promise.resolve(null)
+  void job.then(
+    (png) => ipcRenderer.send(IPC.done, id, png),
+    () => ipcRenderer.send(IPC.done, id, null),
+  )
+})
 
 ipcRenderer.on(IPC.model, (_e, id: unknown, bytes: unknown, px: unknown) => {
   const job = bytes instanceof Uint8Array && side(px) ? modelStill(bytes, px) : Promise.resolve(null)
