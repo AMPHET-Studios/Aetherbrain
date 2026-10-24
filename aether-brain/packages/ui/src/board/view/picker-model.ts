@@ -3,7 +3,7 @@
  * more than PICKER_MAX_ROWS, whatever the vault holds), and the multi-select with Shift and Ctrl. No React, no DOM; the panel
  * (Picker.tsx) only draws what this says. Design: docs/design/reference-board.md.
  */
-import { isImagePath, type VaultAsset } from '@aether/core'
+import { isImagePath, isModelPath, type VaultAsset } from '@aether/core'
 import { rowWindow, type RowWindow } from '../../windowing'
 import { MAX_PICKER_ADD } from './session'
 
@@ -29,11 +29,11 @@ export interface PickerEntry {
   mtime: number
 }
 
-/** Pictures of the list as rows, newest first (those without a time after those with one, then by path). Videos and the like are left out. */
+/** Pictures and 3D models of the list as rows, newest first (those without a time after those with one, then by path). Videos and the like are left out. */
 export function toEntries(assets: readonly VaultAsset[]): { entries: PickerEntry[]; cut: number } {
   const all: PickerEntry[] = []
   for (const a of assets) {
-    if (!isImagePath(a.path)) continue
+    if (!isImagePath(a.path) && !isModelPath(a.path)) continue
     const slash = a.path.lastIndexOf('/')
     all.push({
       path: a.path,
