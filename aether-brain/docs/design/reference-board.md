@@ -98,7 +98,12 @@ Rules:
   path cannot be embedded), `note`, `stroke`, `line`, `rect`, `ellipse`. Then `key=value` pairs separated by single spaces and bare
   flags (`gray`, `lock`, `arrow`). Numbers are written with at most 2 decimals (crop edges and mark widths with 3, the zoom with 4), trimmed. Colours are 6 hex digits
   with **no `#`** (a `#ff8800` in the body would become a vault tag). `g=` is a group label (renumbered from 1 on every write).
-  `flip=` is `h`, `v` or `hv`. `r=` is the rotation in degrees. `op=` is opacity.
+  `flip=` is `h`, `v` or `hv`. `r=` is the rotation in degrees. `op=` is opacity. A 3D model's line (a `pic` line, never an embed) may carry
+  `yaw=` and `pitch=`, the camera's place round it in degrees with one decimal, written after `crop=` and only when they differ from the view
+  its still is drawn from (35 and 24); core's `normaliseView` is the one rule that keeps the view in memory the view in the file.
+  A model is on the board because a board holds `isBoardAssetPath` (pictures, videos and models: `isMediaPath` stays what the thumbnails
+  are) and is drawn from its proxy (core's `models/`: `decodeProxy`, `renderProxy`; baked by the thumbnail helper, handed to the board
+  window by the one channel `vault:modelProxy`, never the file), turned with the Turn tool (`M`, one history step a drag).
 - Text (a note's text, a picture's caption) follows the first ` » ` on the line. It is escaped so the line stays inert markdown
   and one line: `\` → `\\`, a newline → `\n`, and `\` before each of `[ ] # < > | * _ ~ ! \``. No link, tag, task or HTML can
   come out of a note. Reading reverses it exactly.

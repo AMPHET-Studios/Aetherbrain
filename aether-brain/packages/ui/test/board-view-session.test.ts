@@ -334,6 +334,7 @@ describe('what the bars say', () => {
     expect(hint('sampler')).toMatch(/colour/i)
     expect(hint('crop')).toMatch(/Click the picture/)
     expect(hint('crop', { cropping: 4 })).toMatch(/Enter to finish/)
+    expect(hint('turn')).toBe('Drag a 3D model to turn it · Esc to leave')
     expect(hint('select', { selection: [1] })).toMatch(/rotates/)
     expect(toolHint({ tool: 'select', cropping: null, selection: [] }, 0)).toMatch(/Drop pictures here, paste with ⌘ V/)
     expect(toolHint({ tool: 'select', cropping: null, selection: [] }, 0, false)).toMatch(/paste with Ctrl V/)

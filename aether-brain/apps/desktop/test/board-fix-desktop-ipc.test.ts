@@ -28,6 +28,7 @@ const ALLOWED = [
   'board:save',
   'board:status',
   'vault:createAsset',
+  'vault:modelProxy',
   'vault:openAsset',
   'vault:readAsset',
   'vault:readAssetChecked',
@@ -196,7 +197,7 @@ describe('the board preload', () => {
     return electron.exposed['aether'] as Record<string, (...a: unknown[]) => unknown>
   }
 
-  const KEYS = ['boardAssets', 'boardClose', 'boardConfigure', 'boardFlushed', 'boardRead', 'boardSave', 'boardStatus', 'copyText', 'createAsset', 'onBoardFlush', 'onBoardGone', 'onBoardState', 'onChanges', 'openAsset', 'platform', 'readAsset', 'readAssetChecked', 'revealInFolder', 'thumbnail', 'version']
+  const KEYS = ['boardAssets', 'boardClose', 'boardConfigure', 'boardFlushed', 'boardRead', 'boardSave', 'boardStatus', 'copyText', 'createAsset', 'modelProxy', 'onBoardFlush', 'onBoardGone', 'onBoardState', 'onChanges', 'openAsset', 'platform', 'readAsset', 'readAssetChecked', 'revealInFolder', 'thumbnail', 'version']
 
   it('exposes window.aether with the board bridge and nothing else', async () => {
     const bridge = await load('board-preload.cts')
@@ -216,6 +217,7 @@ describe('the board preload', () => {
     await bridge.boardStatus!()
     await bridge.copyText!('x')
     await bridge.createAsset!('Boards/Gate/a.png', new Uint8Array(1))
+    await bridge.modelProxy!('Art/robot.glb')
     await bridge.openAsset!('a.png')
     await bridge.readAsset!('a.png')
     await bridge.readAssetChecked!('a.png')

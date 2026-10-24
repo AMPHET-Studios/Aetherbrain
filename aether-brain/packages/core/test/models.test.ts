@@ -41,7 +41,7 @@ describe('3D models in the vault', () => {
     for (const p of ['scene.gltf', 'robot.glb.png', 'robot.glbx', 'glb', 'robot.fbx', 'robot.obj', 'note.md']) expect(isModelPath(p)).toBe(false)
   })
 
-  it('a model is not media: reference boards (isMediaPath) and writes (isImagePath) never take one', () => {
+  it('a model is not media: the thumbnails’ list (isMediaPath) and writes (isImagePath) never take one (a board takes it through isBoardAssetPath)', () => {
     expect(isMediaPath('robot.glb')).toBe(false)
     expect(isImagePath('robot.glb')).toBe(false)
     expect(isVideoPath('robot.glb')).toBe(false)

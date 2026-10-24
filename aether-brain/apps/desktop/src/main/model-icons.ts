@@ -8,6 +8,9 @@
  *
  * Bounded: at most `maxBytes` and `maxFiles` (the oldest go first, a hit makes a picture young again), written whole to a temporary file and
  * renamed into place, read back only when it still starts like a PNG and is no bigger than a thumbnail may be.
+ *
+ * The same class keeps model proxies (up to 24,000 triangles of a model, for a window that draws it itself: `ext: 'px'`, `valid: proxyOf`)
+ * in a folder of their own: what is kept is whatever `valid` accepts, under the extension it is given.
  */
 import { createHash } from 'node:crypto'
 import { promises as fs } from 'node:fs'
@@ -27,6 +30,10 @@ export interface ModelIconOptions {
   maxBytes?: number
   maxFiles?: number
   noIconMs?: number
+  /** The extension of what is kept: `png` (a picture, the default) or `px` (a model proxy). */
+  ext?: 'png' | 'px'
+  /** Whether bytes are what this cache keeps; default: a PNG of a thumbnail's size. */
+  valid?: (bytes: Uint8Array) => boolean
   /** A clock in ms (tests pass a fake one). */
   now?: () => number
 }
@@ -50,23 +57,32 @@ export class ModelIconCache {
     return createHash('sha1').update(`${abs}\n${mtimeMs}\n${size}\n${px}`).digest('hex')
   }
 
-  private file(key: string, ext: 'png' | 'none'): string {
-    return path.join(this.dir, `${key}.${ext}`)
+  /** What is kept is under this extension; "no picture" notes are always `none`. */
+  private get ext(): 'png' | 'px' {
+    return this.opts.ext ?? 'png'
+  }
+
+  private file(key: string, kind: 'data' | 'none'): string {
+    return path.join(this.dir, `${key}.${kind === 'data' ? this.ext : 'none'}`)
+  }
+
+  private valid(bytes: Uint8Array): boolean {
+    return (this.opts.valid ?? isPng)(bytes)
   }
 
   /** The kept picture (PNG bytes), null for a model known to have none, or undefined when nothing is kept (or it is too old to believe). */
   async get(key: string): Promise<Uint8Array | null | undefined> {
     if (!isKey(key)) return undefined
-    const png = this.file(key, 'png')
+    const png = this.file(key, 'data')
     try {
       const bytes = new Uint8Array(await fs.readFile(png))
-      if (isPng(bytes)) {
+      if (this.valid(bytes)) {
         // A hit keeps it young, so the pictures that are used stay and the ones that are not age out.
         const at = new Date(this.now())
         void fs.utimes(png, at, at).catch(() => undefined)
         return bytes
       }
-      // Whatever it is, it is not a picture of ours: gone.
+      // Whatever it is, it is not what this cache keeps: gone.
       await fs.unlink(png).catch(() => undefined)
     } catch {
       /* not kept */
@@ -84,9 +100,9 @@ export class ModelIconCache {
 
   /** Keep a picture, or (null) the fact that there is none. Anything that is not a PNG of a thumbnail's size is not kept. */
   async set(key: string, png: Uint8Array | null): Promise<void> {
-    if (!isKey(key) || (png && !isPng(png))) return
+    if (!isKey(key) || (png && !this.valid(png))) return
     await fs.mkdir(this.dir, { recursive: true })
-    const target = this.file(key, png ? 'png' : 'none')
+    const target = this.file(key, png ? 'data' : 'none')
     const temp = `${target}.${process.pid}.${++this.temps}.tmp`
     try {
       await fs.writeFile(temp, png ?? new Uint8Array(0))
@@ -96,7 +112,7 @@ export class ModelIconCache {
       throw err
     }
     // A picture replaces a "no picture" note, and the other way round.
-    await fs.unlink(this.file(key, png ? 'none' : 'png')).catch(() => undefined)
+    await fs.unlink(this.file(key, png ? 'none' : 'data')).catch(() => undefined)
     if (++this.sets % 64 === 0) void this.prune()
   }
 
@@ -125,7 +141,7 @@ export class ModelIconCache {
         if (this.now() - st.mtimeMs > 60 * 60 * 1000) await fs.unlink(abs).catch(() => undefined)
         continue
       }
-      if (!/^[0-9a-f]{40}\.(png|none)$/.test(name)) continue
+      if (!/^[0-9a-f]{40}\.(png|px|none)$/.test(name)) continue
       files.push({ abs, bytes: st.size, at: st.mtimeMs })
       total += st.size
     }
@@ -143,6 +159,6 @@ export class ModelIconCache {
   /** Forget every kept picture (the files only: the folder stays). */
   async clear(): Promise<void> {
     const names = await fs.readdir(this.dir).catch(() => [] as string[])
-    for (const name of names) if (/^[0-9a-f]{40}\.(png|none)(\..*\.tmp)?$/.test(name)) await fs.unlink(path.join(this.dir, name)).catch(() => undefined)
+    for (const name of names) if (/^[0-9a-f]{40}\.(png|px|none)(\..*\.tmp)?$/.test(name)) await fs.unlink(path.join(this.dir, name)).catch(() => undefined)
   }
 }

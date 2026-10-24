@@ -284,6 +284,7 @@ export const BOARD_PAGE_CHANNELS: ReadonlySet<string> = new Set<string>([
   IPC.boardAssets,
   IPC.boardFlushed,
   IPC.thumb,
+  IPC.modelProxy,
   IPC.readAsset,
   IPC.readAssetChecked,
   IPC.createAsset,
@@ -681,10 +682,12 @@ export class BoardWindowHost {
         return this.showsPath(first) || (typeof first === 'string' && isMediaName(first.slice(first.lastIndexOf('/') + 1)))
           ? null
           : 'The board window can show only pictures, videos and its own board in the file manager'
-      case IPC.thumb:
       case IPC.openAsset:
-        // A board holds pictures and videos. A 3D model is the brain's: drawn by the helper and opened in the 3D app on its request.
-        return typeof first === 'string' && isModelName(first.slice(first.lastIndexOf('/') + 1)) ? 'The board window works with pictures and videos only' : null
+        // A board never opens a 3D model in the 3D app: that is the brain's, on its request.
+        return typeof first === 'string' && isModelName(first.slice(first.lastIndexOf('/') + 1)) ? 'The board window opens pictures and videos only' : null
+      case IPC.modelProxy:
+        // A model on a board is turned by the page from the proxy main gives it (a bounded stand-in of up to 24,000 triangles): never the file.
+        return typeof first === 'string' && isModelName(first.slice(first.lastIndexOf('/') + 1)) ? null : 'The board window can ask the proxy of a 3D model only'
       default:
         return null
     }

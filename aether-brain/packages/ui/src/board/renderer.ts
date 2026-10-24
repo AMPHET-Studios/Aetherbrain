@@ -13,6 +13,7 @@ import {
   NOTE_LINE_HEIGHT_EM,
   itemBounds,
   itemQuad,
+  isModelPath,
   itemsBounds,
   luminance,
   noteBox,
@@ -30,6 +31,7 @@ import {
 } from '@aether/core'
 import type { BoardUiState, ImageFailure, ImageSlot, ImageSource } from './api'
 import type { BitmapLike } from './imageCache'
+import type { ModelViewSource } from './modelViews'
 
 /* ------------------------------------------------------------------ context -- */
 
@@ -120,6 +122,8 @@ export interface DrawArgs {
   dpr: number
   state: Pick<BoardUiState, 'selection' | 'box' | 'marquee' | 'guides' | 'draft' | 'cropping' | 'editingNote' | 'sample' | 'moving'>
   images: ImageSource
+  /** The 3D models on the board, drawn as they are turned (from their proxies): a model with no live view is drawn from `images`, as its still. */
+  models?: ModelViewSource
   metrics: TextMetrics
   /** Handles, outlines, guides, marquee, loupe, grid: false for an export. Default true. */
   showUi?: boolean
@@ -255,6 +259,7 @@ interface Frame {
   cy: number
   metrics: TextMetrics
   images: ImageSource
+  models: ModelViewSource | undefined
   missing: ((path: string) => boolean) | undefined
   editing: number | null
   moving: boolean
@@ -318,6 +323,7 @@ export function drawBoard(ctx: Ctx2D, args: DrawArgs): void {
     cy: (vh * dpr) / 2,
     metrics: args.metrics,
     images: args.images,
+    models: args.models,
     missing: args.missing,
     editing: state.editingNote,
     moving: state.moving,
@@ -447,7 +453,9 @@ function drawPicture(f: Frame, it: PictureItem, bounds: Rect): void {
     // part that is SHOWN is goes with it: when the budget cannot give every picture what it wants, the biggest on the screen come first.
     slot = f.images.get(it.path, Math.max(it.w, it.h) * f.k, Math.max(w, h) * f.k)
   }
-  const bmp = slot ? slot.bitmap : null
+  // A 3D model that has its live view is drawn from that, turned as the item says; until it has one, its still (the cache's bitmap).
+  const live = !gone && f.models && isModelPath(it.path) ? f.models.get(it, Math.max(it.w, it.h) * f.k) : null
+  const bmp = live ? (live as unknown as ImageBitmap) : slot ? slot.bitmap : null
   if (!bmp || !(bmp.width > 0 && bmp.height > 0)) {
     // The vault says the file is gone; else the cache says why it could not be read; a picture with no slot at all is unreadable.
     drawPlaceholder(f, it, w, h, gone ? 'missing' : !slot || slot.failed ? (slot?.reason ?? 'unreadable') : null)

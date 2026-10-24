@@ -67,11 +67,12 @@ export class HelperQueue<J, R> {
   /**
    * `spawn` starts a helper; the app then calls ready() once it listens and
    * gone() when it crashes or is destroyed. `accept` turns a helper's answer
-   * into a result, or null when it is not one.
+   * into a result, or null when it is not one (it is told which job the
+   * answer is for: a queue may carry jobs whose answers are not alike).
    */
   constructor(
     private spawn: () => QueueHelper<J>,
-    private accept: (answer: unknown) => R | null,
+    private accept: (answer: unknown, job: J) => R | null,
     private opts: HelperQueueOptions<J>,
   ) {
     this.timeoutMs = opts.timeoutMs
@@ -115,7 +116,7 @@ export class HelperQueue<J, R> {
     if (!r) return false
     this.running.delete(id)
     clearTimeout(r.timer)
-    r.w.resolve(this.accept(answer))
+    r.w.resolve(this.accept(answer, r.w.job))
     this.pump()
     return true
   }

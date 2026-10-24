@@ -5,6 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import ts from 'typescript'
+import { encodeProxy } from '@aether/core'
 import { MAX_MODEL_BYTES, MAX_MODEL_FILE_BYTES, serveVideo } from '../src/main/assets.js'
 import {
   MODEL_FILE_TIMEOUT,
@@ -13,11 +14,13 @@ import {
   Thumbnailer,
   VIDEO_SCHEME,
   VIDEO_URL_PREFIX,
+  proxyOf,
   type ThumbElectron,
   type ThumbHelper,
   type ThumbJob,
 } from '../src/main/thumbnailer.js'
 import { lf } from './lf.js'
+import { Packer, fakePage, glb, loadPreload, type Doc, type Pre, type RangeSource, type Tex } from './helpers/glb-preload.js'
 
 /**
  * 3D icons that look like the model: a model's picture is drawn with its base colour texture (UVs, wrap modes, alpha masks), and a
@@ -32,79 +35,6 @@ const PNG_SIG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]
 /* ------------------------------------------------------------------ */
 /* Building binary glTF files                                         */
 /* ------------------------------------------------------------------ */
-
-const enc = new TextEncoder()
-type Doc = Record<string, any> // eslint-disable-line @typescript-eslint/no-explicit-any
-
-/** A binary glTF: the JSON, then the BIN chunk when there is one, each padded to four bytes as the format asks. */
-function glb(doc: unknown, bin?: Uint8Array): Uint8Array {
-  const json = enc.encode(JSON.stringify(doc))
-  const jsonLen = (json.length + 3) & ~3
-  const binLen = bin ? (bin.length + 3) & ~3 : 0
-  const total = 12 + 8 + jsonLen + (bin ? 8 + binLen : 0)
-  const out = new Uint8Array(total)
-  const v = new DataView(out.buffer)
-  v.setUint32(0, 0x46546c67, true)
-  v.setUint32(4, 2, true)
-  v.setUint32(8, total, true)
-  v.setUint32(12, jsonLen, true)
-  v.setUint32(16, 0x4e4f534a, true)
-  out.fill(0x20, 20, 20 + jsonLen)
-  out.set(json, 20)
-  if (bin) {
-    const at = 20 + jsonLen
-    v.setUint32(at, binLen, true)
-    v.setUint32(at + 4, 0x004e4942, true)
-    out.set(bin, at + 8)
-  }
-  return out
-}
-
-/** The BIN chunk being laid out: buffer views and the accessors on them. */
-class Packer {
-  parts: Uint8Array[] = []
-  views: Doc[] = []
-  accessors: Doc[] = []
-  size = 0
-
-  view(bytes: Uint8Array, extra: Doc = {}): number {
-    const padded = new Uint8Array((bytes.length + 3) & ~3)
-    padded.set(bytes)
-    this.views.push({ buffer: 0, byteOffset: this.size, byteLength: bytes.length, ...extra })
-    this.parts.push(padded)
-    this.size += padded.length
-    return this.views.length - 1
-  }
-
-  accessor(view: number, acc: Doc): number {
-    this.accessors.push({ bufferView: view, ...acc })
-    return this.accessors.length - 1
-  }
-
-  floats(values: number[], type: 'VEC3' | 'VEC2' | 'SCALAR'): number {
-    const comps = type === 'VEC3' ? 3 : type === 'VEC2' ? 2 : 1
-    return this.accessor(this.view(new Uint8Array(new Float32Array(values).buffer)), { componentType: 5126, count: values.length / comps, type })
-  }
-
-  indices16(values: number[]): number {
-    return this.accessor(this.view(new Uint8Array(new Uint16Array(values).buffer)), { componentType: 5123, count: values.length, type: 'SCALAR' })
-  }
-
-  /** Bytes nothing draws (a normal map's picture, a metal-rough map): a buffer view of `bytes` of 0xAB. */
-  junk(bytes: number): number {
-    return this.view(new Uint8Array(bytes).fill(0xab))
-  }
-
-  bin(): Uint8Array {
-    const out = new Uint8Array(this.size)
-    let at = 0
-    for (const p of this.parts) {
-      out.set(p, at)
-      at += p.length
-    }
-    return out
-  }
-}
 
 /** The fake "picture" the stand-in decoder understands: the left half of the texture is `left`, the right half `right` (RGBA each). */
 const picture = (left: number[], right: number[]): Uint8Array => Uint8Array.of(...left, ...right)
@@ -226,102 +156,6 @@ function exporterModel(): Uint8Array {
 /* ------------------------------------------------------------------ */
 /* The preload, loaded the way the sandbox loads it                   */
 /* ------------------------------------------------------------------ */
-
-type Rgb = readonly [number, number, number]
-interface Tex {
-  width: number
-  height: number
-  data: Uint8ClampedArray
-  wrapS: number
-  wrapT: number
-  cutoff: number
-}
-interface Glb {
-  doc: Doc
-  bin: Uint8Array | null
-}
-interface RangeSource {
-  size: number
-  read(start: number, length: number): Promise<Uint8Array | null>
-}
-interface Pre {
-  parseGlb(bytes: Uint8Array): Glb | null
-  rasterGlb(g: Glb, side: number, tints?: ReadonlyMap<number, Rgb>, opts?: { textures?: ReadonlyMap<number, Tex> }): Uint8ClampedArray | null
-  loadTextures(g: Glb): Promise<{ textures: Map<number, Tex>; tints: Map<number, Rgb> }>
-  sampleTex(tex: Tex, u: number, v: number, out: Float64Array): void
-  readGlbRanged(src: RangeSource, opts?: { maxBytes?: number }): Promise<Glb | null>
-}
-
-const PRELOAD = path.join(here, '..', 'src', 'preload', 'thumb-preload.cts')
-
-/** A stand-in for what the page gives the preload: a decoder that understands `picture()`, canvases that keep what is drawn, a counter. */
-function fakePage(extra: Record<string, unknown> = {}) {
-  const stats = { decodes: 0, puts: [] as { width: number; height: number; data: Uint8ClampedArray }[] }
-  const globals = {
-    Blob,
-    atob,
-    ImageData: class {
-      constructor(
-        readonly data: Uint8ClampedArray,
-        readonly width: number,
-        readonly height: number,
-      ) {}
-    },
-    createImageBitmap: async (blob: Blob, opts: { resizeWidth: number; resizeHeight: number }) => {
-      stats.decodes++
-      const bytes = new Uint8Array(await blob.arrayBuffer())
-      if (bytes.length < 8) throw new Error('not a picture')
-      const w = opts.resizeWidth
-      const h = opts.resizeHeight
-      const pixels = new Uint8ClampedArray(w * h * 4)
-      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) pixels.set(bytes.subarray(x < w / 2 ? 0 : 4, x < w / 2 ? 4 : 8), (y * w + x) * 4)
-      return { width: w, height: h, pixels, close() {} }
-    },
-    document: {
-      createElement: () => {
-        const canvas = {
-          width: 0,
-          height: 0,
-          px: null as Uint8ClampedArray | null,
-          getContext() {
-            return {
-              drawImage: (bmp: { pixels: Uint8ClampedArray }) => void (canvas.px = bmp.pixels),
-              getImageData: (_x: number, _y: number, w: number, h: number) => ({ data: canvas.px ?? new Uint8ClampedArray(w * h * 4) }),
-              putImageData: (img: { width: number; height: number; data: Uint8ClampedArray }) => void stats.puts.push(img),
-            }
-          },
-          toDataURL() {
-            return `data:image/png;base64,${Buffer.from([...PNG_SIG, this.width, this.height]).toString('base64')}`
-          },
-        }
-        return canvas
-      },
-    },
-    ...extra,
-  }
-  return { globals, stats }
-}
-
-/** Runs the preload source with a stand-in `electron` (the only module a sandboxed preload may require) and `globals`. */
-async function loadPreload(globals: Record<string, unknown>) {
-  const src = await fs.readFile(PRELOAD, 'utf8')
-  const js = ts.transpileModule(src, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
-  const sent: unknown[][] = []
-  const listeners = new Map<string, (e: unknown, ...args: unknown[]) => void>()
-  const electron = {
-    ipcRenderer: {
-      send: (...args: unknown[]) => void sent.push(args),
-      on: (channel: string, fn: (e: unknown, ...args: unknown[]) => void) => void listeners.set(channel, fn),
-    },
-  }
-  const require = (id: string): unknown => {
-    if (id === 'electron') return electron
-    throw new Error(`the sandboxed preload cannot require ${id}`)
-  }
-  const module = { exports: {} as Record<string, unknown> }
-  new Function('require', 'module', 'exports', ...Object.keys(globals), js)(require, module, module.exports, ...Object.values(globals))
-  return { pre: module.exports as unknown as Pre, sent, listeners }
-}
 
 let pre: Pre
 let page: ReturnType<typeof fakePage>
@@ -1021,7 +855,7 @@ describe('main and models too big to send', () => {
 
   it('still parses and draws nothing itself: only the helper knows what a model holds', () => {
     for (const file of ['main.ts', 'assets.ts', 'thumbnailer.ts']) {
-      expect(lf(readFileSync(path.join(here, '..', 'src', 'main', file), 'utf8')), file).not.toMatch(/parseGlb|readGlbRanged|rasterGlb|loadTextures/)
+      expect(lf(readFileSync(path.join(here, '..', 'src', 'main', file), 'utf8')), file).not.toMatch(/parseGlb|readGlbRanged|rasterGlb|loadTextures|bakeProxy|decodeProxy|renderProxy/)
     }
   })
 
@@ -1032,3 +866,126 @@ describe('main and models too big to send', () => {
   })
 })
 
+
+/* ------------------------------------------------------------------ */
+/* The proxy job, main's side                                         */
+/* ------------------------------------------------------------------ */
+
+/** A tiny proxy: one triangle. */
+const TINY_PROXY = encodeProxy({ centre: [0, 0, 0], half: 1, positions: [-32767, 0, 0, 32767, 0, 0, 0, 32767, 0], colors: [255, 0, 0, 0, 255, 0, 0, 0, 255], indices: [0, 1, 2] })
+
+describe('Thumbnailer: the proxy of a model', () => {
+  let dir: string
+  let abs: string
+  const data = new Uint8Array(100_000).map((_, i) => i % 251)
+  beforeAll(async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'aether-proxy-main-'))
+    abs = path.join(dir, 'model.glb')
+    await fs.writeFile(abs, data)
+  })
+  afterAll(async () => {
+    await fs.rm(dir, { recursive: true, force: true })
+  })
+
+  it('sends the job on its own channel with the address and the size (no side), serves the file by range, and only while the job runs', async () => {
+    const e = fakeElectron()
+    const t = new Thumbnailer({ electron: e.electron, preload: '/p.cjs' })
+    const out = t.renderModelProxy(abs, data.length)
+    const w = e.windows[0]!
+    t.ready(w.webContents)
+    const [channel, id, url, size, ...rest] = w.webContents.sent[0]! as [string, number, string, number, ...unknown[]]
+    expect([channel, size, rest]).toEqual([THUMB_IPC.modelProxy, data.length, []])
+    expect(url.startsWith(VIDEO_URL_PREFIX)).toBe(true)
+    const serve = e.protocols[VIDEO_SCHEME]!
+    const part = await serve(new Request(url, { headers: { range: 'bytes=10-19' } }))
+    expect([part.status, part.headers.get('content-range')]).toEqual([206, `bytes 10-19/${data.length}`])
+    expect(new Uint8Array(await part.arrayBuffer())).toEqual(data.subarray(10, 20))
+    t.done(w.webContents, id, TINY_PROXY)
+    expect(await out).toEqual(TINY_PROXY)
+    expect((await serve(new Request(url))).status).toBe(404)
+  })
+
+  it('takes the proxy’s bytes only: a PNG, a damaged proxy and anything else the helper answers is no proxy', async () => {
+    for (const answer of [new Uint8Array([...PNG_SIG, 1, 2, 3]), TINY_PROXY.subarray(0, TINY_PROXY.length - 2), new Uint8Array(100), null, 'ABPX', 7]) {
+      const e = fakeElectron()
+      const t = new Thumbnailer({ electron: e.electron, preload: '/p.cjs' })
+      const out = t.renderModelProxy(abs, data.length)
+      const w = e.windows[0]!
+      t.ready(w.webContents)
+      t.done(w.webContents, (w.webContents.sent[0] as [string, number])[1], answer)
+      expect(await out, String(answer)).toBeNull()
+    }
+  })
+
+  it('takes a PNG only for a picture job, and a proxy only for a proxy job: a helper cannot answer one with the other', async () => {
+    const sent: { id: number; job: ThumbJob }[] = []
+    let helper: ThumbHelper | null = null
+    const q = new ThumbQueue(() => (helper = { id: 3, send: (id, job) => void sent.push({ id, job }), destroy() {} }), { timeoutMs: 1000, concurrency: 2 })
+    const picture = q.render({ modelUrl: `${VIDEO_URL_PREFIX}a`, size: 100 << 20, px: 64 })
+    const proxy = q.render({ proxyUrl: `${VIDEO_URL_PREFIX}b`, size: 100 << 20 })
+    q.ready(helper!.id)
+    expect(sent.map((s) => s.job)).toEqual([
+      { modelUrl: `${VIDEO_URL_PREFIX}a`, size: 100 << 20, px: 64 },
+      { proxyUrl: `${VIDEO_URL_PREFIX}b`, size: 100 << 20 },
+    ])
+    q.done(3, sent[0]!.id, TINY_PROXY)
+    q.done(3, sent[1]!.id, new Uint8Array([...PNG_SIG, 1]))
+    expect(await picture).toBeNull()
+    expect(await proxy).toBeNull()
+  })
+
+  it('gives a proxy the time a model read in pieces gets, not the time of a picture', async () => {
+    vi.useFakeTimers()
+    try {
+      const sent: { id: number; job: ThumbJob }[] = []
+      let helper: ThumbHelper | null = null
+      const q = new ThumbQueue(() => (helper = { id: 4, send: (id, job) => void sent.push({ id, job }), destroy() {} }), { timeoutMs: 1000, concurrency: 1 })
+      let settled = false
+      const out = q.render({ proxyUrl: `${VIDEO_URL_PREFIX}c`, size: 100 << 20 }).then((r) => ((settled = true), r))
+      q.ready(helper!.id)
+      await vi.advanceTimersByTimeAsync(MODEL_FILE_TIMEOUT - 1000)
+      expect(settled).toBe(false)
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(await out).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('has main’s check agree that a proxy is a proxy', () => {
+    expect(proxyOf(TINY_PROXY)).toBe(TINY_PROXY)
+    expect(proxyOf(new Uint8Array([...PNG_SIG, 1]))).toBeNull()
+  })
+})
+
+describe('main and the proxy of a model', () => {
+  const main = lf(readFileSync(path.join(here, '..', 'src', 'main', 'main.ts'), 'utf8'))
+
+  it('asks for a model by its own door, checks its first bytes, bakes through the helper and keeps the result under its own folder, never in the vault', () => {
+    expect(main).toContain('async function modelProxy(rel: unknown): Promise<Uint8Array | null> {')
+    expect(main).toContain('const abs = await v.modelAbs(rel)')
+    expect(main).toContain('modelKindOf(await readHead(abs, GLB_HEAD_BYTES), st.size)')
+    expect(main).toContain('thumbnailer.renderModelProxy(abs, st.size)')
+    // The kept proxy is named by the bake that made it too.
+    expect(main).toContain('const PROXY_BAKE = 1')
+    expect(main).toContain('ModelIconCache.key(abs, st.mtimeMs, st.size, PROXY_BAKE)')
+    expect(main).toContain("new ModelIconCache(path.join(app.getPath('userData'), 'model-proxies'), {")
+    expect(main).toContain("ext: 'px',")
+    expect(main).toContain('valid: (bytes) => proxyOf(bytes) !== null,')
+    expect(main).toContain('ipc.handle(IPC.modelProxy, (_e, p: unknown) => within(modelProxy(p), MODEL_PROXY_TIMEOUT, null))')
+    // Not through the picture door.
+    const body = main.slice(main.indexOf('async function modelProxy('), main.indexOf('/** The baker\'s job for one model'))
+    expect(body).not.toContain('assetAbs')
+  })
+
+  it('shares one bake between two askers, and does not remember a bake that got no answer at all', () => {
+    expect(main).toContain('const proxiesInFlight = new Map<string, Promise<Uint8Array | null>>()')
+    expect(main).toContain('.catch(() => null)')
+    expect(main).toContain('.finally(() => proxiesInFlight.delete(key))')
+  })
+
+  it('waits for it longer than for a picture, as long as the helper does', () => {
+    expect(main).toContain('const MODEL_PROXY_TIMEOUT = 65_000')
+    expect(MODEL_FILE_TIMEOUT).toBeLessThan(65_000)
+  })
+})

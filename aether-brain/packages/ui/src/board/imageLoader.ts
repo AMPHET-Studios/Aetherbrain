@@ -18,7 +18,7 @@
  * Nothing here throws: a failure is a null, or `{ failure }` when the reason is known and permanent; a bitmap made along the way is
  * closed unless it is handed over.
  */
-import { IMAGE_BLIND_DECODE_MAX_BYTES, MAX_DECODE_PIXELS, readBlobHeader } from '@aether/core'
+import { IMAGE_BLIND_DECODE_MAX_BYTES, MAX_DECODE_PIXELS, isModelPath, readBlobHeader } from '@aether/core'
 import { IMAGE_TIERS, type BoardPictureHost, type ImageFailure, type ImageTier } from './api'
 import { FULL_MAX_PIXELS, type BitmapLike, type LoadFailure, type LoadedImage } from './imageCache'
 
@@ -27,6 +27,11 @@ export type CreateBitmap = (source: Blob, options?: ImageBitmapOptions) => Promi
 
 /** The longer side of the full tier. */
 const FULL_PX = IMAGE_TIERS[2]
+/**
+ * A 3D model is its picture at most this many px on a side, at every tier: the helper draws it (the board turns it from its proxy, never
+ * from this), and there is no "file itself" to decode: a model is never read whole by a board.
+ */
+export const MODEL_PREVIEW_PX = 512
 /** A picture with more pixels than this is not decoded at all (150 megapixels: 600 MB as RGBA). */
 export const MAX_LOAD_PIXELS = 150e6
 /** Pictures over this many pixels decode one at a time (the host does not make thumbnails of them either). */
@@ -155,7 +160,7 @@ export function createImageLoader(
   }
 
   /** A preview: the picture at most `tier` px on its longer side. A bitmap smaller than that is the picture itself. */
-  async function preview(path: string, tier: ImageTier): Promise<LoadedImage | LoadFailure | null> {
+  async function preview(path: string, tier: number): Promise<LoadedImage | LoadFailure | null> {
     let got: Blob | null = null
     try {
       got = await pictures.preview(path, tier)
@@ -171,6 +176,11 @@ export function createImageLoader(
 
   return async (path, tier) => {
     try {
+      if (isModelPath(path)) {
+        const got = await preview(path, Math.min(tier, MODEL_PREVIEW_PX))
+        // A model has no pixels of its own: the size of its picture is the size it is shown at on a board, whatever tier this is.
+        return got?.bitmap ? { ...got, natural: { w: MODEL_PREVIEW_PX, h: MODEL_PREVIEW_PX } } : got
+      }
       return tier === FULL_PX ? await fromOriginal(path, FULL_PX, FULL_MAX_PIXELS) : await preview(path, tier)
     } catch {
       return null

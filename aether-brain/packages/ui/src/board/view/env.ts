@@ -135,6 +135,16 @@ export function browserEnv(): SessionEnv {
       }
     },
     makeCanvas,
+    makeLiveCanvas(side) {
+      try {
+        const canvas = makeCanvas(side, side)
+        const ctx = (canvas as unknown as { getContext(type: '2d'): { putImageData(data: ImageData, x: number, y: number): void } | null }).getContext('2d')
+        if (!ctx || typeof ImageData === 'undefined') return null
+        return { image: canvas, paint: (pixels) => ctx.putImageData(new ImageData(pixels as Uint8ClampedArray<ArrayBuffer>, side, side), 0, 0) }
+      } catch {
+        return null
+      }
+    },
     async canvasToPng(canvas) {
       const c = canvas as unknown as {
         convertToBlob?: (options?: { type?: string }) => Promise<Blob>

@@ -7,6 +7,8 @@
  * degrees, clockwise on screen. A picture's `w` / `h` are its size in board units at zoom 1.
  */
 
+import type { ModelView } from '../models/proxyRaster'
+
 export const BOARD_VERSION = 1
 
 /**
@@ -103,6 +105,12 @@ export interface PictureItem extends ItemCommon {
   opacity: number
   /** A name shown under the picture when captions are on; may be empty. Plain text. */
   caption: string
+  /**
+   * A 3D model (`.glb`) only: how it was turned (`yaw`, `pitch` in degrees: where the camera is, as in `normaliseView`). Absent for the view
+   * a model is first drawn from (`MODEL_VIEW_DEFAULT`, the one its thumbnail has), and for every other kind of picture. Stored as
+   * `yaw=` and `pitch=` on the picture's line.
+   */
+  turn?: ModelView
 }
 
 /** A text note. `x`, `y` is its centre, `w` the width the text wraps to; its height follows the text (TextMetrics). */

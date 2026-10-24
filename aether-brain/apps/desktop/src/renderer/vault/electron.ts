@@ -220,6 +220,16 @@ export class ElectronVaultAdapter implements VaultAdapter {
     return bytes?.length ? new Blob([bytes as Uint8Array<ArrayBuffer>], { type: 'image/png' }) : null
   }
 
+  /** The proxy of a 3D model, baked by main's hidden thumbnail helper and kept on disk (nothing of the model is parsed here or in main). */
+  async modelProxy(path: string): Promise<Uint8Array | null> {
+    try {
+      const bytes = await this.bridge.modelProxy(path)
+      return bytes?.length ? bytes : null
+    } catch {
+      return null
+    }
+  }
+
   /**
    * The picture file itself, whole: main reads the bytes (at most 64 MB, nothing decoded there) and this side decodes them. Null
    * for a video, a path main refuses, an empty or too big file, and when the read fails: it never rejects.

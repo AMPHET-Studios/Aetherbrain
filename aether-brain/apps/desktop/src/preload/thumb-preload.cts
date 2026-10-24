@@ -24,6 +24,7 @@ const IPC = {
   video: 'thumbs:video',
   model: 'thumbs:model',
   modelFile: 'thumbs:modelfile',
+  modelProxy: 'thumbs:modelproxy',
 } as const
 
 /** Addresses main hands out for videos (VIDEO_URL_PREFIX in src/main/thumbnailer.ts). */
@@ -1180,6 +1181,325 @@ async function modelStillFile(url: string, size: number, side: number): Promise<
   const glb = await readGlbRanged(urlSource(url, size))
   return glb ? drawModel(glb, side) : null
 }
+
+/* ---- the proxy: up to 24,000 triangles and a colour for every vertex, which the board and the brain draw themselves ---- */
+
+/**
+ * The proxy's layout: the same numbers as `packages/core/src/models/proxy.ts`, which reads it (a sandboxed preload cannot import that
+ * file; a test pins the two together and reads what this writes with that file's decoder).
+ */
+const PROXY = {
+  magic: [0x41, 0x42, 0x50, 0x58],
+  version: 1,
+  header: 32,
+  maxVertices: 65_535,
+  maxTriangles: 40_000,
+  /** Triangles a proxy aims for: a coarser grid is tried until there are no more than this. */
+  target: 24_000,
+  /** The finest grid (cells along the longest side of the model), the coarsest, and how much coarser each try is. */
+  grid: 96,
+  gridMin: 3,
+  shrink: 0.82,
+} as const
+
+/** The most a model may put into the gathering before it is merged (instances count again): the rest is left out. */
+const PROXY_SOUP = { vertices: 6_000_000, triangles: 4_000_000 }
+
+/** Time to bake a proxy before there is none (ms): a model that takes longer is not worth a board's wait. */
+const PROXY_BUDGET_MS = 20_000
+
+/** One drawable primitive in world space, with a colour for every vertex. */
+interface ProxyPart {
+  pos: Float32Array
+  /** r, g, b of every vertex, 0..255: the material's colour with its texture at that vertex, before light. */
+  col: Uint8Array
+  tri: Uint32Array
+  /** Vertices where a masked or blended material's texture is see-through; a triangle with all three of them is left out. */
+  hide: Uint8Array | null
+}
+
+/** The model's primitives placed in the world (node matrices applied), each vertex coloured; null when there are none or time ran out. */
+function proxyParts(g: Glb, textures: ReadonlyMap<number, Tex>, tints: ReadonlyMap<number, Rgb>, late: () => boolean): ProxyPart[] | null {
+  const budget = { vertices: GLB_LIMITS.vertices }
+  const meshes = new Map<number, Prim[]>()
+  const parts: ProxyPart[] = []
+  const texel = new Float64Array(4)
+  let vertices = 0
+  let triangles = 0
+  gather: for (const at of placements(g)) {
+    let prims = meshes.get(at.mesh)
+    if (!prims) meshes.set(at.mesh, (prims = meshPrims(g, at.mesh, budget)))
+    const m = at.m
+    for (const prim of prims) {
+      const n = prim.pos.length / 3
+      if (vertices + n > PROXY_SOUP.vertices || triangles + prim.tri.length / 3 > PROXY_SOUP.triangles) break gather
+      if (late()) return null
+      vertices += n
+      triangles += prim.tri.length / 3
+      const pos = new Float32Array(n * 3)
+      const col = new Uint8Array(n * 3)
+      const p = prim.pos
+      const uv = prim.uv
+      const tex = uv ? textures.get(prim.material) : undefined
+      const [cr, cg, cb] = materialColor(g, prim.material, tex ? NO_TINTS : tints)
+      const hide = tex && tex.cutoff > 0 ? new Uint8Array(n) : null
+      for (let i = 0; i < n; i++) {
+        const x = p[i * 3]!, y = p[i * 3 + 1]!, z = p[i * 3 + 2]!
+        pos[i * 3] = m[0]! * x + m[4]! * y + m[8]! * z + m[12]!
+        pos[i * 3 + 1] = m[1]! * x + m[5]! * y + m[9]! * z + m[13]!
+        pos[i * 3 + 2] = m[2]! * x + m[6]! * y + m[10]! * z + m[14]!
+        if (tex && uv) {
+          sampleTex(tex, uv[i * 2]!, uv[i * 2 + 1]!, texel)
+          col[i * 3] = Math.round(cr * texel[0]!)
+          col[i * 3 + 1] = Math.round(cg * texel[1]!)
+          col[i * 3 + 2] = Math.round(cb * texel[2]!)
+          if (hide && texel[3]! < tex.cutoff) hide[i] = 1
+        } else {
+          col[i * 3] = Math.round(cr * 255)
+          col[i * 3 + 1] = Math.round(cg * 255)
+          col[i * 3 + 2] = Math.round(cb * 255)
+        }
+      }
+      parts.push({ pos, col, tri: prim.tri, hide })
+    }
+  }
+  return parts.length ? parts : null
+}
+
+/** What the merging made: vertices (place, colour) and triangles over them. */
+interface ProxyMesh {
+  pos: Float64Array
+  col: Uint8Array
+  tri: number[]
+}
+
+/** Whether every vertex of a triangle is a finite place. */
+const finiteTriangle = (p: Float32Array, a: number, b: number, c: number): boolean =>
+  Number.isFinite(p[a]! + p[a + 1]! + p[a + 2]! + p[b]! + p[b + 1]! + p[b + 2]! + p[c]! + p[c + 1]! + p[c + 2]!)
+
+/** The parts as they are (no merging) when they are small enough to be a proxy already; null otherwise. */
+function proxyAsIs(parts: ProxyPart[], target: number, late: () => boolean): ProxyMesh | null {
+  let vertices = 0
+  let triangles = 0
+  for (const part of parts) {
+    vertices += part.pos.length / 3
+    triangles += part.tri.length / 3
+  }
+  if (vertices > PROXY.maxVertices || triangles > target) return null
+  const pos = new Float64Array(vertices * 3)
+  const col = new Uint8Array(vertices * 3)
+  const tri: number[] = []
+  let base = 0
+  for (const part of parts) {
+    const n = part.pos.length / 3
+    for (let i = 0; i < n * 3; i++) pos[base * 3 + i] = part.pos[i]!
+    col.set(part.col, base * 3)
+    for (let k = 0; k + 2 < part.tri.length; k += 3) {
+      const a = part.tri[k]!, b = part.tri[k + 1]!, c = part.tri[k + 2]!
+      if (a >= n || b >= n || c >= n || a === b || b === c || a === c) continue
+      if (part.hide && part.hide[a] && part.hide[b] && part.hide[c]) continue
+      if (!finiteTriangle(part.pos, a * 3, b * 3, c * 3)) continue
+      tri.push(base + a, base + b, base + c)
+    }
+    base += n
+    if (late()) return null
+  }
+  return { pos, col, tri }
+}
+
+/**
+ * The parts merged on a grid of `grid` cells along the longest side of their bounds (`min`, `ext`): the vertices of a cell become one
+ * (their mean place and mean colour), a triangle whose corners fall in fewer than three cells is gone, and a triangle another one repeats
+ * is kept once. Null when that is more than a proxy may hold (the caller tries a coarser grid), or time ran out.
+ */
+function proxyClustered(parts: ProxyPart[], grid: number, min: readonly number[], ext: readonly number[], target: number, late: () => boolean): ProxyMesh | null {
+  const cell = Math.max(ext[0]!, ext[1]!, ext[2]!) / grid
+  const nx = Math.floor(ext[0]! / cell) + 1
+  const ny = Math.floor(ext[1]! / cell) + 1
+  const nz = Math.floor(ext[2]! / cell) + 1
+  const cells = new Int32Array(nx * ny * nz).fill(-1)
+  // Cluster numbers stay under 65,536: a triangle's three of them make one number below 2^48 (the key of the repeats).
+  const cap = Math.min(cells.length, PROXY.maxVertices + 1)
+  const sum = new Float64Array(cap * 3)
+  const colorSum = new Float64Array(cap * 3)
+  const count = new Uint32Array(cap)
+  let clusters = 0
+  const maps: Int32Array[] = []
+  for (const part of parts) {
+    const n = part.pos.length / 3
+    const map = new Int32Array(n)
+    const p = part.pos
+    for (let i = 0; i < n; i++) {
+      if ((i & 0xffff) === 0 && late()) return null
+      const x = p[i * 3]!, y = p[i * 3 + 1]!, z = p[i * 3 + 2]!
+      if (!Number.isFinite(x + y + z)) {
+        map[i] = -1
+        continue
+      }
+      const ix = Math.min(nx - 1, Math.max(0, Math.floor((x - min[0]!) / cell)))
+      const iy = Math.min(ny - 1, Math.max(0, Math.floor((y - min[1]!) / cell)))
+      const iz = Math.min(nz - 1, Math.max(0, Math.floor((z - min[2]!) / cell)))
+      const at = ix + nx * (iy + ny * iz)
+      let c = cells[at]!
+      if (c < 0) {
+        if (clusters >= cap) return null
+        c = clusters++
+        cells[at] = c
+      }
+      map[i] = c
+      sum[c * 3] = sum[c * 3]! + x
+      sum[c * 3 + 1] = sum[c * 3 + 1]! + y
+      sum[c * 3 + 2] = sum[c * 3 + 2]! + z
+      colorSum[c * 3] = colorSum[c * 3]! + part.col[i * 3]!
+      colorSum[c * 3 + 1] = colorSum[c * 3 + 1]! + part.col[i * 3 + 1]!
+      colorSum[c * 3 + 2] = colorSum[c * 3 + 2]! + part.col[i * 3 + 2]!
+      count[c] = count[c]! + 1
+    }
+    maps.push(map)
+  }
+  const pos = new Float64Array(clusters * 3)
+  const col = new Uint8Array(clusters * 3)
+  for (let c = 0; c < clusters; c++) {
+    const k = count[c]!
+    for (let a = 0; a < 3; a++) {
+      pos[c * 3 + a] = sum[c * 3 + a]! / k
+      col[c * 3 + a] = Math.round(colorSum[c * 3 + a]! / k)
+    }
+  }
+  const seen = new Set<number>()
+  const tri: number[] = []
+  for (let pi = 0; pi < parts.length; pi++) {
+    const part = parts[pi]!
+    const map = maps[pi]!
+    const n = map.length
+    for (let k = 0; k + 2 < part.tri.length; k += 3) {
+      if ((k & 0xfffff) === 0 && late()) return null
+      const a = part.tri[k]!, b = part.tri[k + 1]!, c = part.tri[k + 2]!
+      if (a >= n || b >= n || c >= n) continue
+      const ca = map[a]!, cb = map[b]!, cc = map[c]!
+      if (ca < 0 || cb < 0 || cc < 0 || ca === cb || cb === cc || ca === cc) continue
+      if (part.hide && part.hide[a] && part.hide[b] && part.hide[c]) continue
+      const lo = Math.min(ca, cb, cc)
+      const hi = Math.max(ca, cb, cc)
+      const key = (lo * 65536 + (ca + cb + cc - lo - hi)) * 65536 + hi
+      if (seen.has(key)) continue
+      seen.add(key)
+      tri.push(ca, cb, cc)
+      if (tri.length / 3 > target) return null
+    }
+  }
+  return { pos, col, tri }
+}
+
+/** The bytes of a proxy from a mesh: only the vertices a triangle uses, centred, scaled and kept as 16-bit numbers. Null when there is nothing. */
+function proxyEncode(mesh: ProxyMesh): Uint8Array | null {
+  const triangles = mesh.tri.length / 3
+  if (triangles < 1 || triangles > PROXY.maxTriangles) return null
+  const remap = new Int32Array(mesh.pos.length / 3).fill(-1)
+  let vertices = 0
+  const min = [Infinity, Infinity, Infinity]
+  const max = [-Infinity, -Infinity, -Infinity]
+  for (const v of mesh.tri) {
+    if (remap[v]! >= 0) continue
+    remap[v] = vertices++
+    for (let a = 0; a < 3; a++) {
+      const x = mesh.pos[v * 3 + a]!
+      if (x < min[a]!) min[a] = x
+      if (x > max[a]!) max[a] = x
+    }
+  }
+  if (vertices < 1 || vertices > PROXY.maxVertices) return null
+  // The header keeps the centre and the half-size as 32-bit floats: the numbers are rounded to those before the 16-bit ones are made.
+  const centre = [0, 1, 2].map((a) => Math.fround((min[a]! + max[a]!) / 2))
+  const half = Math.fround(Math.max(max[0]! - min[0]!, max[1]! - min[1]!, max[2]! - min[2]!) / 2)
+  if (!(half > 1e-12) || !Number.isFinite(half) || centre.some((c) => !Number.isFinite(c))) return null
+  const odd = vertices & 1
+  const out = new Uint8Array(PROXY.header + vertices * 9 + odd + triangles * 6)
+  const v = new DataView(out.buffer)
+  for (let i = 0; i < 4; i++) out[i] = PROXY.magic[i]!
+  out[4] = PROXY.version
+  v.setUint16(6, vertices, true)
+  v.setUint32(8, triangles, true)
+  for (let a = 0; a < 3; a++) v.setFloat32(12 + a * 4, centre[a]!, true)
+  v.setFloat32(24, half, true)
+  const colorAt = PROXY.header + vertices * 6
+  for (let old = 0; old < remap.length; old++) {
+    const at = remap[old]!
+    if (at < 0) continue
+    for (let a = 0; a < 3; a++) {
+      const q = Math.round(((mesh.pos[old * 3 + a]! - centre[a]!) / half) * 32767)
+      v.setInt16(PROXY.header + at * 6 + a * 2, Math.max(-32767, Math.min(32767, q)), true)
+      out[colorAt + at * 3 + a] = mesh.col[old * 3 + a]!
+    }
+  }
+  const indexAt = colorAt + vertices * 3 + odd
+  for (let i = 0; i < mesh.tri.length; i++) v.setUint16(indexAt + i * 2, remap[mesh.tri[i]!]!, true)
+  return out
+}
+
+export interface ProxyOptions {
+  /** A clock in ms (tests pass a fake one); default `performance.now`. */
+  now?: () => number
+  /** Time to bake before there is none; default PROXY_BUDGET_MS. */
+  budgetMs?: number
+  /** Triangles to aim for; default PROXY.target (tests lower it to make a small model merge). */
+  target?: number
+}
+
+/**
+ * The model as a proxy (layout in `packages/core/src/models/proxy.ts`): its triangles in the world, a colour at every vertex (its base
+ * colour texture sampled there), merged on a grid that is made coarser until no more than `target` triangles are left; a model that
+ * is small enough already is kept as it is. Null when there is nothing to draw or it takes too long. Pure: the same model gives the
+ * same bytes.
+ */
+export function bakeProxy(g: Glb, textures: ReadonlyMap<number, Tex>, tints: ReadonlyMap<number, Rgb>, opts: ProxyOptions = {}): Uint8Array | null {
+  const now = opts.now ?? (() => performance.now())
+  const deadline = now() + (opts.budgetMs ?? PROXY_BUDGET_MS)
+  const late = (): boolean => now() > deadline
+  const target = Math.max(1, Math.min(PROXY.maxTriangles, opts.target ?? PROXY.target))
+  const parts = proxyParts(g, textures, tints, late)
+  if (!parts) return null
+  const whole = proxyAsIs(parts, target, late)
+  if (whole) return proxyEncode(whole)
+  if (late()) return null
+  const min = [Infinity, Infinity, Infinity]
+  const max = [-Infinity, -Infinity, -Infinity]
+  for (const part of parts) {
+    const p = part.pos
+    for (let i = 0; i + 2 < p.length; i += 3) {
+      if (!Number.isFinite(p[i]! + p[i + 1]! + p[i + 2]!)) continue
+      for (let a = 0; a < 3; a++) {
+        if (p[i + a]! < min[a]!) min[a] = p[i + a]!
+        if (p[i + a]! > max[a]!) max[a] = p[i + a]!
+      }
+    }
+  }
+  const ext = [0, 1, 2].map((a) => max[a]! - min[a]!)
+  if (!ext.every(Number.isFinite) || !(Math.max(...ext) > 1e-12)) return null
+  let grid: number = PROXY.grid
+  for (;;) {
+    const mesh = proxyClustered(parts, grid, min, ext, target, late)
+    if (mesh) return proxyEncode(mesh)
+    if (late() || grid <= PROXY.gridMin) return null
+    grid = Math.max(PROXY.gridMin, Math.floor(grid * PROXY.shrink))
+  }
+}
+
+/** The proxy of the model on a one-job address, read in pieces like its still (`size` bytes: main's own count). */
+async function modelProxyFile(url: string, size: number): Promise<Uint8Array | null> {
+  const glb = await readGlbRanged(urlSource(url, size))
+  if (!glb) return null
+  const { textures, tints } = await loadTextures(glb)
+  return bakeProxy(glb, textures, tints)
+}
+
+ipcRenderer.on(IPC.modelProxy, (_e, id: unknown, url: unknown, size: unknown) => {
+  const job = typeof url === 'string' && url.startsWith(VIDEO_URL) && isIndex(size) ? modelProxyFile(url, size) : Promise.resolve(null)
+  void job.then(
+    (bytes) => ipcRenderer.send(IPC.done, id, bytes),
+    () => ipcRenderer.send(IPC.done, id, null),
+  )
+})
 
 ipcRenderer.on(IPC.modelFile, (_e, id: unknown, url: unknown, size: unknown, px: unknown) => {
   const job = typeof url === 'string' && url.startsWith(VIDEO_URL) && isIndex(size) && side(px) ? modelStillFile(url, size, px) : Promise.resolve(null)

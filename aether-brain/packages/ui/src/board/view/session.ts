@@ -511,6 +511,8 @@ export function toolHint(state: { tool: string; cropping: number | null; selecti
       return 'Click to copy the colour under the pointer'
     case 'crop':
       return state.cropping !== null ? 'Drag the edges to crop · Enter to finish' : 'Click the picture you want to crop'
+    case 'turn':
+      return 'Drag a 3D model to turn it · Esc to leave'
     default:
       if (itemCount === 0) return `Drop pictures here, paste with ${mac ? '⌘' : 'Ctrl'} V, or add pictures`
       return state.selection.length > 0 ? 'Drag to move · corners scale · the knob above rotates' : 'Click to select · drag for a box · Space + drag pans'

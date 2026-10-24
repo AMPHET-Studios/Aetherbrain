@@ -44,6 +44,8 @@ export const THUMB_IPC = {
   model: 'thumbs:model',
   /** main → helper: (id, model address, size in bytes, side): the same for a model too big to send, read in pieces from the address. */
   modelFile: 'thumbs:modelfile',
+  /** main → helper: (id, model address, size in bytes): the model's proxy (see packages/core/src/models/proxy.ts), baked from pieces read at the address. */
+  modelProxy: 'thumbs:modelproxy',
 } as const
 
 /**
@@ -66,6 +68,34 @@ export const THUMB_CONCURRENCY = 2
 export const MAX_THUMB_PNG = 16 * 1024 * 1024
 
 const PNG_SIG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]
+
+/**
+ * The model proxy's layout, as far as main needs it to judge what the helper sends back: the same numbers as
+ * `packages/core/src/models/proxy.ts` (main cannot import that package at runtime; a test pins the two together). A proxy is never
+ * parsed here: only its header and its exact length are looked at, so that nothing else is kept or handed on as one.
+ */
+export const PROXY_MAGIC = [0x41, 0x42, 0x50, 0x58]
+export const PROXY_HEADER_BYTES = 32
+export const PROXY_MAX_VERTICES = 65_535
+export const PROXY_MAX_TRIANGLES = 40_000
+/** The exact size of a proxy with this many vertices and triangles. */
+export const proxySize = (vertices: number, triangles: number): number => PROXY_HEADER_BYTES + vertices * 9 + (vertices & 1) + triangles * 6
+/** The size of the biggest proxy there can be. */
+export const MAX_PROXY_BYTES = proxySize(PROXY_MAX_VERTICES, PROXY_MAX_TRIANGLES)
+
+/** `v` when it is bytes with a proxy's header and exactly the length that header makes; anything else is no proxy. */
+export function proxyOf(v: unknown): Uint8Array | null {
+  if (!(v instanceof Uint8Array) || v.length < PROXY_HEADER_BYTES || v.length > MAX_PROXY_BYTES) return null
+  if (!PROXY_MAGIC.every((x, i) => v[i] === x) || v[4] !== 1 || v[5] !== 0) return null
+  const d = new DataView(v.buffer, v.byteOffset, v.byteLength)
+  const vertices = d.getUint16(6, true)
+  const triangles = d.getUint32(8, true)
+  if (vertices < 1 || vertices > PROXY_MAX_VERTICES || triangles < 1 || triangles > PROXY_MAX_TRIANGLES || d.getUint32(28, true) !== 0) return null
+  const half = d.getFloat32(24, true)
+  if (!Number.isFinite(half) || !(half > 0) || half > 1e12) return null
+  for (let i = 0; i < 3; i++) if (!Number.isFinite(d.getFloat32(12 + i * 4, true))) return null
+  return v.length === proxySize(vertices, triangles) ? v : null
+}
 
 /** One picture to decode: its whole file and what to make of it. */
 export interface PictureJob extends ThumbTarget {
@@ -94,7 +124,17 @@ export interface ModelFileJob {
   px: number
 }
 
-export type ThumbJob = PictureJob | VideoJob | ModelJob | ModelFileJob
+/**
+ * One 3D model to bake a proxy of (up to 24,000 triangles and a colour for every vertex, for a window that draws the model itself):
+ * where the helper's session serves the file (a one-job address) and how many bytes it has. Read in pieces, as `ModelFileJob` is; the
+ * answer is the proxy's bytes, not a PNG.
+ */
+export interface ModelProxyJob {
+  proxyUrl: string
+  size: number
+}
+
+export type ThumbJob = PictureJob | VideoJob | ModelJob | ModelFileJob | ModelProxyJob
 
 /** Longest a model read in pieces may take: a few hundred MB off a disk, the textures decoded, the drawing itself. */
 export const MODEL_FILE_TIMEOUT = 60_000
@@ -115,7 +155,7 @@ export interface ThumbQueueOptions {
   concurrency?: number
 }
 
-/** The helper's answer when it is PNG bytes of a sane size; anything else is no thumbnail. */
+/** The helper's answer when it is PNG bytes of a sane size; anything else is no thumbnail (and for a proxy job, the proxy's bytes). */
 function pngOf(v: unknown): Uint8Array | null {
   if (!(v instanceof Uint8Array) || v.length < PNG_SIG.length || v.length > MAX_THUMB_PNG) return null
   return PNG_SIG.every((x, i) => v[i] === x) ? v : null
@@ -128,14 +168,14 @@ function pngOf(v: unknown): Uint8Array | null {
  */
 export class ThumbQueue extends HelperQueue<ThumbJob, Uint8Array> {
   constructor(spawn: () => ThumbHelper, opts: ThumbQueueOptions = {}) {
-    super(spawn, pngOf, {
+    super(spawn, (answer, job) => ('proxyUrl' in job ? proxyOf(answer) : pngOf(answer)), {
       name: 'thumbnail helper',
       unavailable: (message) => new ThumbUnavailable(message),
       stopped: 'Thumbnails stopped',
       timeoutMs: opts.timeoutMs ?? THUMB_JOB_TIMEOUT,
       concurrency: opts.concurrency ?? THUMB_CONCURRENCY,
       // A model read in pieces is allowed longer than a picture (never less than the usual limit, which a test may set).
-      timeoutFor: (job) => ('modelUrl' in job ? Math.max(MODEL_FILE_TIMEOUT, opts.timeoutMs ?? 0) : undefined),
+      timeoutFor: (job) => ('modelUrl' in job || 'proxyUrl' in job ? Math.max(MODEL_FILE_TIMEOUT, opts.timeoutMs ?? 0) : undefined),
     })
   }
 }
@@ -224,6 +264,24 @@ export class Thumbnailer {
     }
   }
 
+  /**
+   * The proxy of the 3D model of `size` bytes at `abs` (a binary glTF, checked by `modelKindOf`): the helper is handed a one-job address,
+   * reads the pieces it needs, and sends back the proxy's bytes (checked here by `proxyOf`), or null when there is nothing to draw. It may
+   * read the file only until the job ends.
+   */
+  async renderModelProxy(abs: string, size: number): Promise<Uint8Array | null> {
+    const token = randomUUID()
+    const end = new AbortController()
+    this.videos.set(token, { abs, mime: 'model/gltf-binary', end })
+    try {
+      const answer = await this.queue.render({ proxyUrl: VIDEO_URL_PREFIX + token, size })
+      return proxyOf(answer)
+    } finally {
+      this.videos.delete(token)
+      end.abort()
+    }
+  }
+
   /** One request of the helper's session for a video or model address: the file of a job running now, else 404. */
   serve(url: string, range: string | null, method = 'GET'): Promise<Response> {
     const video = url.startsWith(VIDEO_URL_PREFIX) ? this.videos.get(url.slice(VIDEO_URL_PREFIX.length)) : undefined
@@ -287,6 +345,7 @@ export class Thumbnailer {
       send: (jobId, job) => {
         if ('url' in job) wc.send(THUMB_IPC.video, jobId, job.url, job.px)
         else if ('modelUrl' in job) wc.send(THUMB_IPC.modelFile, jobId, job.modelUrl, job.size, job.px)
+        else if ('proxyUrl' in job) wc.send(THUMB_IPC.modelProxy, jobId, job.proxyUrl, job.size)
         else if ('model' in job) wc.send(THUMB_IPC.model, jobId, job.model, job.px)
         else wc.send(THUMB_IPC.job, jobId, job.bytes, job.type, job.width, job.height)
       },

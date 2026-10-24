@@ -121,7 +121,7 @@ describe('the board menus', () => {
       for (let i = 1; i < menu.length; i++) if (menu[i]!.kind === 'separator') expect(menu[i + 1]!.kind).toBe('heading')
     }
     expect(exportMenu(full()).map((e) => (e.kind === 'command' ? e.id : e.kind))).toEqual(['export.selection', 'export.board'])
-    expect(toolEntries(full())).toHaveLength(10)
+    expect(toolEntries(full())).toHaveLength(11)
     expect(windowEntries(full({}, { window: false }))).toEqual([])
   })
 

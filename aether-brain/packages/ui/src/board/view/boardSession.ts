@@ -17,6 +17,7 @@ import {
   cutText,
   dominantColours,
   isBoardNote,
+  isModelPath,
   itemsBounds,
   parseBoard,
   screenToBoard,
@@ -31,7 +32,8 @@ import { BOARD_GONE, type BoardCommandId, type BoardEvent, type BoardHost, type 
 import { BoardController, noteCap } from '../controller'
 import { keyToCommand } from '../commands'
 import { DEFAULT_RETRY_MS, ImageCache, type BitmapLike, type ImageCacheOptions } from '../imageCache'
-import { createImageLoader, type CreateBitmap } from '../imageLoader'
+import { createImageLoader, MODEL_PREVIEW_PX, type CreateBitmap } from '../imageLoader'
+import { ModelViews, type LiveCanvas } from '../modelViews'
 import { drawBoard, exportBoard, visiblePictures, type Ctx2D, type ExportCanvas } from '../renderer'
 import {
   DROP_CHUNK_BYTES,
@@ -91,6 +93,8 @@ export interface SessionEnv {
   /** The picture's pixels scaled to at most `maxSide` on the longer side, as RGBA bytes, or null. */
   pixelsOf(bitmap: BitmapLike, maxSide: number): Uint8ClampedArray | null
   makeCanvas(w: number, h: number): ExportCanvas
+  /** A square canvas to draw a 3D model's live view onto (`paint` puts RGBA on it); absent or null: models are drawn as their stills. */
+  makeLiveCanvas?(side: number): LiveCanvas | null
   /** The canvas as PNG bytes, or null. */
   canvasToPng(canvas: ExportCanvas): Promise<Uint8Array | null>
   /** The time, for picture and export names. */
@@ -179,6 +183,8 @@ export class BoardSession {
 
   private started = false
   private cache: ImageCache | null = null
+  /** The live views of the 3D models on the board (their proxies, drawn as they are turned). */
+  private models: ModelViews | null = null
   private offs: (() => void)[] = []
   private readonly saver: Saver
   private rawBase = ''
@@ -390,6 +396,9 @@ export class BoardSession {
   private wire(): void {
     const c = this.controller
     this.cache = this.makeCache({ load: createImageLoader(this.host.pictures, this.env.createBitmap), onLoaded: () => this.invalidate() })
+    const makeLive = this.env.makeLiveCanvas
+    const proxyOf = this.host.pictures.modelProxy
+    this.models = makeLive && proxyOf ? new ModelViews({ load: (p) => proxyOf.call(this.host.pictures, p), makeCanvas: (side) => makeLive.call(this.env, side), onChange: () => this.invalidate() }) : null
     this.fed.clear()
     this.offs.push(
       c.subscribe((s) => {
@@ -416,6 +425,8 @@ export class BoardSession {
     }
     this.cache?.dispose()
     this.cache = null
+    this.models?.dispose()
+    this.models = null
   }
 
   /* ---------------------------------------------------------- subscriptions --- */
@@ -574,6 +585,7 @@ export class BoardSession {
       dpr,
       state: st,
       images,
+      ...(this.models ? { models: this.models } : {}),
       metrics: this.env.metrics,
       missing: (path) => !this.host.pictures.exists(path),
     })
@@ -1462,6 +1474,8 @@ export class BoardSession {
   }
 
   private async previewSize(path: string): Promise<{ w: number; h: number; exact: boolean } | null> {
+    // A 3D model has no pixels of its own: it is a square tile of the size its picture is made at.
+    if (isModelPath(path)) return { w: MODEL_PREVIEW_PX, h: MODEL_PREVIEW_PX, exact: true }
     const known = this.naturalOf(path)
     if (known) return { ...known, exact: true }
     try {

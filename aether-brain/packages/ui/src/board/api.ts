@@ -31,6 +31,12 @@ export interface BoardPictureHost {
   add(files: { name: string; data: Uint8Array }[]): Promise<(string | null)[]>
   /** Every picture of the vault (for the picker). */
   list(): Promise<VaultAsset[]>
+  /**
+   * The proxy of a 3D model of the vault, in the layout of core's `decodeProxy`: up to 24,000 triangles and a colour for every vertex,
+   * which the board draws itself from any side (the file is never given to the board). Null when there is none. A host that has no 3D models
+   * (the web app) leaves it out, and a model is then shown as its picture, which cannot be turned.
+   */
+  modelProxy?(path: string): Promise<Uint8Array | null>
   /** Whether the vault has this picture now (a board keeps the place of one that is gone, drawn as a missing picture). */
   exists(path: string): boolean
   /** Open in the system's image program (desktop). */
@@ -144,7 +150,7 @@ export interface KeyIn {
 
 /* -------------------------------------------------------------- tools ---- */
 
-export type BoardTool = 'select' | 'hand' | 'note' | 'pen' | 'line' | 'rect' | 'ellipse' | 'eraser' | 'sampler' | 'crop'
+export type BoardTool = 'select' | 'hand' | 'note' | 'pen' | 'line' | 'rect' | 'ellipse' | 'eraser' | 'sampler' | 'crop' | 'turn'
 
 /** Where on a selected item the pointer is. */
 export type HandleKind = 'body' | 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w' | 'rotate' | 'crop-nw' | 'crop-n' | 'crop-ne' | 'crop-e' | 'crop-se' | 'crop-s' | 'crop-sw' | 'crop-w'
@@ -248,7 +254,7 @@ export type BoardEvent =
  */
 export type BoardCommandId =
   // tools
-  | 'tool.select' | 'tool.hand' | 'tool.note' | 'tool.pen' | 'tool.line' | 'tool.rect' | 'tool.ellipse' | 'tool.eraser' | 'tool.sampler' | 'tool.crop'
+  | 'tool.select' | 'tool.hand' | 'tool.note' | 'tool.pen' | 'tool.line' | 'tool.rect' | 'tool.ellipse' | 'tool.eraser' | 'tool.sampler' | 'tool.crop' | 'tool.turn'
   // edit
   | 'edit.undo' | 'edit.redo' | 'edit.selectAll' | 'edit.selectNone' | 'edit.invertSelection' | 'edit.duplicate' | 'edit.delete'
   | 'edit.copy' | 'edit.cut' | 'edit.paste' | 'edit.group' | 'edit.ungroup' | 'edit.lock' | 'edit.unlock'
@@ -258,7 +264,7 @@ export type BoardCommandId =
   | 'order.front' | 'order.forward' | 'order.backward' | 'order.back'
   // transform
   | 'transform.flipH' | 'transform.flipV' | 'transform.rotateCw' | 'transform.rotateCcw' | 'transform.resetRotation'
-  | 'transform.resetScale' | 'transform.resetCrop' | 'transform.resetAll'
+  | 'transform.resetScale' | 'transform.resetCrop' | 'transform.resetAll' | 'transform.resetView'
   // arrange
   | 'arrange.menu' | 'arrange.optimal' | 'arrange.row' | 'arrange.column' | 'arrange.grid' | 'arrange.stack'
   | 'sort.name' | 'sort.added' | 'sort.size' | 'sort.shuffle'

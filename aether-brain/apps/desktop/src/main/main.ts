@@ -33,7 +33,7 @@ import {
   type VaultProgressDto,
 } from '../shared/ipc.js'
 import type { ChatPatch } from '../shared/chat.js'
-import { FsVault, isAssetName, isModelName, isVideoName, within } from './fsvault.js'
+import { FsVault, isAssetName, isImageName, isModelName, isVideoName, within } from './fsvault.js'
 import { VaultWatcher } from './watcher.js'
 import { findProjects } from './projects.js'
 import { FilePager, type FilePage } from './pages.js'
@@ -56,7 +56,7 @@ import {
   thumbTarget,
   videoKindOf,
 } from './assets.js'
-import { THUMB_IPC, Thumbnailer, VIDEO_SCHEME } from './thumbnailer.js'
+import { THUMB_IPC, Thumbnailer, VIDEO_SCHEME, proxyOf } from './thumbnailer.js'
 import { AiLinkHost, aiSettings, cleanPatch, type AiLinkSettings, type LinkVault } from './ai-link.js'
 import { makePictureHost } from './ai-pictures.js'
 import { TunnelHost } from './tunnel.js'
@@ -241,7 +241,8 @@ let library: LibraryHost | null = null
 let vision: VisionHelper | null = null
 let board: BoardWindowHost | null = null
 /** Pictures created or removed since the last scan, which `listAssets` does not have (the floating board window needs them). */
-const pictureLedger = new PictureLedger()
+// What the board window's list holds: pictures and 3D models (the brain's own ledger below lists videos too).
+const pictureLedger = new PictureLedger((name) => isImageName(name) || isModelName(name))
 /** The same for pictures, videos and 3D models together: what the AI link's find_pictures lists (the board's ledger is pictures only). */
 const assetLedger = new PictureLedger(isAssetName)
 /**
@@ -552,6 +553,19 @@ const thumbsInFlight = new Map<string, Promise<Uint8Array | null>>()
  * again; and the baker draws every model of a vault a little after it opens, ahead of need (see model-baker.ts).
  */
 const modelIcons = new ModelIconCache(path.join(app.getPath('userData'), 'model-icons'))
+/**
+ * The proxies of 3D models (up to 24,000 triangles and a colour for every vertex, which a window draws itself): baked on request, kept on
+ * disk in the app's own data folder like the pictures, and never in the vault. Bigger files than a picture (up to about 1 MB each).
+ */
+const modelProxies = new ModelIconCache(path.join(app.getPath('userData'), 'model-proxies'), {
+  ext: 'px',
+  valid: (bytes) => proxyOf(bytes) !== null,
+  maxBytes: 256 * 1024 * 1024,
+  maxFiles: 4000,
+})
+const proxiesInFlight = new Map<string, Promise<Uint8Array | null>>()
+/** Which bake made a kept proxy (part of its name): raise it when the helper starts making different ones (a bigger budget, a new layout), and the old ones are never read again. */
+const PROXY_BAKE = 1
 /** The sizes baked for a model: what the brain asks for (512, drawn into 256 px layers) and what a board asks for (256). */
 const MODEL_ICON_SIZES = [512, 256]
 /** Model pictures the helper really drew since the app started: how the baker tells work from a look at the disk. */
@@ -567,6 +581,8 @@ const thumbnailer = new Thumbnailer({
  * the renderer's few requests in flight forever (it gets null, a plain moon).
  */
 const THUMB_TIMEOUT = 20_000
+/** A model's proxy is baked from pieces of a file that can be 300 MB: longer than a picture (the helper's own limit is 60 s). */
+const MODEL_PROXY_TIMEOUT = 65_000
 /** Longest wait for a whole picture (up to 64 MB) from a share that may have stopped answering. */
 const READ_ASSET_TIMEOUT = 60_000
 /** A video's still that came back empty after this long timed out in the helper (it waits 15 s). */
@@ -665,6 +681,36 @@ async function renderModelIcon(abs: string, mtimeMs: number, size: number, px: n
   modelIconsDrawn++
   await modelIcons.set(key, png).catch(() => undefined)
   return png
+}
+
+/**
+ * The proxy of a model of the vault (`rel`), from the disk when it was baked before, else baked by the thumbnail helper from pieces of
+ * the file (main checks its first bytes and reads nothing else) and kept. Two askers for one model share the work. A model with nothing
+ * to draw is remembered as having no proxy for a day; a bake that got no answer at all (the helper stopped) is not remembered.
+ */
+async function modelProxy(rel: unknown): Promise<Uint8Array | null> {
+  const v = requireVault()
+  if (typeof rel !== 'string') return null
+  const abs = await v.modelAbs(rel)
+  if (!abs) return null
+  const st = await fs.stat(abs).catch(() => null)
+  if (!st?.isFile() || st.size === 0 || st.size > MAX_MODEL_FILE_BYTES) return null
+  const key = ModelIconCache.key(abs, st.mtimeMs, st.size, PROXY_BAKE)
+  const kept = await modelProxies.get(key)
+  if (kept !== undefined) return kept
+  let job = proxiesInFlight.get(key)
+  if (!job) {
+    job = (async () => {
+      if (!modelKindOf(await readHead(abs, GLB_HEAD_BYTES), st.size)) return null
+      const bytes = await thumbnailer.renderModelProxy(abs, st.size)
+      await modelProxies.set(key, bytes).catch(() => undefined)
+      return bytes
+    })()
+      .catch(() => null)
+      .finally(() => proxiesInFlight.delete(key))
+    proxiesInFlight.set(key, job)
+  }
+  return job
 }
 
 /** The baker's job for one model of the vault: both sizes of its picture. True when the helper had to draw any of them. */
@@ -1274,6 +1320,7 @@ function registerIpc(): void {
   ipc.handle(IPC.reveal, (e, p: unknown) => reveal(p, board?.isBoardPage(e.sender) ?? false))
   ipc.handle(IPC.assets, () => listAssets())
   ipc.handle(IPC.thumb, (_e, p: unknown, size: unknown) => within(thumbnail(p, size), THUMB_TIMEOUT, null))
+  ipc.handle(IPC.modelProxy, (_e, p: unknown) => within(modelProxy(p), MODEL_PROXY_TIMEOUT, null))
   // From the thumbnail helper only: the thumbnailer ignores every other sender.
   ipc.on(THUMB_IPC.ready, (e) => thumbnailer.ready(e.sender))
   ipc.on(THUMB_IPC.done, (e, id: unknown, png: unknown) => thumbnailer.done(e.sender, id, png))

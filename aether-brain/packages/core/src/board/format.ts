@@ -15,7 +15,8 @@
  * written back right after the items; attributes it does not know on a line it does understand are kept in the item (`unknown`).
  */
 import { asString, rewriteFrontmatter, splitFrontmatter } from '../markdown/frontmatter'
-import { IMAGE_EXTENSIONS, isImagePath, isMediaPath } from '../vault/assets'
+import { IMAGE_EXTENSIONS, isBoardAssetPath, isImagePath, isModelPath } from '../vault/assets'
+import { MODEL_PITCH_MAX, MODEL_VIEW_DEFAULT, isDefaultView, normaliseView } from '../models/proxyRaster'
 import { todayIso } from '../vault/paths'
 import { BOARD_ITEM_LIMITS } from './ops'
 import { cleanText, cutText, escapeBoardText, unescapeBoardText } from './text'
@@ -53,6 +54,9 @@ const NOTE_SIZE: Spec = { lo: IL.noteSize.min, hi: IL.noteSize.max, dec: 2 }
 /** The width floor (0.005) has three decimals, so a mark's width keeps three. */
 const MARK_WIDTH: Spec = { lo: IL.markWidth.min, hi: IL.markWidth.max, dec: 3 }
 const OPACITY: Spec = { lo: IL.opacity.min, hi: IL.opacity.max, dec: 2 }
+/** A model's view: where the camera is, in degrees (a turn is `normaliseView`'s: one decimal). */
+const YAW: Spec = { lo: 0, hi: 360, dec: 1 }
+const PITCH: Spec = { lo: -MODEL_PITCH_MAX, hi: MODEL_PITCH_MAX, dec: 1 }
 /** The zoom floor (0.005) has three decimals, so the zoom keeps four. */
 const ZOOM: Spec = { lo: L.zoomMin, hi: L.zoomMax, dec: 4 }
 const GRID: Spec = { lo: IL.grid.min, hi: IL.grid.max, dec: 2 }
@@ -280,7 +284,7 @@ interface Scan {
  * user's own bullets that start with the name of a kind (`- note the colours`, `- line 3 is wrong`, `- view from the north`) do not.
  */
 function writtenLike(head: Extract<Head, { ok: true }>): boolean {
-  if (head.kind === 'pic') return isMediaPath(head.path)
+  if (head.kind === 'pic') return isBoardAssetPath(head.path)
   const after = head.after
   if (after.endsWith(' »') || after.includes(' » ')) return true
   for (let i = after.indexOf('='); i >= 0; i = after.indexOf('=', i + 1)) {
@@ -725,6 +729,11 @@ function parseItemLine(rest: string, at: number, say: (text: string) => void): P
           item.flipV = flip.includes('v')
         } else warn(`flip="${shorten(flip)}" is not h, v or hv and was ignored`)
       }
+      // Only a 3D model has a view; on any other picture `yaw` and `pitch` are attributes this version does not use, and are kept as they are.
+      if (isModelPath(path)) {
+        const view = normaliseView({ yaw: a.number('yaw', YAW, MODEL_VIEW_DEFAULT.yaw), pitch: a.number('pitch', PITCH, MODEL_VIEW_DEFAULT.pitch) })
+        if (!isDefaultView(view)) item.turn = view
+      }
       result = { type: 'item', item }
       break
     }
@@ -991,7 +1000,7 @@ export function boardNoteParts(body: string): BoardNoteParts | null {
           take = false
           if (head.kind === 'view' && !viewSeen) viewSeen = true
           else if (head.kind !== 'view') {
-            if (items < L.items && head.kind === 'pic' && isMediaPath(head.path)) {
+            if (items < L.items && head.kind === 'pic' && isBoardAssetPath(head.path)) {
               // An embed's offset is its `!`; a `pic` line has no brackets, so its offset is where its path starts.
               const literal = !t.startsWith('- ![[')
               pictures.push({ path: head.path, offset: line.start + (literal ? 6 : 2), literal })
@@ -1118,6 +1127,10 @@ function itemLine(item: BoardItem, out: Out): string {
       const crop = validCrop(item.crop)
       if (crop && !(crop.l === 0 && crop.t === 0 && crop.r === 1 && crop.b === 1)) {
         parts.push(`crop=${[crop.l, crop.t, crop.r, crop.b].map((v) => formatNumber(v, CROP_EDGE.dec)).join(',')}`)
+      }
+      if (item.turn && isModelPath(item.path)) {
+        const view = normaliseView(item.turn)
+        if (!isDefaultView(view)) parts.push(`yaw=${formatNumber(view.yaw, YAW.dec)}`, `pitch=${formatNumber(view.pitch, PITCH.dec)}`)
       }
       if (item.gray) parts.push('gray')
       const op = norm(OPACITY, item.opacity, 1)
