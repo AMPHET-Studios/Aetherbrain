@@ -52,6 +52,8 @@ export const MODEL_MAX_SIDE = 512
 const SIDES = [64, 128, 256, MODEL_MAX_SIDE] as const
 export const MODEL_MIN_PX = 48
 const DEFAULT_HELD = 24
+/** Model items an export draws live (each on a canvas of its own, up to 512 px square): past this the rest keep their stills. */
+export const EXPORT_LIVE_MAX = 48
 const DEFAULT_RETRY_MS = 60_000
 
 interface Entry {
@@ -66,6 +68,8 @@ interface Entry {
   /** When it was last asked for (a counter): the least recently asked goes first. */
   used: number
   failedAt: number
+  /** The load of this entry's proxy (resolves when it is here or has failed). */
+  loading: Promise<void>
 }
 
 /** The side a model drawn for `px` device pixels is rendered at. */
@@ -116,6 +120,39 @@ export class ModelViews implements ModelViewSource {
     return e.canvas.image
   }
 
+  /**
+   * The live pictures of these model items for an export that draws them at `scale` pixels a board unit: every proxy is waited for (a model
+   * with none is left out), and each item is drawn once, on a canvas of its own, at the view it holds and the side that scale needs. At most
+   * `limit` items are drawn (the rest keep their stills), so an export never holds more than `limit` canvases. The views keep none of it.
+   */
+  async snapshot(items: readonly PictureItem[], scale: number, limit = EXPORT_LIVE_MAX): Promise<ModelViewSource> {
+    const models = items.filter((it) => isModelPath(it.path))
+    const proxies = new Map<string, Entry>()
+    for (const it of models) {
+      if (this.disposed) break
+      if (!proxies.has(it.path)) proxies.set(it.path, this.entryFor(it.path))
+    }
+    await Promise.all([...proxies.values()].map((e) => e.loading))
+    const drawn = new Map<number, LiveImage>()
+    for (const it of models) {
+      if (drawn.size >= limit) break
+      const e = proxies.get(it.path)
+      if (!e || e.state !== 'ready' || !e.proxy) continue
+      const px = Math.max(it.w, it.h) * scale
+      if (!(px >= MODEL_MIN_PX)) continue
+      const side = liveSide(px)
+      const view = normaliseView(it.turn ?? MODEL_VIEW_DEFAULT)
+      const r = renderProxy(e.proxy, { side, yaw: view.yaw, pitch: view.pitch, supersample: side <= 256 ? 2 : 1, ...(e.gain !== undefined ? { gain: e.gain } : {}) })
+      if (!r) continue
+      e.gain ??= r.gain
+      const canvas = this.opts.makeCanvas(side)
+      if (!canvas) continue
+      canvas.paint(r.pixels)
+      drawn.set(it.id, canvas.image)
+    }
+    return { get: (item) => drawn.get(item.id) ?? null }
+  }
+
   /** The vault's copy of this model changed: its proxy is fetched again the next time it is drawn. */
   forget(path: string): void {
     this.held.delete(path)
@@ -131,10 +168,10 @@ export class ModelViews implements ModelViewSource {
     const have = this.held.get(path)
     const now = (this.opts.now ?? Date.now)()
     if (have && !(have.state === 'failed' && now - have.failedAt >= (this.opts.retryMs ?? DEFAULT_RETRY_MS))) return have
-    const entry: Entry = { state: 'loading', proxy: null, gain: undefined, canvas: null, side: 0, shown: '', used: ++this.tick, failedAt: 0 }
+    const entry: Entry = { state: 'loading', proxy: null, gain: undefined, canvas: null, side: 0, shown: '', used: ++this.tick, failedAt: 0, loading: Promise.resolve() }
     this.held.set(path, entry)
     this.evict(path)
-    void this.fetch(path, entry)
+    entry.loading = this.fetch(path, entry)
     return entry
   }
 
@@ -146,8 +183,8 @@ export class ModelViews implements ModelViewSource {
     } catch {
       proxy = null
     }
-    // A model forgotten (or the board closed) while its proxy was on the way: the answer is for a file that is no longer this one.
-    if (this.disposed || this.held.get(path) !== entry) return
+    if (this.disposed) return
+    // The answer stays with the entry it was asked for (an export that is waiting on it holds it, held or not)...
     if (proxy) {
       entry.proxy = proxy
       entry.state = 'ready'
@@ -155,7 +192,8 @@ export class ModelViews implements ModelViewSource {
       entry.state = 'failed'
       entry.failedAt = (this.opts.now ?? Date.now)()
     }
-    this.opts.onChange()
+    // ...but a model forgotten (or let go to make room) while its proxy was on the way is nobody's to announce: the board asks again.
+    if (this.held.get(path) === entry) this.opts.onChange()
   }
 
   /** Lets the least recently asked for go while more are held than allowed (the one being asked for now stays). */

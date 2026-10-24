@@ -1313,6 +1313,8 @@ export interface ExportOptions {
   maxSide?: number
   /** Paint the board's colour under the items (default) or leave the picture transparent. */
   background?: boolean
+  /** The 3D models as they are turned (a `ModelViews.snapshot` of them at this scale): a model with no live view is exported as its still. */
+  models?: ModelViewSource
 }
 
 export interface ExportResult {
@@ -1431,6 +1433,7 @@ export async function exportBoard(
         dpr: 1,
         state: EMPTY_DRAW_STATE,
         images: source,
+        ...(opts.models ? { models: opts.models } : {}),
         metrics,
         showUi: false,
         backdrop: drawn > 0 ? 'keep' : opts.background === false ? 'clear' : 'fill',

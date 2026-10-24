@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { addPicture, emptyBoard, encodeProxy, serializeBoard, type ProxyParts } from '@aether/core'
+import { addPicture, decodeProxy, emptyBoard, encodeProxy, renderProxy, serializeBoard, type ProxyParts } from '@aether/core'
 import type { LiveCanvas } from '../src/board/modelViews'
 import { RecordingContext } from './helpers/recordingContext'
 import { rig } from './helpers/board-view-fakes'
@@ -50,12 +50,12 @@ const flush = async (): Promise<void> => {
 function liveRig(opts: { proxy?: boolean; live?: boolean } = {}) {
   const r = rig(boardWithModel(), opts.proxy === false ? { modelProxy: false } : {}, { start: false })
   r.host.proxies['Art/robot.glb'] = PROXY
-  const canvases: { side: number; painted: number }[] = []
+  const canvases: { side: number; painted: number; last: Uint8ClampedArray | null }[] = []
   if (opts.live !== false) {
     r.env.makeLiveCanvas = (side): LiveCanvas => {
-      const rec = { side, painted: 0 }
+      const rec = { side, painted: 0, last: null as Uint8ClampedArray | null }
       canvases.push(rec)
-      return { image: { width: side, height: side }, paint: () => void rec.painted++ }
+      return { image: { width: side, height: side }, paint: (pixels) => ((rec.painted += 1), (rec.last = pixels)) }
     }
   }
   const frames = { n: 0 }
@@ -124,6 +124,27 @@ describe('the session and the live views of 3D models', () => {
     t.session.controller.pointerMove({ id: 1, x: 460, y: 300, button: 0, buttons: 1, shift: false, ctrl: false, alt: false, meta: false, pointerType: 'mouse', pressure: 0.5, time: 10 })
     t.session.draw(new RecordingContext(), 1)
     expect(t.canvases[0]!.painted).toBe(2)
+  })
+
+  it('an export draws the model as it is turned, from its proxy, and does not read the model whole for its size', async () => {
+    const t = liveRig()
+    t.session.exec('tool.turn')
+    const ptr = (x: number, time: number) => ({ id: 1, x, y: 300, button: 0, buttons: 1, shift: false, ctrl: false, alt: false, meta: false, pointerType: 'mouse' as const, pressure: 0.5, time })
+    t.session.pointerDown(ptr(400, 0))
+    t.session.controller.pointerMove(ptr(480, 10))
+    t.session.controller.pointerUp({ ...ptr(480, 20), buttons: 0 })
+    t.host.originals.length = 0
+    await t.session.exportItems(null, 'board')
+    expect(t.host.originals).not.toContain('Art/robot.glb')
+    expect(t.host.proxyAsks).toContain('Art/robot.glb')
+    const drawn = t.env.canvases.flatMap((c) => c.ctx.drawImages())
+    expect(drawn.length).toBeGreaterThan(0)
+    const live = t.canvases.find((c) => c.painted === 1)!
+    expect(drawn.some((d) => (d.image as unknown as { width: number }).width === live.side)).toBe(true)
+    // The model was drawn at the view it was left in: a drag of 80 px to the right is 40 degrees less yaw (35 - 40 = 355).
+    const direct = renderProxy(decodeProxy(PROXY)!, { side: live.side, yaw: 355, pitch: 24, supersample: live.side <= 256 ? 2 : 1 })!
+    expect(Buffer.compare(Buffer.from(live.last!), Buffer.from(direct.pixels))).toBe(0)
+    expect(t.host.added).toHaveLength(1)
   })
 
   it('a model added from the vault is a square tile of the size its picture is made at, with no picture read for its size', async () => {

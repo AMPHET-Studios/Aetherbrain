@@ -378,3 +378,106 @@ describe('the picture cache and a model', () => {
     expect(calls.original).toEqual(['Art/gate.png'])
   })
 })
+
+/* ------------------------------------------------------------------ */
+/* An export draws the models as they are turned                      */
+/* ------------------------------------------------------------------ */
+
+describe('ModelViews.snapshot (what an export draws)', () => {
+  const files = () => ({ 'Art/robot.glb': bytesOf(sphereParts()), 'Art/other.glb': bytesOf(sphereParts(8, 10)) })
+
+  it('waits for the proxies and draws each model item once, on a canvas of its own, at the view it holds and the side the scale needs', async () => {
+    const t = rig(files())
+    const a = item({ id: 1, turn: { yaw: 100, pitch: 10 } })
+    const b = item({ id: 2, turn: { yaw: 200, pitch: -20 } })
+    const source = await t.views.snapshot([a, b], 1)
+    // 300 units at one pixel each: a 512 side (the nearest above), one canvas for each item.
+    expect(t.canvases.made.map((m) => m.side)).toEqual([512, 512])
+    expect(source.get(a, 1)).toEqual({ width: 512, height: 512 })
+    expect(source.get(b, 1)).not.toBe(source.get(a, 1))
+    // The first item's exposure is every item's: the second is drawn with it.
+    const first = renderProxy(decodeProxy(bytesOf(sphereParts()))!, { side: 512, yaw: 100, pitch: 10, supersample: 1 })!
+    const second = renderProxy(decodeProxy(bytesOf(sphereParts()))!, { side: 512, yaw: 200, pitch: -20, supersample: 1, gain: first.gain })!
+    expect(Buffer.compare(Buffer.from(t.canvases.made[1]!.painted[0]!), Buffer.from(second.pixels))).toBe(0)
+  })
+
+  it('says nothing for what is not a model, for a model with no proxy, and for one drawn too small', async () => {
+    const t = rig({ ...files(), 'Art/none.glb': null })
+    const picture = item({ id: 3, path: 'Art/gate.png' })
+    const none = item({ id: 4, path: 'Art/none.glb' })
+    const tiny = item({ id: 5, w: 20, h: 20 })
+    const ok = item({ id: 6 })
+    const source = await t.views.snapshot([picture, none, tiny, ok], 1)
+    expect(source.get(picture, 1)).toBeNull()
+    expect(source.get(none, 1)).toBeNull()
+    expect(source.get(tiny, 1)).toBeNull()
+    expect(source.get(ok, 1)).not.toBeNull()
+    expect([...t.loads].sort()).toEqual(['Art/none.glb', 'Art/robot.glb'])
+  })
+
+  it('draws at most the limit, so an export never holds more canvases than that', async () => {
+    const t = rig(files())
+    const items = [1, 2, 3, 4, 5].map((id) => item({ id }))
+    const source = await t.views.snapshot(items, 1, 2)
+    expect(t.canvases.made).toHaveLength(2)
+    expect(items.map((it) => source.get(it, 1) !== null)).toEqual([true, true, false, false, false])
+  })
+
+  it('has every model of an export, however many there are: more than the views hold at once', async () => {
+    const many: Record<string, Uint8Array> = {}
+    for (let i = 0; i < 6; i++) many[`Art/m${i}.glb`] = bytesOf(sphereParts())
+    const t = rig(many, { maxHeld: 2 })
+    const items = Object.keys(many).map((path, i) => item({ id: i + 1, path }))
+    const source = await t.views.snapshot(items, 1)
+    expect(items.every((it) => source.get(it, 1) !== null)).toBe(true)
+    // What the views themselves keep is still bounded.
+    expect(t.views.size).toBeLessThanOrEqual(2)
+  })
+
+  it('scales the canvas with the export: a small scale a small side', async () => {
+    const t = rig(files())
+    await t.views.snapshot([item()], 0.3)
+    expect(t.canvases.made.map((m) => m.side)).toEqual([128])
+  })
+
+  it('answers with a source that has nothing when the views were let go', async () => {
+    const t = rig(files())
+    t.views.dispose()
+    const source = await t.views.snapshot([item()], 1)
+    expect(source.get(item(), 1)).toBeNull()
+  })
+})
+
+describe('exportBoard and a 3D model', () => {
+  it('draws the live view the models source gives, in place of the picture its images give, and the still when it gives none', async () => {
+    const { exportBoard } = await import('../src/board/renderer')
+    const live = { width: 512, height: 512 }
+    const models: ModelViewSource = { get: (it) => (it.id === 1 ? live : null) }
+    const doc: BoardDoc = { ...emptyBoard('t'), items: [item({ id: 1, x: 0 }), item({ id: 2, path: 'Art/other.glb', x: 600 })], nextId: 10 }
+    const stills = new Map([['Art/robot.glb', makeBitmap(100, 100)], ['Art/other.glb', makeBitmap(100, 100)]])
+    const ctx = new RecordingContext()
+    const res = await exportBoard(
+      doc,
+      null,
+      1,
+      { get: async (p) => stills.get(p) ?? null, release: () => undefined },
+      (w, h) => ({ width: w, height: h, getContext: () => ctx }),
+      estimateTextMetrics,
+      { models },
+    )
+    expect(res).not.toBeNull()
+    const drawn = ctx.drawImages().map((d) => d.image)
+    expect(drawn).toContain(live)
+    expect(drawn).toContain(stills.get('Art/other.glb'))
+    expect(drawn).not.toContain(stills.get('Art/robot.glb'))
+  })
+
+  it('is as before without a models source', async () => {
+    const { exportBoard } = await import('../src/board/renderer')
+    const doc: BoardDoc = { ...emptyBoard('t'), items: [item({ id: 1 })], nextId: 10 }
+    const still = makeBitmap(100, 100)
+    const ctx = new RecordingContext()
+    await exportBoard(doc, null, 1, { get: async () => still, release: () => undefined }, (w, h) => ({ width: w, height: h, getContext: () => ctx }), estimateTextMetrics)
+    expect(ctx.drawImages().map((d) => d.image)).toEqual([still])
+  })
+})

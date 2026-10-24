@@ -24,6 +24,7 @@ import {
   serializeBoard,
   setProps,
   type BoardDoc,
+  type PictureItem,
   type TextMetrics,
   type Vec2,
 } from '@aether/core'
@@ -1232,6 +1233,9 @@ export class BoardSession {
       // The vault takes a picture of at most MAX_FILE_BYTES, and a PNG of a detailed collage can be larger: it is made again, smaller
       // (a PNG's size follows the pixels, which follow the square of the scale), rather than refused after all the work.
       for (let attempt = 0; attempt < EXPORT_ATTEMPTS; attempt++) {
+        // The models are drawn as they are turned, at the size this attempt's scale gives them (the scale shrinks when the file was too big).
+        const wantedItems = doc.items.filter((it): it is PictureItem => it.kind === 'picture' && (!wanted || wanted.has(it.id)))
+        const models = this.models ? await this.models.snapshot(wantedItems, scale) : undefined
         const result = await exportBoard(
           doc,
           ids,
@@ -1242,6 +1246,7 @@ export class BoardSession {
           },
           (w, h) => this.env.makeCanvas(w, h),
           this.env.metrics,
+          models ? { models } : {},
         )
         if (!result) {
           this.say('There is nothing to export.', 'info')
@@ -1524,6 +1529,12 @@ export class BoardSession {
   private async learnNaturals(paths: readonly string[]): Promise<void> {
     for (const path of paths.slice(0, MAX_PROBES)) {
       if (this.exact.has(path) || !this.started) continue
+      // A model has no pixels to read a size from: it is the square tile its picture is made at.
+      if (isModelPath(path)) {
+        this.controller.setNaturalSize(path, MODEL_PREVIEW_PX, MODEL_PREVIEW_PX)
+        this.markExact(path)
+        continue
+      }
       try {
         const blob = await this.host.pictures.original(path)
         const size = blob ? await this.env.decodeSize(blob) : null
