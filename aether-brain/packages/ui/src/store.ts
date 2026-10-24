@@ -765,6 +765,8 @@ export interface AetherState {
    * has none, it is empty or it fails. Never rejects.
    */
   preview(path: string, size: number): Promise<Blob | null>
+  /** The proxy of a 3D model of the vault (what a board turns); null when there is none or the vault cannot make one. Never rejects. */
+  modelProxy(path: string): Promise<Uint8Array | null>
   /** Projects a Concept Forge drawing can be saved to (active first). */
   forgeProjects(): ForgeProject[]
   /** File a graded drawing (PNG + critique note) into a project's Critique planet. Rejects with a readable message. */
@@ -3189,6 +3191,16 @@ export const useAether = create<AetherState>()((set, get) => {
       try {
         const adapter = get().adapter
         return await stillFor(path, size, () => thumbnail.call(adapter, path, size))
+      } catch {
+        return null
+      }
+    },
+
+    async modelProxy(path) {
+      const adapter = get().adapter
+      if (!adapter?.modelProxy) return null
+      try {
+        return await adapter.modelProxy(path)
       } catch {
         return null
       }

@@ -11,7 +11,7 @@
  *
  * No React and no DOM here (Blob and timers only), so it is tested in node with a fake bridge.
  */
-import { boardFolderName, boardPictureName, isImagePath, mimeOf, parseBoard, type VaultAsset } from '@aether/core'
+import { boardFolderName, boardPictureName, isImagePath, isModelPath, mimeOf, parseBoard, type VaultAsset } from '@aether/core'
 import type { BoardHost, BoardWindowHost as BoardWindowControls } from '@aether/ui'
 import type { BoardBridge, BoardStatusDto, VaultChangeDto } from '../shared/ipc'
 
@@ -157,7 +157,7 @@ export function createFloatingBoardHost(bridge: BoardBridge, path: string, opts:
       try {
         const res = await bridge.boardAssets()
         const next = new Map<string, VaultAsset>()
-        for (const a of res.assets) if (isImagePath(a.path)) next.set(key(a.path), a)
+        for (const a of res.assets) if (isImagePath(a.path) || isModelPath(a.path)) next.set(key(a.path), a)
         const prev = assets
         assets = next
         partial = res.truncated
@@ -185,7 +185,7 @@ export function createFloatingBoardHost(bridge: BoardBridge, path: string, opts:
         if (c.kind === 'unlink' || (c.content !== undefined && c.content !== lastKnown && !echoes.includes(c.content))) changedOutside()
         continue
       }
-      if (!isImagePath(c.path)) continue
+      if (!isImagePath(c.path) && !isModelPath(c.path)) continue
       if (fetching) held.push(c)
       else if (applyPicture(c)) pictures = true
     }
@@ -325,6 +325,14 @@ export function createFloatingBoardHost(bridge: BoardBridge, path: string, opts:
         if (res.ok) return res.bytes.length ? new Blob([res.bytes as Uint8Array<ArrayBuffer>], { type: mimeOf(p) }) : null
         // Main says why there are no bytes (a verdict about the file, or a file that is gone); the picture cache keeps it.
         throw Object.assign(new Error(res.detail), { reason: res.reason })
+      },
+      async modelProxy(p) {
+        try {
+          const bytes = await bridge.modelProxy(p)
+          return bytes?.length ? bytes : null
+        } catch {
+          return null
+        }
       },
       async add(files) {
         const out: (string | null)[] = []

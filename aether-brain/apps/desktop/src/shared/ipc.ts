@@ -511,6 +511,13 @@ export interface AetherBridge {
   listAssets(): Promise<AssetListDto>
   /** PNG bytes of a preview at most `size` px (32–1024) on its longer side, or null when unreadable. */
   thumbnail(path: string, size: number): Promise<Uint8Array | null>
+  /**
+   * The proxy of a 3D model of the vault (`.glb`): up to 24,000 triangles and a colour for every vertex, in the layout of
+   * `@aether/core`'s `decodeProxy` (never more than 1 MB), which a window draws itself to show the model from any side. Baked by the
+   * thumbnail helper from pieces of the file, kept on disk, and null when the path is no model of the visible vault, the file is too big or
+   * not a binary glTF, or there is nothing to draw. The model's file itself is never sent.
+   */
+  modelProxy(path: string): Promise<Uint8Array | null>
   /** Create a new image (create-only; rejects with EEXIST when anything is there). Image paths only, ≤ 40 MB. */
   createAsset(path: string, data: Uint8Array): Promise<void>
   /** Open an image of the vault in the OS default app (image paths only). */
@@ -673,6 +680,7 @@ export const IPC = {
   progress: 'vault:progress',
   assets: 'vault:assets',
   thumb: 'vault:thumb',
+  modelProxy: 'vault:modelProxy',
   createAsset: 'vault:createAsset',
   openAsset: 'vault:openAsset',
   readAsset: 'vault:readAsset',
@@ -745,6 +753,7 @@ export type BoardBridge = Pick<
   | 'boardStatus'
   | 'copyText'
   | 'createAsset'
+  | 'modelProxy'
   | 'onBoardFlush'
   | 'onBoardGone'
   | 'onBoardState'

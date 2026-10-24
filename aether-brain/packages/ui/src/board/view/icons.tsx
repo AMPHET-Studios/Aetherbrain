@@ -64,6 +64,13 @@ const TOOL_ICONS: Record<BoardTool, ReactNode> = {
     </>
   ),
   crop: <path d="M5 2.5v10.5h10.5M2.5 5H13V15.5" />,
+  // A cube: the model that is turned.
+  turn: (
+    <>
+      <path d="M9 2.4l5.6 3.2v6.8L9 15.6l-5.6-3.2V5.6z" fill="currentColor" fillOpacity={0.1} />
+      <path d="M3.4 5.6L9 8.8l5.6-3.2M9 8.8v6.8" />
+    </>
+  ),
 }
 
 export function ToolIcon({ tool }: { tool: BoardTool }) {

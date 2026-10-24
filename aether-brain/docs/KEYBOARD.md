@@ -188,6 +188,7 @@ A **board** is a note of the vault (`type: board`) shown as an open canvas of pi
 | `E` | Eraser: removes whole marks |
 | `I` | Colour sampler: click to read and copy the colour under the pointer |
 | `C` | Crop the selected picture (`Enter` or `Esc` finishes) |
+| `M` | Turn a 3D model: drag a model to turn it (`Esc` leaves the tool) |
 
 **Edit**
 

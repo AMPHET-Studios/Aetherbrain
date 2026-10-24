@@ -42,6 +42,7 @@ export const BOARD_COMMANDS: BoardCommandInfo[] = [
   row('tool.eraser', 'Eraser', 'Tools', 'E'),
   row('tool.sampler', 'Colour sampler', 'Tools', 'I'),
   row('tool.crop', 'Crop the selected picture', 'Tools', 'C', { needs: 1 }),
+  row('tool.turn', 'Turn a 3D model', 'Tools', 'M'),
   // edit
   row('edit.undo', 'Undo', 'Edit', '⌘ Z'),
   row('edit.redo', 'Redo', 'Edit', '⌘ ⇧ Z / ⌘ Y'),
@@ -72,7 +73,8 @@ export const BOARD_COMMANDS: BoardCommandInfo[] = [
   row('transform.resetRotation', 'Reset rotation', 'Transform', undefined, { needs: 1 }),
   row('transform.resetScale', 'Reset size to the picture’s own', 'Transform', undefined, { needs: 1 }),
   row('transform.resetCrop', 'Reset crop', 'Transform', undefined, { needs: 1 }),
-  row('transform.resetAll', 'Reset rotation, size, crop, flips and opacity', 'Transform', undefined, { needs: 1 }),
+  row('transform.resetAll', 'Reset rotation, size, crop, flips, opacity and a 3D model’s view', 'Transform', undefined, { needs: 1 }),
+  row('transform.resetView', 'Reset a 3D model’s view', 'Transform', undefined, { needs: 1 }),
   // arrange
   row('arrange.menu', 'Arrange menu', 'Arrange', 'A'),
   row('arrange.optimal', 'Arrange: optimal', 'Arrange'),
@@ -246,6 +248,7 @@ export function keyToCommand(e: KeyIn, ctx: KeyContext): BoardCommandId | null {
   const sig = signatureOfEvent(e)
   if (sig === null) return null
   if ((ctx.cropping || ctx.tool === 'crop') && (sig === 'enter' || sig === 'escape')) return 'tool.select'
+  if (ctx.tool === 'turn' && sig === 'escape') return 'tool.select'
   return BINDINGS.get(sig) ?? null
 }
 

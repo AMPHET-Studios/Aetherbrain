@@ -8,6 +8,8 @@
  * Where a picture's or note's size is needed (a flip about the selection's centre, which item overlaps which) the functions take the
  * text metrics last, defaulting to the estimate.
  */
+import { isModelPath } from '../vault/assets'
+import { isDefaultView, normaliseView, type ModelView } from '../models/proxyRaster'
 import { cleanText, cutText, estimateTextMetrics } from './text'
 import { clampView, itemBounds, itemsBounds, noteBox, normalizeAngle, rotatePoint } from './geometry'
 import {
@@ -86,11 +88,12 @@ function sameValue(a: unknown, b: unknown): boolean {
   return false
 }
 
-/** `next` when it differs from `prev` in any field, else `prev` itself. */
+/** `next` when it differs from `prev` in any field (one `prev` has and `next` has not, an optional one taken away, too), else `prev` itself. */
 function keepIfSame<T extends object>(prev: T, next: T): T {
   const a = prev as Record<string, unknown>
   const b = next as Record<string, unknown>
   for (const k of Object.keys(b)) if (!sameValue(a[k], b[k])) return next
+  for (const k of Object.keys(a)) if (!(k in b) && a[k] !== undefined) return next
   return prev
 }
 
@@ -146,8 +149,13 @@ function sanitizeItem(item: BoardItem): BoardItem {
   switch (item.kind) {
     case 'picture': {
       const size = fitPictureSize(item.w, item.h)
-      return keepIfSame(item, {
-        ...item,
+      // A view is kept as the file keeps it, and only on a model, and only when it is not the first view.
+      const { turn, ...bare } = item
+      const view = turn && isModelPath(item.path) ? normaliseView(turn) : null
+      const turned = view && !isDefaultView(view) ? view : null
+      const next: PictureItem = {
+        ...bare,
+        ...(turned ? { turn: turned } : {}),
         group,
         locked,
         x: clampCoord(item.x),
@@ -161,7 +169,8 @@ function sanitizeItem(item: BoardItem): BoardItem {
         gray: item.gray === true,
         opacity: clampTo(fin(item.opacity, 1), BOARD_ITEM_LIMITS.opacity.min, BOARD_ITEM_LIMITS.opacity.max),
         caption: keptText(item.caption),
-      })
+      }
+      return keepIfSame(item, next)
     }
     case 'note':
       return keepIfSame(item, {
@@ -711,6 +720,8 @@ export interface BoardPatch {
   caption?: string
   flipH?: boolean
   flipV?: boolean
+  /** A 3D model's view (`normaliseView` brings it in range); null puts it back to the first view. Ignored by a picture that is not a model. */
+  turn?: ModelView | null
   /** A picture's whole-picture height. */
   h?: number
   // pictures and notes
@@ -743,6 +754,10 @@ function patched(it: BoardItem, p: BoardPatch, metrics: TextMetrics): BoardItem 
       if (num(p.rotation)) next.rotation = p.rotation
       if (num(p.w) && p.w > 0) next.w = p.w
       if (num(p.h) && p.h > 0) next.h = p.h
+      if (isModelPath(it.path)) {
+        if (p.turn === null) delete next.turn
+        else if (p.turn && num(p.turn.yaw) && num(p.turn.pitch)) next.turn = p.turn
+      }
       return sanitizeItem(next)
     }
     case 'note': {

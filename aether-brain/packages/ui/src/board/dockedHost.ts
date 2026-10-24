@@ -16,7 +16,7 @@
  *
  * No React, no DOM here: a store, timers and Blobs. Design: docs/design/reference-board.md.
  */
-import { basenameOf, idFromPath, isImagePath, parseBoard, type VaultAsset } from '@aether/core'
+import { basenameOf, idFromPath, isImagePath, isModelPath, parseBoard, type VaultAsset } from '@aether/core'
 import { copyText } from '../components/pictures'
 import { useAether } from '../store'
 import { getBoardWindowControl, type BoardWindowControl } from './active'
@@ -196,10 +196,11 @@ export function createDockedBoardHost(path: string): DockedBoardHost {
     pictures: {
       preview: (p, px) => store().preview(p, px),
       original: (p) => store().readPicture(p),
+      modelProxy: (p) => store().modelProxy(p),
       add: (files) => store().importBoardPictures(path, files),
       list: async () => {
         const out: VaultAsset[] = []
-        for (const a of store().assets.values()) if (isImagePath(a.path)) out.push(a)
+        for (const a of store().assets.values()) if (isImagePath(a.path) || isModelPath(a.path)) out.push(a)
         return out
       },
       exists: (p) => store().assets.has(p),

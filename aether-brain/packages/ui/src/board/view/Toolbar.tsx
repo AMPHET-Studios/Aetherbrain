@@ -38,9 +38,9 @@ export function capabilitiesOf(session: BoardSession): MenuContext['can'] {
   }
 }
 
-const TOOL_GROUPS: BoardTool[][] = [['select', 'hand'], ['note'], ['pen', 'line', 'rect', 'ellipse', 'eraser'], ['sampler', 'crop']]
+const TOOL_GROUPS: BoardTool[][] = [['select', 'hand'], ['note'], ['pen', 'line', 'rect', 'ellipse', 'eraser'], ['sampler', 'crop', 'turn']]
 /** The tools a toolbar narrower than NARROW_PX tucks into its "More tools" menu (their keys work all the same). */
-const TUCKED_TOOLS: ReadonlySet<BoardTool> = new Set<BoardTool>(['line', 'rect', 'ellipse', 'eraser', 'sampler', 'crop'])
+const TUCKED_TOOLS: ReadonlySet<BoardTool> = new Set<BoardTool>(['line', 'rect', 'ellipse', 'eraser', 'sampler', 'crop', 'turn'])
 // Written out in full (a class name built from parts is not seen by Tailwind): a toolbar narrower than 560 px tucks the rarer tools away.
 // (`.hud-btn` sets its own display, outside any layer: only an important utility can hide a button.)
 const HIDE_WHEN_NARROW = '@max-[560px]:!hidden'

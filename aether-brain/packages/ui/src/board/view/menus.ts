@@ -21,6 +21,7 @@ export const COMMAND_HOME: Record<BoardCommandId, MenuHome> = {
   'tool.eraser': 'tool',
   'tool.sampler': 'tool',
   'tool.crop': 'tool',
+  'tool.turn': 'tool',
   'edit.undo': 'edit',
   'edit.redo': 'edit',
   'edit.selectAll': 'edit',
@@ -48,6 +49,7 @@ export const COMMAND_HOME: Record<BoardCommandId, MenuHome> = {
   'transform.resetScale': 'edit',
   'transform.resetCrop': 'edit',
   'transform.resetAll': 'edit',
+  'transform.resetView': 'edit',
   'arrange.menu': 'arrangeButton',
   'arrange.optimal': 'arrange',
   'arrange.row': 'arrange',
@@ -193,6 +195,7 @@ const PICTURE_COMMANDS: ReadonlySet<BoardCommandId> = new Set<BoardCommandId>([
   'item.opacityUp',
   'item.opacityDown',
   'transform.resetCrop',
+  'transform.resetView',
   'transform.resetScale',
   'normalize.scale',
 ])
@@ -229,6 +232,7 @@ export function commandDisabled(id: BoardCommandId, ctx: MenuContext): boolean {
     case 'note.edit':
       return ctx.selected !== 1 || ctx.notes !== 1
     case 'tool.crop':
+    case 'tool.turn':
     // Paste is always offered: with nothing of the board's own to paste it says how to paste what is on the system clipboard (⌘ V).
     case 'edit.paste':
     case 'picture.add':
@@ -359,7 +363,7 @@ export function contextMenu(ctx: MenuContext, target: 'item' | 'canvas', singleN
     commandEntry('transform.rotateCw', ctx),
     commandEntry('transform.rotateCcw', ctx),
   ]
-  const look: MenuEntry[] = picture ? [commandEntry('view.grayItem', ctx), commandEntry('tool.crop', ctx, 'Crop')] : []
+  const look: MenuEntry[] = picture ? [commandEntry('view.grayItem', ctx), commandEntry('tool.crop', ctx, 'Crop'), commandEntry('transform.resetView', ctx, 'Reset the 3D view')] : []
   const pictures = picture
     ? ofGroup('Pictures', ctx, ['picture.open', 'picture.reveal', 'picture.showInBrain', 'picture.info', 'picture.palette', 'export.selection'])
     : []

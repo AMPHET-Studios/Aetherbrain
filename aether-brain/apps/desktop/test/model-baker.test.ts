@@ -5,7 +5,9 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { BAKE_DELAY_MS, BAKE_GAP_MS, BAKE_LIMIT, ModelBaker, type BakerTimers } from '../src/main/model-baker.js'
 import { MODEL_ICON_BYTES, MODEL_ICON_FILES, ModelIconCache, NO_ICON_MS } from '../src/main/model-icons.js'
+import { encodeProxy } from '@aether/core'
 import { MAX_MODEL_BYTES, MAX_MODEL_FILE_BYTES } from '../src/main/assets.js'
+import { proxyOf } from '../src/main/thumbnailer.js'
 import { lf } from './lf.js'
 
 /**
@@ -592,5 +594,88 @@ describe('the docs on a model’s picture', () => {
     expect(claude).toContain('`userData/model-icons` (never in the vault')
     expect(claude).toContain('model-icons.ts (ModelIconCache')
     expect(claude).toContain('model-baker.ts (ModelBaker')
+  })
+})
+
+/* ------------------------------------------------------------------ */
+/* The same cache, keeping model proxies                              */
+/* ------------------------------------------------------------------ */
+
+describe('ModelIconCache keeping proxies', () => {
+  let dir: string
+  beforeEach(async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'aether-proxy-cache-'))
+  })
+  afterEach(async () => {
+    await fs.rm(dir, { recursive: true, force: true })
+  })
+
+  const proxy = (n = 0): Uint8Array => encodeProxy({ centre: [0, 0, 0], half: 1, positions: [-32767, 0, n, 32767, 0, 0, 0, 32767, 0], colors: [255, 0, 0, 0, 255, 0, 0, 0, 255], indices: [0, 1, 2] })
+  const cache = (opts = {}) => new ModelIconCache(dir, { ext: 'px', valid: (b) => proxyOf(b) !== null, ...opts })
+  const key = (n: number) => ModelIconCache.key(`/vault/model-${n}.glb`, 1000 + n, 5000 + n, 0)
+  const names = async () => (await fs.readdir(dir)).sort()
+
+  it('keeps a proxy under its own extension and gives the same bytes back', async () => {
+    const c = cache()
+    expect(await c.get(key(1))).toBeUndefined()
+    await c.set(key(1), proxy())
+    expect(await names()).toEqual([`${key(1)}.px`])
+    expect(await c.get(key(1))).toEqual(proxy())
+  })
+
+  it('keeps only proxies: a PNG, a damaged proxy and bytes of any other kind are not kept, and a kept file that stopped being one is thrown away', async () => {
+    const c = cache()
+    await c.set(key(1), PNG(1))
+    await c.set(key(2), proxy().subarray(0, 20))
+    await c.set(key(3), new Uint8Array(200))
+    expect(await names()).toEqual([])
+    await fs.writeFile(path.join(dir, `${key(4)}.px`), 'not a proxy at all, whatever its name')
+    expect(await c.get(key(4))).toBeUndefined()
+    expect(await names()).toEqual([])
+    // And the other way: a cache of pictures does not take a proxy.
+    const pictures = new ModelIconCache(dir)
+    await pictures.set(key(5), proxy())
+    expect(await names()).toEqual([])
+  })
+
+  it('remembers a model with no proxy for a day, as the pictures do, and lets a proxy replace the note', async () => {
+    const c = cache()
+    await c.set(key(1), null)
+    expect(await names()).toEqual([`${key(1)}.none`])
+    expect(await c.get(key(1))).toBeNull()
+    await c.set(key(1), proxy())
+    expect(await names()).toEqual([`${key(1)}.px`])
+    await c.set(key(1), null)
+    expect(await names()).toEqual([`${key(1)}.none`])
+  })
+
+  it('prunes its own files by age and size, and clears them, leaving what is not its own', async () => {
+    const c = cache({ maxFiles: 4 })
+    await fs.writeFile(path.join(dir, 'notes.txt'), 'not ours')
+    for (let n = 0; n < 6; n++) {
+      await c.set(key(n), proxy(n))
+      await fs.utimes(path.join(dir, `${key(n)}.px`), new Date(1_000_000 + n * 1000), new Date(1_000_000 + n * 1000))
+    }
+    await c.prune()
+    const left = (await names()).filter((n) => n.endsWith('.px'))
+    // 6 files over a limit of 4: down to a fifth under (3), the oldest gone.
+    expect(left).toEqual([3, 4, 5].map((n) => `${key(n)}.px`).sort())
+    expect(await names()).toContain('notes.txt')
+    await c.clear()
+    expect(await names()).toEqual(['notes.txt'])
+  })
+
+  it('is bounded the way a proxy is: a megabyte each at the most, so the limit of bytes is what holds the folder down', async () => {
+    const c = cache({ maxBytes: 300 })
+    for (let n = 0; n < 5; n++) {
+      await c.set(key(n), proxy(n))
+      await fs.utimes(path.join(dir, `${key(n)}.px`), new Date(1_000_000 + n * 1000), new Date(1_000_000 + n * 1000))
+    }
+    const size = proxy().length
+    await c.prune()
+    const left = (await names()).filter((n) => n.endsWith('.px'))
+    expect(left.length * size).toBeLessThanOrEqual(300)
+    // The newest stay.
+    expect(left).toContain(`${key(4)}.px`)
   })
 })

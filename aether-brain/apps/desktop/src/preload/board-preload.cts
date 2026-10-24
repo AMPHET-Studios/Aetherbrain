@@ -16,6 +16,7 @@ const IPC = {
   changes: 'vault:changes',
   reveal: 'vault:reveal',
   thumb: 'vault:thumb',
+  modelProxy: 'vault:modelProxy',
   createAsset: 'vault:createAsset',
   openAsset: 'vault:openAsset',
   readAsset: 'vault:readAsset',
@@ -90,6 +91,7 @@ const bridge: BoardBridge = {
   readAsset: (p) => ipcRenderer.invoke(IPC.readAsset, p),
   readAssetChecked: (p) => ipcRenderer.invoke(IPC.readAssetChecked, p),
   revealInFolder: (p) => ipcRenderer.invoke(IPC.reveal, p),
+  modelProxy: (p) => ipcRenderer.invoke(IPC.modelProxy, p),
   thumbnail: (p, size) => ipcRenderer.invoke(IPC.thumb, p, size),
   version: process.env['npm_package_version'] ?? '0.1.0',
 }

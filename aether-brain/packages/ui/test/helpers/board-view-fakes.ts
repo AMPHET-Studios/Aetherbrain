@@ -146,6 +146,9 @@ export class FakeHost implements BoardHost {
   addError: Error | null = null
   previews: string[] = []
   originals: string[] = []
+  /** The proxies of 3D models, by path (none: null), and the paths asked for. */
+  proxies: Record<string, Uint8Array | null> = {}
+  proxyAsks: string[] = []
   opens: string[] = []
   reveals: string[] = []
   brains: string[] = []
@@ -153,7 +156,7 @@ export class FakeHost implements BoardHost {
   pictures: BoardPictureHost
   private counter = 0
 
-  constructor(raw: string, extras: { open?: boolean; reveal?: boolean; showInBrain?: boolean; window?: boolean } = {}) {
+  constructor(raw: string, extras: { open?: boolean; reveal?: boolean; showInBrain?: boolean; window?: boolean; modelProxy?: boolean } = {}) {
     this.raw = raw
     const host = this
     const pictures: BoardPictureHost = {
@@ -177,6 +180,7 @@ export class FakeHost implements BoardHost {
         return () => void host.pictureSubs.delete(cb)
       },
     }
+    if (extras.modelProxy !== false) pictures.modelProxy = async (path) => (host.proxyAsks.push(path), host.proxies[path] ?? null)
     if (extras.open !== false) pictures.open = (p) => void host.opens.push(p)
     if (extras.reveal !== false) pictures.reveal = (p) => void host.reveals.push(p)
     if (extras.showInBrain !== false) pictures.showInBrain = (p) => void host.brains.push(p)

@@ -26,6 +26,7 @@ import {
   BOARD_ITEM_LIMITS,
   BOARD_LIMITS,
   History,
+  MODEL_VIEW_DEFAULT,
   NOTE_PADDING_EM,
   addMark,
   addNote,
@@ -48,6 +49,7 @@ import {
   hitHandle,
   hitTest,
   insertItems,
+  isModelPath,
   itemBounds,
   itemChars,
   itemQuad,
@@ -56,6 +58,7 @@ import {
   lockItems,
   moveItems,
   normalize,
+  normaliseView,
   normalizeAngle,
   panView,
   parseBoard,
@@ -80,6 +83,7 @@ import {
   type ArrangeOptions,
   type ArrangeOrder,
   type BoardDoc,
+  type ModelView,
   type BoardItem,
   type BoardPatch,
   type BoardView,
@@ -98,6 +102,8 @@ import { isRepeatable, keyToCommand } from './commands'
 
 /** A press that moves less than this (CSS pixels) is a click, not a drag. */
 const CLICK_PX = 3
+/** Degrees a 3D model turns for each CSS pixel the pointer drags (720 px is a whole turn). */
+const TURN_DEG_PER_PX = 0.5
 /** How near the pointer must be to an item, in CSS pixels, to hit it. */
 const HIT_PX = 6
 /** How near to a handle's middle the pointer must be (the handle is 8 px wide), for a mouse or pen and for a finger. */
@@ -541,6 +547,13 @@ interface CropGesture extends GestureBase {
   grab: Vec2
 }
 
+interface TurnGesture extends GestureBase {
+  kind: 'turn'
+  /** The 3D model being turned, and the view it had when the press began (a drag turns from there, however far it wanders). */
+  id: number
+  view: ModelView
+}
+
 interface DrawGesture extends GestureBase {
   kind: 'draw'
   tool: 'pen' | 'line' | 'rect' | 'ellipse'
@@ -578,6 +591,7 @@ type Gesture =
   | ScaleGesture
   | RotateGesture
   | CropGesture
+  | TurnGesture
   | DrawGesture
   | EraseGesture
   | NoteGesture
@@ -989,6 +1003,8 @@ export class BoardController {
           return resizeCursor(g.handle, g.pic.rotation)
         case 'rotate':
           return 'crosshair'
+        case 'turn':
+          return 'grabbing'
         case 'erase':
           return 'cell'
         case 'draw':
@@ -1003,6 +1019,7 @@ export class BoardController {
     if (this.space) return 'grab'
     switch (this.tool) {
       case 'hand':
+      case 'turn':
         return 'grab'
       case 'note':
         return 'text'
@@ -1727,6 +1744,9 @@ export class BoardController {
       case 'crop':
         this.downCrop(e, p)
         break
+      case 'turn':
+        this.downTurn(e, p)
+        break
       case 'hand':
         break
     }
@@ -1937,6 +1957,30 @@ export class BoardController {
     return Number.isFinite(e.pressure) && e.pressure > 0 ? clampTo(e.pressure, 0, 1) : 0.5
   }
 
+  /** A press with the Turn tool: on a 3D model it begins turning it (the model is selected); on anything else it does nothing. */
+  private downTurn(e: PointerIn, p: Vec2): void {
+    const hit = this.hitAt(p)
+    if (hit?.kind !== 'picture' || !isModelPath(hit.path)) {
+      this.toast('Click a 3D model to turn it.', 'info', 'select')
+      this.ignored.add(e.id)
+      return
+    }
+    if (hit.locked) {
+      this.toastLocked()
+      this.ignored.add(e.id)
+      return
+    }
+    if (!this.selection.includes(hit.id)) this.setSelection([hit.id])
+    const s = { x: e.x, y: e.y }
+    this.startGesture({ kind: 'turn', pointer: e.id, startScreen: s, start: p, base: this.doc, id: hit.id, view: normaliseView(hit.turn ?? MODEL_VIEW_DEFAULT) })
+  }
+
+  /** The board with the model turned by the drag so far: dragging to the right turns the model to the right, dragging down brings its top toward you. */
+  private turnTo(g: TurnGesture, s: Vec2): BoardDoc {
+    const view = normaliseView({ yaw: g.view.yaw - (s.x - g.startScreen.x) * TURN_DEG_PER_PX, pitch: g.view.pitch + (s.y - g.startScreen.y) * TURN_DEG_PER_PX })
+    return setProps(g.base, [g.id], { turn: view }, this.metrics)
+  }
+
   private downCrop(e: PointerIn, p: Vec2): void {
     const s = { x: e.x, y: e.y }
     const handle = this.handleAt(s, e.pointerType)
@@ -2017,6 +2061,9 @@ export class BoardController {
         break
       case 'crop':
         this.live(this.cropTo(g, p), 'crop')
+        break
+      case 'turn':
+        this.live(this.turnTo(g, s), 'turn')
         break
       case 'draw':
         this.drawMove(g, s, p, e)
@@ -2176,7 +2223,7 @@ export class BoardController {
     if (this.pointers.has(g.pointer)) this.ignored.add(g.pointer)
     const hadChange = differs(this.doc, withView(g.base, this.doc.view))
     if (g.kind === 'marquee') this.setSelection(g.before)
-    if (g.kind === 'move' || g.kind === 'scale' || g.kind === 'rotate' || g.kind === 'crop' || g.kind === 'erase') {
+    if (g.kind === 'move' || g.kind === 'scale' || g.kind === 'rotate' || g.kind === 'crop' || g.kind === 'turn' || g.kind === 'erase') {
       this.doc = withView(g.base, this.doc.view)
       this.reconcile()
     }
@@ -2213,6 +2260,9 @@ export class BoardController {
         break
       case 'crop':
         this.commitGesture(g, 'Crop', 'crop')
+        break
+      case 'turn':
+        this.commitGesture(g, 'Turn', 'turn')
         break
       case 'draw':
         this.finishDraw(g, s, p)
@@ -2911,10 +2961,17 @@ export class BoardController {
       case 'transform.resetCrop':
         this.edit('Reset crop', (d) => resetCrop(d, sel))
         return
+      case 'transform.resetView':
+        if (!this.selectedItems().some((it) => it.kind === 'picture' && isModelPath(it.path))) {
+          this.toast('Select a 3D model to reset its view.', 'info', 'select')
+          return
+        }
+        this.edit('Reset view', (d) => setProps(d, sel, { turn: null }, this.metrics))
+        return
       case 'transform.resetAll':
         this.edit('Reset', (d) => {
           let doc = resetCrop(d, sel)
-          doc = setProps(doc, sel, { rotation: 0, flipH: false, flipV: false, opacity: 1 }, this.metrics)
+          doc = setProps(doc, sel, { rotation: 0, flipH: false, flipV: false, opacity: 1, turn: null }, this.metrics)
           return normalize(doc, sel, 'scale', { target: 1, natural: (p) => this.exactNaturalSize(p), metrics: this.metrics })
         })
         this.toastSkippedSizes()

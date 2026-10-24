@@ -425,6 +425,12 @@ export interface VaultAdapter {
    */
   thumbnail?(path: string, size: number): Promise<Blob | null>
   /**
+   * The proxy of a 3D model (see `decodeProxy`): up to 24,000 triangles and a colour for every vertex, with which a reference board
+   * draws the model from any side. Null when there is none (the path is no model, the file cannot be drawn). Never rejects. Absent: the
+   * vault has no 3D models to turn (a model shows as its picture).
+   */
+  modelProxy?(path: string): Promise<Uint8Array | null>
+  /**
    * The picture file itself, whole and undecoded (the reference board draws
    * it at full size when zoomed in; `thumbnail` stops at 1024 px), as a Blob
    * typed by its extension. Null when the path is not a picture of the vault

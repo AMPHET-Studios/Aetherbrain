@@ -303,11 +303,21 @@ describe('modelKindOf', () => {
 /* ------------------------------------------------------------------ */
 
 describe('the board window and models', () => {
-  it('may not ask for a model’s thumbnail or open one, while pictures and videos go on as before', () => {
+  it('may ask for a model’s thumbnail and its proxy (a model can be on a board now), but never open one in the 3D app, and pictures and videos go on as before', () => {
     const t = rig({ platform: 'linux' })
+    // Opening a model in the 3D app is the brain's, on its request.
+    expect(t.host.pageRefusal(IPC.openAsset, ['Art/robot.glb'])).toMatch(/pictures and videos only/)
+    expect(t.host.pageRefusal(IPC.openAsset, ['Art/ROBOT.GLB'])).toMatch(/pictures and videos only/)
+    // Its picture and its proxy (a bounded stand-in of up to 24,000 triangles, never the file) are what a board shows and turns.
+    for (const p of ['Art/robot.glb', 'Art/ROBOT.GLB', 'a/b/c.Glb']) {
+      expect(t.host.pageRefusal(IPC.thumb, [p, 256]), p).toBeNull()
+      expect(t.host.pageRefusal(IPC.modelProxy, [p]), p).toBeNull()
+    }
+    // The proxy is for models only: nothing else may be asked through that channel.
+    for (const p of ['Art/gate.png', 'Art/clip.mp4', 'Notes/a.md', 'robot.glb.png', 'robot.glbx', 7, null, undefined]) {
+      expect(t.host.pageRefusal(IPC.modelProxy, [p]), String(p)).toMatch(/proxy of a 3D model only/)
+    }
     for (const channel of [IPC.thumb, IPC.openAsset]) {
-      expect(t.host.pageRefusal(channel, ['Art/robot.glb', 256]), channel).toMatch(/pictures and videos only/)
-      expect(t.host.pageRefusal(channel, ['Art/ROBOT.GLB']), channel).toMatch(/pictures and videos only/)
       for (const p of ['Art/gate.png', 'Art/clip.mp4', 'a.webp']) expect(t.host.pageRefusal(channel, [p, 128]), `${channel} ${p}`).toBeNull()
     }
     // Not a path at all: left to the handler, as before.

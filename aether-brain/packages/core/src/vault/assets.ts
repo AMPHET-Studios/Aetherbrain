@@ -7,8 +7,9 @@
  * thumbnail moons. A video shows one still frame, never plays in the brain (it
  * opens in the OS player); a model shows one lit still, drawn in the thumbnail
  * helper, and opens in the OS's 3D app. Writes (imports, the Concept Forge)
- * are pictures only: `isImagePath`; reference boards take pictures and videos:
- * `isMediaPath`; the vault lists all three kinds: `isAssetPath`.
+ * are pictures only: `isImagePath`; the thumbnails (moons, cards, embeds) take pictures and
+ * videos: `isMediaPath`; reference boards take all three, a model turned by hand:
+ * `isBoardAssetPath`; the vault lists all three kinds: `isAssetPath`.
  */
 import type { NoteId, VaultAsset } from '../types'
 import { folderOf, isIgnoredPath, normalizePath } from './paths'
@@ -44,7 +45,8 @@ export function isMediaPath(p: string): boolean {
 
 /**
  * 3D model extensions the brain shows as a lit still (lowercase, no dot). Binary glTF only: one self-contained file,
- * nothing else to fetch. Models are *not* media: `isMediaPath` is what reference boards take, and a board cannot hold one.
+ * nothing else to fetch. Models are *not* media: `isMediaPath` is what is drawn as a thumbnail and stays pictures and videos. A reference
+ * board holds a model too (`isBoardAssetPath`), drawn from its proxy and turned with the pointer.
  */
 export const MODEL_EXTENSIONS: readonly string[] = ['glb']
 
@@ -63,6 +65,15 @@ export function isModelPath(p: string): boolean {
  */
 export function isAssetPath(p: string): boolean {
   return ASSET_RE.test(p)
+}
+
+/**
+ * True for what a reference board may hold: a picture, a video or a 3D model (`isMediaPath` plus `isModelPath`). A board's item is
+ * a picture line whatever the file: a model's is drawn from its proxy (the bounded stand-in the thumbnail helper bakes) and has a view
+ * (`yaw`, `pitch`) the user can turn; main never gives a board window the model's file itself.
+ */
+export function isBoardAssetPath(p: string): boolean {
+  return MEDIA_RE.test(p) || MODEL_RE.test(p)
 }
 
 /** Graph node id of an image: `image:<vault path>`. */

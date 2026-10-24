@@ -37,6 +37,19 @@ describe('the picker’s list', () => {
     expect(entries[3]).toMatchObject({ name: 'a.jpg', dir: '' })
   })
 
+  it('lists 3D models with the pictures, in the same order, and still not videos, notes or other 3D formats', () => {
+    const { entries } = toEntries([
+      { path: 'Art/old.png', mtime: 100 },
+      { path: 'Art/robot.glb', mtime: 150 },
+      { path: 'Art/ROBOT2.GLB', mtime: 120 },
+      { path: 'Art/scene.gltf', mtime: 900 },
+      { path: 'Art/model.fbx', mtime: 900 },
+      { path: 'Art/clip.mp4', mtime: 900 },
+    ])
+    expect(entries.map((e) => e.path)).toEqual(['Art/robot.glb', 'Art/ROBOT2.GLB', 'Art/old.png'])
+    expect(entries[0]).toMatchObject({ name: 'robot.glb', dir: 'Art', lower: 'art/robot.glb' })
+  })
+
   it('a vault with more pictures than the picker lists is cut to the newest, and says by how many', () => {
     const many = Array.from({ length: PICKER_MAX_ENTRIES + 5 }, (_, i) => ({ path: `f/${i}.png`, mtime: i }))
     const { entries, cut } = toEntries(many)

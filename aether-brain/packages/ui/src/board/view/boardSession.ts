@@ -17,12 +17,14 @@ import {
   cutText,
   dominantColours,
   isBoardNote,
+  isModelPath,
   itemsBounds,
   parseBoard,
   screenToBoard,
   serializeBoard,
   setProps,
   type BoardDoc,
+  type PictureItem,
   type TextMetrics,
   type Vec2,
 } from '@aether/core'
@@ -31,7 +33,8 @@ import { BOARD_GONE, type BoardCommandId, type BoardEvent, type BoardHost, type 
 import { BoardController, noteCap } from '../controller'
 import { keyToCommand } from '../commands'
 import { DEFAULT_RETRY_MS, ImageCache, type BitmapLike, type ImageCacheOptions } from '../imageCache'
-import { createImageLoader, type CreateBitmap } from '../imageLoader'
+import { createImageLoader, MODEL_PREVIEW_PX, type CreateBitmap } from '../imageLoader'
+import { ModelViews, type LiveCanvas } from '../modelViews'
 import { drawBoard, exportBoard, visiblePictures, type Ctx2D, type ExportCanvas } from '../renderer'
 import {
   DROP_CHUNK_BYTES,
@@ -91,6 +94,8 @@ export interface SessionEnv {
   /** The picture's pixels scaled to at most `maxSide` on the longer side, as RGBA bytes, or null. */
   pixelsOf(bitmap: BitmapLike, maxSide: number): Uint8ClampedArray | null
   makeCanvas(w: number, h: number): ExportCanvas
+  /** A square canvas to draw a 3D model's live view onto (`paint` puts RGBA on it); absent or null: models are drawn as their stills. */
+  makeLiveCanvas?(side: number): LiveCanvas | null
   /** The canvas as PNG bytes, or null. */
   canvasToPng(canvas: ExportCanvas): Promise<Uint8Array | null>
   /** The time, for picture and export names. */
@@ -179,6 +184,8 @@ export class BoardSession {
 
   private started = false
   private cache: ImageCache | null = null
+  /** The live views of the 3D models on the board (their proxies, drawn as they are turned). */
+  private models: ModelViews | null = null
   private offs: (() => void)[] = []
   private readonly saver: Saver
   private rawBase = ''
@@ -390,6 +397,9 @@ export class BoardSession {
   private wire(): void {
     const c = this.controller
     this.cache = this.makeCache({ load: createImageLoader(this.host.pictures, this.env.createBitmap), onLoaded: () => this.invalidate() })
+    const makeLive = this.env.makeLiveCanvas
+    const proxyOf = this.host.pictures.modelProxy
+    this.models = makeLive && proxyOf ? new ModelViews({ load: (p) => proxyOf.call(this.host.pictures, p), makeCanvas: (side) => makeLive.call(this.env, side), onChange: () => this.invalidate() }) : null
     this.fed.clear()
     this.offs.push(
       c.subscribe((s) => {
@@ -416,6 +426,8 @@ export class BoardSession {
     }
     this.cache?.dispose()
     this.cache = null
+    this.models?.dispose()
+    this.models = null
   }
 
   /* ---------------------------------------------------------- subscriptions --- */
@@ -574,6 +586,7 @@ export class BoardSession {
       dpr,
       state: st,
       images,
+      ...(this.models ? { models: this.models } : {}),
       metrics: this.env.metrics,
       missing: (path) => !this.host.pictures.exists(path),
     })
@@ -1220,6 +1233,9 @@ export class BoardSession {
       // The vault takes a picture of at most MAX_FILE_BYTES, and a PNG of a detailed collage can be larger: it is made again, smaller
       // (a PNG's size follows the pixels, which follow the square of the scale), rather than refused after all the work.
       for (let attempt = 0; attempt < EXPORT_ATTEMPTS; attempt++) {
+        // The models are drawn as they are turned, at the size this attempt's scale gives them (the scale shrinks when the file was too big).
+        const wantedItems = doc.items.filter((it): it is PictureItem => it.kind === 'picture' && (!wanted || wanted.has(it.id)))
+        const models = this.models ? await this.models.snapshot(wantedItems, scale) : undefined
         const result = await exportBoard(
           doc,
           ids,
@@ -1230,6 +1246,7 @@ export class BoardSession {
           },
           (w, h) => this.env.makeCanvas(w, h),
           this.env.metrics,
+          models ? { models } : {},
         )
         if (!result) {
           this.say('There is nothing to export.', 'info')
@@ -1462,6 +1479,8 @@ export class BoardSession {
   }
 
   private async previewSize(path: string): Promise<{ w: number; h: number; exact: boolean } | null> {
+    // A 3D model has no pixels of its own: it is a square tile of the size its picture is made at.
+    if (isModelPath(path)) return { w: MODEL_PREVIEW_PX, h: MODEL_PREVIEW_PX, exact: true }
     const known = this.naturalOf(path)
     if (known) return { ...known, exact: true }
     try {
@@ -1510,6 +1529,12 @@ export class BoardSession {
   private async learnNaturals(paths: readonly string[]): Promise<void> {
     for (const path of paths.slice(0, MAX_PROBES)) {
       if (this.exact.has(path) || !this.started) continue
+      // A model has no pixels to read a size from: it is the square tile its picture is made at.
+      if (isModelPath(path)) {
+        this.controller.setNaturalSize(path, MODEL_PREVIEW_PX, MODEL_PREVIEW_PX)
+        this.markExact(path)
+        continue
+      }
       try {
         const blob = await this.host.pictures.original(path)
         const size = blob ? await this.env.decodeSize(blob) : null
