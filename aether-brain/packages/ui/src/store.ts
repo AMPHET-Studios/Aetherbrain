@@ -13,8 +13,10 @@ import {
   blankNote,
   bodyOwners,
   bodyTiers,
+  ActivityLog,
   bindProjects,
   buildGraph,
+  computeActivity,
   critiqueBaseName,
   critiqueNote,
   dailyBrief,
@@ -74,6 +76,7 @@ import {
   splitFrontmatter,
   todayIso,
   updateFrontmatter,
+  type ActivityKind,
   type Area,
   type BriefTask,
   type BuildGraphOptions,
@@ -202,6 +205,8 @@ const EXPANDED_KEY = 'aether:expanded:'
 const SUNS_KEY = 'aether:suns:'
 /** The board last open, per vault location (the `8` key goes back to it). */
 const LAST_BOARD_KEY = 'aether:board:'
+/** How much each note is used (opens and saves, fading), per vault location: what a star's brightness is. Local to this computer; never in the vault. */
+const ACTIVITY_KEY = 'aether:activity:'
 const SETTINGS_VERSION = 2
 /** Views drawn over the graph: flying to something there shows nothing until they close. */
 export const COVERING_VIEWS: ReadonlySet<View> = new Set<View>(['projects', 'review', 'capture', 'search', 'boards'])
@@ -337,6 +342,15 @@ function cosmosOf(graph: GraphData): { counts: Map<NoteId, SunCounts>; owners: I
     cosmosCache.set(graph, c)
   }
   return c
+}
+
+/** The activity saved for the vault at `location` (an empty log when there is none, or storage is unusable or holds garbage). */
+function loadActivity(location: string, now: number): ActivityLog {
+  try {
+    return ActivityLog.from(JSON.parse(localStorage.getItem(ACTIVITY_KEY + location) ?? 'null'), now)
+  } catch {
+    return new ActivityLog()
+  }
 }
 
 function loadExpanded(location: string): Set<string> {
@@ -668,6 +682,11 @@ export interface AetherState {
    * and a failure goes to `onError` instead of a toast.
    */
   makeProject(folderPath: string, opts?: { quiet?: boolean; onError?: (message: string) => void }): Promise<NoteId | null>
+  /**
+   * Forget which notes and folders you use: every star's brightness goes back to calm. The log lives only on this computer; this empties it
+   * (and its saved copy) for the vault that is open.
+   */
+  forgetActivity(): void
   /**
    * Mark a folder as a galaxy (`scale: galaxy` in its project note) or as a plain star again (the key goes). A folder that is not a
    * project yet becomes one first (`makeProject`). The line goes into the project note the graph itself binds to the folder
@@ -1078,7 +1097,7 @@ export const useAether = create<AetherState>()((set, get) => {
     const system = settings.layoutMode === 'system'
     const opts: BuildGraphOptions = {
       images: { all: assets, moons: system && settings.imageMoons, gallery: system ? get().gallery : null },
-      // Orbit speed and star brightness: how soon each thing needs you, from its open tasks.
+      // Orbit speed: how soon each thing needs you, from its open tasks. (A star's brightness is how much you use it: `computeActivity`.)
       urgency: { date },
     }
     if (settings.todayHub) opts.today = { brief }
@@ -1164,10 +1183,38 @@ export const useAether = create<AetherState>()((set, get) => {
     if (hoveredId && !graph.index.has(hoveredId)) set({ hoveredId: null })
   }
 
+  /**
+   * How much each note is used, for the vault that is open (docs/COSMOLOGY.md, "A star's brightness is how much you use it"). Opening a note
+   * and saving a change to it are what count. It stays on this computer, beside the other view settings, and `forgetActivity` clears it.
+   */
+  let activity = new ActivityLog()
+  let activityRefresh: ReturnType<typeof setTimeout> | null = null
+  let activitySave: ReturnType<typeof setTimeout> | null = null
+  /** Work out every star's brightness for the graph that is showing and hand it to the scene (which recolours at once). */
+  const refreshActivity = () => {
+    const { graph, status } = get()
+    controller.setActivity(graph && status === 'ready' ? computeActivity(graph, activity, Date.now()) : null)
+  }
+  const saveActivity = () => {
+    activitySave = null
+    const { adapter } = get()
+    if (adapter) saveJson(ACTIVITY_KEY + adapter.location, activity.toJSON())
+  }
+  /** A note was opened or saved: count it, brighten its stars a moment later (a burst of interactions is one refresh), save a little after. */
+  const interacted = (id: NoteId, kind: ActivityKind) => {
+    if (isVirtualId(id) || !activity.record(id, kind, Date.now())) return
+    activityRefresh ??= setTimeout(() => {
+      activityRefresh = null
+      refreshActivity()
+    }, 250)
+    activitySave ??= setTimeout(saveActivity, 3000)
+  }
+
   const setLoaded = (notes: Map<NoteId, ParsedNote>, graph: GraphData, folders: Set<string>, assets: Map<string, VaultAsset>) => {
     const before = get().graph
     set((s) => ({ notes, graph, folders, assets, brief: builtBrief, revision: s.revision + 1 }))
     controller.setGraph(graph)
+    refreshActivity()
     syncHighlight()
     pruneSelection(graph, before)
     const { editorId, dirty } = get()
@@ -1188,6 +1235,7 @@ export const useAether = create<AetherState>()((set, get) => {
     const graph = buildGraph(notes, graphOptions(folders, notes, assets))
     set((s) => ({ graph, brief: builtBrief, revision: s.revision + 1 }))
     controller.setLayoutMode(settings.layoutMode, graph)
+    refreshActivity()
     syncHighlight()
     pruneSelection(graph, before)
   }
@@ -1768,6 +1816,7 @@ export const useAether = create<AetherState>()((set, get) => {
         get().toast(`Could not ${what}: ${errText(err)}`, 'error')
         return null
       }
+      interacted(id, 'save')
       // A draft typed while the write was under way is kept (applyExternal says the file changed).
       if (get().editorId === id && !get().dirty) set({ draft: content })
       get().applyExternal([{ kind: 'change', path: note.meta.path, content, mtime: Date.now() }])
@@ -2132,6 +2181,15 @@ export const useAether = create<AetherState>()((set, get) => {
       stills.clear()
       const suns = loadSuns(adapter.location)
       controller.setSunLevels(suns.def, new Map(Object.entries(suns.own)))
+      // The previous vault's use is not this one's: save it where it was, and read this one's.
+      if (activitySave) {
+        clearTimeout(activitySave)
+        saveActivity()
+      }
+      if (activityRefresh) clearTimeout(activityRefresh)
+      activityRefresh = null
+      activity = loadActivity(adapter.location, Date.now())
+      controller.setActivity(null)
       set({
         adapter,
         roots: adapter.roots ?? [],
@@ -2248,6 +2306,7 @@ export const useAether = create<AetherState>()((set, get) => {
       openSunsFor(id)
       controller.setSelected(id)
       if (opts?.fly !== false) controller.flyTo(id)
+      interacted(id, 'open')
     },
 
     closeEditor() {
@@ -2345,6 +2404,7 @@ export const useAether = create<AetherState>()((set, get) => {
       try {
         await adapter.write(note.meta.path, content)
         set({ dirty: false, draft: content })
+        interacted(editorId, 'save')
         get().applyExternal([{ kind: 'change', path: note.meta.path, content, mtime: Date.now() }])
       } catch (err) {
         get().toast(`Save failed: ${errText(err)}`, 'error')
@@ -2437,6 +2497,7 @@ export const useAether = create<AetherState>()((set, get) => {
         }
         const content = updateFrontmatter(note.raw, { ...patch, updated: todayIso() })
         await adapter.write(note.meta.path, content)
+        interacted(id, 'save')
         if (get().editorId === id && !get().dirty) set({ draft: content })
         get().applyExternal([{ kind: 'change', path: note.meta.path, content, mtime: Date.now() }])
       })
@@ -2810,6 +2871,14 @@ export const useAether = create<AetherState>()((set, get) => {
         get().toast(`★ ${p.title} is a project now${numberedAs(p.path, id)}`, 'success')
       }
       return id
+    },
+
+    forgetActivity() {
+      activity.clear()
+      if (activitySave) clearTimeout(activitySave)
+      saveActivity()
+      refreshActivity()
+      get().toast('Forgot which folders you use: every star is calm again', 'success')
     },
 
     async setFolderScale(folderPath, scale) {

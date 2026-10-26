@@ -112,6 +112,11 @@ export class BrainController {
   hovered: NoteId | null = null
   /** When set, everything outside the set is dimmed (search results, filters). */
   highlight: Set<NoteId> | null = null
+  /**
+   * How much each node of the graph is used, 0 to 1, in node order (`computeActivity`): what a star's brightness is. Null until the app has
+   * worked it out (every star is then as calm as an unused one). Not part of the layout: it only recolours.
+   */
+  activity: Float32Array | null = null
   colorMode: ColorMode = 'area'
   layoutMode: LayoutMode = 'constellation'
   /** System layout: planets and moons orbit their parents over time. */
@@ -416,6 +421,12 @@ export class BrainController {
 
   setHighlight(ids: Set<NoteId> | null): void {
     this.highlight = ids
+    this.touch()
+  }
+
+  /** The brightness of every star, as `computeActivity` gave it for the graph the controller holds (stars are recoloured at once). */
+  setActivity(activity: Float32Array | null): void {
+    this.activity = activity
     this.touch()
   }
 

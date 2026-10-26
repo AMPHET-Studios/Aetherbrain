@@ -1157,9 +1157,9 @@ const IDLE_GLOW = 1.35
 const NEIGHBOR_GLOW = 1.5
 const HOVER_GLOW = 1.7
 const SELECTED_GLOW = 1.9
-/** Galaxies (the vault root, the drives) bloom steadily; every folder is a star whose glow follows its system's urgency. */
+/** Galaxies (the vault root, the drives) bloom steadily; every folder is a star whose glow follows how much its whole system is used. */
 const GALAXY_GLOW = 2.2
-/** A calm star's glow (under the bloom threshold: a body, not a flare), what a fully urgent system adds (it blooms), and where a project star starts (the bigger, brighter one). */
+/** A star nobody uses has a calm glow (under the bloom threshold: a body, not a flare); what a star that is used all the time adds (it blooms); and where a project star starts (the bigger, brighter one). */
 const STAR_GLOW_CALM = 0.85
 const STAR_GLOW_HEAT = 1.25
 const PROJECT_GLOW_CALM = 1.15
@@ -1168,9 +1168,9 @@ const PLANET_GLOW = 0.95
 /** A reference board with pictures orbiting it: a sun that blooms steadily, between a lit star and a galaxy. */
 const BOARD_SUN_GLOW = 1.7
 
-/** Brightness of a star for the urgency (0 to 1) of its whole system. */
-function starGlow(urgency: number, project: boolean): number {
-  const u = Math.min(1, Math.max(0, urgency))
+/** Brightness of a star for how much its whole system is used (0 to 1, `computeActivity`). */
+function starGlow(activity: number, project: boolean): number {
+  const u = Math.min(1, Math.max(0, activity))
   return (project ? PROJECT_GLOW_CALM : STAR_GLOW_CALM) + STAR_GLOW_HEAT * u
 }
 /** The Today hub outshines the stars (and breathes: the core pulses above glow 1.5). */
@@ -1242,8 +1242,8 @@ function recolor(b: Buffers, c: BrainController, neighbors: Set<number>, labelSe
       solid = 1
       gl = i === selI ? IMAGE_GLOW + 0.25 : i === hovI ? IMAGE_GLOW + 0.15 : neighbors.has(i) ? IMAGE_GLOW + 0.07 : IMAGE_GLOW
     } else if (role === ROLE_FOLDER || role === ROLE_PROJECT) {
-      // A star, as bright as the urgency of its whole system. The Bio star burns at one full brightness, urgent or not.
-      const star = node.folder?.bio ? BIO_STAR_GLOW : starGlow(node.urgency ?? 0, role === ROLE_PROJECT)
+      // A star, as bright as its whole system is used (what you open and save in it). The Bio star burns at one full brightness, used or not.
+      const star = node.folder?.bio ? BIO_STAR_GLOW : starGlow(c.activity !== null && c.activity.length === n ? (c.activity[i] ?? 0) : 0, role === ROLE_PROJECT)
       gl = i === selI ? star + 0.4 : i === hovI ? star + 0.2 : neighbors.has(i) ? star + 0.1 : star
     } else if (role >= 0) {
       // A galaxy.

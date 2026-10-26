@@ -39,6 +39,8 @@ export interface FeedSource {
   activeTag: string | null
   layoutMode: CompanionGraphDto['layout']
   pictureSize: PictureSize
+  /** How much each node is used (what a star's brightness is), in node order; null until worked out. */
+  activity: Float32Array | null
 }
 
 export interface FeedSink {
@@ -114,6 +116,7 @@ export class CompanionFeed {
           activeTag: src.activeTag,
           selectedId: src.selectedId,
           pictureSize: src.pictureSize,
+          activity: src.activity,
         },
         next,
       )
@@ -148,7 +151,7 @@ export class CompanionFeed {
     const src = this.read()
     if (!src) return
     const g = src.graph
-    const key = [g, src.colorMode, src.activeTag, src.selectedId, src.layoutMode, src.adapter, src.pictureSize]
+    const key = [g, src.colorMode, src.activeTag, src.selectedId, src.layoutMode, src.adapter, src.pictureSize, src.activity]
     if (key.some((k, i) => k !== this.made[i])) {
       if (Date.now() < this.retryAt || !this.publish(src, key)) return
     }
