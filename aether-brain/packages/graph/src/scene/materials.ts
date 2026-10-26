@@ -15,11 +15,16 @@ export function createNodeMaterial(): ShaderMaterial {
     },
     vertexShader: /* glsl */ `
       attribute vec4 aGlow;
+      attribute vec4 aLight;
       varying vec3 vColor;
       varying vec4 vGlow;
       varying vec3 vNormalW;
       varying vec3 vViewDir;
+      varying vec3 vObj;
+      varying vec4 vLight;
       void main() {
+        vObj = position;
+        vLight = aLight;
         vec4 mvPosition = vec4(position, 1.0);
         vec3 nrm = normal;
         #ifdef USE_INSTANCING
@@ -45,6 +50,52 @@ export function createNodeMaterial(): ShaderMaterial {
       varying vec4 vGlow;
       varying vec3 vNormalW;
       varying vec3 vViewDir;
+      varying vec3 vObj;
+      varying vec4 vLight;
+
+      // A rocky surface for solid bodies: value-noise fbm for continents and maria, a second fine layer for grain, and round craters.
+      float hash3(vec3 p) {
+        p = fract(p * 0.3183099 + 0.1);
+        p *= 17.0;
+        return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+      }
+      float vnoise(vec3 x) {
+        vec3 i = floor(x);
+        vec3 f = fract(x);
+        f = f * f * (3.0 - 2.0 * f);
+        return mix(
+          mix(mix(hash3(i), hash3(i + vec3(1, 0, 0)), f.x), mix(hash3(i + vec3(0, 1, 0)), hash3(i + vec3(1, 1, 0)), f.x), f.y),
+          mix(mix(hash3(i + vec3(0, 0, 1)), hash3(i + vec3(1, 0, 1)), f.x), mix(hash3(i + vec3(0, 1, 1)), hash3(i + vec3(1, 1, 1)), f.x), f.y),
+          f.z
+        );
+      }
+      float fbm(vec3 p) {
+        float a = 0.5;
+        float s = 0.0;
+        for (int k = 0; k < 4; k++) {
+          s += a * vnoise(p);
+          p = p * 2.03 + 11.7;
+          a *= 0.5;
+        }
+        return s;
+      }
+      float craters(vec3 p) {
+        vec3 c = floor(p);
+        float best = 0.0;
+        for (int x = -1; x <= 1; x++) {
+          for (int y = -1; y <= 1; y++) {
+            for (int z = -1; z <= 1; z++) {
+              vec3 g = c + vec3(float(x), float(y), float(z));
+              float h = hash3(g);
+              if (h < 0.55) continue;
+              vec3 centre = g + vec3(hash3(g + 3.1), hash3(g + 7.7), hash3(g + 1.3));
+              float d = length(p - centre) / (0.18 + 0.22 * h);
+              best = max(best, smoothstep(1.0, 0.8, d) * 0.5 - smoothstep(0.8, 0.55, d) * 0.5 + smoothstep(1.0, 0.9, d) * smoothstep(0.7, 0.9, d) * 0.35);
+            }
+          }
+        }
+        return best;
+      }
       void main() {
         vec3 nrm = normalize(vNormalW);
         vec3 view = normalize(vViewDir);
@@ -58,8 +109,23 @@ export function createNodeMaterial(): ShaderMaterial {
         vec3 rim = vColor * fresnel * 1.6 + vec3(1.0) * pow(fresnel, 5.0) * 0.5;
         vec3 col = (core + rim) * glow * (1.0 + 0.18 * pulse * step(1.5, glow));
         // Solid body (planet): lit from above the viewer, a thin atmosphere, stays under the bloom threshold.
-        float lit = max(dot(nrm, normalize(view + vec3(0.0, 0.9, 0.0))), 0.0);
-        vec3 body = (vColor * (0.2 + 0.8 * lit) + vColor * fresnel * 0.4) * glow;
+        // Lit from its own star (aLight points from the body to it); a body with no star is lit from above.
+        vec3 L = length(vLight.xyz) > 0.01 ? normalize(vLight.xyz) : vec3(0.0, 1.0, 0.0);
+        float lit = smoothstep(-0.06, 0.55, dot(nrm, L));
+        vec3 q = vObj * 2.2 + vGlow.z * 3.7;
+        float terrain = fbm(q);
+        float grain = vnoise(vObj * 14.0 + vGlow.z);
+        float crater = craters(vObj * 3.0 + vGlow.z * 5.0);
+        float tone = 0.55 + 0.9 * terrain + 0.12 * grain + 0.35 * crater;
+        // The tint of the file (its area, its folder) stays, but as rock: halfway to a warm grey.
+        vec3 rock = mix(vec3(0.46, 0.42, 0.38), vColor, 0.5) * tone;
+        // Life follows use: an unused body stays dry, grey rock; one you open and write in grows oceans, green land and an air of its own.
+        float life = clamp(vLight.w, 0.0, 1.0);
+        float sea = smoothstep(0.52, 0.46, terrain);
+        vec3 wet = mix(vec3(0.22, 0.42, 0.2) * (0.6 + 0.8 * terrain), vec3(0.06, 0.24, 0.6), sea);
+        rock = mix(rock, wet, life * 0.85);
+        fresnel *= 1.0 + 2.5 * life;
+        vec3 body = (rock * (0.07 + 1.0 * lit) + mix(vColor, vec3(0.4, 0.65, 1.0), life) * fresnel * (0.3 + 0.5 * life) * lit) * glow;
         col = mix(col, body, vGlow.w);
         col = mix(col * 0.12, col, dim);
         gl_FragColor = vec4(col, 1.0);

@@ -338,6 +338,8 @@ interface Buffers {
   edges: LineSegments
   field: Mesh
   glow: InstancedBufferAttribute
+  /** Per body: the direction to its star (xyz) and how alive it is, 0 dry rock to 1 oceans and air (w, from use). */
+  light: InstancedBufferAttribute
   color: InstancedBufferAttribute
   edgePos: BufferAttribute
   edgeColor: BufferAttribute
@@ -428,13 +430,17 @@ interface Buffers {
 
 function buildBuffers(graph: GraphData, pictures: PictureSize): Buffers {
   const count = graph.nodes.length
-  const sphere = new SphereGeometry(1, 16, 12)
+  const sphere = new SphereGeometry(1, 24, 16)
   const plane = new PlaneGeometry(1, 1)
   const glow = new InstancedBufferAttribute(new Float32Array(count * 4), 4)
   glow.setUsage(DynamicDrawUsage)
   const color = new InstancedBufferAttribute(new Float32Array(count * 3), 3)
   color.setUsage(DynamicDrawUsage)
   sphere.setAttribute('aGlow', glow)
+  // Where each body's star is, as a direction from the body (zero: none): a planet or a moon is lit from it, so it has a day and a night side.
+  const light = new InstancedBufferAttribute(new Float32Array(count * 4), 4)
+  light.setUsage(DynamicDrawUsage)
+  sphere.setAttribute('aLight', light)
   plane.setAttribute('aGlow', glow)
 
   const nodes = new InstancedMesh(sphere, createNodeMaterial(), count)
@@ -640,6 +646,7 @@ function buildBuffers(graph: GraphData, pictures: PictureSize): Buffers {
     edges,
     field,
     glow,
+    light,
     color,
     edgePos,
     edgeColor,
@@ -1089,12 +1096,25 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
         m4.makeScale(core, core, core)
         m4.setPosition(x, y, z)
         buffers.nodes.setMatrixAt(i, m4)
+        // The direction to its star, for the day and night side of a planet or a moon.
+        const sp = buffers.parentIdx[i]!
+        const la = buffers.light.array as Float32Array
+        if (sp >= 0) {
+          la[i * 4] = (dp[sp * 3] ?? 0) - x
+          la[i * 4 + 1] = (dp[sp * 3 + 1] ?? 0) - y
+          la[i * 4 + 2] = (dp[sp * 3 + 2] ?? 0) - z
+        } else {
+          la[i * 4] = 0
+          la[i * 4 + 1] = 0
+          la[i * 4 + 2] = 0
+        }
         const h = pictured || i === holeI ? 0 : r * buffers.haloK[i]!
         m4.makeScale(h, h, h)
         m4.setPosition(x, y, z)
         buffers.halos.setMatrixAt(i, m4)
       }
       buffers.nodes.instanceMatrix.needsUpdate = true
+      buffers.light.needsUpdate = true
       buffers.halos.instanceMatrix.needsUpdate = true
       // Edge endpoints.
       const ep = buffers.edgePos.array as Float32Array
@@ -1330,6 +1350,11 @@ function recolor(b: Buffers, c: BrainController, neighbors: Set<number>, labelSe
       else if (i === hovI) gl = HOVER_GLOW
       else if (neighbors.has(i)) gl = NEIGHBOR_GLOW
       if (node.ghost) gl *= 0.55
+      // A small file is a real moon: a solid, lit, cratered rock (a ghost, a note that is not there yet, stays a faint glow).
+      if (!node.ghost) {
+        solid = 1
+        gl = i === selI ? 1.2 : i === hovI ? 1.1 : neighbors.has(i) ? 1.02 : PLANET_GLOW
+      }
       b.labelColors[i] = node.ghost ? GHOST_COLOR : c.colorMode === 'area' ? AREA_COLORS[node.area] : '#e8ecff'
     }
     let dim = 1
@@ -1345,6 +1370,7 @@ function recolor(b: Buffers, c: BrainController, neighbors: Set<number>, labelSe
     glow[i * 4 + 1] = dim
     glow[i * 4 + 2] = (i * 0.618) % 6.283
     glow[i * 4 + 3] = solid
+    b.light.array[i * 4 + 3] = c.activity !== null && c.activity.length === n ? Math.min(1, c.activity[i] ?? 0) : 0
   }
   b.color.needsUpdate = true
   b.glow.needsUpdate = true
