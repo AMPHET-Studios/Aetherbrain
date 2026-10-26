@@ -26,7 +26,7 @@ import {
   Vector3,
 } from 'three'
 import type { CameraControlsImpl } from '@react-three/drei'
-import { bodyOrder, bodyOwners, bodyTiers, isPlanetNode, type GraphData, type GraphNode, type NoteId } from '@aether/core'
+import { bodyOrder, bodyOwners, bodyTiers, isGalaxyNode, isPlanetNode, type GraphData, type GraphNode, type NoteId } from '@aether/core'
 import { BrainController, DEFAULT_FAR, DEFAULT_MAX_DISTANCE, cameraRange } from '../BrainController'
 import { GALLERY_CHECK_MS, easeGrow, nearestStar, stepGrow } from '../gallery'
 import type { LayoutEngine } from '../layout/LayoutEngine'
@@ -62,6 +62,7 @@ import { shiftTarget } from './follow'
 import { bakeSky, createSkyDome, createSkyStars, type BakedSky } from './sky'
 import { LABEL_PRIORITY, LabelPlacer } from './labelPlace'
 import { applyReveal, easeReveal, revealTargets, ringReps, ringReveal, stepReveal } from './reveal'
+import { buildDiscs, fitDiscs, placeDiscs, type DiscSet } from './galaxyDisc'
 import { todayLabel } from './labels'
 import { ThumbLayer, thumbTargets, type ThumbTargets } from './thumbLayer'
 import { ScreenLayer } from './screenLayer'
@@ -409,6 +410,8 @@ interface Buffers {
   ringAlpha: InstancedBufferAttribute
   ringParent: Int32Array
   ringCount: number
+  /** The faint plate under every galaxy (a drive, the vault, a folder you marked): one instanced mesh, fitted to its outermost ring. */
+  discs: DiscSet
   /** engine.ringsVersion the ring attributes were built from (-1: never). */
   ringsVersion: number
   ageOf: (n: GraphNode) => number
@@ -593,6 +596,12 @@ function buildBuffers(graph: GraphData, pictures: PictureSize): Buffers {
   rings.visible = false
   rings.renderOrder = 0
 
+  // Every galaxy gets a disc: the drives, the vault when it is one folder, and the folders you marked (fitted to their rings once the layout answers).
+  const galaxies: number[] = []
+  graph.nodes.forEach((n, i) => isGalaxyNode(n) && galaxies.push(i))
+  const discTint = new Color(SUN_COLOR)
+  const discs = buildDiscs(galaxies, count, () => [discTint.r, discTint.g, discTint.b])
+
   const owner = bodyOwners(graph)
   return {
     graph,
@@ -653,6 +662,7 @@ function buildBuffers(graph: GraphData, pictures: PictureSize): Buffers {
     ringAlpha,
     ringParent: new Int32Array(ringCap),
     ringCount: 0,
+    discs,
     ringsVersion: -1,
     ageOf,
     dispose() {
@@ -660,6 +670,7 @@ function buildBuffers(graph: GraphData, pictures: PictureSize): Buffers {
       plane.dispose()
       eg.dispose()
       ringGeo.dispose()
+      discs.dispose()
       ;(rings.material as { dispose(): void }).dispose()
       ;(nodes.material as { dispose(): void }).dispose()
       ;(halos.material as { dispose(): void }).dispose()
@@ -941,12 +952,14 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
     if (versionChanged) recolor(buffers, controller, st.neighbors, st.labelSet)
     if (ringsChanged) {
       syncRings(buffers, eng.rings)
+      fitDiscs(buffers.discs, buffers.ringParent, buffers.ringRadius.array as Float32Array, buffers.ringQuat.array as Float32Array, buffers.ringCount)
       buffers.ringsVersion = eng.ringsVersion
       buffers.ringRepsOk = false
       buffers.ringRepsTries = 0
     }
     if (ringsChanged || versionChanged) styleRings(buffers, controller)
     buffers.rings.visible = controller.layoutMode === 'system' && buffers.ringCount > 0
+    buffers.discs.mesh.visible = buffers.rings.visible && buffers.discs.fitted > 0
 
     const selI = controller.selected ? (g.index.get(controller.selected) ?? -1) : -1
     const hovI = st.hovered
@@ -1040,6 +1053,7 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
     // A ring is as visible as the body it carries: closing a sun folds its rings away with its planets and moons.
     if (ringsChanged || versionChanged || revealChanged || repsFresh || buffers.ringRepsFor === eng.ringsVersion) revealRings(buffers, revealChanged || ringsChanged || versionChanged || repsFresh)
     if ((positionsChanged || ringsChanged || versionChanged || revealChanged) && buffers.rings.visible) placeRings(buffers, dp)
+    if ((positionsChanged || ringsChanged || revealChanged) && buffers.discs.mesh.visible) placeDiscs(buffers.discs, dp)
 
     // Project to screen for picking + labels.
     camera.getWorldPosition(camPos)
@@ -1090,6 +1104,7 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
   if (!buffers) return null
   return (
     <>
+      <primitive object={buffers.discs.mesh} />
       <primitive object={buffers.rings} />
       <primitive object={buffers.edges} />
       <primitive object={buffers.nodes} />
