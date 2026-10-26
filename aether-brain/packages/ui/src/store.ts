@@ -13,6 +13,7 @@ import {
   blankNote,
   bodyOwners,
   bodyTiers,
+  bindProjects,
   buildGraph,
   critiqueBaseName,
   critiqueNote,
@@ -23,6 +24,8 @@ import {
   editTask as editTaskInNote,
   extractTasks,
   folderKey,
+  folderUniverse,
+  galaxiesInside,
   folderOf,
   folderPathOf,
   folderProjectNote,
@@ -62,10 +65,12 @@ import {
   portableFolderRef,
   projectFolderOf,
   projectNote,
+  scaleOf,
   setProjectFields,
   setTaskDone,
   slugifyTitle,
   sunCounts,
+  underAny,
   splitFrontmatter,
   todayIso,
   updateFrontmatter,
@@ -119,7 +124,7 @@ import {
 } from './board/boardRegistry'
 import { playBody, playSun, soundSupported } from './audio/sounds'
 import { listProjects, moveTaskOnBoard } from './projects'
-import { plural, stillOf, truncate } from './util'
+import { IGNORED_MARK_TEXT, plural, stillOf, truncate } from './util'
 
 export type View = 'graph' | 'editor' | 'capture' | 'search' | 'review' | 'projects' | 'boards'
 
@@ -664,6 +669,14 @@ export interface AetherState {
    */
   makeProject(folderPath: string, opts?: { quiet?: boolean; onError?: (message: string) => void }): Promise<NoteId | null>
   /**
+   * Mark a folder as a galaxy (`scale: galaxy` in its project note) or as a plain star again (the key goes). A folder that is not a
+   * project yet becomes one first (`makeProject`). The line goes into the project note the graph itself binds to the folder
+   * (`bindProjects`). Resolves with whether the note now says what was asked (also when it already did); a refusal (read-only, a
+   * drive, Archive, broken frontmatter, a write that did not land) is a toast. Whether the mark COUNTS (how deep galaxies nest, how
+   * many there can be) is the graph's to say: the toast says so when it does not, and the inspector keeps saying it.
+   */
+  setFolderScale(folderPath: string, scale: 'galaxy' | 'star'): Promise<boolean>
+  /**
    * Make several folders stars at once (Find projects): one graph rebuild per
    * chunk and one toast. Resolves with how many became stars (already ones
    * count) and the first failure, if any.
@@ -866,12 +879,23 @@ export interface AetherState {
   showPicture(path: string): void
 }
 
-/** Pictures under a folder, subfolders included. */
-export function picturesUnder(assets: Map<string, VaultAsset>, folder: string): number {
+/**
+ * Pictures under a folder, subfolders included, except those in `leaves`: the galaxies inside it (`galaxiesIn`), which take their
+ * pictures with them, so the count is the gallery's own.
+ */
+export function picturesUnder(assets: Map<string, VaultAsset>, folder: string, leaves: readonly string[] = []): number {
   const inside = `${normalizeFolderPath(folder)}/`
   let n = 0
-  for (const path of assets.keys()) if (path.startsWith(inside)) n++
+  for (const path of assets.keys()) if (path.startsWith(inside) && (leaves.length === 0 || !underAny(path, leaves))) n++
   return n
+}
+
+/** The folders of the galaxies inside `folder` that count in `graph` (marked folders that are galaxies), by path. */
+export function galaxiesIn(graph: GraphData | null, folder: string): string[] {
+  if (!graph) return []
+  const marked: string[] = []
+  for (const n of graph.nodes) if (n.folder?.galaxyLevel !== undefined) marked.push(n.folder.path)
+  return galaxiesInside(marked, normalizeFolderPath(folder))
 }
 
 /**
@@ -2752,7 +2776,9 @@ export const useAether = create<AetherState>()((set, get) => {
       const dir = canonicalFolder(folderPath)
       if (!dir || (roots.length > 1 && !dir.includes('/'))) return fail('Pick a folder inside the vault, not the vault or a drive itself')
       if (areaFromFolder(`${dir}/x.md`) === 'archive') return fail('Archived folders are not projects; move it out of Archive first')
-      const existing = [...notes.values()].find((n) => isProjectNote(n) && projectFolderOf(n, folders) === dir)
+      // The note the graph itself binds to the folder (one rule for all: `bindProjects`), not merely the first that names it.
+      const bound = bindProjects(notes, [...notes.keys()].sort(), folderUniverse(folders, [...notes.values()].map((n) => n.meta.folder)).all).projectAt.get(dir)
+      const existing = bound ? notes.get(bound) : undefined
       if (existing) {
         if (!quiet) {
           set({ projectId: existing.meta.id })
@@ -2784,6 +2810,48 @@ export const useAether = create<AetherState>()((set, get) => {
         get().toast(`★ ${p.title} is a project now${numberedAs(p.path, id)}`, 'success')
       }
       return id
+    },
+
+    async setFolderScale(folderPath, scale) {
+      const { adapter } = get()
+      if (!adapter) return false
+      if (adapter.readOnly) {
+        get().toast('This vault is read-only', 'error')
+        return false
+      }
+      // A galaxy is a project with a mark: a folder that is no project yet becomes one first (this refuses a drive, Archive and a bad note).
+      const id = await get().makeProject(folderPath, { quiet: true })
+      const note = id ? get().notes.get(id) : undefined
+      if (!id || !note) return false
+      const name = note.meta.title
+      if (scaleOf(note.frontmatter) === scale) {
+        get().toast(scale === 'galaxy' ? `${name} is a galaxy already` : `${name} is a star already`)
+        return true
+      }
+      if (hasBrokenFrontmatter(note.raw)) {
+        get().toast(`The frontmatter of ${note.meta.path} is not valid YAML; fix it first`, 'error')
+        return false
+      }
+      try {
+        // Plain markdown: one key of the project note, put back or taken away; nothing else of the note changes.
+        await get().patchFrontmatter(id, { scale: scale === 'galaxy' ? 'galaxy' : undefined })
+      } catch (err) {
+        get().toast(`Could not mark ${name}: ${errText(err)}`, 'error')
+        return false
+      }
+      // patchFrontmatter says its refusals itself (the note changed on disk, its frontmatter broke) and does not throw: look, do not assume.
+      const written = get().notes.get(id)
+      if (!written || scaleOf(written.frontmatter) !== scale) return false
+      if (scale === 'star') {
+        get().toast(`★ ${name} is a star again`, 'success')
+        return true
+      }
+      // The line is written; whether it counts is the graph's to say (how deep galaxies nest, how many there can be).
+      const g = get().graph
+      const info = g?.nodes[g.index.get(folderKey(canonicalFolder(folderPath))) ?? -1]?.folder
+      if (info?.markIgnored && info.markIgnored !== 'drive') get().toast(`${name}: ${IGNORED_MARK_TEXT[info.markIgnored]}`, 'info')
+      else get().toast(`✦ ${name} is a galaxy now`, 'success')
+      return true
     },
 
     async makeProjects(folderPaths) {
@@ -3086,7 +3154,7 @@ export const useAether = create<AetherState>()((set, get) => {
       set({ gallery: path })
       if (get().status !== 'ready' || get().settings.layoutMode !== 'system') return
       // A star without pictures has no cards: nothing to rebuild for (unless a gallery is drawn now).
-      const cards = path !== null && picturesUnder(get().assets, path) > 0
+      const cards = path !== null && picturesUnder(get().assets, path, galaxiesIn(get().graph, path)) > 0
       if (!cards && !shown) return
       keepBrief = true
       try {
@@ -3127,7 +3195,7 @@ export const useAether = create<AetherState>()((set, get) => {
         return
       }
       const title = nodeOf(graph, star)?.title ?? folderPathOf(star)
-      const total = picturesUnder(assets, folderPathOf(star))
+      const total = picturesUnder(assets, folderPathOf(star), galaxiesIn(graph, folderPathOf(star)))
       if (total === 0) {
         get().toast(`No pictures under ★ ${title} yet: drop some on the window`)
         return

@@ -32,6 +32,7 @@ import {
   applyChatUpdate,
   areaFromFolder,
   basenameOf,
+  bindProjects,
   blankNote,
   buildGraph,
   chatBaseName,
@@ -65,6 +66,7 @@ import {
   renderChatNote,
   renderTranscript,
   replaceSummary,
+  scaleOf,
   sectionOf,
   transcriptCount,
   setProjectFields,
@@ -183,6 +185,11 @@ export interface FolderNode {
   kind: 'root' | 'mount' | 'project' | 'folder'
   /** Title of the project bound to this folder (its star note). */
   project?: string
+  /**
+   * `galaxy` when that project's note says `scale: galaxy`: the folder is drawn as a galaxy of its own in the brain (a mark that is
+   * too deep, or beyond the 64 that count, is drawn as a star). Absent for a star. To mark one, put `scale: galaxy` in the project note.
+   */
+  scale?: 'galaxy'
   /** Notes directly inside. */
   notes: number
   /** Notes anywhere below. */
@@ -937,8 +944,11 @@ export class Brain {
         total: d.totals.get(f) ?? 0,
         folders: kids.length,
       }
-      const title = pid ? this.notes.get(pid)?.meta.title : undefined
-      if (title) node.project = title
+      const bound = pid ? this.notes.get(pid) : undefined
+      if (bound) {
+        node.project = bound.meta.title
+        if (scaleOf(bound.frontmatter) === 'galaxy') node.scale = 'galaxy'
+      }
       return node
     }
     const top = make(root)
@@ -1951,19 +1961,11 @@ export class Brain {
       ids.sort((a, b) => (this.notes.get(a)?.meta.title ?? a).localeCompare(this.notes.get(b)?.meta.title ?? b))
     }
     const { children, foldersLower, foldersNamed } = this.folderIdx()
-    // Bind projects to home folders like the graph does: an explicit `folder:`
-    // beats a folder note, which beats a sibling folder; ties go to the first id.
+    // Bind projects to home folders exactly as the graph does (`bindProjects`, one rule for the graph, the store and this link): an
+    // explicit `folder:` beats a folder note, which beats a sibling folder; ties go to the first id in plain code-unit order.
     const homeOf = new Map<NoteId, string | null>()
-    const ranked = projects
-      .map((n) => {
-        const folder = projectFolderOf(n, this.folders)
-        const explicit = typeof n.frontmatter['folder'] === 'string' && normalizeFolderPath(n.frontmatter['folder']) !== ''
-        homeOf.set(n.meta.id, folder)
-        return { id: n.meta.id, folder, rank: explicit ? 0 : folder === n.meta.folder ? 1 : 2 }
-      })
-      .sort((a, b) => a.rank - b.rank || a.id.localeCompare(b.id))
-    const projectAt = new Map<string, NoteId>()
-    for (const r of ranked) if (r.folder && this.folders.has(r.folder) && !projectAt.has(r.folder)) projectAt.set(r.folder, r.id)
+    for (const n of projects) homeOf.set(n.meta.id, projectFolderOf(n, this.folders))
+    const { projectAt } = bindProjects(this.notes, [...this.notes.keys()].sort(), this.folders)
     return {
       byId,
       byName,

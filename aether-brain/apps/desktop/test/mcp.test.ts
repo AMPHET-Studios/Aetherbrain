@@ -285,6 +285,29 @@ describe('reading', () => {
     expect((await call(client, 'list_folder', { path: 'Nowhere' })).isError).toBe(true)
   })
 
+  it('list_folder says which project folders are galaxies (scale: galaxy in the project note), and only those', async () => {
+    await put('Projects/Lab/Lab.md', '---\ntype: project\nscale: galaxy\n---\n# Lab\n')
+    await put('Projects/Quiet/Quiet.md', '---\ntype: project\nscale: star\n---\n# Quiet\n')
+    const client = await connect(await open())
+    const r = json(await call(client, 'list_folder', { path: 'Projects', depth: 1 }))
+    const child = (name: string) => r.folder.children.find((c: { name: string }) => c.name === name)
+    expect(child('Lab')).toMatchObject({ kind: 'project', project: 'Lab', scale: 'galaxy' })
+    expect(child('Quiet')).toMatchObject({ kind: 'project', project: 'Quiet' })
+    expect(child('Quiet')).not.toHaveProperty('scale')
+    expect(child('PORTALz')).not.toHaveProperty('scale')
+  })
+
+  it('list_folder reads the mark from the project note the graph binds: a tie goes by plain id order, not by locale', async () => {
+    // Two projects name one folder; 'Projects/Zed' sorts before 'Projects/alpha' in code units (the graph's order), after it by locale.
+    await put('Shared/x.md', '# x\n')
+    await put('Projects/Zed.md', '---\ntype: project\nfolder: Shared\nscale: galaxy\n---\n# Zed\n')
+    await put('Projects/alpha.md', '---\ntype: project\nfolder: Shared\n---\n# alpha\n')
+    const client = await connect(await open())
+    const r = json(await call(client, 'list_folder', {}))
+    const shared = r.folder.children.find((c: { name: string }) => c.name === 'Shared')
+    expect(shared).toMatchObject({ kind: 'project', project: 'Zed', scale: 'galaxy' })
+  })
+
   it('list_projects and get_project', async () => {
     const client = await connect(await open())
     const list = json(await call(client, 'list_projects'))

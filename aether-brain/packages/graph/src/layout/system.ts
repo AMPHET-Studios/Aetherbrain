@@ -26,7 +26,7 @@ export interface SystemInput {
   parent: Int32Array
   /** 0 note, 1 ghost, 2 folder, 3 the Today hub, 4 image (see `LayoutKind`). */
   kind: Uint8Array
-  /** Folder role code (0 root, 1 mount, 2 project, 3 folder), -1 for non-folders. */
+  /** Folder role code (0 root, 1 mount, 2 project, 3 folder, 4 a folder marked as a galaxy), -1 for non-folders. */
   role: Int8Array
   /** Visual radius per node. */
   radius: Float32Array
@@ -125,6 +125,11 @@ export function orbitSpeed(r: number): number {
 const URGENT_LEAF = 0.55
 /** Inclination of what orbits a galaxy: nearly flat, so a drive reads as a disc. */
 const GALAXY_INCLINATION = 0.05
+/**
+ * Inclination of what orbits a galaxy you marked: still a disc, but tilted a little (up to about 17°) so galaxies that sit on a galaxy
+ * (or on each other's discs) do not all lie in one plate.
+ */
+const MARKED_GALAXY_INCLINATION = 0.3
 
 /**
  * What an orbit's speed is multiplied by for its urgency (0 to 1): a calm orbit crawls at 0.55, an overdue one
@@ -448,9 +453,10 @@ export function computeSystemLayout(input: SystemInput): SystemLayout {
       continue
     }
     const id = input.ids[p] ?? String(p)
-    // What orbits a galaxy (a drive, a vault root) lies nearly flat: a disc.
-    const flat = input.role[p] === 0 || input.role[p] === 1
-    const inc = hash01(id, 1) * (flat ? GALAXY_INCLINATION : MAX_INCLINATION)
+    // What orbits a galaxy (a drive, a vault root) lies nearly flat: a disc; around a galaxy you marked it is a disc tilted a little.
+    const role = input.role[p]
+    const flat = role === 0 || role === 1
+    const inc = hash01(id, 1) * (role === 4 ? MARKED_GALAXY_INCLINATION : flat ? GALAXY_INCLINATION : MAX_INCLINATION)
     const az = hash01(id, 2) * TAU
     const s = Math.sin(inc / 2)
     q[0] = Math.cos(az) * s

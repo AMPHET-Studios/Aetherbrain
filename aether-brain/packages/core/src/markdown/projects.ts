@@ -406,3 +406,38 @@ export function folderProjectNote(
   const note = projectNote({ name, summary: opts.summary, tags: opts.tags }, now)
   return { ...note, path: `${dir}/${name}.md` }
 }
+
+/**
+ * Which project note owns which folder: the one rule every reader of the vault shares (the graph, the store's make-a-project and
+ * mark-a-galaxy, the AI link), so they cannot disagree about which note a mark such as `scale: galaxy` is read from.
+ *
+ * A folder takes ONE project note. An explicit `folder:` key beats a folder note (`<folder>/<folder>.md`), which beats a sibling note
+ * (`Projects/X.md` for `Projects/X/`); among notes of the same kind the first in `ids` wins, and `ids` is taken in the order given:
+ * pass them sorted (`[...notes.keys()].sort()`, plain code-unit order). Only folders in `known` count: a project whose folder is not
+ * there yet is not bound (the UI offers to create it).
+ */
+export function bindProjects(
+  notes: ReadonlyMap<string, ParsedNote>,
+  ids: readonly string[],
+  known: ReadonlySet<string>,
+): { projectAt: Map<string, string>; homeOf: Map<string, string> } {
+  const candidates: { id: string; folder: string; rank: number }[] = []
+  for (const id of ids) {
+    const n = notes.get(id)
+    if (!n || !isProjectNote(n)) continue
+    const folder = projectFolderOf(n, known as Set<string>)
+    if (!folder || !known.has(folder)) continue
+    const explicit = normalizeFolderPath(asString(n.frontmatter['folder']) ?? '') !== ''
+    candidates.push({ id, folder, rank: explicit ? 0 : folder === n.meta.folder ? 1 : 2 })
+  }
+  // A stable sort: ids of one rank stay in the order they came in.
+  candidates.sort((a, b) => a.rank - b.rank)
+  const projectAt = new Map<string, string>()
+  const homeOf = new Map<string, string>()
+  for (const c of candidates) {
+    if (projectAt.has(c.folder)) continue
+    projectAt.set(c.folder, c.id)
+    homeOf.set(c.id, c.folder)
+  }
+  return { projectAt, homeOf }
+}

@@ -27,8 +27,9 @@ export function companionKind(n: GraphNode): CompanionKind {
 }
 
 /**
- * What a node is in the cosmology (docs/COSMOLOGY.md): a drive or a one-folder vault a 'galaxy', the origin of several
- * drives an 'origin', every folder a 'star', a reference board with pictures orbiting it a 'star' (a sun of its own), a
+ * What a node is in the cosmology (docs/COSMOLOGY.md): a drive, a one-folder vault or a folder marked as a galaxy a
+ * 'galaxy' (such a folder's `kind` stays a project star's), the origin of several drives an 'origin', every other
+ * folder a 'star', a reference board with pictures orbiting it a 'star' (a sun of its own), a
  * big picture, video, model or long note a 'planet', every small file a 'moon'.
  */
 export function companionBody(n: GraphNode): CompanionBody {

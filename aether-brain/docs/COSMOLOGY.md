@@ -6,7 +6,7 @@ What every body in the system layout *is*, how it moves and why. This is the con
 
 | Your vault | Is | Drawn as |
 | --- | --- | --- |
-| a **drive** (or the whole vault, when it is one folder) | a **galaxy** | the biggest body, a steady glow; what is in it lies on a flat disc |
+| a **drive** (or the whole vault, when it is one folder), or a **folder you mark** as one (below) | a **galaxy** | the biggest body, a steady glow; what is in it lies on a flat disc |
 | a **folder** | a **star** | a glowing body; bigger the more it holds; a project folder is the brightest, biggest kind |
 | a **picture, video or 3D model** big enough to matter, or a **document-sized note** | a **planet** | pictures, videos and models as extra-large thumbnails; a long note as a solid sphere |
 | every **small file** | a **moon** | a small body on a close orbit |
@@ -14,6 +14,42 @@ What every body in the system layout *is*, how it moves and why. This is the con
 | **how soon it needs you** | **orbit speed** and **star brightness** | a faster orbit; a brighter star for the whole system |
 
 Everything orbits what is above it: files orbit their folder's star, a sub-folder's star orbits its parent star, a drive's stars lie on its disc. Nothing is a star that is not a folder, except a board's sun (below).
+
+## A galaxy is a folder you mark
+
+A drive is a galaxy. So is any folder you choose to make one. Every folder is a **star** by default; a project folder is the brightest, biggest kind of star (**★**); a project folder you mark as a **✦ galaxy** has a disc of its own, with its sub-folders lying on it as stars.
+
+- **The mark** is one line in the folder's project note: `scale: galaxy` (any letter case). No line, or `scale: star`, is a star. The palette's *Make the selected folder a galaxy* and the folder inspector's *✦ Make galaxy* write it (and make the folder a project first, if it is not one); *Make the selected galaxy a star again* and *★ Make star again* take the line away. It is plain markdown in the vault, like everything else, so Claude and ChatGPT see it and it travels with the vault. A galaxy is still a project: it keeps its board card, its tasks and its place in the brief.
+- **What a galaxy is.** The biggest kind of body there is after a drive: a radius of 12 to 15 by what it holds (a drive is 16), the cream of a drive, a steady glow that does not follow urgency, always named `✦ Name`, always shown and open on its own. What orbits it lies on a flat disc, like a drive's: its own notes close in, its sub-folders as stars outside them. The disc of a galaxy you marked is tilted a little (up to about 17°, `MARKED_GALAXY_INCLINATION`; a drive's is within 3°) so galaxies are not all in one plate. Under every galaxy (a drive, the vault when it is one folder, a folder you marked) a faint **plate of light with two loose spiral arms** is drawn in that same plane (`scene/galaxyDisc.ts`): one instanced mesh for all of them, fitted to the outermost orbit ring around the galaxy (a little wider, `DISC_SCALE`) so it always matches the rings, following the galaxy as it orbits, added to the light behind it and kept well under the bloom threshold, so it is a plate and never a flare.
+- **Where it sits.** A galaxy sits on the galaxy above it, however deep its folder is: on the vault (or its drive) or on another galaxy. The plain folders between stay stars and keep their own planets. In the graph that is the galaxy's `parent`; its `folder.path` is still where it is on disk. The sub-folders of a star keep orbiting that star, and the sub-folders of a galaxy are stars on its disc (always shown, like the folders under a drive).
+- **What it takes with it.** What a galaxy holds is no longer counted in the stars it left: their size is measured without it (`shedGalaxies`, `FolderNodeInfo.data` and `weight`), and it is no longer one of their sub-folders for their size. `totalNotes` and `childFolders` still count what is on disk.
+- **How far it goes.** Three levels, counting the vault (or a drive) as the first: a galaxy on the vault is the second, a galaxy on that galaxy the third, and a mark deeper than that does not count. At most 64 marks count in a vault: the shallowest first, then by path, whatever order the notes come in (`GALAXY_MAX_LEVELS`, `GALAXY_MAX_MARKS`, `planGalaxies`). A mark that does not count is kept, and its folder stays a star; the inspector says why (`FolderNodeInfo.markIgnored`: `depth`, `count`, or `drive` for a drive or the vault, which are galaxies already). A mark that does not count does not stop the galaxies inside it from counting, and taking the line away is how to be rid of it. The Bio star is never a galaxy.
+- **The viewer** is sent a galaxy you marked as a `star` in `kind` (a project folder, exactly as before: a viewer built to the original names keeps working, and a `kind` it does not know is refused), as a `galaxy` in `body`, with its radius as drawn, and its `parent` is the galaxy it sits on. A `galaxy` body always hangs from another galaxy, the origin, or nothing, never from a star. The scene cut treats it as the project star it is (`stars` in the budget, and a kept star always brings the galaxy it lies on).
+- **The AI link** (`list_folder`) marks such a folder `scale: galaxy`; an AI writes the mark by putting the line in the project note.
+- Code: `packages/core/src/graph/galaxies.ts` (the mark, the plan, the data), `build.ts` (the lift and the numbers), `vault/cosmos.ts` (`isGalaxyNode`), `packages/graph/src/layout/system.ts` (layout role 4), `theme.ts` (`nodeRadius`).
+
+## A star grows with what it holds
+
+A star's size says how much is in it. What a folder holds is counted without looking at the disk, from what the brain already knows, everything under it (the folders inside it included) except what a galaxy took with it, in **note-equivalents**:
+
+> one for each note, one for each sub-folder, one for every thousand words, a quarter for each picture, a half for each video or 3D model
+
+(`dataWeight`, `FolderNodeInfo.weight`; the parts are in `FolderNodeInfo.data` and shown in the inspector as *holds 412 notes · 38k words · 38 pictures · 3 3D models*.) Pictures, videos and models are the ones the vault has listed, so they are a floor on a huge drive, and nothing is stat'ed or scanned for it: a count, not bytes.
+
+The size follows a curve that keeps telling folders apart as they grow: `radius = 3.4 + 4.6 · f`, with `f = min(1, (log2(1 + weight) / log2(1 + 50 000)) ^ 0.75)`.
+
+| holds | plain star | project star | galaxy you marked |
+| --- | --- | --- | --- |
+| nothing | 3.4 | 4.6 | 12.0 |
+| 10 | 4.9 | 6.1 | 13.0 |
+| 100 | 5.8 | 7.0 | 13.6 |
+| 1 000 | 6.7 | 7.9 | 14.1 |
+| 10 000 | 7.5 | 8.7 | 14.7 |
+| 50 000 or more | 8.0 | 9.2 | 15.0 |
+
+The size moves in steps of an eighth of a doubling of what a folder holds, so a few more words in a note do not move the star (and do not change the scene a viewer is sent); a change of about a tenth does. The Bio star keeps its own size (9.5 to 11, from the notes, folders and pictures on disk, `nodeRadius`), whatever the weight says. For a vault that is already open, stars with tens to hundreds of notes are smaller than they were (a folder of 100 notes went from 7.4 to 5.8): the whole range of sizes now carries meaning.
+
+The ceilings, and their order, do not move: a drive (16) is bigger than any galaxy you marked (15), which is bigger than the Bio star (11), which is bigger than any project star (9.2), a board sun (9) and any plain star (8). Before this, every folder holding about 200 notes or more was the same size (8). The size feeds the layout (a bigger body asks for a wider orbit), so a folder that fills up pushes its neighbours out, a little at a time.
 
 ## A board is a sun
 
@@ -31,7 +67,7 @@ One star in the sky is the user's own body and mind: the **Bio star**, a big, br
 
 - **Making it.** The palette's *Create my Bio star* (or the *Make it* on the toast that `⇧ I` shows when there is none) writes the folder and the pages that are missing. It is create-only: a page that is there, under any letter case, is never touched, a deleted one comes back, and nothing is numbered or replaced. The pages are starting points in the user's own voice, headings and empty lists to fill in: no advice, no diagnosis, no phone numbers, nothing about changing a medicine (the coach keeps to the same rules). They hold no task, link or tag in their text, so nothing lands on the daily brief or in the graph by itself.
 - **Which folder.** Exactly the folder `Bio` at the vault's home, spelled as the vault spells it (`bio` on Windows is `Bio`). A folder called Bio anywhere else is an ordinary star and a drive named Bio is a drive. A vault with no such folder, that can be written to, shows the star **dormant**: the same blue star, named `✚ Bio`, standing where the folder will be with nothing in it (`folder.placeholder`; `FolderGraphOptions.bioPlaceholder`, which the store asks for), so it can be seen before it is made. Drawing it writes nothing and makes no folder; the inspector's *Make my Bio star* does, and the dormant star becomes the real one in place (the same id, so the selection stays). A dormant star is not a sun (nothing in it to open), it hangs from the galaxy, and a read-only vault has none.
-- **How it looks.** The biggest star there is (radius 9.5, a little more for each doubling of what it holds, at most 11; a project star tops out at 9.2, a board sun at 9, a drive is 16), blue (`BIO_STAR_COLOR` is a deep body colour on purpose: the scene shows colour × glow with no tone mapping, so at the Bio star's glow it comes out a bright blue, where a lighter blue clipped to cyan), with a wider soft aura than any other body (`BIO_STAR_HALO`, 5.4 radii against 3.2) so it is a blue giant from far away too, always named (`✚ Bio`, in the lighter `BIO_STAR_LABEL_COLOR`, which its inspector uses too), burning at one brightness whatever the urgency (`BIO_STAR_GLOW`: more than the most urgent star, a galaxy or a board sun; only the Today hub outshines it). In every other way it is a folder: its pages orbit it, it orbits its drive, and it is always shown while it exists, however deep it sits.
+- **How it looks.** The biggest star there is (radius 9.5, a little more for each doubling of what it holds, at most 11; a project star tops out at 9.2, a board sun at 9, a galaxy you marked is 12 to 15, a drive is 16), blue (`BIO_STAR_COLOR` is a deep body colour on purpose: the scene shows colour × glow with no tone mapping, so at the Bio star's glow it comes out a bright blue, where a lighter blue clipped to cyan), with a wider soft aura than any other body (`BIO_STAR_HALO`, 5.4 radii against 3.2) so it is a blue giant from far away too, always named (`✚ Bio`, in the lighter `BIO_STAR_LABEL_COLOR`, which its inspector uses too), burning at one brightness whatever the urgency (`BIO_STAR_GLOW`: more than the most urgent star, a galaxy or a board sun; only the Today hub outshines it). In every other way it is a folder: its pages orbit it, it orbits its drive, and it is always shown while it exists, however deep it sits.
 - **The inspector** of the Bio star says what lives there and who could see it, and adds the pages that are missing on a click. On a dormant star it says the star is waiting and that nothing is written until the button is pressed, and the one button makes it.
 - **Who could see it.** The pages are plain markdown on this computer, like every note. With Claude as the chat's answerer, whatever the chat reads from them goes to Anthropic; with Ollama nothing leaves the computer ([BRAIN-CHAT.md](BRAIN-CHAT.md#your-bio-notes)).
 - **The viewer** is sent the Bio star as a `star` (kind and body) in its blue and its radius, and the scene cut always keeps it with a page or two, like the drives and the Today hub. A dormant one is sent too, as a star with no children.
@@ -137,7 +173,7 @@ The brain window publishes the scene to a viewer (`docs/UNREAL.md`, the companio
 | Field | |
 | --- | --- |
 | `kind` | the original names, **unchanged** so a viewer built to them keeps drawing what it drew: `sun` the vault or a drive · `star` a project folder, a board with pictures orbiting it, or the Bio star · `planet` any other folder · `moon` a note · `picture` · `ghost` · `today` |
-| `body` | the cosmology's names, for the viewer built to this page: `galaxy` a drive or a one-folder vault · `origin` the root of several drives · `star` every folder and every board sun · `planet` / `moon` a big / small file (a `picture` kind carries one of them in its radius and its size) · `ghost` · `hub` (Today). Absent from older builds: use `kind` |
+| `body` | the cosmology's names, for the viewer built to this page: `galaxy` a drive, a one-folder vault or a folder you marked as a galaxy (its `kind` stays `star`) · `origin` the root of several drives · `star` every other folder and every board sun · `planet` / `moon` a big / small file (a `picture` kind carries one of them in its radius and its size) · `ghost` · `hub` (Today). Absent from older builds: use `kind` |
 | `radius` | in the brain's world units (the layout spaces orbits by it) |
 | `color` | the colour the brain draws it in |
 | `parent` | what it orbits |
