@@ -1,4 +1,4 @@
-import type { GraphData, GraphNode, NoteId, SunLevel } from '@aether/core'
+import type { GraphData, GraphNode, NoteId, Reminder, SunLevel } from '@aether/core'
 import { GALLERY_DWELL_MS, GALLERY_FOLD_MS, GALLERY_FRAMING_MS, GALLERY_REACH_MS, nearestStar as starNearCamera } from './gallery'
 import { LayoutEngine } from './layout/LayoutEngine'
 import type { LayoutMode } from './layout/protocol'
@@ -117,6 +117,10 @@ export class BrainController {
    * worked it out (every star is then as calm as an unused one). Not part of the layout: it only recolours.
    */
   activity: Float32Array | null = null
+  /** The reminders that float by as asteroids (`remindersOf`), most urgent first; a new array each time they change. */
+  reminders: readonly Reminder[] = []
+  /** Whether the asteroids are drawn (a setting of the brain window). */
+  asteroids = true
   /** Stars that need attention throw corona ejections (docs/COSMOLOGY.md, "A star that needs you erupts"); off hides them. Only the scene reads it. */
   flares = true
   colorMode: ColorMode = 'area'
@@ -434,6 +438,15 @@ export class BrainController {
   setActivity(activity: Float32Array | null): void {
     this.activity = activity
     this.touch()
+  }
+
+  setReminders(reminders: readonly Reminder[]): void {
+    this.reminders = reminders
+    this.touch()
+  }
+
+  setAsteroids(on: boolean): void {
+    this.asteroids = on
   }
 
   setColorMode(mode: ColorMode): void {

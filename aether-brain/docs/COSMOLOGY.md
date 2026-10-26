@@ -191,6 +191,17 @@ A star whose whole system needs attention throws plasma. The number is the urgen
 - **Bounds.** At most 40 stars flare at once (the most urgent, then the nearest the camera) and at most 96 flares are alive, however many stars are overdue.
 - **The viewer** is not sent the flares: it has each node's `urgency` and may draw its own.
 
+## Asteroids are reminders
+
+Rocks drift through the part of the sky you are looking at. Each one is a **reminder**, and there are at most 24 (`REMINDER_MAX`):
+
+- **A dated task.** An open task with a due date that is late or due within two weeks (urgency 0.22 or more, the same `taskUrgency` that sets orbit speed). Its label is the task's words, without the date marks.
+- **A note tagged `reminder`.** `#reminder` in the text or `tags: [reminder]`: the way to ask for one yourself. Urgency 0.5 (`REMINDER_TAGGED_URGENCY`); archived notes are left out.
+- **How it looks.** A lumpy rock, tumbling, lit like a planet. The more urgent, the nearer the middle of the view, the bigger, the redder and the faster (`planAsteroid`); an overdue one hurries. Calm ones are amber.
+- **Where it floats.** In a box that follows the camera (half way to what it looks at, as wide as that distance, 40 to 1,500), so wherever you fly a few are going by. It wraps round the box and fades at its edge, so none pops. The clock is the orbit clock: `o` stops them with everything else.
+- **Hover and click.** Hovering one shows its date and words beside it; clicking it opens its note.
+- **Where the list comes from.** `remindersOf(notes, today)` (`core/vault/reminders.ts`), refreshed when the graph is built; nothing is written and nothing is sent. They are not nodes: the layout, the graph and the viewer do not know about them. One instanced mesh (`scene/asteroids.ts`), no allocation per frame; the controller's `reminders` and `asteroids` (on) hold them.
+
 ## What the viewer is told
 
 The brain window publishes the scene to a viewer (`docs/UNREAL.md`, the companion link). For each node:
