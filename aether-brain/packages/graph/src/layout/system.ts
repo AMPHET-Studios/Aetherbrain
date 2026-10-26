@@ -1,7 +1,8 @@
 /**
  * Solar-system layout: the folder tree laid out analytically, no physics.
  *
- * Every node orbits its structural parent (docs/COSMOLOGY.md): a drive is a galaxy (what sits in it lies on a
+ * Every node orbits its structural parent (docs/COSMOLOGY.md): the Bio is a black hole at the centre and every galaxy orbits it
+ * (the parent array says so, `orbitParents`), a drive is a galaxy (what sits in it lies on a
  * flat disc), a folder is a star, a big file is a planet, a small file is a moon. Around a star, from the inside
  * out: urgent files (the hottest, fastest), small files (on rings, or on a Fibonacci shell when there are more than
  * 24 of them), big files, then the stars of its sub-folders. Bodies of one heat band share rings, so a ring has
@@ -26,7 +27,7 @@ export interface SystemInput {
   parent: Int32Array
   /** 0 note, 1 ghost, 2 folder, 3 the Today hub, 4 image (see `LayoutKind`). */
   kind: Uint8Array
-  /** Folder role code (0 root, 1 mount, 2 project, 3 folder, 4 a folder marked as a galaxy), -1 for non-folders. */
+  /** Folder role code (0 root, 1 mount, 2 project, 3 folder, 4 a folder marked as a galaxy, 5 the Bio black hole), -1 for non-folders. */
   role: Int8Array
   /** Visual radius per node. */
   radius: Float32Array
@@ -130,6 +131,15 @@ const GALAXY_INCLINATION = 0.05
  * (or on each other's discs) do not all lie in one plate.
  */
 const MARKED_GALAXY_INCLINATION = 0.3
+/** Layout role code of the Bio black hole (`LayoutRole` 5): the centre every galaxy revolves around. */
+export const BLACK_HOLE_ROLE = 5
+/**
+ * The room the black hole keeps clear, in its own radii: its accretion disc is drawn out to about 3.4 radii (`scene/blackHole.ts`),
+ * so the layout treats it as a body twice as big and the first ring (its pages) and the galaxies start outside the disc.
+ */
+export const BLACK_HOLE_REACH = 2
+/** Inclination of what orbits the black hole (up to about 9°): the galaxies lie nearly in one plane, which is also the plane of its disc. */
+export const BLACK_HOLE_INCLINATION = 0.16
 
 /**
  * What an orbit's speed is multiplied by for its urgency (0 to 1): a calm orbit crawls at 0.55, an overdue one
@@ -274,6 +284,7 @@ export function computeSystemLayout(input: SystemInput): SystemLayout {
   const bodyRadius = (i: number): number => {
     const r = input.radius[i]
     const body = r !== undefined && Number.isFinite(r) && r > 0 ? r : 1
+    if (input.role[i] === BLACK_HOLE_ROLE) return body * BLACK_HOLE_REACH
     return input.kind[i] === KIND_IMAGE ? body * PICTURE_FOOTPRINT : body
   }
   const hasChildren = (i: number): boolean => childStart[i + 1]! > childStart[i]!
@@ -456,7 +467,7 @@ export function computeSystemLayout(input: SystemInput): SystemLayout {
     // What orbits a galaxy (a drive, a vault root) lies nearly flat: a disc; around a galaxy you marked it is a disc tilted a little.
     const role = input.role[p]
     const flat = role === 0 || role === 1
-    const inc = hash01(id, 1) * (role === 4 ? MARKED_GALAXY_INCLINATION : flat ? GALAXY_INCLINATION : MAX_INCLINATION)
+    const inc = hash01(id, 1) * (role === BLACK_HOLE_ROLE ? BLACK_HOLE_INCLINATION : role === 4 ? MARKED_GALAXY_INCLINATION : flat ? GALAXY_INCLINATION : MAX_INCLINATION)
     const az = hash01(id, 2) * TAU
     const s = Math.sin(inc / 2)
     q[0] = Math.cos(az) * s

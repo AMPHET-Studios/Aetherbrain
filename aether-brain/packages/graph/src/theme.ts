@@ -55,26 +55,13 @@ export const IMAGE_COLOR = '#f4f1ff'
 /** A reference board with pictures orbiting it: a mint-white sun, cooler than the gold stars and warmer than the Today hub. */
 export const BOARD_SUN_COLOR = '#b8f7e2'
 /**
- * The Bio star (the folder `Bio`: sleep, food, meds, exercise, drugs, mental health): the one blue star, far from every gold one.
- * This is its BODY: the scene multiplies it by `BIO_STAR_GLOW` and shows the result with no tone mapping, so a body this deep
- * (green held low) comes out on screen as a bright blue (about #3f9eff). A lighter blue here (#3d9bff) clipped to cyan (#64f3ff,
- * hue 185°) at that glow: the green channel passes 1 first.
+ * The Bio (the folder `Bio`: sleep, food, meds, exercise, drugs, mental health) is a super massive black hole, and the one blue thing in
+ * the sky. This is its blue: the tint of its accretion disc (`scene/blackHole.ts` paints the disc itself, white-hot inside and this blue
+ * outside), of the rings of the galaxies that circle it, and of its body in the viewer.
  */
 export const BIO_STAR_COLOR = '#2563ff'
-/** The Bio star's blue for text and small marks (its name in the sky, the dot and the card of its inspector): the body is too deep to read on a dark panel. */
+/** The Bio's blue for text and small marks (its name in the sky, the dot and the card of its inspector): the body is too deep to read on a dark panel. */
 export const BIO_STAR_LABEL_COLOR = '#74adff'
-/**
- * How brightly the Bio star burns, always (it does not follow urgency): brighter than a board sun, than a galaxy and than the most
- * urgent star there can be (a project star with everything overdue is 2.4); only the Today hub (2.6) outshines it. Blue carries
- * about half the light of gold at the same glow, so it needs the headroom to read as the brightest; its rim blooms white-blue.
- */
-export const BIO_STAR_GLOW = 2.5
-/**
- * How wide the Bio star's aura is, in radii of its core: 5.4 where every other body's is 3.2 (`HALO_RADII` in the scene). A deep blue
- * has little light for the bloom to pick up, so from far away the star would be a small blue dot; the wide soft halo is what
- * makes it a blue giant at any distance.
- */
-export const BIO_STAR_HALO = 5.4
 
 /**
  * Planet color for a folder: a stable hashed hue with soft saturation. Hues in
@@ -196,12 +183,18 @@ export function isPictureSize(v: unknown): v is PictureSize {
 /** A small picture's radius (an icon, a sprite): it is a moon, not a planet. */
 export const MOON_PICTURE_RADIUS = 1.0
 
-/** A star with nothing in it, and the biggest a plain star gets: the ceiling every other body is measured against (the Bio star, a board sun, a drive). */
+/** A star with nothing in it, and the biggest a plain star gets: the ceiling every other body is measured against (a board sun, a drive). */
 export const STAR_MIN_RADIUS = 3.4
 export const STAR_MAX_RADIUS = 8
 /** A folder you marked as a galaxy: a little smaller than a drive's 16 when empty, nearly as big when full, and always bigger than any star. */
 export const GALAXY_MIN_RADIUS = 12
 export const GALAXY_MAX_RADIUS = 15
+/**
+ * The Bio black hole: the radius of its event horizon, 22 even when empty and a little more for each doubling of what it holds, at most 28.
+ * It is the biggest body there is (a drive is 16): the galaxies circle it. The layout keeps `BLACK_HOLE_REACH` times this clear around it.
+ */
+export const BLACK_HOLE_MIN_RADIUS = 22
+export const BLACK_HOLE_MAX_RADIUS = 28
 /** How much a folder holds (`FolderNodeInfo.weight`, in note-equivalents) when its size stops growing. */
 export const FULL_WEIGHT = 50_000
 /** Below 1 so that the first notes still make a visible difference while the big folders keep telling apart: 100, 1,000 and 10,000 are three sizes. */
@@ -232,7 +225,7 @@ function weightOf(f: FolderNodeInfo): number {
  * a big picture, video or model (the radius of the picture size, extra large by default) or a document-sized note;
  * a moon is every small file. A reference board with pictures orbiting it is a sun: 4 and a little more for each doubling
  * of its pictures, at most 9 (a star holds notes, a sun holds pictures, and must stay in scale with them). The Today hub
- * is a fixed 4.6. The Bio star is bigger than any other star (9.5 to 11; a project star tops out at 9.2, a board sun at 9, and every drive is 16).
+ * is a fixed 4.6. The Bio is a black hole, the biggest body there is (22 to 28; every drive is 16, a galaxy you marked 15, a project star tops out at 9.2).
  * The system layout spaces orbits by these radii.
  */
 export function nodeRadius(n: GraphNode, pictures: PictureSize = 'medium'): number {
@@ -245,8 +238,8 @@ export function nodeRadius(n: GraphNode, pictures: PictureSize = 'medium'): numb
     if (f.role === 'root') return f.galaxy ? 16 : 6
     // A folder you marked as a galaxy: 12 to 15 by what it holds, bigger than any star, smaller than a drive.
     if (f.galaxyLevel !== undefined) return GALAXY_MIN_RADIUS + (GALAXY_MAX_RADIUS - GALAXY_MIN_RADIUS) * fullness(weightOf(f))
-    // The Bio star is the biggest star there is: 9.5 even when empty (a project star tops out at 9.2), a little more for each doubling of what it holds, at most 11.
-    if (f.bio) return Math.min(11, 9.5 + 0.3 * Math.log2(1 + f.totalNotes + f.childFolders + 0.25 * f.images))
+    // The Bio black hole: 22 even when empty, a little more for each doubling of what it holds, at most 28.
+    if (f.bio) return Math.min(BLACK_HOLE_MAX_RADIUS, BLACK_HOLE_MIN_RADIUS + 0.9 * Math.log2(1 + f.totalNotes + f.childFolders + 0.25 * f.images))
     const star = STAR_MIN_RADIUS + (STAR_MAX_RADIUS - STAR_MIN_RADIUS) * fullness(weightOf(f))
     return f.role === 'project' ? star + 1.2 : star
   }

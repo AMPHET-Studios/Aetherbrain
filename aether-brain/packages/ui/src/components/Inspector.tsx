@@ -455,6 +455,7 @@ function FolderInspector({ node }: { node: GraphNode }) {
                 ? 'Your Bio star is waiting. It holds your own notes on sleep, food, meds, exercise, drugs and mental health: six pages to fill in. Nothing is written until you press the button.'
                 : 'Your notes on sleep, food, meds, exercise, drugs and mental health live here.'}
             </div>
+            <div className="mt-1 text-faint">It is the black hole at the centre of your sky: every galaxy revolves around it.</div>
             <div className="mt-1 text-faint">
               They stay on this computer. If you chat with Claude, what the chat reads from them goes to Anthropic; with Ollama nothing leaves.
             </div>

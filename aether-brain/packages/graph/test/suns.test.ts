@@ -144,15 +144,17 @@ describe('flying to a sun', () => {
     'Bio/Mental.md': '# Mental\n',
   }
 
-  it('stays at least 13 star radii away from a big star with a small system: the Bio star never fills the view', () => {
+  it('stays at least 13 radii away from a big body with a small system: the Bio black hole never fills the view', () => {
     const g = graphOf(bioFiles, ['Bio'], 'Bio')
     const star = g.nodes.find((n) => n.folder?.bio)!
     const r = nodeRadius(star)
-    const { c, cam } = placed(g, star.id, 20)
+    // Its pages orbit just outside its disc, about 5 radii away.
+    const reach = r * 5
+    const { c, cam } = placed(g, star.id, reach)
     expect(c.flyTo(star.id)).toBe(true)
-    // Its moons are 20 away, so framing them alone would put the camera at about 2.3 × 25: the star itself would fill the view.
+    // Framing the pages alone would put the camera at about 2.3 × their distance: closer than 13 radii, so the hole itself would fill the view.
+    expect(reach * 2.3).toBeLessThan(r * 13)
     expect(cam.flights[0]![3]).toBeCloseTo(r * 13, 5)
-    expect(cam.flights[0]![3]).toBeGreaterThan(20 * 2.3 * 2)
     c.dispose()
   })
 
