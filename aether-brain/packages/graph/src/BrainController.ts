@@ -117,6 +117,8 @@ export class BrainController {
    * worked it out (every star is then as calm as an unused one). Not part of the layout: it only recolours.
    */
   activity: Float32Array | null = null
+  /** Stars that need attention throw corona ejections (docs/COSMOLOGY.md, "A star that needs you erupts"); off hides them. Only the scene reads it. */
+  flares = true
   colorMode: ColorMode = 'area'
   layoutMode: LayoutMode = 'constellation'
   /** System layout: planets and moons orbit their parents over time. */
@@ -422,6 +424,10 @@ export class BrainController {
   setHighlight(ids: Set<NoteId> | null): void {
     this.highlight = ids
     this.touch()
+  }
+
+  setFlares(on: boolean): void {
+    this.flares = on
   }
 
   /** The brightness of every star, as `computeActivity` gave it for the graph the controller holds (stars are recoloured at once). */

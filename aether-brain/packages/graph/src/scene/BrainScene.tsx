@@ -63,6 +63,7 @@ import { bakeSky, createSkyDome, createSkyStars, type BakedSky } from './sky'
 import { LABEL_PRIORITY, LabelPlacer } from './labelPlace'
 import { applyReveal, easeReveal, revealTargets, ringReps, ringReveal, stepReveal } from './reveal'
 import { buildDiscs, fitDiscs, placeDiscs, type DiscSet } from './galaxyDisc'
+import { FLARE_MIN_URGENCY, FlareField, type FlareInput } from './flares'
 import { todayLabel } from './labels'
 import { ThumbLayer, thumbTargets, type ThumbTargets } from './thumbLayer'
 import { ScreenLayer } from './screenLayer'
@@ -412,6 +413,11 @@ interface Buffers {
   ringCount: number
   /** The faint plate under every galaxy (a drive, the vault, a folder you marked): one instanced mesh, fitted to its outermost ring. */
   discs: DiscSet
+  /** Corona ejections of the stars that need attention: one instanced mesh, and what it is fed each frame (reused, never rebuilt). */
+  flares: FlareField
+  flareInput: FlareInput
+  /** Each node's urgency, as the layout's speed and the ejections read it. */
+  urgency: Float32Array
   /** engine.ringsVersion the ring attributes were built from (-1: never). */
   ringsVersion: number
   ageOf: (n: GraphNode) => number
@@ -602,6 +608,27 @@ function buildBuffers(graph: GraphData, pictures: PictureSize): Buffers {
   const discTint = new Color(SUN_COLOR)
   const discs = buildDiscs(galaxies, count, () => [discTint.r, discTint.g, discTint.b])
 
+  // Stars that can erupt: folders (not the vault, a drive or the Bio star) whose whole system needs attention. Chosen once; urgency is baked into the graph.
+  const urgency = new Float32Array(count)
+  const erupting: number[] = []
+  graph.nodes.forEach((n, i) => {
+    urgency[i] = n.urgency ?? 0
+    const f = n.folder
+    if (f && !f.bio && !f.placeholder && f.role !== 'root' && f.role !== 'mount' && urgency[i]! >= FLARE_MIN_URGENCY) erupting.push(i)
+  })
+  const flares = new FlareField(count)
+  const flareInput: FlareInput = {
+    clock: 0,
+    enabled: false,
+    calm: false,
+    candidates: Int32Array.from(erupting),
+    urgency,
+    reveal: new Float32Array(0),
+    radius: new Float32Array(0),
+    pos: new Float32Array(0),
+    cam: { x: 0, y: 0, z: 0 },
+  }
+
   const owner = bodyOwners(graph)
   return {
     graph,
@@ -663,6 +690,9 @@ function buildBuffers(graph: GraphData, pictures: PictureSize): Buffers {
     ringParent: new Int32Array(ringCap),
     ringCount: 0,
     discs,
+    flares,
+    flareInput,
+    urgency,
     ringsVersion: -1,
     ageOf,
     dispose() {
@@ -671,6 +701,7 @@ function buildBuffers(graph: GraphData, pictures: PictureSize): Buffers {
       eg.dispose()
       ringGeo.dispose()
       discs.dispose()
+      flares.dispose()
       ;(rings.material as { dispose(): void }).dispose()
       ;(nodes.material as { dispose(): void }).dispose()
       ;(halos.material as { dispose(): void }).dispose()
@@ -709,6 +740,8 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
     hovered: -1,
     drag: null as null | { index: number; id: NoteId; sx: number; sy: number; moved: boolean },
     time: 0,
+    /** The clock the ejections run on: it stops with the orbits (`o`), so a flare freezes with them. */
+    flareClock: 0,
     neighbors: new Set<number>(),
     labelSet: new Set<number>(),
     /** Buffers the visual state was last computed for (new buffers force a recolor). */
@@ -942,6 +975,11 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
     }
 
     const fresh = st.buffers !== buffers
+    // The graph was rebuilt (a note saved, a file seen): the plumes in the air and the stars' schedules carry over, matched by node id.
+    if (fresh && st.buffers) {
+      const before = st.buffers
+      buffers.flares.adoptFrom(before.flares, (i) => before.graph.nodes[i]?.id, (id) => buffers.graph.index.get(id))
+    }
     if (fresh) st.buffers = buffers
     const versionChanged = fresh || controller.version !== st.lastVersion
     const positionsChanged = fresh || eng.frame !== st.lastFrame
@@ -1001,6 +1039,20 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
     }
     const dp = buffers.drawPos
     if (positionsChanged || revealChanged || instantReveal || fresh) applyReveal(pos, dp, buffers.owner, buffers.reveal, n)
+
+    // Corona ejections: the stars that need attention throw plasma. The clock stops with the orbits; calm mode and the setting are read here.
+    if (controller.motion) st.flareClock += dt
+    const fi = buffers.flareInput
+    fi.clock = st.flareClock
+    fi.enabled = controller.flares && controller.layoutMode === 'system'
+    fi.calm = controller.calm
+    fi.reveal = buffers.reveal
+    fi.radius = buffers.baseRadii
+    fi.pos = dp
+    fi.cam.x = camera.position.x
+    fi.cam.y = camera.position.y
+    fi.cam.z = camera.position.z
+    buffers.flares.step(fi)
 
     // Star gallery cards grow out of their star, and shrink when it folds.
     const cardsChanged = sizeCards(buffers, controller, eng, st, dt)
@@ -1109,6 +1161,7 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
       <primitive object={buffers.edges} />
       <primitive object={buffers.nodes} />
       <primitive object={buffers.halos} />
+      <primitive object={buffers.flares.mesh} />
       <primitive object={buffers.field} />
       <primitive object={thumbs.mesh} />
       <primitive object={screenLayer.group} />

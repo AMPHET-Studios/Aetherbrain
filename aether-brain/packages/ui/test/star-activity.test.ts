@@ -120,6 +120,24 @@ describe('where it is kept', () => {
     expect(again.heat(folderKey('Work'))).toBe(0)
   }, 15_000)
 
+  it('saves at once when the window is going away, so the last few seconds of use are not lost', async () => {
+    const handlers = new Map<string, () => void>()
+    vi.stubGlobal('window', { addEventListener: (name: string, fn: () => void) => handlers.set(name, fn), removeEventListener: () => undefined })
+    const { s, storage } = await freshStore()
+    await s().openVault(vault())
+    s().openNote('Play/Game')
+    // Not yet: the save waits a few seconds so a burst is one write.
+    expect([...storage.map.keys()].some((k) => k.startsWith('aether:activity:'))).toBe(false)
+    expect(handlers.has('pagehide')).toBe(true)
+    handlers.get('pagehide')!()
+    const key = [...storage.map.keys()].find((k) => k.startsWith('aether:activity:'))!
+    expect(JSON.parse(storage.map.get(key)!).e['Play/Game']).toBeTruthy()
+    // Nothing pending: a second call writes nothing more.
+    storage.map.delete(key)
+    handlers.get('pagehide')!()
+    expect(storage.map.has(key)).toBe(false)
+  })
+
   it('never in the vault: nothing is written to it', async () => {
     const { s } = await freshStore()
     const adapter = vault()

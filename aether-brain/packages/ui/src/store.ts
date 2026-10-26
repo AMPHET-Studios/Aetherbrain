@@ -193,6 +193,8 @@ export interface Settings {
   suns: boolean
   /** A click on a star, a planet or a moon plays a note; opening a sun plays a run (Shift+M mutes). */
   sound: boolean
+  /** System layout: stars that need attention throw corona ejections, the more urgent the bigger (Shift+F). */
+  flares: boolean
   /** Settings version; 2 = the solar-system layout became the default. */
   v: number
 }
@@ -257,6 +259,7 @@ const DEFAULT_SETTINGS: Settings = {
   starGalleries: true,
   suns: true,
   sound: true,
+  flares: true,
   v: SETTINGS_VERSION,
 }
 
@@ -273,6 +276,15 @@ function saveJson(key: string, value: unknown): void {
     localStorage.setItem(key, JSON.stringify(value))
   } catch {
     /* private mode etc. */
+  }
+}
+
+/** Whether this computer asks for less motion (the setting is only read in a browser window; anywhere else it is no). */
+function prefersReducedMotion(): boolean {
+  try {
+    return typeof window !== 'undefined' && typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  } catch {
+    return false
   }
 }
 
@@ -305,6 +317,8 @@ function loadSettings(): Settings {
   s.starGalleries = s.starGalleries !== false
   s.suns = s.suns !== false
   s.sound = s.sound !== false
+  // Ejections are motion: a computer that asks for less of it starts without them (until the setting is changed by hand).
+  s.flares = stored?.flares === undefined && prefersReducedMotion() ? false : s.flares !== false
   if (stored && !(typeof stored.v === 'number' && stored.v >= SETTINGS_VERSION)) {
     s.layoutMode = 'system'
     s.v = SETTINGS_VERSION
@@ -637,6 +651,8 @@ export interface AetherState {
   toggleMotion(): void
   /** System layout: calm orbits on / off (⇧O). */
   toggleCalm(): void
+  /** Corona ejections from stars that need attention on / off (⇧F). */
+  toggleFlares(): void
   /**
    * Suns open into planets, then moons. The level of each sun the user opened or closed by hand (the rest are at `sunDefault`):
    * 0 closed, 1 its planets, 2 its planets and its moons.
@@ -1009,6 +1025,7 @@ export const useAether = create<AetherState>()((set, get) => {
   controller.motion = settings.motion
   controller.calm = settings.calm
   controller.suns = settings.suns
+  controller.flares = settings.flares
   controller.showThumbnails = settings.thumbnails
   controller.galleries = settings.starGalleries
   controller.pictureSize = settings.pictureSize
@@ -1208,6 +1225,16 @@ export const useAether = create<AetherState>()((set, get) => {
       refreshActivity()
     }, 250)
     activitySave ??= setTimeout(saveActivity, 3000)
+  }
+  // The window is going away (closed, or hidden): what was done in the last few seconds is saved now, not lost.
+  const flushActivity = () => {
+    if (!activitySave) return
+    clearTimeout(activitySave)
+    saveActivity()
+  }
+  if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+    window.addEventListener('pagehide', flushActivity)
+    if (typeof document !== 'undefined') document.addEventListener?.('visibilitychange', () => document.visibilityState === 'hidden' && flushActivity())
   }
 
   const setLoaded = (notes: Map<NoteId, ParsedNote>, graph: GraphData, folders: Set<string>, assets: Map<string, VaultAsset>) => {
@@ -2607,6 +2634,7 @@ export const useAether = create<AetherState>()((set, get) => {
       controller.setMotion(next.motion)
       controller.setCalm(next.calm)
       controller.setSuns(next.suns)
+      controller.setFlares(next.flares)
       controller.showThumbnails = next.thumbnails
       controller.galleries = next.starGalleries
       controller.pictureSize = next.pictureSize
@@ -2728,6 +2756,11 @@ export const useAether = create<AetherState>()((set, get) => {
       get().setSunLevel(id, level)
       get().select(id, { fly: true })
       if (get().settings.sound) playSun(level, 0)
+    },
+    toggleFlares() {
+      const flares = !get().settings.flares
+      get().setSettings({ flares })
+      get().toast(flares ? 'Solar flares on: a star that needs attention throws plasma, the more urgent the bigger' : 'Solar flares off')
     },
     toggleSound() {
       const sound = !get().settings.sound

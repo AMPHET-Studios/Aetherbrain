@@ -307,6 +307,15 @@ export const COMMANDS: Command[] = [
     run: (s) => s.toggleSuns(),
   },
   {
+    id: 'flares',
+    title: 'Solar flares: a star that needs attention throws plasma on / off',
+    hint: 'the more urgent its whole system, the more often and the bigger: a due star throws loops, an overdue one huge ejections (calm mode keeps to loops)',
+    keys: 'Shift+F',
+    group: 'view',
+    when: (s) => s.settings.layoutMode === 'system',
+    run: (s) => s.toggleFlares(),
+  },
+  {
     id: 'sound',
     title: 'Sound: a note for every click on / off',
     hint: 'a note for each star, planet and moon you click, a run when a sun opens',

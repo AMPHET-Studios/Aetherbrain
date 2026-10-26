@@ -193,7 +193,13 @@ export function handleKey(e: KeyboardEvent): void {
       // Import AI chats: the system file dialog (the key press is the gesture it needs).
       if (s.adapter && !s.adapter.readOnly) importChatsFromDialog()
       return
+    case 'F':
     case 'f':
+      // Shift+F: corona ejections on / off. f: fly to the selection. Shift decides, as for Shift+G.
+      if (e.shiftKey) {
+        s.toggleFlares()
+        return
+      }
       if (s.selectedId) s.controller.flyTo(s.selectedId)
       return
     case 'Home':
