@@ -238,3 +238,11 @@ export async function resizeImage(source: Blob, size: number): Promise<Blob | nu
     bitmap.close()
   }
 }
+
+/** Why a galaxy mark does not count, in words: the folder inspector shows it and the toast after marking says it (docs/COSMOLOGY.md, "A galaxy is a folder you mark"). */
+export const IGNORED_MARK_TEXT = {
+  drive: 'This is a drive, or the vault itself: it is a galaxy already, so the galaxy mark does nothing here.',
+  depth:
+    'This folder is marked as a galaxy, but the mark does not count: galaxies nest three levels deep at most, the vault (or a drive) being the first. It stays a star. To use this mark, make a galaxy above it a star again, or move it up.',
+  count: 'This folder is marked as a galaxy, but the mark does not count: a vault shows at most 64 galaxies, the shallowest first. It stays a star.',
+} as const satisfies Record<'drive' | 'depth' | 'count', string>

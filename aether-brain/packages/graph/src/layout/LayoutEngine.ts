@@ -4,6 +4,8 @@ import { AREA_INDEX, nodeRadius, type PictureSize } from '../theme'
 
 const KIND_CODE: Record<NodeKind, LayoutKind> = { note: 0, ghost: 1, folder: 2, today: 3, image: 4 }
 const ROLE_CODE: Record<FolderRole, LayoutRole> = { root: 0, mount: 1, project: 2, folder: 3 }
+/** A project folder marked as a galaxy (`FolderNodeInfo.galaxyLevel`): a flat disc of its own. */
+const GALAXY_ROLE: LayoutRole = 4
 
 export type TickListener = (engine: LayoutEngine) => void
 
@@ -119,7 +121,7 @@ export class LayoutEngine {
       radius: nodeRadius(n, this.pictureSize),
       parent: n.parent === null ? -1 : (graph.index.get(n.parent) ?? -1),
       kind: KIND_CODE[n.kind] ?? 0,
-      role: n.folder ? (ROLE_CODE[n.folder.role] ?? 3) : -1,
+      role: n.folder ? (n.folder.galaxyLevel !== undefined ? GALAXY_ROLE : (ROLE_CODE[n.folder.role] ?? 3)) : -1,
       urgency: n.urgency ?? 0,
       planet: isPlanetNode(n),
     }))

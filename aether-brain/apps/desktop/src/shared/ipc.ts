@@ -81,8 +81,10 @@ export interface ForgeFrameDto {
 export type CompanionKind = 'sun' | 'star' | 'planet' | 'moon' | 'ghost' | 'picture' | 'today'
 
 /**
- * What a node is in the cosmology (docs/COSMOLOGY.md): a drive or a one-folder vault is a 'galaxy', the origin of
- * several drives only an 'origin', every folder a 'star', a big picture, video, model or long note a 'planet', every
+ * What a node is in the cosmology (docs/COSMOLOGY.md): a drive, a one-folder vault or a folder marked as a galaxy
+ * is a 'galaxy' (its `kind` stays a project star's: 'star'; a 'galaxy' body hangs only from another galaxy, the origin
+ * or nothing), the origin of several drives only an 'origin', every other folder a 'star', a big picture, video, model
+ * or long note a 'planet', every
  * small file a 'moon'; 'ghost' and 'hub' (the Today hub) as before.
  */
 export type CompanionBody = 'galaxy' | 'origin' | 'star' | 'planet' | 'moon' | 'ghost' | 'hub'

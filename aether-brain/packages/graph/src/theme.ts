@@ -1,4 +1,4 @@
-import { isPlanetNode, type Area, type GraphNode, type NoteType } from '@aether/core'
+import { isPlanetNode, type Area, type FolderNodeInfo, type GraphNode, type NoteType } from '@aether/core'
 import { Color } from 'three'
 
 /** Cosmic palette. Keep in sync with packages/ui/src/styles.css tokens. */
@@ -157,7 +157,8 @@ export function nodeBaseColor(
   if (n.folder) {
     const role = n.folder.role
     if (n.folder.bio) return cachedColor(BIO_STAR_COLOR)
-    if (role === 'root' || role === 'mount') return cachedColor(SUN_COLOR)
+    // A drive, the vault and a folder marked as a galaxy are the same cream: the galaxies everything orbits.
+    if (role === 'root' || role === 'mount' || n.folder.galaxyLevel !== undefined) return cachedColor(SUN_COLOR)
     if (role === 'project') return cachedColor(STAR_COLOR)
     return cachedColor(starColor(n.folder.path))
   }
@@ -195,6 +196,36 @@ export function isPictureSize(v: unknown): v is PictureSize {
 /** A small picture's radius (an icon, a sprite): it is a moon, not a planet. */
 export const MOON_PICTURE_RADIUS = 1.0
 
+/** A star with nothing in it, and the biggest a plain star gets: the ceiling every other body is measured against (the Bio star, a board sun, a drive). */
+export const STAR_MIN_RADIUS = 3.4
+export const STAR_MAX_RADIUS = 8
+/** A folder you marked as a galaxy: a little smaller than a drive's 16 when empty, nearly as big when full, and always bigger than any star. */
+export const GALAXY_MIN_RADIUS = 12
+export const GALAXY_MAX_RADIUS = 15
+/** How much a folder holds (`FolderNodeInfo.weight`, in note-equivalents) when its size stops growing. */
+export const FULL_WEIGHT = 50_000
+/** Below 1 so that the first notes still make a visible difference while the big folders keep telling apart: 100, 1,000 and 10,000 are three sizes. */
+const FULLNESS_CURVE = 0.75
+
+/**
+ * The size follows log2 of what a folder holds in steps of 1/8 of a doubling: a few more words in a note (a thousandth of a note's
+ * worth each) no longer move the star at all, and only a change of about 9% does. That keeps the layout from rippling, and the scene
+ * a viewer is sent from changing, with every keystroke.
+ */
+const FULLNESS_STEPS = 8
+
+/** How full a folder is, from 0 (nothing in it) to 1 (`FULL_WEIGHT` or more): the curve a star's size follows. Finite for any input. */
+export function fullness(weight: number): number {
+  const w = Number.isFinite(weight) && weight > 0 ? weight : 0
+  const doublings = Math.round(Math.log2(1 + w) * FULLNESS_STEPS) / FULLNESS_STEPS
+  return Math.min(1, (doublings / Math.log2(1 + FULL_WEIGHT)) ** FULLNESS_CURVE)
+}
+
+/** What a folder holds: the number the brain measured, or for a folder made by hand its notes, folders and a quarter per picture. */
+function weightOf(f: FolderNodeInfo): number {
+  return f.weight ?? f.totalNotes + f.childFolders + 0.25 * f.images
+}
+
 /**
  * Visual radius in world units (docs/COSMOLOGY.md). Galaxies (drives, a one-folder vault) are the biggest bodies; the
  * origin of a multi-root vault is small. Stars grow with what they hold, a project a little more. A planet is
@@ -212,10 +243,11 @@ export function nodeRadius(n: GraphNode, pictures: PictureSize = 'medium'): numb
     const f = n.folder
     if (f.role === 'mount') return 16
     if (f.role === 'root') return f.galaxy ? 16 : 6
-    const held = Math.log2(1 + f.totalNotes + f.childFolders + 0.25 * f.images)
+    // A folder you marked as a galaxy: 12 to 15 by what it holds, bigger than any star, smaller than a drive.
+    if (f.galaxyLevel !== undefined) return GALAXY_MIN_RADIUS + (GALAXY_MAX_RADIUS - GALAXY_MIN_RADIUS) * fullness(weightOf(f))
     // The Bio star is the biggest star there is: 9.5 even when empty (a project star tops out at 9.2), a little more for each doubling of what it holds, at most 11.
-    if (f.bio) return Math.min(11, 9.5 + 0.3 * held)
-    const star = Math.min(8, 3.4 + 0.6 * held)
+    if (f.bio) return Math.min(11, 9.5 + 0.3 * Math.log2(1 + f.totalNotes + f.childFolders + 0.25 * f.images))
+    const star = STAR_MIN_RADIUS + (STAR_MAX_RADIUS - STAR_MIN_RADIUS) * fullness(weightOf(f))
     return f.role === 'project' ? star + 1.2 : star
   }
   if (n.ghost) return 0.7

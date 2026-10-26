@@ -30,11 +30,14 @@ export function isPlanetNode(n: GraphNode): boolean {
   return false
 }
 
-/** True for a folder node that is a galaxy: a drive, or the vault root of a single-root vault. */
+/**
+ * True for a folder node that is a galaxy: a drive, the vault root of a single-root vault, or a project folder the user marked as one
+ * (`galaxyLevel`: the mark counts).
+ */
 export function isGalaxyNode(n: GraphNode): boolean {
   const f = n.folder
   if (!f) return false
-  return f.role === 'mount' || (f.role === 'root' && f.galaxy === true)
+  return f.role === 'mount' || (f.role === 'root' && f.galaxy === true) || f.galaxyLevel !== undefined
 }
 
 /** The kinds of body the legend names, and lets you light up (docs/COSMOLOGY.md). */
@@ -73,9 +76,12 @@ export function isSunNode(n: GraphNode): boolean {
   return (n.folder !== undefined && n.folder.placeholder !== true) || n.board !== undefined
 }
 
-/** True for a drive and for the vault's root: the galaxies, which are always shown and open on their own. */
+/**
+ * True for a drive, the vault's root (the origin of several drives too) and a folder marked as a galaxy: the galaxies, which are always
+ * shown and open on their own. A galaxy sits on the galaxy above it, so the folders directly under one are stars on its disc.
+ */
 function isGalaxyRole(n: GraphNode | undefined): boolean {
-  return n?.folder?.role === 'root' || n?.folder?.role === 'mount'
+  return n?.folder?.role === 'root' || n?.folder?.role === 'mount' || n?.folder?.galaxyLevel !== undefined
 }
 
 /**

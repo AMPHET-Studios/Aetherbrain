@@ -151,6 +151,22 @@ export type NodeKind = 'note' | 'ghost' | 'folder' | 'image' | 'today'
  */
 export type FolderRole = 'root' | 'mount' | 'project' | 'folder'
 
+/**
+ * What a folder holds, everything under it (the folders inside it included), as the brain knows it without looking at the disk:
+ * the notes and their words, and the pictures, videos and 3D models it has listed. A folder that a galaxy took out of it (see
+ * `FolderNodeInfo.galaxyLevel`) no longer counts what that galaxy holds.
+ */
+export interface FolderData {
+  notes: number
+  words: number
+  pictures: number
+  videos: number
+  models: number
+}
+
+/** Why a galaxy mark does not count (docs/COSMOLOGY.md, "A galaxy is a folder you mark"). */
+export type GalaxyMarkIgnored = 'drive' | 'depth' | 'count'
+
 export interface FolderNodeInfo {
   /** Vault path of the folder ('' = vault root). */
   path: string
@@ -159,6 +175,21 @@ export interface FolderNodeInfo {
   depth: number
   /** True for the vault root of a single-root vault: a galaxy itself (a multi-root vault's root is only the origin). */
   galaxy?: boolean
+  /**
+   * Set on a project folder the user marked as a galaxy (`scale: galaxy` on its project note) when the mark counts: how deep it nests,
+   * counting the vault (or a drive) as level 1, so 2 or 3. It is a galaxy of its own: its sub-folders lie on its disc, and its
+   * `GraphNode.parent` is the galaxy it sits on, not the folder above it.
+   */
+  galaxyLevel?: number
+  /** Set on a project folder marked as a galaxy whose mark does not count, and why: it stays an ordinary star. */
+  markIgnored?: GalaxyMarkIgnored
+  /** What the folder holds, for the inspector (see `FolderData`). Absent on a node made by hand. */
+  data?: FolderData
+  /**
+   * How much the folder holds in note-equivalents (`dataWeight`): the one number a star's size grows with. Absent on a node made by
+   * hand (the size then comes from its counts).
+   */
+  weight?: number
   /** True for the Bio star: the folder `Bio` at the vault's home (`FolderGraphOptions.bio`), drawn as the one big, bright, blue star. */
   bio?: boolean
   /**
@@ -264,7 +295,9 @@ export interface GraphNode {
    * Structural parent for the system layout: a folder node id (or, for a
    * ghost, the first note that links to it; for a picture on a reference
    * board, that board). null for the vault root and for every node when the
-   * graph was built without folders.
+   * graph was built without folders. A folder marked as a galaxy that counts
+   * (`folder.galaxyLevel`) is the exception: its parent is the galaxy it sits
+   * on (the vault, a drive or another galaxy), not the folder it is in.
    */
   parent: NoteId | null
   /** Present on folder nodes only. */

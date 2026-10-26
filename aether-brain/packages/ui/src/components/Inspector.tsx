@@ -16,13 +16,14 @@ import {
   isVideoPath,
   type BriefTask,
   type DailyBrief,
+  type FolderData,
   type GraphNode,
   type NoteId,
 } from '@aether/core'
 import { AREA_LABELS, BIO_STAR_LABEL_COLOR, IMAGE_COLOR, STAR_COLOR, SUN_COLOR, TODAY_COLOR, starColor } from '@aether/graph'
 import { listBoards } from '../board/boardRegistry'
-import { picturesUnder, useAether } from '../store'
-import { cx, plural, relativeTime, truncate, MOD } from '../util'
+import { galaxiesIn, picturesUnder, useAether } from '../store'
+import { IGNORED_MARK_TEXT, cx, plural, relativeTime, truncate, MOD } from '../util'
 import { copyEmbed, formatBytes, importPicturesFromDialog, usePreview } from './pictures'
 
 /**
@@ -274,6 +275,18 @@ export function linkRow(
 
 const ROLE_LABEL = { root: 'Vault', mount: 'Galaxy · drive', project: '★ Project star', folder: 'Star · folder' } as const
 
+/** What a folder holds, in words: the parts that are there, notes first. Empty when it holds nothing the brain counted. */
+function holdsText(d: FolderData | undefined): string {
+  if (!d) return ''
+  const parts: string[] = []
+  if (d.notes > 0) parts.push(plural(d.notes, 'note'))
+  if (d.words >= 1000) parts.push(`${d.words >= 100_000 ? `${Math.round(d.words / 1000)}k` : `${(d.words / 1000).toFixed(1).replace(/\.0$/, '')}k`} words`)
+  if (d.pictures > 0) parts.push(plural(d.pictures, 'picture'))
+  if (d.videos > 0) parts.push(plural(d.videos, 'video'))
+  if (d.models > 0) parts.push(plural(d.models, '3D model'))
+  return parts.join(' · ')
+}
+
 /**
  * Inspector for a folder node of the system layout: where it is, what is in
  * it (planets with their note counts, moons), and folder actions — a note or
@@ -292,6 +305,7 @@ function FolderInspector({ node }: { node: GraphNode }) {
   const createFolder = useAether((s) => s.createFolder)
   const createNote = useAether((s) => s.createNote)
   const makeProject = useAether((s) => s.makeProject)
+  const setFolderScale = useAether((s) => s.setFolderScale)
   const makeBio = useAether((s) => s.makeBio)
   const selectProject = useAether((s) => s.selectProject)
   const setView = useAether((s) => s.setView)
@@ -301,7 +315,9 @@ function FolderInspector({ node }: { node: GraphNode }) {
   const toggleGallery = useAether((s) => s.toggleGallery)
   /** A star: its pictures (subfolders included) and whether its gallery is open. */
   const assets = useAether((s) => s.assets)
-  const starPictures = useMemo(() => (info.role === 'project' ? picturesUnder(assets, info.path) : 0), [assets, info.role, info.path])
+  // The galaxies inside it take their pictures with them: the gallery (and this count) is the star's own.
+  const leavesKey = useMemo(() => galaxiesIn(graph, info.path).join('|'), [graph, info.path])
+  const starPictures = useMemo(() => (info.role === 'project' ? picturesUnder(assets, info.path, leavesKey ? leavesKey.split('|') : []) : 0), [assets, info.role, info.path, leavesKey])
   const galleryOpen = graph?.gallery?.star === node.id
   /** The Bio star: how many of its pages the vault lacks (the card adds them on a click). */
   const bioMissing = useMemo(() => (info.bio ? bioStatus(info.path, notes.keys()).missing.length : 0), [info.bio, info.path, notes])
@@ -315,8 +331,10 @@ function FolderInspector({ node }: { node: GraphNode }) {
     const moons: GraphNode[] = []
     const pictures: GraphNode[] = []
     for (const n of graph?.nodes ?? []) {
+      // A galaxy that left this folder for the galaxy above it is still one of its folders on disk: it is listed here too (a click flies to it).
+      const left = n.parent !== node.id && n.folder?.galaxyLevel !== undefined && folderOf(n.folder.path) === info.path
       // Cards of an open star gallery belong to the gallery, not to the folder's own moons.
-      if (n.parent !== node.id || n.image?.gallery?.only) continue
+      if ((n.parent !== node.id && !left) || n.image?.gallery?.only) continue
       if (n.kind === 'folder') planets.push(n)
       else if (n.kind === 'note') moons.push(n)
       else if (n.kind === 'image') pictures.push(n)
@@ -326,7 +344,7 @@ function FolderInspector({ node }: { node: GraphNode }) {
     // Newest first, like the moons the graph picks.
     pictures.sort((a, b) => (b.image?.mtime ?? 0) - (a.image?.mtime ?? 0) || a.title.localeCompare(b.title))
     return { planets, moons, pictures }
-  }, [graph, node.id])
+  }, [graph, node.id, info.path])
 
   const readOnly = !adapter || adapter.readOnly
   /** The Bio star before its folder exists: nothing on disk yet, so nothing to reveal, leave out or add to. */
@@ -350,8 +368,22 @@ function FolderInspector({ node }: { node: GraphNode }) {
     setName('')
     setAsked((n) => n + 1)
   }, [formRequest, readOnly, onDisk, canMkdir])
-  const role = info.bio ? (dormant ? '✚ Bio star · not made yet' : '✚ Bio star') : info.role === 'folder' && info.inProject ? 'Planet of a project' : ROLE_LABEL[info.role]
-  const color = info.bio ? BIO_STAR_LABEL_COLOR : info.role === 'project' ? STAR_COLOR : info.role === 'folder' ? starColor(info.path) : SUN_COLOR
+  const isMarkedGalaxy = info.galaxyLevel !== undefined
+  const role = info.bio
+    ? dormant
+      ? '✚ Bio star · not made yet'
+      : '✚ Bio star'
+    : isMarkedGalaxy
+      ? `✦ Galaxy · level ${info.galaxyLevel}`
+      : info.role === 'folder' && info.inProject
+        ? 'Planet of a project'
+        : ROLE_LABEL[info.role]
+  const color = info.bio ? BIO_STAR_LABEL_COLOR : isMarkedGalaxy ? SUN_COLOR : info.role === 'project' ? STAR_COLOR : info.role === 'folder' ? starColor(info.path) : SUN_COLOR
+  /** The galaxy it sits on (a marked galaxy hangs from the galaxy above it, not from the folder it is in). */
+  const sitsOn = isMarkedGalaxy && node.parent ? graph?.nodes[graph.index.get(node.parent) ?? -1] : undefined
+  /** A folder a mark can go on or come off: not a drive, the vault, the Bio star or a folder that does not exist yet. */
+  const canMark = !readOnly && onDisk && !info.bio && (info.role === 'folder' || info.role === 'project')
+  const holds = holdsText(info.data)
   const projectNote = info.projectId ? notes.get(info.projectId) : undefined
   const where = info.role === 'root' ? (adapter?.location ?? '') : dormant ? `${info.path}/ · not on disk yet` : `${info.path}/`
 
@@ -398,6 +430,22 @@ function FolderInspector({ node }: { node: GraphNode }) {
                 🖼 {plural(info.images, 'picture')} · {info.shownImages} shown
               </JumpStat>
             )}
+          </div>
+        )}
+        {!dormant && holds && !info.bio && (
+          <div className="mt-1 text-[11.5px] text-dim" title="Everything under this folder that the brain has counted, the folders inside it included. A star is drawn bigger the more it holds.">
+            holds {holds}
+          </div>
+        )}
+        {isMarkedGalaxy && (
+          <div className="mt-3 rounded-lg border border-[rgba(255,241,214,0.35)] bg-[rgba(255,241,214,0.06)] p-2.5 text-[11.5px] leading-snug" aria-label="About this galaxy">
+            <div className="text-ink">A galaxy: its folders lie on its disc as stars{sitsOn ? `, and it sits on ${sitsOn.title}` : ''}.</div>
+            <div className="mt-1 text-faint">It is a project too. The mark is the line <code>scale: galaxy</code> in its project note; take it away and it is a star again.</div>
+          </div>
+        )}
+        {info.markIgnored && (
+          <div className="mt-3 rounded-lg border border-[rgba(255,180,84,0.4)] bg-[rgba(255,180,84,0.08)] p-2.5 text-[11.5px] leading-snug" aria-label="This galaxy mark does not count">
+            <div className="text-ink">{IGNORED_MARK_TEXT[info.markIgnored]}</div>
           </div>
         )}
         {info.bio && (
@@ -457,6 +505,21 @@ function FolderInspector({ node }: { node: GraphNode }) {
                 ★ Make project
               </button>
             )
+          )}
+          {canMark && !isMarkedGalaxy && !info.markIgnored && (
+            <button
+              type="button"
+              className="hud-btn"
+              onClick={() => void setFolderScale(info.path, 'galaxy')}
+              title={`A galaxy: ${node.title} gets a disc of its own and its folders lie on it as stars. Adds \`scale: galaxy\` to its project note${info.projectId ? '' : ' (and makes it a project)'}`}
+            >
+              ✦ Make galaxy
+            </button>
+          )}
+          {canMark && info.role === 'project' && (isMarkedGalaxy || info.markIgnored) && (
+            <button type="button" className="hud-btn" onClick={() => void setFolderScale(info.path, 'star')} title="Takes `scale: galaxy` out of its project note: the folder is a project star again">
+              ★ Make star again
+            </button>
           )}
           {adapter?.reveal && onDisk && (
             <button type="button" className="hud-btn" onClick={() => void reveal(info.path)} title="Show in the file manager">
@@ -522,7 +585,10 @@ function FolderInspector({ node }: { node: GraphNode }) {
           <Section title={`Planets · ${children.planets.length}`} anchor="planets">
             {children.planets.map((p) => (
               <div key={p.id} className="flex items-center gap-2 py-0.5">
-                <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: p.folder?.role === 'project' ? STAR_COLOR : starColor(p.folder?.path ?? '') }} />
+                <span
+                  className="h-1.5 w-1.5 shrink-0 rounded-full"
+                  style={{ background: p.folder?.galaxyLevel !== undefined ? SUN_COLOR : p.folder?.role === 'project' ? STAR_COLOR : starColor(p.folder?.path ?? '') }}
+                />
                 <button
                   type="button"
                   className="min-w-0 flex-1 truncate text-left text-[12.5px] text-dim hover:text-ink"
@@ -530,7 +596,7 @@ function FolderInspector({ node }: { node: GraphNode }) {
                   onDoubleClick={() => openNote(p.id, { fly: true })}
                   title="Click: select · double-click: expand"
                 >
-                  {p.folder?.role === 'project' ? '★ ' : ''}
+                  {p.folder?.galaxyLevel !== undefined ? '✦ ' : p.folder?.role === 'project' ? '★ ' : ''}
                   {p.title}
                 </button>
                 <span className="shrink-0 text-[10.5px] tabular-nums text-faint">

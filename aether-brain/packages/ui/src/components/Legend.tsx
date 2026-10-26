@@ -82,7 +82,7 @@ export function Legend() {
           )}
           {system && (
             <>
-              <KindChip kind="galaxy" title="A drive (or the whole vault): the folders on it lie on its disc">
+              <KindChip kind="galaxy" title="A drive (or the whole vault), or a folder you marked as a galaxy (✦): the folders on it lie on its disc">
                 <span style={{ color: SUN_COLOR, textShadow: `0 0 8px ${SUN_COLOR}` }}>◉</span> galaxy · drive
               </KindChip>
               <KindChip kind="star" title="A folder. The brighter the star, the more urgent its whole system; a project is the biggest">

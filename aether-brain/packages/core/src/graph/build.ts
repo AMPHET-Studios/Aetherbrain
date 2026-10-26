@@ -1,8 +1,8 @@
-import type { Area, FolderRole, FolderSelection, GalleryInfo, GraphData, GraphEdge, GraphNode, ImageNodeInfo, Link, NoteId, ParsedNote, VaultAsset } from '../types'
+import type { Area, FolderData, FolderRole, FolderSelection, GalleryInfo, GraphData, GraphEdge, GraphNode, ImageNodeInfo, Link, NoteId, ParsedNote, VaultAsset } from '../types'
 import { LinkResolver } from './resolve'
-import { asString } from '../markdown/frontmatter'
+import { EMPTY_FOLDER_DATA, dataWeight, galaxiesInside, galaxyChildren, planGalaxies, scaleOf, shedGalaxies, underAny } from './galaxies'
 import type { DailyBrief } from '../markdown/brief'
-import { isProjectNote, projectFolderOf } from '../markdown/projects'
+import { bindProjects } from '../markdown/projects'
 import { noteUrgency, systemUrgency } from '../markdown/urgency'
 import { AssetResolver, TODAY_ID, imageKey, imageTitle, isAssetPath, isImageId, isModelPath, isVideoPath } from '../vault/assets'
 import { folderUniverse, selectFolders, type FolderSelectOptions } from '../vault/folders'
@@ -470,6 +470,40 @@ interface FolderImageOptions {
   outlinks: Map<NoteId, Set<NoteId>>
 }
 
+/** Pictures, videos and 3D models under each folder (the folders inside it included), per asset map: one pass over the assets, kept like the folder universe. */
+const mediaRollCache = new WeakMap<Map<string, VaultAsset>, Map<string, { pictures: number; videos: number; models: number }>>()
+
+function mediaRoll(assets: Map<string, VaultAsset>): Map<string, { pictures: number; videos: number; models: number }> {
+  let out = mediaRollCache.get(assets)
+  if (out) return out
+  out = new Map()
+  // The assets are already grouped by folder for the moons (`imagesByFolder`, kept for the same list): count each folder's own once,
+  // then add it to the folders above, so the walk up is once per folder and not once per asset.
+  for (const [folder, list] of imagesByFolder(assets)) {
+    let pictures = 0
+    let videos = 0
+    let models = 0
+    for (const path of list) {
+      if (isVideoPath(path)) videos++
+      else if (isModelPath(path)) models++
+      else pictures++
+    }
+    // The keys are folder paths already (`imagesByFolder`), so the way up is a slice, not a normalising `folderOf` per step.
+    for (let cur = folder; ; ) {
+      let t = out.get(cur)
+      if (!t) out.set(cur, (t = { pictures: 0, videos: 0, models: 0 }))
+      t.pictures += pictures
+      t.videos += videos
+      t.models += models
+      if (cur === '') break
+      const slash = cur.lastIndexOf('/')
+      cur = slash < 0 ? '' : cur.slice(0, slash)
+    }
+  }
+  mediaRollCache.set(assets, out)
+  return out
+}
+
 /** Pictures under `folder` (subfolders included), newest first (then by path), per asset map and folder. */
 const galleryCache = new WeakMap<Map<string, VaultAsset>, Map<string, string[]>>()
 
@@ -508,28 +542,19 @@ function addFolderSystem(
   // Bind project notes to their home folders. A folder takes one project:
   // an explicit `folder:` beats a folder note, which beats a sibling note;
   // ties go to the first id. Folders that don't exist yet are not drawn.
-  const candidates: { id: NoteId; folder: string; rank: number }[] = []
-  for (const id of ids) {
-    const n = notes.get(id)!
-    if (!isProjectNote(n)) continue
-    const folder = projectFolderOf(n, known)
-    if (!folder || !known.has(folder)) continue
-    const explicit = normalizeFolderPath(asString(n.frontmatter['folder']) ?? '') !== ''
-    candidates.push({ id, folder, rank: explicit ? 0 : folder === n.meta.folder ? 1 : 2 })
-  }
-  candidates.sort((a, b) => a.rank - b.rank)
-  const projectAt = new Map<string, NoteId>()
-  const homeOf = new Map<NoteId, string>()
-  for (const c of candidates) {
-    if (projectAt.has(c.folder)) continue
-    projectAt.set(c.folder, c.id)
-    homeOf.set(c.id, c.folder)
-  }
+  // (`bindProjects` is the one rule the store and the AI link use too.)
+  const { projectAt, homeOf } = bindProjects(notes, ids, known)
 
   // The Bio star: the asked-for folder when the vault has it. Never made up (a pinned folder that is not on disk would be drawn),
   // and a drive is never it.
   const bioAsked = opts.bio ? normalizeFolderPath(opts.bio) : ''
   const bio = bioAsked !== '' && known.has(bioAsked) && !(opts.multiRoot && folderDepth(bioAsked) === 1) ? bioAsked : null
+
+  // Galaxies: the project folders whose note says `scale: galaxy` (the Bio star is always a star). Which of them count is settled here,
+  // once, shallowest first (docs/COSMOLOGY.md, "A galaxy is a folder you mark").
+  const marked: string[] = []
+  for (const [folder, id] of projectAt) if (folder !== bio && scaleOf(notes.get(id)!.frontmatter) === 'galaxy') marked.push(folder)
+  const plan = planGalaxies(marked, !!opts.multiRoot)
 
   const selection = selectFolders(
     opts.all,
@@ -553,14 +578,35 @@ function addFolderSystem(
 
   const direct = new Map<string, number>()
   const total = new Map<string, number>()
+  const words = new Map<string, number>()
   for (const id of ids) {
-    const folder = notes.get(id)!.meta.folder
+    const meta = notes.get(id)!.meta
+    const folder = meta.folder
+    const wc = Number.isFinite(meta.wordCount) && meta.wordCount > 0 ? meta.wordCount : 0
     direct.set(folder, (direct.get(folder) ?? 0) + 1)
     for (let cur = folder; ; cur = folderOf(cur)) {
       total.set(cur, (total.get(cur) ?? 0) + 1)
+      if (wc > 0) words.set(cur, (words.get(cur) ?? 0) + wc)
       if (cur === '') break
     }
   }
+
+  // What each shown folder holds: its notes and words, and the pictures, videos and models listed under it. A galaxy takes what it holds
+  // out of the stars between it and the galaxy it sits on, so a star is not made big by a galaxy that has left it.
+  const media = img.images ? mediaRoll(img.images) : null
+  const rolled = new Map<string, FolderData>()
+  for (const path of visible) {
+    const m = media?.get(path)
+    rolled.set(path, {
+      notes: total.get(path) ?? 0,
+      words: words.get(path) ?? 0,
+      pictures: m?.pictures ?? 0,
+      videos: m?.videos ?? 0,
+      models: m?.models ?? 0,
+    })
+  }
+  const held = shedGalaxies(rolled, plan)
+  const leftHere = galaxyChildren(plan)
 
   // Parents of notes, ghosts and linked images.
   for (const node of nodes) {
@@ -621,7 +667,10 @@ function addFolderSystem(
   const isStar = gPath !== null && gPath !== '' && !(opts.multiRoot && folderDepth(gPath) === 1) && projectAt.has(gPath)
   if (isStar && img.images && visible.has(gPath)) {
     const star = folderKey(gPath)
-    const all = galleryImages(img.images, gPath)
+    // A galaxy inside the star takes its pictures with it (its cards could not float round a star that is no longer their parent).
+    const leaves = galaxiesInside(plan.galaxies.keys(), gPath)
+    const every = galleryImages(img.images, gPath)
+    const all = leaves.length ? every.filter((p) => !underAny(p, leaves)) : every
     let cards = 0
     let added = 0
     let videos = 0
@@ -655,6 +704,10 @@ function addFolderSystem(
           : path.slice(path.lastIndexOf('/') + 1)
     const area: Area = projectId ? 'projects' : (areaFromFolder(`${path}/x`) ?? 'untagged')
     const id = folderKey(path)
+    const galaxy = plan.galaxies.get(path)
+    const ignored = plan.ignored.get(path)
+    const childFolders = selection.childCount.get(path) ?? 0
+    const data = held.get(path) ?? EMPTY_FOLDER_DATA
     index.set(id, nodes.length)
     nodes.push({
       id,
@@ -664,16 +717,22 @@ function addFolderSystem(
       tags: [],
       kind: 'folder',
       ghost: false,
-      parent: path === '' ? null : folderKey(nearestVisible(folderOf(path))),
+      // A galaxy sits on the galaxy above it, however many plain folders lie between (they stay stars); everything else orbits its folder.
+      parent: path === '' ? null : folderKey(galaxy ? galaxy.onto : nearestVisible(folderOf(path))),
       folder: {
         path,
         role,
         depth,
         ...(role === 'root' && !opts.multiRoot ? { galaxy: true } : {}),
+        ...(galaxy ? { galaxyLevel: galaxy.level } : {}),
+        ...(ignored && projectId ? { markIgnored: ignored } : {}),
         ...(bio !== null && path === bio ? { bio: true } : {}),
         projectId,
         inProject: ancestorsOf(path).some((a) => projectAt.has(a)),
-        childFolders: selection.childCount.get(path) ?? 0,
+        data: { ...data },
+        // A galaxy that left this folder is no longer one of its sub-folders for its size.
+        weight: dataWeight(data, childFolders - (leftHere.get(path) ?? 0)),
+        childFolders,
         hiddenFolders: selection.hidden.get(path) ?? 0,
         notes: direct.get(path) ?? 0,
         totalNotes: total.get(path) ?? 0,

@@ -321,6 +321,8 @@ const ROLE_ROOT = 0
 const ROLE_MOUNT = 1
 const ROLE_PROJECT = 2
 const ROLE_FOLDER = 3
+/** A project folder marked as a galaxy (`FolderNodeInfo.galaxyLevel`): drawn as a galaxy, like a drive, whatever its role says. */
+const ROLE_GALAXY = 4
 const ROLE_CODES = { root: ROLE_ROOT, mount: ROLE_MOUNT, project: ROLE_PROJECT, folder: ROLE_FOLDER } as const
 
 /** Segments of the unit circle every orbit ring is drawn from. */
@@ -517,12 +519,13 @@ function buildBuffers(graph: GraphData, pictures: PictureSize): Buffers {
     if (p >= 0) childStart[p + 1] = childStart[p + 1]! + 1
     const f = n.folder
     if (f) {
-      role[i] = ROLE_CODES[f.role] ?? ROLE_FOLDER
+      role[i] = f.galaxyLevel !== undefined ? ROLE_GALAXY : (ROLE_CODES[f.role] ?? ROLE_FOLDER)
       if (f.role !== 'folder') landmarks.push(i)
-      labelColors[i] = f.role === 'folder' ? starColor(f.path) : f.role === 'project' ? STAR_COLOR : SUN_COLOR
+      labelColors[i] = f.role === 'folder' ? starColor(f.path) : f.role === 'project' && f.galaxyLevel === undefined ? STAR_COLOR : SUN_COLOR
     }
     let label = n.ghost ? `+ ${n.title}` : n.title
-    if (f?.role === 'project') label = `★ ${label}`
+    // A project star is named ★; a folder marked as a galaxy, ✦ (it is still a project).
+    if (f?.role === 'project') label = f.galaxyLevel !== undefined ? `✦ ${label}` : `★ ${label}`
     if (f?.bio) {
       // The Bio star: always named, in its own blue.
       landmarks.push(i)

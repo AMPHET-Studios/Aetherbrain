@@ -40,6 +40,11 @@ export function selectedFolder(s: AetherState): string | null {
   return s.selectedId && isFolderId(s.selectedId) ? folderPathOf(s.selectedId) : null
 }
 
+/** What the graph knows of the selected folder (its role, galaxy mark, counts), or undefined when the selection is not a folder of the graph. */
+export function selectedFolderInfo(s: AetherState) {
+  return s.selectedId ? s.graph?.nodes[s.graph.index.get(s.selectedId) ?? -1]?.folder : undefined
+}
+
 /** Vault path of the selected picture, or null when the selection is not a picture. */
 export function selectedImage(s: AetherState): string | null {
   return s.selectedId && isImageId(s.selectedId) ? imagePathOf(s.selectedId) : null
@@ -343,6 +348,28 @@ export const COMMANDS: Command[] = [
       return !!f && writable(s) && info?.role === 'folder'
     },
     run: (s) => s.makeProject(selectedFolder(s)!),
+  },
+  {
+    id: 'folder-galaxy',
+    title: 'Make the selected folder a galaxy',
+    hint: 'a disc of its own, its sub-folders lie on it as stars',
+    group: 'note',
+    when: (s) => {
+      const info = selectedFolderInfo(s)
+      // Any folder or project star but a drive, the vault, the Bio star and a galaxy it already is (a mark that is ignored can be taken back below).
+      return !!info && !!selectedFolder(s) && writable(s) && (info.role === 'folder' || info.role === 'project') && !info.bio && !info.placeholder && info.galaxyLevel === undefined && info.markIgnored === undefined
+    },
+    run: (s) => s.setFolderScale(selectedFolder(s)!, 'galaxy'),
+  },
+  {
+    id: 'folder-galaxy-off',
+    title: 'Make the selected galaxy a star again',
+    group: 'note',
+    when: (s) => {
+      const info = selectedFolderInfo(s)
+      return !!info && !!selectedFolder(s) && writable(s) && info.role === 'project' && (info.galaxyLevel !== undefined || info.markIgnored !== undefined)
+    },
+    run: (s) => s.setFolderScale(selectedFolder(s)!, 'star'),
   },
   {
     id: 'folder-board',

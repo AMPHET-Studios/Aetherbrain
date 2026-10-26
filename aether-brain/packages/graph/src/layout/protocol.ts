@@ -16,8 +16,11 @@ export type LayoutMode = 'constellation' | 'orbit' | 'system'
  * by its beams) in the force layouts.
  */
 export type LayoutKind = 0 | 1 | 2 | 3 | 4
-/** Folder role codes: 0 root, 1 mount, 2 project, 3 folder; -1 for non-folders. */
-export type LayoutRole = -1 | 0 | 1 | 2 | 3
+/**
+ * Folder role codes: 0 root, 1 mount, 2 project, 3 folder, 4 a folder marked as a galaxy (a project folder; what orbits it lies on a
+ * flat disc, like a drive's); -1 for non-folders.
+ */
+export type LayoutRole = -1 | 0 | 1 | 2 | 3 | 4
 
 export interface LayoutNodeInput {
   id: string

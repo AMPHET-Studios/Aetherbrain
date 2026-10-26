@@ -227,7 +227,7 @@ function Hint() {
       {h && node?.kind === 'folder' ? (
         <span>
           <span className="text-ink">
-            {node.folder?.role === 'project' ? '★ ' : ''}
+            {node.folder?.galaxyLevel !== undefined ? '✦ ' : node.folder?.role === 'project' ? '★ ' : ''}
             {h}
           </span>{' '}
           · {node.folder?.totalNotes ?? 0} notes · click to open its planets · double-click to go deeper
