@@ -33,7 +33,7 @@ import {
   type VaultProgressDto,
 } from '../shared/ipc.js'
 import type { ChatPatch } from '../shared/chat.js'
-import { FsVault, isAssetName, isModelName, isVideoName, within } from './fsvault.js'
+import { FsVault, isAssetName, isModelName, isOpenableFileName, isVideoName, within } from './fsvault.js'
 import { VaultWatcher } from './watcher.js'
 import { findProjects } from './projects.js'
 import { FilePager, type FilePage } from './pages.js'
@@ -560,7 +560,7 @@ async function listAssets(): Promise<AssetListDto> {
   const v = requireVault()
   const scan = v.lastScan
   if (!scan) return { assets: [], truncated: false }
-  return { assets: await v.statAssets(scan.assets), truncated: scan.assetsTruncated }
+  return { assets: await v.statAssets(scan.assets), truncated: scan.assetsTruncated, files: await v.statAssets(scan.otherFiles ?? [], 1200) }
 }
 
 /**
@@ -675,7 +675,18 @@ async function openAsset(p: unknown): Promise<void> {
   const v = requireVault()
   const rel = String(p)
   const abs = (await v.assetAbs(rel)) ?? (await v.modelAbs(rel))
-  if (!abs) throw new Error(`Not a picture in the vault: ${rel}`)
+  if (!abs) {
+    // Any other file (an mp3, a pdf, a zip): opened only when it is a kind the OS opens safely, else shown in its folder.
+    const file = await v.fileAbs(rel)
+    if (!file) throw new Error(`Not a file in the vault: ${rel}`)
+    if (!isOpenableFileName(path.basename(file))) {
+      shell.showItemInFolder(file)
+      return
+    }
+    const failed = await shell.openPath(file)
+    if (failed) throw new Error(`Could not open ${rel}: ${failed}`)
+    return
+  }
   if (isVideoName(path.basename(abs)) && !videoKindOf(await readHead(abs, VIDEO_HEAD_BYTES))) throw new Error(`Not a video: ${rel}`)
   if (isModelName(path.basename(abs))) {
     const st = await fs.stat(abs)

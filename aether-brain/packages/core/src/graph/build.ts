@@ -5,6 +5,7 @@ import type { DailyBrief } from '../markdown/brief'
 import { bindProjects } from '../markdown/projects'
 import { noteUrgency, systemUrgency } from '../markdown/urgency'
 import { AssetResolver, TODAY_ID, imageKey, imageTitle, isAssetPath, isImageId, isModelPath, isVideoPath } from '../vault/assets'
+import { FILE_MOONS_PER_FOLDER, FILE_MOONS_TOTAL, fileKindOf, isFileMoonPath } from '../vault/files'
 import { folderUniverse, selectFolders, type FolderSelectOptions } from '../vault/folders'
 import { ancestorsOf, areaFromFolder, folderDepth, folderKey, folderOf, isFolderId, normalizeFolderPath } from '../vault/paths'
 
@@ -42,6 +43,15 @@ export interface ImageGraphOptions {
   maxPerFolder?: number
   /** Most image nodes in the graph, embedded ones first (default 1500). */
   maxTotal?: number
+  /**
+   * Every other file of the vault (an mp3, a pdf, a zip: `fileMap`), kept apart from the pictures so galleries, boards and the picture counts
+   * never see them. With folders + `moons`, each shown folder gets its newest as moons (a big one a planet). Omit: no file moons.
+   */
+  files?: Map<string, VaultAsset>
+  /** Most file moons per folder, newest first (default `FILE_MOONS_PER_FOLDER`). */
+  maxFilesPerFolder?: number
+  /** Most file moons in the whole sky (default `FILE_MOONS_TOTAL`). */
+  maxFiles?: number
   /**
    * With folders: the folder of a project star whose gallery is open. Every
    * picture under it (subfolders included, newest first) becomes a card of
@@ -248,6 +258,9 @@ export function buildGraph(notes: Map<NoteId, ParsedNote>, opts: BuildGraphOptio
         images: assets,
         moons: !!opts.images?.moons,
         maxPerFolder: opts.images?.maxPerFolder ?? 24,
+        files: opts.images?.files ?? null,
+        maxFilesPerFolder: Math.max(0, opts.images?.maxFilesPerFolder ?? FILE_MOONS_PER_FOLDER),
+        fileBudget: { left: Math.max(0, opts.images?.maxFiles ?? FILE_MOONS_TOTAL) },
         budget: imageBudget,
         gallery: opts.images?.gallery ?? null,
         maxGallery: Math.max(0, opts.images?.maxGallery ?? GALLERY_MAX),
@@ -345,6 +358,7 @@ function addImageNode(
   const image: ImageNodeInfo = { path, mtime, size: asset?.size ?? null, embeddedBy: 0 }
   if (isVideoPath(path)) image.video = true
   else if (isModelPath(path)) image.model = true
+  else if (!isAssetPath(path) && isFileMoonPath(path)) image.file = fileKindOf(path)
   const node: GraphNode = {
     id,
     title: imageTitle(path),
@@ -460,6 +474,10 @@ interface FolderImageOptions {
   /** Show the newest images of each shown folder as moons (else linked images only). */
   moons: boolean
   maxPerFolder: number
+  /** Every other file (null: none known), the most each folder shows, and how many the whole sky still may (apart from the pictures' budget). */
+  files: Map<string, VaultAsset> | null
+  maxFilesPerFolder: number
+  fileBudget: { left: number }
   /** Image nodes still allowed (shared with the linked images). */
   budget: { left: number }
   /** Folder of the project star whose gallery is open (null: none). */
@@ -656,6 +674,30 @@ function addFolderSystem(
       node.parent = folderKey(nearestVisible(folderOf(path)))
       const f = folderPathOfParent(node.parent)
       shown.set(f, (shown.get(f) ?? 0) + 1)
+    }
+  }
+
+  // File moons: the newest other files (an mp3, a pdf, a zip) of every shown folder, shallow folders first, under their own caps.
+  if (img.files && img.moons && img.fileBudget.left > 0 && img.maxFilesPerFolder > 0) {
+    const filesByDir = imagesByFolder(img.files)
+    const order = [...visible].sort((a, b) => folderDepth(a) - folderDepth(b) || (a < b ? -1 : a > b ? 1 : 0))
+    const picked: string[] = []
+    for (const f of order) {
+      if (img.fileBudget.left <= 0) break
+      const list = filesByDir.get(f)
+      if (!list) continue
+      let taken = 0
+      for (const path of list) {
+        if (taken >= img.maxFilesPerFolder || img.fileBudget.left <= 0) break
+        if (index.has(imageKey(path))) continue
+        picked.push(path)
+        taken++
+        img.fileBudget.left--
+      }
+    }
+    for (const path of picked.sort()) {
+      const node = addImageNode(nodes, index, img.backlinks, img.outlinks, path, img.files.get(path))
+      node.parent = folderKey(nearestVisible(folderOf(path)))
     }
   }
 

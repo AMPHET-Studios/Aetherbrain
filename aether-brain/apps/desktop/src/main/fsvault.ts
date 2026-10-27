@@ -92,6 +92,66 @@ export function isAssetName(name: string, platform: string = process.platform): 
   return (IMAGE_RE.test(name) || VIDEO_RE.test(name) || MODEL_RE.test(name)) && safeAssetName(name, platform)
 }
 
+/**
+ * Every other file (an mp3, a pdf, a zip, a script) is a possible moon (docs/COSMOLOGY.md, "Every file is a moon"). Main cannot import @aether/core at
+ * runtime, so the clutter lists are a copy of `FILE_JUNK_*` in core (a test keeps them equal): build output, caches, system files, no extension.
+ */
+export const FILE_JUNK_EXT: readonly string[] =
+  'map lock log tmp temp bak swp swo pyc pyo class o pdb ilk exp lib a so dylib dll sys cache lnk url crdownload part partial thumb'.split(' ')
+export const FILE_JUNK_NAME: readonly string[] = ['desktop.ini', 'thumbs.db', 'ehthumbs.db', '.ds_store']
+export const FILE_JUNK_DIR: readonly string[] = [
+  'dist',
+  'build',
+  'out',
+  'target',
+  'obj',
+  'bin',
+  '__pycache__',
+  'intermediate',
+  'binaries',
+  'saved',
+  'deriveddatacache',
+  'library',
+  'temp',
+  'tmp',
+  'cache',
+  'coverage',
+  'vendor',
+  'site-packages',
+]
+/**
+ * The extensions the OS may open for the user: the audio, document, archive, data and design kinds of `FILE_OPENABLE_KINDS` in core (a test keeps them
+ * equal). Anything else, code and unknown kinds above all, is only revealed in its folder: the OS runs a script or a program as readily as it opens a song.
+ */
+export const OPENABLE_FILE_EXT: readonly string[] = (
+  'mp3 wav flac ogg oga m4a aac opus wma aiff aif mid midi ' +
+  'pdf doc docx odt rtf txt epub ppt pptx odp key pages ' +
+  'zip rar 7z tar gz tgz bz2 xz iso ' +
+  'csv tsv json xml yaml yml xls xlsx ods sql db sqlite toml ini ' +
+  'psd psb ai xcf kra blend fbx obj stl dae gltf 3ds ma mb ztl spp sbsar ase aseprite ico'
+).split(' ')
+
+/** True when the OS may open a file of this name for the user (see OPENABLE_FILE_EXT). */
+export function isOpenableFileName(name: string): boolean {
+  const dot = name.lastIndexOf('.')
+  return dot > 0 && OPENABLE_FILE_EXT.includes(name.slice(dot + 1).toLowerCase())
+}
+
+/** The most other files the scan lists (names only, no stat): `FILE_SCAN_MAX` in core. */
+export const FILE_SCAN_MAX = 20_000
+
+/** True for a file that may be a moon: it has an extension, is not hidden or clutter, and sits in no build or cache folder. (A note, a picture, a video and a model are told apart before.) */
+export function isFileCandidate(vaultPath: string, platform: string = process.platform): boolean {
+  const parts = vaultPath.split('/')
+  const name = parts[parts.length - 1] ?? ''
+  if (name === '' || name.startsWith('.') || !safeAssetName(name, platform)) return false
+  const dot = name.lastIndexOf('.')
+  if (dot <= 0 || dot === name.length - 1) return false
+  if (FILE_JUNK_EXT.includes(name.slice(dot + 1).toLowerCase()) || FILE_JUNK_NAME.includes(name.toLowerCase())) return false
+  for (let i = 0; i < parts.length - 1; i++) if (FILE_JUNK_DIR.includes(parts[i]!.toLowerCase())) return false
+  return true
+}
+
 function safeAssetName(name: string, platform: string): boolean {
   if (name.startsWith('~$')) return false
   return platform !== 'win32' || (!name.includes(':') && !WIN_DEVICE.test(name))
@@ -118,6 +178,8 @@ export interface ScanResult {
   assets: { path: string; abs: string }[]
   /** True when more pictures were found than `maxAssets` (the list is partial). */
   assetsTruncated: boolean
+  /** Every other file that may be a moon (`isFileCandidate`), found by name only, at most `FILE_SCAN_MAX`, shallow folders first. */
+  otherFiles?: { path: string; abs: string }[]
   /** Folders this scan left out because they hold an installed game or program (see SkippedInstall). */
   installs: SkippedInstall[]
 }
@@ -528,6 +590,7 @@ export class FsVault {
   private async walk(roots: MountedRoot[], onProgress?: (p: ScanProgress) => void): Promise<ScanResult> {
     const files: ScanResult['files'] = []
     const assets: ScanResult['assets'] = []
+    const otherFiles: { path: string; abs: string }[] = []
     let assetsTruncated = false
     const folders: string[] = this.multi ? roots.map((r) => r.mount) : []
     const installs: SkippedInstall[] = []
@@ -580,7 +643,7 @@ export class FsVault {
           else if (isAssetName(e.name)) {
             if (assets.length < this.maxAssets) assets.push({ path: vault, abs })
             else assetsTruncated = true
-          }
+          } else if (otherFiles.length < FILE_SCAN_MAX && isFileCandidate(vault)) otherFiles.push({ path: vault, abs })
         }
       }
       if (onProgress && Date.now() - lastReport >= 120) {
@@ -589,7 +652,7 @@ export class FsVault {
       }
     }
     onProgress?.({ dirs, found: files.length })
-    return { files, folders, truncated, dirs, assets, assetsTruncated, installs }
+    return { files, folders, truncated, dirs, assets, assetsTruncated, otherFiles, installs }
   }
 
   /** Read scanned files with bounded concurrency (32); unreadable files are skipped. Keeps input order. */
@@ -722,6 +785,14 @@ export class FsVault {
    */
   async modelAbs(p: string): Promise<string | null> {
     return this.shownAbs(p, isModelName)
+  }
+
+  /**
+   * Absolute path of an other file (an mp3, a pdf: `isFileCandidate`) in the visible vault, with every check `assetAbs` makes. A separate door on
+   * purpose, and only ever used to open the file in the OS or reveal it: never to read it.
+   */
+  async fileAbs(p: string): Promise<string | null> {
+    return this.shownAbs(p, (name) => !isNoteName(name) && !isAssetName(name) && isFileCandidate(name))
   }
 
   private async shownAbs(p: string, isName: (name: string) => boolean): Promise<string | null> {

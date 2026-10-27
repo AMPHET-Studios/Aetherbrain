@@ -1113,7 +1113,9 @@ export const useAether = create<AetherState>()((set, get) => {
    * ones in every layout, moons only in the system layout, which alone has
    * folder nodes.
    */
-  const graphOptions: GraphOptionsFn = (folders, notes, assets) => {
+  /** Every other file worth a moon (an mp3, a pdf, a zip), as the last scan found them: not state, nothing shows them but the graph. */
+  let vaultFiles = new Map<string, VaultAsset>()
+  const graphOptions: GraphOptionsFn = (folders, notes, assets, files) => {
     const { settings, adapter, roots, expandedFolders, brief: shown } = get()
     const date = todayIso()
     const fresh = keepBrief && shown?.date === date ? shown : dailyBrief(notes.values(), { date, folders })
@@ -1122,7 +1124,7 @@ export const useAether = create<AetherState>()((set, get) => {
     builtBrief = brief
     const system = settings.layoutMode === 'system'
     const opts: BuildGraphOptions = {
-      images: { all: assets, moons: system && settings.imageMoons, gallery: system ? get().gallery : null },
+      images: { all: assets, moons: system && settings.imageMoons, files: files ?? vaultFiles, gallery: system ? get().gallery : null },
       // Orbit speed: how soon each thing needs you, from its open tasks. (A star's brightness is how much you use it: `computeActivity`.)
       urgency: { date },
     }
@@ -2273,6 +2275,7 @@ export const useAether = create<AetherState>()((set, get) => {
         // A video comes from the browser adapters as itself: the scene gets one still frame of it.
         controller.thumbnails = thumbnail ? (path, size) => stillFor(path, size, () => thumbnail(path, size)) : null
         set({ search, status: 'ready', loadProgress: null })
+        vaultFiles = loaded.files
         setLoaded(loaded.notes, loaded.graph, loaded.folders, loaded.assets)
         unwatch = adapter.watch((changes) => get().applyExternal(changes))
         // Too many changes arrived while a big vault loaded: some are lost, only a rescan catches up.

@@ -3,6 +3,7 @@ import { parseNote } from '../markdown/parse'
 import { buildGraph, type BuildGraphOptions } from '../graph/build'
 import { SearchIndex } from '../search/index'
 import { assetMap, isAssetPath } from './assets'
+import { fileMap } from './files'
 import { folderOf, idFromPath, isIgnoredPath, isMarkdownPath, normalizeFolderPath, normalizePath } from './paths'
 
 export interface LoadedVault {
@@ -13,6 +14,8 @@ export interface LoadedVault {
   folders: Set<string>
   /** Every image file (vault path → asset); empty when the adapter can't list them. */
   assets: Map<string, VaultAsset>
+  /** Every other file worth a moon (`fileMap`); empty when the adapter can't list them. */
+  files: Map<string, VaultAsset>
 }
 
 export interface LoadProgress {
@@ -25,7 +28,7 @@ export interface LoadProgress {
  * Graph options computed from the current folders, notes and images (e.g. the
  * system layout's folder options, image moons, the Today hub).
  */
-export type GraphOptionsFn = (folders: Set<string>, notes: Map<NoteId, ParsedNote>, assets: Map<string, VaultAsset>) => BuildGraphOptions
+export type GraphOptionsFn = (folders: Set<string>, notes: Map<NoteId, ParsedNote>, assets: Map<string, VaultAsset>, files?: Map<string, VaultAsset>) => BuildGraphOptions
 
 /** Add a folder and its ancestors to `folders` ('' and ignored paths are skipped). */
 function addFolder(folders: Set<string>, path: string): void {
@@ -74,6 +77,14 @@ export async function loadVault(
       console.warn('[aether] failed to list images', err)
     }
   }
+  let otherFiles = new Map<string, VaultAsset>()
+  if (adapter.listFiles) {
+    try {
+      otherFiles = fileMap(await adapter.listFiles())
+    } catch (err) {
+      console.warn('[aether] failed to list files', err)
+    }
+  }
   const notes = new Map<NoteId, ParsedNote>()
   const BATCH = 150
   // Yield every BATCH notes and also whenever 40 ms have gone by: a few long notes take seconds each, and 150 of them would be
@@ -100,9 +111,9 @@ export async function loadVault(
   await new Promise<void>((r) => setTimeout(r, 0))
   const folders = foldersOfNotes(notes.values())
   for (const f of listed ?? []) addFolder(folders, f)
-  const graph = buildGraph(notes, graphOptions?.(folders, notes, assets))
+  const graph = buildGraph(notes, graphOptions?.(folders, notes, assets, otherFiles))
   await search.rebuildAsync(notes.values())
-  return { notes, graph, search, folders, assets }
+  return { notes, graph, search, folders, assets, files: otherFiles }
 }
 
 /**
@@ -127,7 +138,7 @@ export function applyChanges(
   notes: Map<NoteId, ParsedNote>,
   changes: VaultChange[],
   search: SearchIndex,
-  opts: { folders?: Set<string>; assets?: Map<string, VaultAsset>; graph?: GraphOptionsFn } = {},
+  opts: { folders?: Set<string>; assets?: Map<string, VaultAsset>; files?: Map<string, VaultAsset>; graph?: GraphOptionsFn } = {},
 ): { notes: Map<NoteId, ParsedNote>; graph: GraphData; touched: NoteId[]; folders: Set<string>; assets: Map<string, VaultAsset> } {
   const next = new Map(notes)
   let assets = opts.assets ?? new Map<string, VaultAsset>()
@@ -248,6 +259,6 @@ export function applyChanges(
   dropGone()
   // buildGraph re-resolves every link from its raw text, so untouched notes
   // don't need a re-parse even when a ghost target just became real.
-  const graph = buildGraph(next, opts.graph?.(folders, next, assets))
+  const graph = buildGraph(next, opts.graph?.(folders, next, assets, opts.files))
   return { notes: next, graph, touched, folders, assets }
 }

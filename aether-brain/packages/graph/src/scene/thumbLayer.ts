@@ -56,7 +56,8 @@ export function thumbTargets(graph: GraphData): ThumbTargets {
   const paths: string[] = []
   const video: number[] = []
   graph.nodes.forEach((n, i) => {
-    if (n.kind !== 'image' || !n.image) return
+    // Any other file (an mp3, a pdf, a zip) has no picture to show: it stays the rock it is.
+    if (n.kind !== 'image' || !n.image || n.image.file) return
     idx.push(i)
     keys.push(thumbKey(n.image))
     paths.push(n.image.path)

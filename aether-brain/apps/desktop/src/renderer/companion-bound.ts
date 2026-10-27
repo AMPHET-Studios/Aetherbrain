@@ -106,6 +106,8 @@ const MOON = 3
 const GHOST = 4
 const PICTURE = 5
 const TODAY = 6
+/** An other file (an mp3, a pdf, a zip): a moon of the brain window only, the viewer is not sent it (yet). */
+const FILE = 7
 /**
  * What a node is in the tree, for the budget: a root or drive (SUN), a project folder (STAR), any other folder (PLANET),
  * a note (MOON). These are structural classes, not the names a viewer draws them with (companionKind: every folder is a
@@ -113,7 +115,7 @@ const TODAY = 6
  */
 function structuralClass(n: GraphNode): number {
   if (n.kind === 'today') return TODAY
-  if (n.kind === 'image') return PICTURE
+  if (n.kind === 'image') return n.image?.file ? FILE : PICTURE
   if (n.folder) return n.folder.role === 'root' || n.folder.role === 'mount' ? SUN : n.folder.role === 'project' ? STAR : PLANET
   return n.ghost ? GHOST : MOON
 }
@@ -149,8 +151,8 @@ export function planBase(graph: GraphData, B: SceneBudget = COMPANION_BUDGET): B
     ebeam[k] = e.kind === 'today' ? 1 : 0
   }
   const keep = new Uint8Array(n)
-  const total = [0, 0, 0, 0, 0, 0, 0]
-  const kept = [0, 0, 0, 0, 0, 0, 0]
+  const total = [0, 0, 0, 0, 0, 0, 0, 0]
+  const kept = [0, 0, 0, 0, 0, 0, 0, 0]
   for (let i = 0; i < n; i++) total[cls[i]!]!++
 
   /** Keep `i` and every ancestor of it; returns how many were new. Marking as it climbs stops it at a cycle in the data too. */
