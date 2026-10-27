@@ -196,6 +196,8 @@ export interface Settings {
   sound: boolean
   /** System layout: stars that need attention throw corona ejections, the more urgent the bigger (Shift+F). */
   flares: boolean
+  /** System layout: the reminders (dated tasks, notes tagged reminder) float by as asteroids (Shift+A). */
+  asteroids: boolean
   /** Settings version; 2 = the solar-system layout became the default. */
   v: number
 }
@@ -261,6 +263,7 @@ const DEFAULT_SETTINGS: Settings = {
   suns: true,
   sound: true,
   flares: true,
+  asteroids: true,
   v: SETTINGS_VERSION,
 }
 
@@ -320,6 +323,8 @@ function loadSettings(): Settings {
   s.sound = s.sound !== false
   // Ejections are motion: a computer that asks for less of it starts without them (until the setting is changed by hand).
   s.flares = stored?.flares === undefined && prefersReducedMotion() ? false : s.flares !== false
+  // Drifting rocks are motion too.
+  s.asteroids = stored?.asteroids === undefined && prefersReducedMotion() ? false : s.asteroids !== false
   if (stored && !(typeof stored.v === 'number' && stored.v >= SETTINGS_VERSION)) {
     s.layoutMode = 'system'
     s.v = SETTINGS_VERSION
@@ -654,6 +659,8 @@ export interface AetherState {
   toggleCalm(): void
   /** Corona ejections from stars that need attention on / off (⇧F). */
   toggleFlares(): void
+  /** The asteroids (reminders that float by) on / off (⇧A). */
+  toggleAsteroids(): void
   /**
    * Suns open into planets, then moons. The level of each sun the user opened or closed by hand (the rest are at `sunDefault`):
    * 0 closed, 1 its planets, 2 its planets and its moons.
@@ -1027,6 +1034,7 @@ export const useAether = create<AetherState>()((set, get) => {
   controller.calm = settings.calm
   controller.suns = settings.suns
   controller.flares = settings.flares
+  controller.asteroids = settings.asteroids
   controller.showThumbnails = settings.thumbnails
   controller.galleries = settings.starGalleries
   controller.pictureSize = settings.pictureSize
@@ -2643,6 +2651,7 @@ export const useAether = create<AetherState>()((set, get) => {
       controller.setCalm(next.calm)
       controller.setSuns(next.suns)
       controller.setFlares(next.flares)
+      controller.setAsteroids(next.asteroids)
       controller.showThumbnails = next.thumbnails
       controller.galleries = next.starGalleries
       controller.pictureSize = next.pictureSize
@@ -2769,6 +2778,11 @@ export const useAether = create<AetherState>()((set, get) => {
       const flares = !get().settings.flares
       get().setSettings({ flares })
       get().toast(flares ? 'Solar flares on: a star that needs attention throws plasma, the more urgent the bigger' : 'Solar flares off')
+    },
+    toggleAsteroids() {
+      const asteroids = !get().settings.asteroids
+      get().setSettings({ asteroids })
+      get().toast(asteroids ? 'Asteroids on: your reminders float by (hover one to read it, click it to open its note)' : 'Asteroids off')
     },
     toggleSound() {
       const sound = !get().settings.sound

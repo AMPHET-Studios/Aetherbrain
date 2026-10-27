@@ -54,6 +54,7 @@ const GROUPS: HelpGroup[] = [
       ['click a ★', 'Opens the sun: its planets come out and orbit it (the bar at the bottom adds its moons or closes it)'],
       ['s · ⇧ S', 'Open the selected sun one level further: closed → planets → planets and moons · open / close every sun'],
       ['⇧ M', 'Sound on / off: a note for every star, planet and moon you click'],
+      ['⇧ A', 'Asteroids on / off: your reminders (late or soon dated tasks, notes tagged reminder) float by; hover to read, click to open'],
       ['⇧ F', 'Solar flares on / off: a star that needs attention throws plasma, the more urgent the bigger'],
       ['⇧ G', "Star gallery: a star's pictures in 3D (also opens as you fly close)"],
       ['⇧ H', 'Leave the selected folder out of the brain (desktop; Undo on the toast, or v)'],

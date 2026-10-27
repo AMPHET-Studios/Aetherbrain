@@ -117,9 +117,11 @@ export function asteroidBox(camera: { x: number; y: number; z: number }, target:
 /** An asteroid's colour: amber when calm, red when overdue (0 to 1 per channel). */
 export function asteroidColor(urgency: number, out: Float32Array | number[], at = 0): void {
   const u = clamp01(urgency)
-  out[at] = 0.95
-  out[at + 1] = 0.48 - 0.38 * u
-  out[at + 2] = 0.14 - 0.08 * u
+  // The rock shader mixes a colour halfway to grey rock, so ask for twice the way out from it: the body comes out amber or red, not pink.
+  const base: [number, number, number] = [0.9 - 0.05 * u, 0.5 - 0.4 * u, 0.1 - 0.05 * u]
+  out[at] = Math.min(1, Math.max(0, 2 * base[0] - 0.46))
+  out[at + 1] = Math.min(1, Math.max(0, 2 * base[1] - 0.42))
+  out[at + 2] = Math.min(1, Math.max(0, 2 * base[2] - 0.38))
 }
 
 /** A rock's lumps, baked into an icosphere once: every vertex pushed in or out by a hash of where it is. */
