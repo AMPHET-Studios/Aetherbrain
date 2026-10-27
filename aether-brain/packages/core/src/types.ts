@@ -238,6 +238,8 @@ export interface ImageNodeInfo {
   video?: boolean
   /** True for a 3D model (`isModelPath`): shown as one lit still the thumbnail helper draws, opened in the OS's 3D app. */
   model?: boolean
+  /** Present for any other file (an mp3, a pdf, a zip, a script: `isFileMoonPath`): its kind, for its colour. Never thumbnailed, opened in the OS. */
+  file?: 'audio' | 'document' | 'archive' | 'data' | 'code' | 'design' | 'other'
   /** Present while the picture is a card of the open star gallery. */
   gallery?: GalleryCardInfo
 }
@@ -452,6 +454,8 @@ export interface VaultAdapter {
   reveal?(path: string): Promise<void>
   /** Every image file in the vault (skipped folders excluded). Absent: the vault has no images. */
   listAssets?(): Promise<VaultAsset[]>
+  /** Every other file the last scan found (an mp3, a pdf, a zip: `fileMap` keeps the keepsakes), with mtime and size where known. */
+  listFiles?(): Promise<VaultAsset[]>
   /**
    * A small preview of an image, at most `size` px on its longer side (PNG or
    * JPEG), or null when it can't be read or decoded. Absent: no thumbnails.

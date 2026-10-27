@@ -52,6 +52,16 @@ export const SUN_COLOR = '#fff1d6'
 export const TODAY_COLOR = '#8ff7ff'
 /** Picture moons: a pale moonlight white (the thumbnail is their real color). */
 export const IMAGE_COLOR = '#f4f1ff'
+/** The tint of a file moon (an mp3, a pdf, a zip, a script) by its kind: the rock shader takes it halfway to grey, so these are a little deeper than they look. */
+export const FILE_COLORS: Record<'audio' | 'document' | 'archive' | 'data' | 'code' | 'design' | 'other', string> = {
+  audio: '#b46cff',
+  document: '#f2e6c8',
+  archive: '#c98a4b',
+  data: '#4fb6a8',
+  code: '#7fd36a',
+  design: '#ff7aa8',
+  other: '#a9aab8',
+}
 /** A reference board with pictures orbiting it: a mint-white sun, cooler than the gold stars and warmer than the Today hub. */
 export const BOARD_SUN_COLOR = '#b8f7e2'
 /**
@@ -139,7 +149,7 @@ export function nodeBaseColor(
 ): Color {
   // Folders (the structure of the system layout), the Today hub, pictures and board suns ignore the color mode.
   if (n.kind === 'today') return cachedColor(TODAY_COLOR)
-  if (n.kind === 'image') return cachedColor(IMAGE_COLOR)
+  if (n.kind === 'image') return cachedColor(n.image?.file ? FILE_COLORS[n.image.file] : IMAGE_COLOR)
   if (n.board) return cachedColor(BOARD_SUN_COLOR)
   if (n.folder) {
     const role = n.folder.role

@@ -210,8 +210,16 @@ export class ElectronVaultAdapter implements VaultAdapter {
   async listAssets(): Promise<VaultAsset[]> {
     const res = await this.bridge.listAssets()
     this.assetsTruncated = res.truncated
+    this.lastFiles = res.files ?? []
     return res.assets
   }
+
+  /** The other files the last `listAssets` came with (an mp3, a pdf, a zip); asks again when nothing has asked yet. */
+  async listFiles(): Promise<VaultAsset[]> {
+    if (this.lastFiles === null) await this.listAssets()
+    return this.lastFiles ?? []
+  }
+  private lastFiles: VaultAsset[] | null = null
 
   /** A PNG preview at most `size` px on its longer side, made by main's hidden thumbnail helper (off both main and this renderer). */
   async thumbnail(path: string, size: number): Promise<Blob | null> {

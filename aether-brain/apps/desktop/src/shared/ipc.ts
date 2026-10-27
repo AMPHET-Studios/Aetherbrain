@@ -45,6 +45,8 @@ export interface VaultAssetDto {
 
 export interface AssetListDto {
   assets: VaultAssetDto[]
+  /** Every other file that may be a moon (an mp3, a pdf, a zip), with mtime and size where main had time to look. */
+  files?: VaultAssetDto[]
   /** True when the scan stopped at the image cap; the list is partial. */
   truncated: boolean
 }

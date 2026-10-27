@@ -11,6 +11,7 @@ import {
   isFolderId,
   isGhostId,
   isImageId,
+  isAssetPath,
   isModelPath,
   isTodayId,
   isVideoPath,
@@ -263,7 +264,9 @@ export function linkRow(
     if (isModelPath(path)) return { kind: 'image', label: `◈ ${imageFileName(path)}`, hint: 'Click: select · double-click: open in your 3D app', dot: IMAGE_COLOR }
     return isVideoPath(path)
       ? { kind: 'image', label: `▶ ${imageFileName(path)}`, hint: 'Click: select · double-click: play in your video player', dot: IMAGE_COLOR }
-      : { kind: 'image', label: `🖼 ${imageFileName(path)}`, hint: 'Click: select · double-click: open in your image app', dot: IMAGE_COLOR }
+      : isAssetPath(path)
+        ? { kind: 'image', label: `🖼 ${imageFileName(path)}`, hint: 'Click: select · double-click: open in your image app', dot: IMAGE_COLOR }
+        : { kind: 'image', label: `📄 ${imageFileName(path)}`, hint: 'Click: select · double-click: open it (or show it in its folder)', dot: IMAGE_COLOR }
   }
   if (isTodayId(id)) return { kind: 'today', label: '☀ Today', hint: "Click: select the daily brief", dot: TODAY_COLOR }
   if (isFolderId(id)) {
@@ -1006,7 +1009,7 @@ function ImageInspector({ id }: { id: NoteId }) {
           type="button"
           className="hud-btn primary"
           onClick={() => void openImage(path)}
-          title={video ? 'Play it in your video player (e · Enter)' : model ? 'Open it in your 3D app (e · Enter)' : 'Open in your image app (e · Enter)'}
+          title={video ? 'Play it in your video player (e · Enter)' : model ? 'Open it in your 3D app (e · Enter)' : info?.file ? 'Open it with your computer, or show it in its folder when it is not safe to open (e · Enter)' : 'Open in your image app (e · Enter)'}
         >
           Open <kbd className="!text-white/80">e</kbd>
         </button>

@@ -191,6 +191,16 @@ A star whose whole system needs attention throws plasma. The number is the urgen
 - **Bounds.** At most 40 stars flare at once (the most urgent, then the nearest the camera) and at most 96 flares are alive, however many stars are overdue.
 - **The viewer** is not sent the flares: it has each node's `urgency` and may draw its own.
 
+## Every file is a moon
+
+Any file that is not a note, a picture, a video or a 3D model (an mp3, a pdf, a zip, a spreadsheet, a mod's script) is a **moon** of its folder's star, a big one a **planet** (the same 48 KB line as a picture). Never a folder. It is a rock, not a thumbnail: nothing is read or previewed.
+
+- **Colour by kind** (`fileKindOf`, `FILE_COLORS`): audio violet, documents cream, archives bronze, data teal, code green, design pink, anything else grey.
+- **Bounded.** A folder shows at most its 12 newest (`FILE_MOONS_PER_FOLDER`), the sky at most 800 (`FILE_MOONS_TOTAL`), and the scan lists at most 20,000 by name (`FILE_SCAN_MAX`), shallow folders first. Clutter is left out by name: hidden files, build output and caches (`dist`, `build`, `Intermediate`, `DerivedDataCache`, `node_modules` …), `.map`, `.lock`, `.log`, `.dll`, system files, and anything with no extension (`isFileMoonPath`).
+- **Kept apart from the pictures.** They have their own list (`ImageGraphOptions.files`, `fileMap`), so galleries, boards and picture counts never see them. In the graph they are `image:<path>` nodes with `image.file` set.
+- **Opening.** Double-click opens a **song, document, archive, data or design file** with your computer (`FILE_OPENABLE_KINDS`). Code and any kind nobody named are only **shown in their folder**: the OS runs a script or a program as readily as it opens a song.
+- **Not yet.** A file added while the app is open shows after the next rescan, not at once. The viewer is not sent them.
+
 ## Asteroids are reminders
 
 Rocks drift through the part of the sky you are looking at. Each one is a **reminder**, and there are at most 24 (`REMINDER_MAX`):
