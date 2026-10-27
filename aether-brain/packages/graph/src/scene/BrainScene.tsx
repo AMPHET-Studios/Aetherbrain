@@ -64,6 +64,7 @@ import { applyReveal, easeReveal, revealTargets, ringReps, ringReveal, stepRevea
 import { buildDiscs, fitDiscs, placeDiscs, type DiscSet } from './galaxyDisc'
 import { buildBlackHole, feedOf, fitBlackHole, placeBlackHole, type BlackHole } from './blackHole'
 import { FLARE_MIN_URGENCY, FlareField, type FlareInput } from './flares'
+import { AsteroidField } from './asteroids'
 import { todayLabel } from './labels'
 import { ThumbLayer, thumbTargets, type ThumbTargets } from './thumbLayer'
 import { ScreenLayer } from './screenLayer'
@@ -420,6 +421,8 @@ interface Buffers {
   /** Corona ejections of the stars that need attention: one instanced mesh, and what it is fed each frame (reused, never rebuilt). */
   flares: FlareField
   flareInput: FlareInput
+  /** The reminders that float by: one instanced mesh of drifting rocks. */
+  asteroids: AsteroidField
   /** Each node's urgency, as the layout's speed and the ejections read it. */
   urgency: Float32Array
   /** engine.ringsVersion the ring attributes were built from (-1: never). */
@@ -625,6 +628,7 @@ function buildBuffers(graph: GraphData, pictures: PictureSize): Buffers {
     if (f && !f.bio && !f.placeholder && f.role !== 'root' && f.role !== 'mount' && urgency[i]! >= FLARE_MIN_URGENCY) erupting.push(i)
   })
   const flares = new FlareField(count)
+  const asteroids = new AsteroidField()
   const flareInput: FlareInput = {
     clock: 0,
     enabled: false,
@@ -702,6 +706,7 @@ function buildBuffers(graph: GraphData, pictures: PictureSize): Buffers {
     discs,
     flares,
     flareInput,
+    asteroids,
     urgency,
     ringsVersion: -1,
     ageOf,
@@ -713,6 +718,7 @@ function buildBuffers(graph: GraphData, pictures: PictureSize): Buffers {
       discs.dispose()
       hole?.dispose()
       flares.dispose()
+      asteroids.dispose()
       ;(rings.material as { dispose(): void }).dispose()
       ;(nodes.material as { dispose(): void }).dispose()
       ;(halos.material as { dispose(): void }).dispose()
@@ -774,6 +780,9 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
     lastNearCheck: -Infinity,
     /** A press that started on the star screen (a click there opens its app), and whether the pointer is over it. */
     screenPress: null as null | { x: number; y: number },
+    /** A press on an asteroid (its place and which one), and the asteroid the pointer is over (-1: none). */
+    astPress: null as null | { x: number; y: number; index: number },
+    astHover: -1,
     overScreen: false,
   })
 
@@ -812,7 +821,12 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
         return
       }
       const i = pick(x, y)
-      if (i < 0) return
+      if (i < 0) {
+        // An asteroid (a reminder) is under the pointer: a click on it opens its note.
+        const a = buffers.asteroids.hit(x, y)
+        if (a >= 0) st.astPress = { x, y, index: a }
+        return
+      }
       st.drag = { index: i, id: buffers.graph.nodes[i]!.id, sx: x, sy: y, moved: false }
       controller.camera?.setEnabled(false)
     }
@@ -821,6 +835,12 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
       st.screenPress = null
       // A click on the screen (not a drag that orbits the camera) opens its app.
       if (press && Math.hypot(st.pointer.x - press.x, st.pointer.y - press.y) < 6) controller.activateScreen()
+      const ap = st.astPress
+      st.astPress = null
+      if (ap && Math.hypot(st.pointer.x - ap.x, st.pointer.y - ap.y) < 6) {
+        const r = buffers.asteroids.reminder(ap.index)
+        if (r) controller.events.onOpen?.(r.note)
+      }
       const d = st.drag
       st.drag = null
       controller.camera?.setEnabled(true)
@@ -937,6 +957,7 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
   const m4 = useMemo(() => new Matrix4(), [])
   const v3 = useMemo(() => new Vector3(), [])
   const camPos = useMemo(() => new Vector3(), [])
+  const astTarget = useMemo(() => new Vector3(), [])
   const camEnd = useMemo(() => new Vector3(), [])
   const lookEnd = useMemo(() => new Vector3(), [])
 
@@ -1067,6 +1088,25 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
     fi.cam.z = camera.position.z
     buffers.flares.step(fi)
 
+    // Asteroids: the reminders drifting through the part of the sky you look at (the clock stops with the orbits).
+    if (controls) controls.getTarget(astTarget, false)
+    else astTarget.copy(camera.position)
+    buffers.asteroids.step({
+      clock: st.flareClock,
+      enabled: controller.asteroids && controller.layoutMode === 'system',
+      reminders: controller.reminders,
+      camera: camera as PerspectiveCamera,
+      target: astTarget,
+      width: size.width,
+      height: size.height,
+    })
+    const astHover = st.pointerInside && st.hovered < 0 ? buffers.asteroids.hit(st.pointer.x, st.pointer.y) : -1
+    if (astHover !== st.astHover) {
+      st.astHover = astHover
+      if (astHover >= 0) gl.domElement.style.cursor = 'pointer'
+      else if (st.hovered < 0 && !st.overScreen) gl.domElement.style.cursor = ''
+    }
+
     // Star gallery cards grow out of their star, and shrink when it folds.
     const cardsChanged = sizeCards(buffers, controller, eng, st, dt)
 
@@ -1157,6 +1197,7 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
     }
 
     drawLabels(overlayRef.current, buffers, controller, st.labelSet, hovI, selI, size.width, size.height, screenLayer)
+    if (st.astHover >= 0) drawAsteroidLabel(overlayRef.current, buffers.asteroids, st.astHover, size.width)
 
     // Star galleries: which project star is the camera close to? Measured where the camera is going
     // (the end of a flight), so flying past a star counts for nothing. Last in the frame: the answer
@@ -1196,6 +1237,7 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
       <primitive object={buffers.nodes} />
       <primitive object={buffers.halos} />
       <primitive object={buffers.flares.mesh} />
+      <primitive object={buffers.asteroids.mesh} />
       {buffers.hole && <primitive object={buffers.hole.mesh} />}
       <primitive object={buffers.field} />
       <primitive object={thumbs.mesh} />
@@ -1591,6 +1633,34 @@ const candOrder: number[] = []
 const placer = new LabelPlacer()
 /** Measured text widths per emphasis (a label's text rarely changes): measuring every label every frame would cost more than drawing it. */
 const labelWidths: [Map<string, number>, Map<string, number>, Map<string, number>] = [new Map(), new Map(), new Map()]
+
+/** The words of the asteroid under the pointer, in a small tag beside it (drawn over the labels the frame has just drawn). */
+function drawAsteroidLabel(canvas: HTMLCanvasElement | null, field: AsteroidField, index: number, width: number): void {
+  const r = field.reminder(index)
+  if (!canvas || !r) return
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return
+  const x = field.screen[index * 4] ?? 0
+  const y = field.screen[index * 4 + 1] ?? 0
+  const rad = field.screen[index * 4 + 2] ?? 0
+  const text = `${r.due !== null ? `${r.due}  ` : '☆  '}${r.text}`
+  ctx.save()
+  ctx.font = '600 12px Inter, ui-sans-serif, system-ui, sans-serif'
+  ctx.textAlign = 'left'
+  ctx.textBaseline = 'middle'
+  const w = Math.min(width - 16, ctx.measureText(text).width + 18)
+  const bx = Math.min(Math.max(8, x + rad + 8), Math.max(8, width - w - 8))
+  ctx.fillStyle = 'rgba(14,16,32,0.92)'
+  ctx.strokeStyle = r.urgency >= 0.85 ? 'rgba(255,110,90,0.8)' : 'rgba(255,190,110,0.7)'
+  ctx.lineWidth = 1
+  ctx.beginPath()
+  ctx.roundRect(bx, y - 12, w, 24, 8)
+  ctx.fill()
+  ctx.stroke()
+  ctx.fillStyle = '#ffe9d2'
+  ctx.fillText(text, bx + 9, y + 0.5, w - 14)
+  ctx.restore()
+}
 
 function drawLabels(
   canvas: HTMLCanvasElement | null,

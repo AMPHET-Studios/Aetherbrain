@@ -17,6 +17,7 @@ import {
   bindProjects,
   buildGraph,
   computeActivity,
+  remindersOf,
   critiqueBaseName,
   critiqueNote,
   dailyBrief,
@@ -1208,6 +1209,11 @@ export const useAether = create<AetherState>()((set, get) => {
   let activityRefresh: ReturnType<typeof setTimeout> | null = null
   let activitySave: ReturnType<typeof setTimeout> | null = null
   /** Work out every star's brightness for the graph that is showing and hand it to the scene (which recolours at once). */
+  /** The reminders that float by as asteroids: dated tasks that are late or due soon, and notes tagged `reminder`. */
+  const refreshReminders = () => {
+    const { notes, status } = get()
+    controller.setReminders(status === 'ready' ? remindersOf(notes, todayIso()) : [])
+  }
   const refreshActivity = () => {
     const { graph, status } = get()
     controller.setActivity(graph && status === 'ready' ? computeActivity(graph, activity, Date.now()) : null)
@@ -1242,6 +1248,7 @@ export const useAether = create<AetherState>()((set, get) => {
     set((s) => ({ notes, graph, folders, assets, brief: builtBrief, revision: s.revision + 1 }))
     controller.setGraph(graph)
     refreshActivity()
+    refreshReminders()
     syncHighlight()
     pruneSelection(graph, before)
     const { editorId, dirty } = get()
@@ -1263,6 +1270,7 @@ export const useAether = create<AetherState>()((set, get) => {
     set((s) => ({ graph, brief: builtBrief, revision: s.revision + 1 }))
     controller.setLayoutMode(settings.layoutMode, graph)
     refreshActivity()
+    refreshReminders()
     syncHighlight()
     pruneSelection(graph, before)
   }
