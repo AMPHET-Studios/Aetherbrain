@@ -103,10 +103,16 @@ export interface CompanionNodeDto {
   /** The cosmology's name for it (see `CompanionBody`). Absent from older builds: use `kind`. */
   body?: CompanionBody
   /**
-   * How soon it needs you, 0 to 1: its orbit's speed (a star: its whole system's, its brightness). Absent from older
+   * How soon it needs you, 0 to 1: its orbit's speed (a star: its whole system's). Absent from older
    * builds; a viewer that does not know it draws every orbit at one speed.
    */
   urgency?: number
+  /**
+   * How much it is used, 0 to 1 (opens and saves of the notes in it, fading over weeks; a folder: its whole system's): a star's
+   * brightness. Absent from older builds and while the brain has not worked it out; a viewer that does not know it draws every star
+   * as calm as one nobody uses.
+   */
+  activity?: number
 }
 
 /**

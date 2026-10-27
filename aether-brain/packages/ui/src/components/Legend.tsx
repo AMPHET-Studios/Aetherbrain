@@ -85,7 +85,7 @@ export function Legend() {
               <KindChip kind="galaxy" title="A drive (or the whole vault), or a folder you marked as a galaxy (✦): the folders on it lie on its disc">
                 <span style={{ color: SUN_COLOR, textShadow: `0 0 8px ${SUN_COLOR}` }}>◉</span> galaxy · drive
               </KindChip>
-              <KindChip kind="star" title="A folder. The brighter the star, the more urgent its whole system; a project is the biggest">
+              <KindChip kind="star" title="A folder. The brighter the star, the more you open and save in it lately; a project is the biggest">
                 <span style={{ color: STAR_COLOR, textShadow: `0 0 8px ${STAR_COLOR}` }}>★</span> star · folder
               </KindChip>
               <KindChip kind="planet" title="A picture, video or big note, as an extra-large thumbnail. A faster orbit is more urgent">

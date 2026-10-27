@@ -350,6 +350,14 @@ export const COMMANDS: Command[] = [
     run: (s) => s.makeProject(selectedFolder(s)!),
   },
   {
+    id: 'activity-forget',
+    title: 'Forget which folders I use (every star goes calm)',
+    hint: 'a star is as bright as you open and save in it; this clears that, on this computer only',
+    group: 'vault',
+    when: (s) => s.status === 'ready' && s.settings.layoutMode === 'system',
+    run: (s) => s.forgetActivity(),
+  },
+  {
     id: 'folder-galaxy',
     title: 'Make the selected folder a galaxy',
     hint: 'a disc of its own, its sub-folders lie on it as stars',

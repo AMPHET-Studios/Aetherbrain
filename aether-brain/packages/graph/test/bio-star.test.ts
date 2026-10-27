@@ -164,8 +164,8 @@ describe('the Bio star in the scene', () => {
     expect(BIO_STAR_GLOW).toBeLessThan(num('TODAY_GLOW'))
   })
 
-  it('uses that one brightness whatever the urgency, instead of the star glow', () => {
-    expect(scene).toMatch(/const star = node\.folder\?\.bio \? BIO_STAR_GLOW : starGlow\(node\.urgency \?\? 0, role === ROLE_PROJECT\)/)
+  it('uses that one brightness however much it is used, instead of the star glow', () => {
+    expect(scene).toMatch(/const star = node\.folder\?\.bio \? BIO_STAR_GLOW : starGlow\(c\.activity !== null && c\.activity\.length === n \? \(c\.activity\[i\] \?\? 0\) : 0, role === ROLE_PROJECT\)/)
   })
 
   it('gives it a wider aura than any other body, so a deep blue is still a bright blue giant from far away', () => {

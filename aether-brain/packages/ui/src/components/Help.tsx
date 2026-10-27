@@ -45,7 +45,7 @@ const GROUPS: HelpGroup[] = [
   {
     title: 'System layout',
     rows: [
-      ['◉ ★ ● ·', 'Galaxy = drive · star = folder · planet = big file · moon = small file · faster orbit, brighter star = more urgent'],
+      ['◉ ★ ● ·', 'Galaxy = drive · star = folder · planet = big file · moon = small file · faster orbit = more urgent · brighter star = the more you use it'],
       ['✦', 'A folder you made a galaxy (palette: Make the selected folder a galaxy): its own disc, its folders are stars on it. A star is bigger the more it holds'],
       ['x', 'Expand / collapse the selected folder'],
       ['[ ]', 'Show fewer / more folder levels'],

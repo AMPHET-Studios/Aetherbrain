@@ -49,6 +49,8 @@ export interface CompanionSceneOptions {
   selectedId: NoteId | null
   /** How big the brain draws pictures (their radius). */
   pictureSize?: PictureSize
+  /** How much each node is used (`computeActivity`, in node order): sent as each node's `activity`, to the hundredth. Left out when null or not for this graph. */
+  activity?: Float32Array | null
 }
 
 /**
@@ -71,7 +73,8 @@ export function companionScene(graph: GraphData, o: CompanionSceneOptions, plan?
   }
   const span = Math.max(1, maxT - minT)
   const ageOf = (n: GraphNode) => (n.created === null ? 0.9 : 1 - (n.created - minT) / span)
-  const dto = (n: GraphNode, parent: number) => ({
+  const used = o.activity && o.activity.length === graph.nodes.length ? o.activity : null
+  const dto = (n: GraphNode, parent: number, at: number) => ({
     id: n.id,
     title: n.title,
     kind: companionKind(n),
@@ -80,11 +83,12 @@ export function companionScene(graph: GraphData, o: CompanionSceneOptions, plan?
     radius: Math.round(nodeRadius(n, o.pictureSize) * 1000) / 1000,
     parent,
     urgency: Math.round((n.urgency ?? 0) * 1000) / 1000,
+    ...(used ? { activity: Math.round((used[at] ?? 0) * 100) / 100 } : {}),
   })
   if (plan) {
     const nodes = Array.from(plan.keep, (i) => {
       const p = plan.parent[i]!
-      return dto(graph.nodes[i]!, p < 0 ? -1 : plan.newIndex[p]!)
+      return dto(graph.nodes[i]!, p < 0 ? -1 : plan.newIndex[p]!, i)
     })
     const edges = plan.edges.map((i) => plan.newIndex[i]!)
     return {
@@ -98,7 +102,7 @@ export function companionScene(graph: GraphData, o: CompanionSceneOptions, plan?
     }
   }
   const at = (id: NoteId | null) => (id === null ? -1 : (graph.index.get(id) ?? -1))
-  const nodes = graph.nodes.map((n) => dto(n, at(n.parent)))
+  const nodes = graph.nodes.map((n, i) => dto(n, at(n.parent), i))
   const edges: number[] = []
   for (const e of graph.edges) {
     const a = at(e.from)
@@ -139,6 +143,7 @@ export function sceneSignature(g: CompanionGraphDto): string {
     eat(n.radius)
     eat(n.parent)
     eat(n.urgency ?? 0)
+    eat(n.activity ?? 0)
   }
   for (const e of g.edges) eat(e)
   if (g.limits) {

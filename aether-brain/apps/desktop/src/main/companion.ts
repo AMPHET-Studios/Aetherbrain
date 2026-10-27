@@ -105,7 +105,7 @@ export function cleanGraph(raw: unknown): CompanionGraphDto {
   for (let i = 0; i < n; i++) {
     const x: unknown = nodes[i]
     if (!isRecord(x)) throw new Error(`bad node ${i}`)
-    const { id, title, kind, color, radius, parent, body, urgency } = x
+    const { id, title, kind, color, radius, parent, body, urgency, activity } = x
     if (typeof id !== 'string' || !id || id.length > MAX_ID) throw new Error(`bad node id ${i}`)
     if (typeof kind !== 'string' || !KINDS.has(kind as CompanionKind)) throw new Error(`bad node kind ${i}`)
     if (typeof color !== 'string' || !/^#[0-9a-f]{6}$/i.test(color)) throw new Error(`bad node color ${i}`)
@@ -122,6 +122,7 @@ export function cleanGraph(raw: unknown): CompanionGraphDto {
     // The cosmology's fields are optional and never fail a scene: a bad one is left out.
     if (typeof body === 'string' && BODIES.has(body as CompanionBody)) out[i]!.body = body as CompanionBody
     if (typeof urgency === 'number' && Number.isFinite(urgency)) out[i]!.urgency = Math.round(Math.min(1, Math.max(0, urgency)) * 1000) / 1000
+    if (typeof activity === 'number' && Number.isFinite(activity)) out[i]!.activity = Math.round(Math.min(1, Math.max(0, activity)) * 1000) / 1000
   }
   if (!Array.isArray(edges) || edges.length > MAX_EDGE_NUMBERS || edges.length % 2 !== 0) throw new Error('bad edges')
   for (const e of edges) if (!Number.isInteger(e) || (e as number) < 0 || (e as number) >= n) throw new Error('bad edge')

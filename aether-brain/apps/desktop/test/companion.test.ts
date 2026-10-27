@@ -520,10 +520,13 @@ describe('the brain window side', () => {
     expect(useAether.getState().editorId).toBe('Projects/Forge/Plan')
     selectTo!({ id: 'Nope', open: false })
     expect(useAether.getState().selectedId).toBe('Projects/Forge/Plan')
-    // The selection goes out with the next scene.
-    await new Promise((r) => setTimeout(r, 250))
+    // The selection goes out with the next scene; opening the note also brightened its stars (a quarter of a second later), which is one more.
+    await new Promise((r) => setTimeout(r, 450))
     const last = graphs.at(-1)!
     expect(last.nodes[last.selected]?.id).toBe('Projects/Forge/Plan')
+    // What opening it did is in the scene: the star of the note is brighter than a star nobody has used (activity is how much it is used).
+    const star = last.nodes.find((n) => n.id === 'folder:Projects/Forge')
+    expect(star?.activity ?? 0).toBeGreaterThan(0)
     // The link nudging a window that is already publishing (a layout that stands still sends no frames) must not
     // hand the viewer the whole scene again under a new version.
     const published = graphs.length

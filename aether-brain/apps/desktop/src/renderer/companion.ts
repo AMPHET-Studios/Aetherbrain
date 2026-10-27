@@ -34,6 +34,7 @@ function source(): FeedSource | null {
     activeTag: c.activeTag,
     layoutMode: c.layoutMode,
     pictureSize: c.pictureSize,
+    activity: c.activity,
   }
 }
 
