@@ -30,10 +30,9 @@ import { bodyOrder, bodyOwners, bodyTiers, isGalaxyNode, isPlanetNode, type Grap
 import { BrainController, DEFAULT_FAR, DEFAULT_MAX_DISTANCE, cameraRange } from '../BrainController'
 import { GALLERY_CHECK_MS, easeGrow, nearestStar, stepGrow } from '../gallery'
 import type { LayoutEngine } from '../layout/LayoutEngine'
+import { blackHoleOf, orbitParents } from '../layout/orbitParents'
 import {
   AREA_COLORS,
-  BIO_STAR_GLOW,
-  BIO_STAR_HALO,
   BIO_STAR_LABEL_COLOR,
   BOARD_SUN_COLOR,
   GHOST_COLOR,
@@ -63,6 +62,7 @@ import { bakeSky, createSkyDome, createSkyStars, type BakedSky } from './sky'
 import { LABEL_PRIORITY, LabelPlacer } from './labelPlace'
 import { applyReveal, easeReveal, revealTargets, ringReps, ringReveal, stepReveal } from './reveal'
 import { buildDiscs, fitDiscs, placeDiscs, type DiscSet } from './galaxyDisc'
+import { buildBlackHole, feedOf, fitBlackHole, placeBlackHole, type BlackHole } from './blackHole'
 import { FLARE_MIN_URGENCY, FlareField, type FlareInput } from './flares'
 import { todayLabel } from './labels'
 import { ThumbLayer, thumbTargets, type ThumbTargets } from './thumbLayer'
@@ -347,7 +347,7 @@ interface Buffers {
   baseColors: Float32Array
   screen: Float32Array
   hubs: number[]
-  /** Structural parent index per node (-1: none). */
+  /** The body each node orbits (-1: none): its folder, except that the Bio is the centre and every galaxy circles it (`orbitParents`). */
   parentIdx: Int32Array
   /** Children per node (CSR over `childList`), for the selected node's system. */
   childStart: Int32Array
@@ -399,8 +399,10 @@ interface Buffers {
   isCard: Uint8Array
   /** Radius per node as the theme gives it (`radii` holds the drawn one: gallery cards grow from it). */
   baseRadii: Float32Array
-  /** How wide each node's aura is, in radii of its core: `HALO_RADII`, or `BIO_STAR_HALO` for the Bio star. */
+  /** How wide each node's aura is, in radii of its core: `HALO_RADII`, or none for the Bio (its own glow is painted with the black hole). */
   haloK: Float32Array
+  /** The Bio black hole (one quad over its node), or null when the graph has no Bio. */
+  hole: BlackHole | null
   /** Orbit rings: one instanced LineSegments. */
   rings: LineSegments
   ringGeo: InstancedBufferGeometry
@@ -476,9 +478,10 @@ function buildBuffers(graph: GraphData, pictures: PictureSize): Buffers {
   const radii = new Float32Array(count)
   graph.nodes.forEach((n, i) => (radii[i] = nodeRadius(n, pictures)))
   const haloK = new Float32Array(count).fill(HALO_RADII)
-  graph.nodes.forEach((n, i) => {
-    if (n.folder?.bio) haloK[i] = BIO_STAR_HALO
-  })
+  // The Bio is a black hole: its core is dark and has no aura of its own, the quad over it paints the glow, the disc and the ring.
+  const holeAt = blackHoleOf(graph)
+  if (holeAt >= 0) haloK[holeAt] = 0
+  const hole = holeAt >= 0 ? buildBlackHole(holeAt) : null
   const stars: number[] = []
   const cards: number[] = []
   const cardOnly: number[] = []
@@ -514,7 +517,7 @@ function buildBuffers(graph: GraphData, pictures: PictureSize): Buffers {
     .map((x) => x.i)
 
   // Structure of the system layout: parents, children, roles, labels.
-  const parentIdx = new Int32Array(count).fill(-1)
+  const parentIdx = orbitParents(graph)
   const childStart = new Int32Array(count + 1)
   const role = new Int8Array(count).fill(-1)
   const labels: string[] = new Array<string>(count)
@@ -523,8 +526,7 @@ function buildBuffers(graph: GraphData, pictures: PictureSize): Buffers {
   const landmarks: number[] = []
   const landmark = new Uint8Array(count)
   graph.nodes.forEach((n, i) => {
-    const p = n.parent === null ? -1 : (graph.index.get(n.parent) ?? -1)
-    parentIdx[i] = p
+    const p = parentIdx[i]!
     if (p >= 0) childStart[p + 1] = childStart[p + 1]! + 1
     const f = n.folder
     if (f) {
@@ -680,6 +682,7 @@ function buildBuffers(graph: GraphData, pictures: PictureSize): Buffers {
     isCard,
     baseRadii: new Float32Array(radii),
     haloK,
+    hole,
     rings,
     ringGeo,
     ringCenter,
@@ -701,6 +704,7 @@ function buildBuffers(graph: GraphData, pictures: PictureSize): Buffers {
       eg.dispose()
       ringGeo.dispose()
       discs.dispose()
+      hole?.dispose()
       flares.dispose()
       ;(rings.material as { dispose(): void }).dispose()
       ;(nodes.material as { dispose(): void }).dispose()
@@ -991,6 +995,8 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
     if (ringsChanged) {
       syncRings(buffers, eng.rings)
       fitDiscs(buffers.discs, buffers.ringParent, buffers.ringRadius.array as Float32Array, buffers.ringQuat.array as Float32Array, buffers.ringCount)
+      // The black hole's disc lies in the plane the galaxies orbit it in.
+      if (buffers.hole) fitBlackHole(buffers.hole, buffers.ringParent, buffers.ringQuat.array as Float32Array, buffers.ringCount)
       buffers.ringsVersion = eng.ringsVersion
       buffers.ringRepsOk = false
       buffers.ringRepsTries = 0
@@ -1067,6 +1073,8 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
       // a small core behind it and no halo: the picture is the body. A gallery
       // card still waiting for its picture is a picture moon's pale body.
       const shown = buffers.thumbs.shown
+      // The black hole has no core to draw: the quad over it is the whole body.
+      const holeI = buffers.hole?.node ?? -1
       for (let i = 0; i < n; i++) {
         const x = dp[i * 3] ?? 0
         const y = dp[i * 3 + 1] ?? 0
@@ -1077,11 +1085,11 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
         else if (i === hovI) r *= 1.2
         const pictured = shown[i] === 1
         // A gallery card is all picture: no core to show when it fades as the camera passes.
-        const core = pictured ? (buffers.isCard[i] === 1 ? 0 : r * THUMB_CORE) : r
+        const core = i === holeI ? 0 : pictured ? (buffers.isCard[i] === 1 ? 0 : r * THUMB_CORE) : r
         m4.makeScale(core, core, core)
         m4.setPosition(x, y, z)
         buffers.nodes.setMatrixAt(i, m4)
-        const h = pictured ? 0 : r * buffers.haloK[i]!
+        const h = pictured || i === holeI ? 0 : r * buffers.haloK[i]!
         m4.makeScale(h, h, h)
         m4.setPosition(x, y, z)
         buffers.halos.setMatrixAt(i, m4)
@@ -1106,6 +1114,12 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
     if (ringsChanged || versionChanged || revealChanged || repsFresh || buffers.ringRepsFor === eng.ringsVersion) revealRings(buffers, revealChanged || ringsChanged || versionChanged || repsFresh)
     if ((positionsChanged || ringsChanged || versionChanged || revealChanged) && buffers.rings.visible) placeRings(buffers, dp)
     if ((positionsChanged || ringsChanged || revealChanged) && buffers.discs.mesh.visible) placeDiscs(buffers.discs, dp)
+    // The black hole: where its node is, as big as the node is drawn, its disc turning with the orbits (the clock stops with them).
+    if (buffers.hole) {
+      const k = buffers.hole.node
+      const lift = k === selI ? 1 : k === hovI ? 0.5 : 0
+      placeBlackHole(buffers.hole, dp[k * 3] ?? 0, dp[k * 3 + 1] ?? 0, dp[k * 3 + 2] ?? 0, buffers.radii[k] ?? 0, feedOf(g.nodes[k]?.folder), st.flareClock % 3600, lift)
+    }
 
     // Project to screen for picking + labels.
     camera.getWorldPosition(camPos)
@@ -1162,6 +1176,7 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
       <primitive object={buffers.nodes} />
       <primitive object={buffers.halos} />
       <primitive object={buffers.flares.mesh} />
+      {buffers.hole && <primitive object={buffers.hole.mesh} />}
       <primitive object={buffers.field} />
       <primitive object={thumbs.mesh} />
       <primitive object={screenLayer.group} />
@@ -1295,8 +1310,8 @@ function recolor(b: Buffers, c: BrainController, neighbors: Set<number>, labelSe
       solid = 1
       gl = i === selI ? IMAGE_GLOW + 0.25 : i === hovI ? IMAGE_GLOW + 0.15 : neighbors.has(i) ? IMAGE_GLOW + 0.07 : IMAGE_GLOW
     } else if (role === ROLE_FOLDER || role === ROLE_PROJECT) {
-      // A star, as bright as its whole system is used (what you open and save in it). The Bio star burns at one full brightness, used or not.
-      const star = node.folder?.bio ? BIO_STAR_GLOW : starGlow(c.activity !== null && c.activity.length === n ? (c.activity[i] ?? 0) : 0, role === ROLE_PROJECT)
+      // A star, as bright as its whole system is used (what you open and save in it). (The Bio is no star: it is dark, see below.)
+      const star = starGlow(c.activity !== null && c.activity.length === n ? (c.activity[i] ?? 0) : 0, role === ROLE_PROJECT)
       gl = i === selI ? star + 0.4 : i === hovI ? star + 0.2 : neighbors.has(i) ? star + 0.1 : star
     } else if (role >= 0) {
       // A galaxy.
@@ -1320,10 +1335,13 @@ function recolor(b: Buffers, c: BrainController, neighbors: Set<number>, labelSe
     let dim = 1
     if (hasHighlight && !highlight.has(node.id)) dim = 0.12
     else if (focusI >= 0 && i !== focusI && !neighbors.has(i)) dim = selI >= 0 ? 0.32 : 0.6
-    colors[i * 3] = col.r
-    colors[i * 3 + 1] = col.g
-    colors[i * 3 + 2] = col.b
-    glow[i * 4] = gl
+    // The Bio is a black hole: a core that gives no light at all (its blue is in `base`, for the rings that circle it). What shines is the
+    // disc and the ring painted by the quad over it.
+    const dark = node.folder?.bio === true
+    colors[i * 3] = dark ? 0 : col.r
+    colors[i * 3 + 1] = dark ? 0 : col.g
+    colors[i * 3 + 2] = dark ? 0 : col.b
+    glow[i * 4] = dark ? 0 : gl
     glow[i * 4 + 1] = dim
     glow[i * 4 + 2] = (i * 0.618) % 6.283
     glow[i * 4 + 3] = solid

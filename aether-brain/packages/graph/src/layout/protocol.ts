@@ -18,9 +18,10 @@ export type LayoutMode = 'constellation' | 'orbit' | 'system'
 export type LayoutKind = 0 | 1 | 2 | 3 | 4
 /**
  * Folder role codes: 0 root, 1 mount, 2 project, 3 folder, 4 a folder marked as a galaxy (a project folder; what orbits it lies on a
- * flat disc, like a drive's); -1 for non-folders.
+ * flat disc, like a drive's), 5 the Bio black hole (the centre of the sky: every galaxy orbits it, in a plane of its own); -1 for
+ * non-folders.
  */
-export type LayoutRole = -1 | 0 | 1 | 2 | 3 | 4
+export type LayoutRole = -1 | 0 | 1 | 2 | 3 | 4 | 5
 
 export interface LayoutNodeInput {
   id: string

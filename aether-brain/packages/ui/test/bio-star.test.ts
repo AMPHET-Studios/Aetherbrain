@@ -378,7 +378,8 @@ describe('the guides', () => {
 
   it('say what the Bio star is, where it goes and who could see it', () => {
     const cosmology = guide('COSMOLOGY.md')
-    expect(cosmology).toContain('## The Bio star')
+    expect(cosmology).toContain('## The Bio black hole')
+    expect(cosmology).toContain('every galaxy revolves around it')
     expect(cosmology).toContain('Sleep schedule')
     expect(cosmology).toContain('`Bio` folder')
     expect(cosmology).toContain('a page that is there, under any letter case, is never touched')

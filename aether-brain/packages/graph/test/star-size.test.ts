@@ -91,11 +91,11 @@ describe('a star’s size', () => {
     }
   })
 
-  it('is the Bio star’s own size, measured from what is on disk, not from the galaxy-aware weight', () => {
-    // The Bio star keeps its band (9.5 to 11) and its own formula; a number the weight carries does not move it.
+  it('is the Bio black hole’s own size, measured from what is on disk, not from the galaxy-aware weight', () => {
+    // The Bio keeps its band (22 to 28) and its own formula; a number the weight carries does not move it.
     const bio = (extra: Record<string, unknown>) => nodeRadius(folder({ bio: true, totalNotes: 6, childFolders: 1, images: 4, ...extra }))
     expect(bio({ weight: 1 })).toBe(bio({ weight: 1e9 }))
-    expect(bio({})).toBeCloseTo(9.5 + 0.3 * Math.log2(1 + 6 + 1 + 0.25 * 4), 6)
+    expect(bio({})).toBeCloseTo(22 + 0.9 * Math.log2(1 + 6 + 1 + 0.25 * 4), 6)
   })
 
   it('grows with the notes, the folders and the pictures it holds (the number the graph measured)', () => {
@@ -124,13 +124,14 @@ describe('a galaxy you marked', () => {
     expect(GALAXY_MAX_RADIUS).toBe(15)
   })
 
-  it('stays in the order of the sky: a drive, then any galaxy, then the Bio star, then any project star, then any star', () => {
+  it('stays in the order of the sky: the Bio black hole, then a drive, then any galaxy, then any project star, then any star', () => {
     const bioMax = nodeRadius(folder({ bio: true, totalNotes: 10_000_000 }))
     expect(nodeRadius(folder({ role: 'mount' }))).toBe(16)
     expect(galaxy(1e9)).toBeLessThan(16)
-    expect(galaxy(0)).toBeGreaterThan(bioMax)
-    expect(bioMax).toBe(11)
-    expect(nodeRadius(folder({ bio: true }))).toBeGreaterThan(project(1e9))
+    expect(bioMax).toBe(28)
+    expect(nodeRadius(folder({ bio: true }))).toBe(22)
+    expect(nodeRadius(folder({ bio: true }))).toBeGreaterThan(16)
+    expect(galaxy(0)).toBeGreaterThan(project(1e9))
     expect(project(1e9)).toBeGreaterThan(star(1e9))
     // A board sun (at most 9) is smaller than a galaxy too.
     expect(nodeRadius({ kind: 'note', board: { pictures: 1e9 } } as never)).toBeLessThanOrEqual(9)

@@ -1,13 +1,13 @@
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import { Color, LinearSRGBColorSpace, SRGBColorSpace } from 'three'
+import { Color, SRGBColorSpace } from 'three'
 import { buildGraph, folderKey, parseNote, type GraphNode, type NoteId, type ParsedNote } from '@aether/core'
 import {
   BIO_STAR_COLOR,
-  BIO_STAR_GLOW,
-  BIO_STAR_HALO,
   BIO_STAR_LABEL_COLOR,
+  BLACK_HOLE_MAX_RADIUS,
+  BLACK_HOLE_MIN_RADIUS,
   BOARD_SUN_COLOR,
   IMAGE_COLOR,
   STAR_COLOR,
@@ -20,13 +20,14 @@ import {
 } from '../src/theme'
 
 /**
- * The Bio star (docs/COSMOLOGY.md): the folder `Bio` at the vault's home, the one big, bright, blue star. Blue sits far from every
- * gold star, it is bigger than any other star (a drive is still bigger), it burns at one brightness whatever the urgency, and it is
- * always named.
+ * The Bio (docs/COSMOLOGY.md, "The Bio black hole"): the folder `Bio` at the vault's home, a super massive black hole at the centre of
+ * the sky. Its blue sits far from every gold star, it is the biggest body there is, it gives no light of its own (the quad over it paints
+ * the disc and the ring), and it is always named.
  */
 
-const scene = readFileSync(fileURLToPath(new URL('../src/scene/BrainScene.tsx', import.meta.url)), 'utf8').replace(/\r\n/g, '\n')
-const num = (name: string): number => Number(scene.match(new RegExp(`const ${name} = ([0-9.]+)`))?.[1])
+const read = (rel: string): string => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8').replace(/\r\n/g, '\n')
+const scene = read('../src/scene/BrainScene.tsx')
+const engine = read('../src/layout/LayoutEngine.ts')
 
 function bioGraph() {
   const notes = new Map<NoteId, ParsedNote>()
@@ -51,18 +52,6 @@ const hueOf = (css: string): { h: number; s: number; l: number } => {
   new Color(css).getHSL(hsl, SRGBColorSpace)
   return { h: hsl.h * 360, s: hsl.s, l: hsl.l }
 }
-/**
- * What the middle of a star facing the camera shows on screen: the shader (`materials.ts`) outputs colour × glow × (1 + 0.18 pulse,
- * the pulse averaging a half) in linear light with no tone mapping, so a channel past 1 is simply clipped. Returned as an sRGB colour.
- */
-const onScreen = (css: string, glow: number): { h: number; s: number; l: number } => {
-  const c = new Color(css)
-  const k = glow * 1.09
-  const shown = new Color().setRGB(Math.min(1, c.r * k), Math.min(1, c.g * k), Math.min(1, c.b * k), LinearSRGBColorSpace)
-  const hsl = { h: 0, s: 0, l: 0 }
-  shown.getHSL(hsl, SRGBColorSpace)
-  return { h: hsl.h * 360, s: hsl.s, l: hsl.l }
-}
 /** WCAG relative luminance of an sRGB colour, for the contrast of text on the dark panels. */
 const luminance = (css: string): number => {
   const c = new Color(css)
@@ -70,7 +59,7 @@ const luminance = (css: string): number => {
 }
 const folder = (over: Record<string, unknown>) => ({ kind: 'folder', folder: { totalNotes: 0, childFolders: 0, images: 0, role: 'folder', ...over } }) as never
 
-describe('the Bio star’s color', () => {
+describe('the Bio’s color', () => {
   it('is a bright, saturated blue in every color mode, where notes would follow the mode', () => {
     const star = nodeOf(folderKey('Bio'))
     for (const mode of ['area', 'type', 'tag', 'age'] as ColorMode[]) {
@@ -81,18 +70,6 @@ describe('the Bio star’s color', () => {
     expect(h).toBeLessThan(230)
     expect(s).toBeGreaterThan(0.85)
     expect(l).toBeGreaterThan(0.5)
-  })
-
-  it('shows as a bright blue on screen at its glow, not cyan: the green channel must stay under the display limit', () => {
-    const shown = onScreen(BIO_STAR_COLOR, BIO_STAR_GLOW)
-    expect(shown.h).toBeGreaterThan(200)
-    expect(shown.h).toBeLessThan(225)
-    expect(shown.s).toBeGreaterThan(0.8)
-    expect(shown.l).toBeGreaterThan(0.55)
-    // The mistake this guards against: the lighter blue first tried clipped to cyan (hue 185) at the same glow.
-    expect(onScreen('#3d9bff', BIO_STAR_GLOW).h).toBeLessThan(195)
-    // And a selected Bio star (glow plus 0.4) is still blue.
-    expect(onScreen(BIO_STAR_COLOR, BIO_STAR_GLOW + 0.4).h).toBeGreaterThan(200)
   })
 
   it('has a lighter blue for its name and its inspector, readable on the dark panels', () => {
@@ -106,7 +83,7 @@ describe('the Bio star’s color', () => {
     expect(contrast(BIO_STAR_COLOR)).toBeLessThan(7)
   })
 
-  it('is far from every other folder, sun and hub: only the Bio star is blue', () => {
+  it('is far from every other folder, sun and hub: only the Bio is blue', () => {
     // Every other star is drawn in the warm band (starColor hues 16 to 60, a project star gold, a drive cream).
     for (const path of ['Work', 'Work/Gate', 'Inbox', 'Art/Sketches', 'D/Projects']) {
       const hue = hueOf(starColor(path)).h
@@ -127,24 +104,26 @@ describe('the Bio star’s color', () => {
   })
 })
 
-describe('the Bio star’s size', () => {
-  it('is bigger than any other star there can be, and smaller than a drive', () => {
+describe('the Bio’s size', () => {
+  it('is the biggest body there is: 22 when empty, bigger than a drive (16) and than any star', () => {
     // The biggest star of any kind: a project star holding a million notes is 9.2; a board sun at most 9.
     const biggest = nodeRadius(folder({ role: 'project', totalNotes: 1_000_000, childFolders: 5000 }))
     expect(biggest).toBeCloseTo(9.2, 5)
     const empty = nodeRadius(folder({ bio: true }))
-    expect(empty).toBeCloseTo(9.5, 5)
-    expect(empty).toBeGreaterThan(biggest)
+    expect(empty).toBeCloseTo(22, 5)
+    expect(empty).toBe(BLACK_HOLE_MIN_RADIUS)
+    expect(empty).toBeGreaterThan(nodeRadius(folder({ role: 'mount' })))
     expect(nodeRadius(folder({ role: 'mount' }))).toBe(16)
-    expect(nodeRadius(folder({ bio: true, totalNotes: 1_000_000 }))).toBeLessThan(16)
+    expect(nodeRadius(folder({ role: 'root', galaxy: true }))).toBe(16)
   })
 
-  it('grows a little with what it holds and stops at 11', () => {
+  it('grows a little with what it holds and stops at 28', () => {
     const r = (notes: number) => nodeRadius(folder({ bio: true, totalNotes: notes }))
     expect(r(6)).toBeGreaterThan(r(0))
     expect(r(60)).toBeGreaterThan(r(6))
-    expect(r(6)).toBeCloseTo(9.5 + 0.3 * Math.log2(7), 5)
-    expect(r(10_000_000)).toBe(11)
+    expect(r(6)).toBeCloseTo(22 + 0.9 * Math.log2(7), 5)
+    expect(r(10_000_000)).toBe(28)
+    expect(BLACK_HOLE_MAX_RADIUS).toBe(28)
   })
 
   it('is what the real graph’s Bio node measures, and its neighbors keep theirs', () => {
@@ -154,26 +133,35 @@ describe('the Bio star’s size', () => {
   })
 })
 
-describe('the Bio star in the scene', () => {
-  it('burns brighter than any star can, than a galaxy and than a board sun, and only the Today hub outshines it', () => {
-    const brightestStar = num('PROJECT_GLOW_CALM') + num('STAR_GLOW_HEAT')
-    expect(brightestStar).toBeGreaterThan(2)
-    expect(BIO_STAR_GLOW).toBeGreaterThan(brightestStar)
-    expect(BIO_STAR_GLOW).toBeGreaterThan(num('GALAXY_GLOW'))
-    expect(BIO_STAR_GLOW).toBeGreaterThan(num('BOARD_SUN_GLOW'))
-    expect(BIO_STAR_GLOW).toBeLessThan(num('TODAY_GLOW'))
+describe('the Bio in the scene', () => {
+  it('gives no light of its own: a dark core with no glow', () => {
+    expect(scene).toContain('const dark = node.folder?.bio === true')
+    expect(scene).toContain('colors[i * 3] = dark ? 0 : col.r')
+    expect(scene).toContain('glow[i * 4] = dark ? 0 : gl')
+    // Its blue stays in the base colours: the rings of the galaxies that circle it are tinted by it.
+    expect(scene).toContain('base[i * 3] = col.r')
   })
 
-  it('uses that one brightness however much it is used, instead of the star glow', () => {
-    expect(scene).toMatch(/const star = node\.folder\?\.bio \? BIO_STAR_GLOW : starGlow\(c\.activity !== null && c\.activity\.length === n \? \(c\.activity\[i\] \?\? 0\) : 0, role === ROLE_PROJECT\)/)
+  it('draws no core and no aura of its own: the quad over it is the whole body', () => {
+    expect(scene).toContain('const core = i === holeI ? 0 :')
+    expect(scene).toContain('const h = pictured || i === holeI ? 0 : r * buffers.haloK[i]!')
+    expect(scene).toMatch(/const holeAt = blackHoleOf\(graph\)\n\s+if \(holeAt >= 0\) haloK\[holeAt\] = 0/)
   })
 
-  it('gives it a wider aura than any other body, so a deep blue is still a bright blue giant from far away', () => {
-    expect(num('HALO_RADII')).toBe(3.2)
-    expect(BIO_STAR_HALO).toBeGreaterThan(num('HALO_RADII') * 1.5)
-    // Per node: the Bio star's, nobody else's; and the halo is sized from it, not from a fixed number.
-    expect(scene).toMatch(/const haloK = new Float32Array\(count\)\.fill\(HALO_RADII\)\n\s+graph\.nodes\.forEach\(\(n, i\) => \{\n\s+if \(n\.folder\?\.bio\) haloK\[i\] = BIO_STAR_HALO\n\s+\}\)/)
-    expect(scene).toContain('const h = pictured ? 0 : r * buffers.haloK[i]!')
+  it('draws it with one quad, in the plane its galaxies orbit, at its place, hovered and selected', () => {
+    expect(scene).toContain('const hole = holeAt >= 0 ? buildBlackHole(holeAt) : null')
+    expect(scene).toContain('if (buffers.hole) fitBlackHole(buffers.hole, buffers.ringParent, buffers.ringQuat.array as Float32Array, buffers.ringCount)')
+    expect(scene).toMatch(/placeBlackHole\(buffers\.hole, dp\[k \* 3\] \?\? 0, dp\[k \* 3 \+ 1\] \?\? 0, dp\[k \* 3 \+ 2\] \?\? 0, buffers\.radii\[k\] \?\? 0, feedOf\(g\.nodes\[k\]\?\.folder\), st\.flareClock % 3600, lift\)/)
+    expect(scene).toContain('const lift = k === selI ? 1 : k === hovI ? 0.5 : 0')
+    expect(scene).toContain('{buffers.hole && <primitive object={buffers.hole.mesh} />}')
+    expect(scene).toContain('hole?.dispose()')
+  })
+
+  it('has its rings, its unfolding and its layout follow who orbits whom, not the folders', () => {
+    expect(scene).toContain('const parentIdx = orbitParents(graph)')
+    expect(engine).toContain('const circles = orbitParents(graph)')
+    expect(engine).toContain('parent: circles[i]!')
+    expect(engine).toContain('n.folder.bio ? BLACK_HOLE_ROLE')
   })
 
   it('always names it, in its blue, with a ✚', () => {

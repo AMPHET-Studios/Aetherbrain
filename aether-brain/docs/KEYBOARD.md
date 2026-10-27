@@ -11,7 +11,7 @@ Every feature has a key. `⌘` is `Ctrl` on Windows/Linux. Single keys are ignor
 | `y` · `7`      | Today: fly to the ☀ Today hub and show the daily brief (turns the hub on if it was off) |
 | `d`            | Open (or create) today's daily note               |
 | `i`            | Import your AI chats: pick the Claude / ChatGPT data export (.zip) — see [AI-CHATS.md](AI-CHATS.md) |
-| `⇧ I`          | The **✚ Bio star**: fly to it. With none yet, a toast offers to make it (`u` or its button), or use the palette's *Create my Bio star* — see [The Bio star](COSMOLOGY.md#the-bio-star) |
+| `⇧ I`          | The **✚ Bio star**: fly to it. With none yet, a toast offers to make it (`u` or its button), or use the palette's *Create my Bio star* — see [The Bio black hole](COSMOLOGY.md#the-bio-black-hole) |
 | `1` `2` `3` `4` `5` `6` | Graph · Editor · Capture · Search · Review · Projects |
 | `8` · `⇧ B` | Boards: reference boards, the board you were on or the list of boards — see [Reference boards](#reference-boards) |
 | `p`            | Projects board (with a ★ project star selected: that project's board) |
