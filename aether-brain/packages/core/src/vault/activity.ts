@@ -84,8 +84,8 @@ export class ActivityLog {
   }
 
   toJSON(): ActivityData {
-    const e: Record<string, [number, number]> = {}
-    for (const [id, v] of this.entries) e[id] = [Math.round(v.s * 1000) / 1000, Math.round(v.t)]
+    // fromEntries defines each key as an own property: a note called `__proto__` is data here, not a way to change the object's prototype.
+    const e = Object.fromEntries([...this.entries].map(([id, v]) => [id, [Math.round(v.s * 1000) / 1000, Math.round(v.t)] as [number, number]]))
     return { v: 1, e }
   }
 

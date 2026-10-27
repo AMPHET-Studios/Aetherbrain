@@ -11,7 +11,7 @@ What every body in the system layout *is*, how it moves and why. This is the con
 | a **picture, video or 3D model** big enough to matter, or a **document-sized note** | a **planet** | pictures, videos and models as extra-large thumbnails; a long note as a solid sphere |
 | every **small file** | a **moon** | a small body on a close orbit |
 | a **reference board** with pictures on it | a **sun** | a bright mint-white star of its own, bigger the more pictures it holds; the pictures on it orbit it instead of their folders |
-| **how soon it needs you** | **orbit speed** | a faster orbit; the most urgent things closest in |
+| **how soon it needs you** | **orbit speed** and **corona ejections** | a faster orbit, the most urgent things closest in; a star that needs you erupts |
 | **how much you use it** | **star brightness** | a brighter star for the folders you open and save in lately |
 
 Everything orbits what is above it: files orbit their folder's star, a sub-folder's star orbits its parent star, a drive's stars lie on its disc. Nothing is a star that is not a folder, except a board's sun (below).
@@ -172,6 +172,22 @@ A star's glow is `calm + heat · A`, with `A` how much its **whole system is use
 - **A folder is as bright as its whole system** (`computeActivity`): the hottest note or sub-folder in it, plus a share of the rest (the same saturating sum a folder's urgency uses), so a deep note lights the whole branch above it and three hundred notes touched once each are a glow, not a blaze. A galaxy you marked takes its notes and folders out of the stars it left, as everything else does.
 - **Where it lives.** On this computer, beside the app's other view settings (`aether:activity:<vault>` in the window's local storage): never in the vault, never sent anywhere, at most 4,000 notes (the coolest are forgotten first). The palette's *Forget which folders I use* empties it. A fresh vault, or one opened on another computer, starts calm.
 - **Not everything is a star.** The Bio star burns at its one brightness, a galaxy at its steady glow and the Today hub at its own, whatever is used.
+
+### A star that needs you erupts
+
+A star whose whole system needs attention throws plasma. The number is the urgency that already sets its orbit's speed (open tasks, overdue ones most), so what is due moves fast **and** erupts, and what you use glows: three different things, never confused. The more urgent, the more often and the bigger:
+
+| the star's urgency | what it does |
+| --- | --- |
+| under 0.35 | nothing |
+| 0.35 and up | throws a **prominence**, a loop of plasma that rises and falls back: every 16 seconds, down to every 3 when overdue |
+| 0.7 and up | now and then a huge **coronal mass ejection** too: a stream of plasma that leaves the star and runs 6 to 12 of its own radii out (one flare in five at 0.7, seven in ten when overdue) |
+
+- **Which stars.** A folder's star, and a galaxy you marked, whose whole system needs attention. Not the vault, a drive or the Bio star. Only a star that is shown (not folded inside a closed sun).
+- **How it moves.** `o` stops the orbits and the ejections with them (they freeze mid-air); calm mode (`⇧ O`) keeps the loops, half as often, and throws no huge ejection; `⇧ F` (or the palette's *Solar flares*) switches them off and on, a setting of the brain window. A computer that asks for less motion starts with them off.
+- **How it is drawn** (`packages/graph/src/scene/flares.ts`): one instanced mesh for every flare there is, each a short stream of camera-facing sprites moved by the vertex shader (white-yellow when young, orange, then a dull red), added to the light so the young core blooms. The CPU only decides when and which way (`FlareField.step`, plain typed arrays, nothing allocated per frame), the same every time for the same sky, and a graph rebuild (a note saved) hands the plumes in the air to the new field by node id, so nothing vanishes.
+- **Bounds.** At most 40 stars flare at once (the most urgent, then the nearest the camera) and at most 96 flares are alive, however many stars are overdue.
+- **The viewer** is not sent the flares: it has each node's `urgency` and may draw its own.
 
 ## What the viewer is told
 

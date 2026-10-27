@@ -141,6 +141,19 @@ describe('what is kept', () => {
     expect(ActivityLog.from({ v: 1, e: big }, T0).size).toBeLessThanOrEqual(ACTIVITY_MAX_NOTES)
   })
 
+  it('keeps a note called __proto__ (or constructor) as the data it is, and saves and reads it back', () => {
+    const log = new ActivityLog()
+    for (const id of ['__proto__', 'constructor', 'toString', 'hasOwnProperty']) log.record(id, 'save', T0)
+    const saved = JSON.parse(JSON.stringify(log.toJSON())) as { e: Record<string, unknown> }
+    expect(Object.keys(saved.e).sort()).toEqual(['__proto__', 'constructor', 'hasOwnProperty', 'toString'])
+    const back = ActivityLog.from(saved, T0)
+    expect(back.size).toBe(4)
+    for (const id of ['__proto__', 'constructor', 'toString', 'hasOwnProperty']) expect(back.scoreOf(id, T0)).toBeCloseTo(ACTIVITY_SAVE, 3)
+    // Nothing leaked into every object.
+    expect(({} as { s?: unknown }).s).toBeUndefined()
+    expect(Object.getPrototypeOf({})).toBe(Object.prototype)
+  })
+
   it('forgets everything on request', () => {
     const log = new ActivityLog()
     log.record('A', 'open', T0)
