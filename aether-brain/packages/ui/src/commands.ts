@@ -307,6 +307,15 @@ export const COMMANDS: Command[] = [
     run: (s) => s.toggleSuns(),
   },
   {
+    id: 'asteroids',
+    title: 'Asteroids: reminders float by on / off',
+    hint: 'dated tasks that are late or due soon, and notes tagged reminder, drift through the sky: the more urgent, the nearer, bigger and redder; hover to read, click to open',
+    keys: 'Shift+A',
+    group: 'view',
+    when: (s) => s.settings.layoutMode === 'system',
+    run: (s) => s.toggleAsteroids(),
+  },
+  {
     id: 'flares',
     title: 'Solar flares: a star that needs attention throws plasma on / off',
     hint: 'the more urgent its whole system, the more often and the bigger: a due star throws loops, an overdue one huge ejections (calm mode keeps to loops)',

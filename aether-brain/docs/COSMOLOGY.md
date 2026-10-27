@@ -200,6 +200,7 @@ Rocks drift through the part of the sky you are looking at. Each one is a **remi
 - **How it looks.** A lumpy rock, tumbling, lit like a planet. The more urgent, the nearer the middle of the view, the bigger, the redder and the faster (`planAsteroid`); an overdue one hurries. Calm ones are amber.
 - **Where it floats.** In a box that follows the camera (half way to what it looks at, as wide as that distance, 40 to 1,500), so wherever you fly a few are going by. It wraps round the box and fades at its edge, so none pops. The clock is the orbit clock: `o` stops them with everything else.
 - **Hover and click.** Hovering one shows its date and words beside it; clicking it opens its note.
+- **The switch.** `⇧ A` (or the palette's *Asteroids*) turns them on and off, a setting of the brain window; a computer that asks for less motion starts with them off.
 - **Where the list comes from.** `remindersOf(notes, today)` (`core/vault/reminders.ts`), refreshed when the graph is built; nothing is written and nothing is sent. They are not nodes: the layout, the graph and the viewer do not know about them. One instanced mesh (`scene/asteroids.ts`), no allocation per frame; the controller's `reminders` and `asteroids` (on) hold them.
 
 ## What the viewer is told

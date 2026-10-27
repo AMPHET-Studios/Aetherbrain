@@ -58,6 +58,7 @@ The default layout, a cosmology (see [COSMOLOGY.md](COSMOLOGY.md)). Each drive i
 | `s`         | Open the selected ★ sun one level further: closed → planets → planets and moons → closed (on a planet or moon: its sun). A click on a closed sun opens its planets, and the bar at the bottom of the view picks a level |
 | `⇧ S`       | Open every sun, or close every one |
 | `⇧ M`       | Sound on / off: a note for every star, planet and moon you click, a run when a sun opens |
+| `⇧ A`       | Asteroids on / off: your reminders (open tasks due soon or late, notes tagged `reminder`) float by as rocks; hover one to read it, click it to open its note; `o` freezes them |
 | `⇧ F`       | Solar flares on / off: a star whose system needs attention throws plasma, the more urgent the more often and the bigger (an overdue one, huge ejections); `o` freezes them, calm mode (`⇧ O`) keeps only small loops (see [A star that needs you erupts](COSMOLOGY.md#a-star-that-needs-you-erupts)). Inside the Boards view `⇧ F` is the board's own (fit the selection) |
 | `⇧ G`       | Star gallery: every picture of the selected ★ star (or of the star the selection belongs to, else the nearest star) floats around it in 3D, and the camera flies there; again: fold it |
 | `t`         | Leave / come back to the system layout                            |

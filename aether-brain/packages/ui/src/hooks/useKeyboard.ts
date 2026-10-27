@@ -193,6 +193,10 @@ export function handleKey(e: KeyboardEvent): void {
       // Import AI chats: the system file dialog (the key press is the gesture it needs).
       if (s.adapter && !s.adapter.readOnly) importChatsFromDialog()
       return
+    case 'A':
+      // Shift+A: the asteroids (reminders that float by) on / off.
+      s.toggleAsteroids()
+      return
     case 'F':
     case 'f':
       // Shift+F: corona ejections on / off. f: fly to the selection. Shift decides, as for Shift+G.
