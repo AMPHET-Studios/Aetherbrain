@@ -254,3 +254,12 @@ Two tiers. Numbers are planning estimates to confirm on the card, not measuremen
 | the coach (the AI that works with you) | a 3 to 4 B model at 4-bit, about 2 to 3 GB, run beside the viewer | a 7 to 8 B model at 4-bit, about 5 GB, with room to spare |
 
 The coach runs **outside** the viewer (a local model server, the way the app's chat already uses Ollama), so the render never waits for it and a bigger or smaller model is a setting, not a rebuild. Nothing about the coach is in the cosmology: it reads the same notes, tasks and check-ins, and it is the one that helps you pick the single bright thing that matters today.
+
+## The sky builds itself
+
+When a vault opens, or something is added, the sky appears in order: **galaxies**, then **stars**, then **planets**, then **moons**, then the **files** (`scene/buildUp.ts`). Each stage starts 0.8 s after the one before, and the bodies of a stage come a little apart from each other, not all at once, so the whole build takes about four seconds.
+
+- A body that is not due yet is *held*: its reveal target is 0 (`RevealInput.hold` in `scene/reveal.ts`), so when its turn comes it grows out of its sun along its own orbit, the way a sun opening does.
+- Only what is new is held. A graph rebuilt after an edit holds the new bodies and nothing else; new bodies are timed from the earliest stage among them, so a new note appears at once and a new folder comes first and its notes after it.
+- It is part of the brain window's view, like the suns opening: it changes no position, no layout and nothing a viewer is sent. It runs in the system layout only.
+- The selected body is never held.
