@@ -2,19 +2,39 @@
 
 What every body in the system layout *is*, how it moves and why. This is the contract: the desktop app is the concept that proves it, and the Unreal Engine 5.8 version is built to it. When the two disagree, this page is right and one of them has a bug.
 
-## The six rules
+## The rules
 
 | Your vault | Is | Drawn as |
 | --- | --- | --- |
 | a **drive** (or the whole vault, when it is one folder), or a **folder you mark** as one (below) | a **galaxy** | the biggest body, a steady glow; what is in it lies on a flat disc |
-| a **folder** | a **star** | a glowing body; bigger the more it holds; a project folder is the brightest, biggest kind |
-| a **picture, video or 3D model** big enough to matter, or a **document-sized note** | a **planet** | pictures, videos and models as extra-large thumbnails; a long note as a solid sphere |
-| every **small file** | a **moon** | a small body on a close orbit |
+| a **folder directly in a galaxy** | a **star** | a glowing body; bigger the more it holds; a project folder is the brightest, biggest kind |
+| a **folder directly in a star** | a **planet** | a smaller body on a ring of its star |
+| a **folder in a planet**, or in another moon | a **moon**, and moons nest: a moon's folder is a moon of that moon, as deep as the folders go | a small body on a close orbit |
+| every **file** | a **satellite** | it orbits a moon, never a star or a planet; a picture, video or model as a thumbnail (extra large when it is big), a long note as a solid sphere, anything else as a rock |
 | a **reference board** with pictures on it | a **sun** | a bright mint-white star of its own, bigger the more pictures it holds; the pictures on it orbit it instead of their folders |
 | **how soon it needs you** | **orbit speed** and **corona ejections** | a faster orbit, the most urgent things closest in; a star that needs you erupts |
 | **how much you use it** | **star brightness** | a brighter star for the folders you open and save in lately |
 
-Everything orbits what is above it: files orbit their folder's star, a sub-folder's star orbits its parent star, a drive's stars lie on its disc. Nothing is a star that is not a folder, except a board's sun (below). At the very top there is one exception: the **Bio** is a **super massive black hole** at the centre of the sky, and **every galaxy revolves around it** ([The Bio black hole](#the-bio-black-hole)).
+Everything orbits what is above it: a star orbits its galaxy's centre, a planet orbits its star, a moon orbits its planet (or its parent moon), and a file orbits a moon. Nothing is a star that is not a folder, except a board's sun (below). At the very top there is one exception: the **Bio** is a **super massive black hole** at the centre of the sky, and **every galaxy revolves around it** ([The Bio black hole](#the-bio-black-hole)).
+
+## Galaxy, star, planet, moon, satellite
+
+Space nests the way folders do (decided 2026-10-28 with Dominic: *a folder is a planet*, *files orbit moons*, *real space configuration down to moons and satellites*):
+
+| Real thing | Your vault |
+| --- | --- |
+| galaxy | a drive, or a folder you marked |
+| star | a folder directly in a galaxy |
+| planet | a folder directly in a star |
+| moon | a folder in a planet; a folder in a moon is a moon of that moon, without limit |
+| satellite | a file |
+
+- **The depth is counted below the galaxy.** A folder you mark as a galaxy starts the count again: the folders directly on it are its stars.
+- **Files are satellites and orbit moons.** A big file (a picture, video or model of 48 KB or more, a note of 3,000 words or more: `isBigFile`) is the same satellite drawn bigger. No file is a planet any more.
+- **A level opens what is under it.** *Folders* shows the bodies of the sub-folders (a star's planets, a planet's moons, a moon's moons), *Folders + files* adds its files (`bodyTiers`: a sub-folder 1, a file 2).
+- **The sky builds itself** in this order: galaxies, stars, planets, moons, satellites (`scene/buildUp.ts`, with `folderBodies`).
+- **Code:** `folderBodies` and `legendBodiesIn` in `packages/core/src/vault/cosmos.ts`; the legend has a chip for each (galaxy, star, planet, moon, satellite).
+- **Not built yet (said plainly):** the home moon (a planet or star that holds files of its own gets one moon for them, so no file orbits a planet), the layout and sizes by body (a planet is still drawn and placed like a star), the sound of a planet or moon folder, the companion link and the Unreal viewer (they are still sent the old classes). Until the home moon exists a file still orbits the folder it is in.
 
 ## A galaxy is a folder you mark
 
@@ -75,19 +95,19 @@ One body in the sky is the user's own body and mind: the **Bio**, a **super mass
 - **Who could see it.** The pages are plain markdown on this computer, like every note. With Claude as the chat's answerer, whatever the chat reads from them goes to Anthropic; with Ollama nothing leaves the computer ([BRAIN-CHAT.md](BRAIN-CHAT.md#your-bio-notes)).
 - **The viewer** is sent the Bio as a `star` (kind and body) in its blue and its radius (22 to 28), and the scene cut always keeps it with a page or two, like the drives and the Today hub. A dormant one is sent too, as a star with no children. A viewer built to this page may draw it as a black hole at the centre; `kind` and `body` do not change.
 
-## Suns open into planets, then moons
+## Suns open into folders, then files
 
 A sun (a folder's star, a drive's galaxy, a board's sun) is something you open. A closed sun shows only itself, so a big vault is a field of stars to pick from, not a wall of dots.
 
 | Level | Shows |
 | --- | --- |
 | **Closed** (0) | the star alone |
-| **Planets** (1) | its planets (a big picture, video or model, a long note) and the stars of its sub-folders, orbiting it |
-| **Planets + moons** (2) | those and its moons: every small file, and the links to notes that do not exist yet |
+| **Folders** (1) | the bodies of its sub-folders: a star's planets, a planet's moons, a moon's moons, orbiting it |
+| **Folders + files** (2) | those and its files (satellites): every file, and the links to notes that do not exist yet |
 
 - **Always shown.** The galaxy, the folders directly under it (so a closed vault is a field of stars), the Today hub, the selected body, the cards of an open star gallery, and what a search or a filter lights up.
-- **Opening.** A click on a closed star opens its planets (its moons, when it has no planets), the camera flies in and a rising run of notes plays. The bar at the bottom of the 3D view then picks *Closed*, *Planets* or *Planets + moons* for the selected sun, with what it holds (`1 planet · 2 folders · 7 moons`); a level it has nothing for is off. `s` steps the selected sun (or the sun of the selected body) through the levels it has something for, `⇧ S` opens every sun or closes every one.
-- **Each sun is its own**, and the levels are saved for the vault. A body is shown only while the sun it orbits is shown (`bodyOwners`, `bodyTiers`, `bodyOrder` in `packages/core/src/vault/cosmos.ts`): a sub-folder's planets wait for its own star to open. Counts for the bar come from `sunCounts`.
+- **Opening.** A click on a closed body opens its folders (its files, when it has no sub-folders), the camera flies in and a rising run of notes plays. The bar at the bottom of the 3D view then picks *Closed*, *Folders* or *Folders + files* for the selected sun, with what it holds (`2 folders · 7 files`); a level it has nothing for is off. `s` steps the selected sun (or the sun of the selected body) through the levels it has something for, `⇧ S` opens every sun or closes every one.
+- **Each sun is its own**, and the levels are saved for the vault. A body is shown only while the sun it orbits is shown (`bodyOwners`, `bodyTiers`, `bodyOrder` in `packages/core/src/vault/cosmos.ts`): a sub-folder's bodies wait for its own body to open. Counts for the bar come from `sunCounts`.
 - **Selecting a hidden body** (a search, a link, `Tab`, back and forward) opens the stars above it as far as it needs, so what you asked for is always there, and the opening is saved like any other.
 - **The unfolding.** When a sun opens its bodies grow out of it along their own orbits, and when it closes they fold back into it (about half a second, `REVEAL_SECONDS` in `scene/reveal.ts`); their orbit rings come and go with them, and a link to a hidden body ends at its sun. A fresh scene starts with every body where it belongs.
 - **Switching it off** (the palette's *Suns: open on click / always show every planet and moon*) shows every body, always, as before. The other layouts never fold anything: they have no suns.
@@ -110,20 +130,20 @@ A click on a star, a planet or a moon plays a short note of its own; opening or 
 - **Everything is made on the spot** with Web Audio (oscillators and a reverb made of decaying noise, a compressor, at most 14 notes at once): no sound file is shipped, nothing is downloaded, nothing leaves the computer. A page with no Web Audio is silent, and the context is only made on the first click (a browser wants one before it will play).
 - `packages/ui/src/audio/sounds.ts`; `soundPlan` and `sunRun` are the pure parts, tested as numbers.
 
-## Planet or moon
+## Big file or small file
 
-A file is a **planet** when it is worth looking at as itself:
+A file is **big** when it is worth looking at as itself (`isBigFile`; `isPlanetNode` is its old name):
 
-- a picture, video or `.glb` model of at least **48 KB** (`PLANET_MIN_BYTES`), or one whose size nobody looked at (a whole drive's pictures are not all stat'ed: a picture is a planet until it says it is small);
+- a picture, video or `.glb` model of at least **48 KB** (`PLANET_MIN_BYTES`), or one whose size nobody looked at (a whole drive’s pictures are not all stat’ed: a picture is big until it says it is small);
 - a note of at least **3,000 words** (`PLANET_MIN_WORDS`).
 
-Everything else is a **moon**: notes, ghosts (links to notes that do not exist yet), icons and sprites. Folders and the Today hub are never either.
+A big file is a satellite drawn bigger. Every other file is a satellite too: notes, ghosts (links to notes that do not exist yet), icons and sprites. A planet and a moon are folders; the Today hub is none of them.
 
 ### What a model looks like
 
 A `.glb` (binary glTF, one self-contained file) is drawn as one still by the desktop app itself. The thumbnail helper has no GPU, so a small software rasterizer in its preload draws the model's triangles from a fixed side (a little off the front and above, with one key light), in its materials' base colours (a textured material in its texture's average colour), on a dark ground. A dark model is lifted to a readable level, never by more than three times.
 
-What it does not do, said plainly: textures are not mapped; skins, animation and lights are ignored (the bind pose is drawn); compressed (Draco, meshopt) and sparse geometry is skipped; and a file over 64 MB gets no still (it is still a planet, without a picture). The production viewer is free to draw the real model. The planet and moon rule above is the contract, not the still.
+What it does not do, said plainly: textures are not mapped; skins, animation and lights are ignored (the bind pose is drawn); compressed (Draco, meshopt) and sparse geometry is skipped; and a file over 64 MB gets no still (it is still a big satellite, without a picture). The production viewer is free to draw the real model. The big and small rule above is the contract, not the still.
 
 ## Urgency
 
@@ -191,9 +211,9 @@ A star whose whole system needs attention throws plasma. The number is the urgen
 - **Bounds.** At most 40 stars flare at once (the most urgent, then the nearest the camera) and at most 96 flares are alive, however many stars are overdue.
 - **The viewer** is not sent the flares: it has each node's `urgency` and may draw its own.
 
-## Every file is a moon
+## Every file is a satellite
 
-Any file that is not a note, a picture, a video or a 3D model (an mp3, a pdf, a zip, a spreadsheet, a mod's script) is a **moon** of its folder's star, a big one a **planet** (the same 48 KB line as a picture). Never a folder. It is a rock, not a thumbnail: nothing is read or previewed.
+Any file that is not a note, a picture, a video or a 3D model (an mp3, a pdf, a zip, a spreadsheet, a mod's script) is a **satellite**, a big one drawn bigger (the same 48 KB line as a picture). Never a folder. It is a rock, not a thumbnail: nothing is read or previewed.
 
 - **Colour by kind** (`fileKindOf`, `FILE_COLORS`): audio violet, documents cream, archives bronze, data teal, code green, design pink, anything else grey.
 - **Bounded.** A folder shows at most its 12 newest (`FILE_MOONS_PER_FOLDER`), the sky at most 800 (`FILE_MOONS_TOTAL`), and the scan lists at most 20,000 by name (`FILE_SCAN_MAX`), shallow folders first. Clutter is left out by name: hidden files, build output and caches (`dist`, `build`, `Intermediate`, `DerivedDataCache`, `node_modules` …), `.map`, `.lock`, `.log`, `.dll`, system files, and anything with no extension (`isFileMoonPath`).

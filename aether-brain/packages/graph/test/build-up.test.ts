@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { GraphData, GraphNode } from '@aether/core'
+import { FB_MOON, FB_PLANET, FB_STAR } from '@aether/core'
 import { BUILD_FILE, BUILD_GALAXY, BUILD_MOON, BUILD_PLANET, BUILD_STAGE_SECONDS, BUILD_STAR, bodyStages, buildDelays, holdBodies, stageOf } from '../src/scene/buildUp'
 import { revealTargets } from '../src/scene/reveal'
 
@@ -10,8 +11,8 @@ function node(id: string, extra: Partial<GraphNode> = {}): GraphNode {
 }
 const galaxy = (id: string) => node(id, { kind: 'folder', folder: { role: 'mount' } } as Partial<GraphNode>)
 const star = (id: string) => node(id, { kind: 'folder', folder: { role: 'folder' } } as Partial<GraphNode>)
-const planet = (id: string) => node(id, { wordCount: 5000 })
-const moon = (id: string) => node(id)
+const planet = (id: string) => node(id, { kind: 'folder', folder: { role: 'folder' } } as Partial<GraphNode>)
+const moon = (id: string) => node(id, { kind: 'folder', folder: { role: 'folder' } } as Partial<GraphNode>)
 const file = (id: string) => node(id, { kind: 'image', image: { size: 1000, file: 'audio' } } as Partial<GraphNode>)
 
 function graphOf(nodes: GraphNode[]): GraphData {
@@ -21,21 +22,24 @@ function graphOf(nodes: GraphNode[]): GraphData {
 describe('which stage a body is', () => {
   it('puts galaxies first, then stars, planets, moons and files', () => {
     expect(stageOf(galaxy('g'))).toBe(BUILD_GALAXY)
-    expect(stageOf(star('s'))).toBe(BUILD_STAR)
-    expect(stageOf(planet('p'))).toBe(BUILD_PLANET)
-    expect(stageOf(moon('m'))).toBe(BUILD_MOON)
+    expect(stageOf(star('s'), FB_STAR)).toBe(BUILD_STAR)
+    expect(stageOf(planet('p'), FB_PLANET)).toBe(BUILD_PLANET)
+    expect(stageOf(moon('m'), FB_MOON)).toBe(BUILD_MOON)
     expect(stageOf(file('f'))).toBe(BUILD_FILE)
     expect([BUILD_GALAXY, BUILD_STAR, BUILD_PLANET, BUILD_MOON, BUILD_FILE]).toEqual([0, 1, 2, 3, 4])
   })
 
-  it('treats the Today hub and a board as stars, and an unresolved link as a moon', () => {
+  it('treats the Today hub and a board as stars, and every file, a long note and an unresolved link as satellites', () => {
     expect(stageOf(node('t', { kind: 'today' } as Partial<GraphNode>))).toBe(BUILD_STAR)
     expect(stageOf(node('b', { board: { pictures: 3 } } as unknown as Partial<GraphNode>))).toBe(BUILD_STAR)
-    expect(stageOf(node('x', { ghost: true } as Partial<GraphNode>))).toBe(BUILD_MOON)
+    expect(stageOf(node('x', { ghost: true } as Partial<GraphNode>))).toBe(BUILD_FILE)
+    expect(stageOf(node('long', { wordCount: 5000 }))).toBe(BUILD_FILE)
+    expect(stageOf(node('small'))).toBe(BUILD_FILE)
   })
 
   it('reads a whole graph', () => {
-    const g = graphOf([galaxy('g'), star('s'), planet('p'), moon('m'), file('f')])
+    // A chain of folders: the depth below the galaxy makes a star, a planet and a moon.
+    const g = graphOf([galaxy('g'), { ...star('s'), parent: 'g' }, { ...planet('p'), parent: 's' }, { ...moon('m'), parent: 'p' }, file('f')] as GraphNode[])
     expect(Array.from(bodyStages(g))).toEqual([0, 1, 2, 3, 4])
   })
 })

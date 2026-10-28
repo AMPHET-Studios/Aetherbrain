@@ -10,8 +10,8 @@ import { LEGEND_BODIES, PLANET_MIN_BYTES, PLANET_MIN_WORDS, legendBodies, type G
 const node = (over: Record<string, unknown>): GraphNode => ({ kind: 'note', ghost: false, wordCount: 10, parent: null, ...over }) as unknown as GraphNode
 
 describe('the legend’s kinds', () => {
-  it('lists the six the legend names, in its order', () => {
-    expect([...LEGEND_BODIES]).toEqual(['galaxy', 'star', 'planet', 'moon', 'sun', 'picture'])
+  it('lists the seven the legend names, in its order', () => {
+    expect([...LEGEND_BODIES]).toEqual(['galaxy', 'star', 'planet', 'moon', 'satellite', 'sun', 'picture'])
   })
 
   it('calls a drive, or a one-folder vault, a galaxy, and every other folder a star', () => {
@@ -23,19 +23,25 @@ describe('the legend’s kinds', () => {
     expect(legendBodies(node({ kind: 'folder', folder: { role: 'folder' } }))).toEqual(['star'])
   })
 
-  it('calls a board with pictures orbiting it a sun, and a plain board note a moon like any note', () => {
+  it('calls a board with pictures orbiting it a sun, and a plain board note a satellite like any file', () => {
     expect(legendBodies(node({ type: 'board', board: { pictures: 3 } }))).toEqual(['sun'])
-    expect(legendBodies(node({ type: 'board' }))).toEqual(['moon'])
+    expect(legendBodies(node({ type: 'board' }))).toEqual(['satellite'])
   })
 
-  it('calls a big file a planet and a small one a moon, and a picture a picture as well', () => {
-    expect(legendBodies(node({ wordCount: PLANET_MIN_WORDS }))).toEqual(['planet'])
-    expect(legendBodies(node({ wordCount: PLANET_MIN_WORDS - 1 }))).toEqual(['moon'])
-    expect(legendBodies(node({ kind: 'ghost', ghost: true }))).toEqual(['moon'])
-    expect(legendBodies(node({ kind: 'image', image: { size: PLANET_MIN_BYTES } }))).toEqual(['planet', 'picture'])
-    expect(legendBodies(node({ kind: 'image', image: { size: PLANET_MIN_BYTES - 1 } }))).toEqual(['moon', 'picture'])
-    // A picture nobody measured is a planet until it says it is small.
-    expect(legendBodies(node({ kind: 'image', image: { size: null } }))).toEqual(['planet', 'picture'])
+  it('calls every file a satellite, big or small, and a picture a picture as well', () => {
+    expect(legendBodies(node({ wordCount: PLANET_MIN_WORDS }))).toEqual(['satellite'])
+    expect(legendBodies(node({ wordCount: PLANET_MIN_WORDS - 1 }))).toEqual(['satellite'])
+    expect(legendBodies(node({ kind: 'ghost', ghost: true }))).toEqual(['satellite'])
+    expect(legendBodies(node({ kind: 'image', image: { size: PLANET_MIN_BYTES } }))).toEqual(['satellite', 'picture'])
+    expect(legendBodies(node({ kind: 'image', image: { size: PLANET_MIN_BYTES - 1 } }))).toEqual(['satellite', 'picture'])
+    expect(legendBodies(node({ kind: 'image', image: { size: null } }))).toEqual(['satellite', 'picture'])
+  })
+
+  it('calls a folder a planet or a moon when its depth makes it one', () => {
+    const folder = node({ kind: 'folder', folder: { role: 'folder' } })
+    expect(legendBodies(folder, 'planet')).toEqual(['planet'])
+    expect(legendBodies(folder, 'moon')).toEqual(['moon'])
+    expect(legendBodies(folder, 'star')).toEqual(['star'])
   })
 
   it('leaves the Today hub out of all of them', () => {

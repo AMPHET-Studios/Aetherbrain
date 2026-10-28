@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { MemoryVaultAdapter, folderKey, isGalaxyNode } from '@aether/core'
+import { FB_MOON, FB_PLANET, FB_STAR, MemoryVaultAdapter, folderBodies, folderKey, isGalaxyNode } from '@aether/core'
 
 /**
- * Icons that do something. The legend's six kinds of body (◉ galaxy, ★ star, ● planet, · moon, ▣ sun, 🖼 picture) are chips that light
+ * Icons that do something. The legend's six kinds of body (◉ galaxy, ★ star, ● planet, ◦ moon, · satellite, ▣ sun, 🖼 picture) are chips that light
  * up everything of that kind, like the tag chips; the counts in an inspector (↗ ↙ · ● 🖼) jump to their lists; the logo brings the whole
  * brain back in view. None of them is a picture of a button any more.
  */
@@ -80,23 +80,31 @@ describe('the legend’s kinds light up what they name', () => {
     expect(s().controller.highlight).toBeNull()
   })
 
-  it('lights up every folder star for ★ (a galaxy is a galaxy, not a star), and the small and big files for · and ●', async () => {
+  it('lights up every folder by its body: a star, a planet or a moon by depth (a galaxy is a galaxy), and every file for ·', async () => {
     const { s } = await fresh()
     const nodes = s().graph!.nodes
+    const kinds = folderBodies(s().graph!)
+    const idsOf = (code: number): Set<string> => new Set(nodes.filter((_, i) => kinds[i] === code).map((n) => n.id))
     s().toggleBody('star')
-    const stars = nodes.filter((n) => n.folder && !isGalaxyNode(n)).map((n) => n.id)
-    expect(stars.length).toBeGreaterThan(2)
-    expect(s().controller.highlight).toEqual(new Set(stars))
+    expect(idsOf(FB_STAR).size).toBeGreaterThan(1)
+    expect(s().controller.highlight).toEqual(idsOf(FB_STAR))
     s().toggleBody('star')
+    s().toggleBody('planet')
+    expect(idsOf(FB_PLANET).has(folderKey('Projects/Gate'))).toBe(true)
+    expect(s().controller.highlight).toEqual(idsOf(FB_PLANET))
+    s().toggleBody('planet')
+    s().toggleBody('moon')
+    expect(idsOf(FB_MOON).has(folderKey('Projects/Gate/Art'))).toBe(true)
+    expect(s().controller.highlight).toEqual(idsOf(FB_MOON))
+    s().toggleBody('moon')
     s().toggleBody('galaxy')
     expect(s().controller.highlight).toEqual(new Set(nodes.filter((n) => isGalaxyNode(n)).map((n) => n.id)))
     s().clearFilters()
-    // Two kinds at once light up both: the planet (the 60 KB picture) and the moons (the notes, the 10-byte picture).
-    s().toggleBody('planet')
-    s().toggleBody('moon')
-    const planet = nodes.find((n) => n.kind === 'image' && (n.image?.size ?? 0) >= 48 * 1024)!
+    // A satellite is any file, big (the 60 KB picture) or small (a note, the 10-byte picture), and no folder.
+    s().toggleBody('satellite')
+    const big = nodes.find((n) => n.kind === 'image' && (n.image?.size ?? 0) >= 48 * 1024)!
     const lit = s().controller.highlight!
-    expect(lit.has(planet.id)).toBe(true)
+    expect(lit.has(big.id)).toBe(true)
     expect(lit.has('Notes/Loose')).toBe(true)
     expect(lit.has(folderKey('Projects'))).toBe(false)
   })
@@ -104,10 +112,10 @@ describe('the legend’s kinds light up what they name', () => {
   it('works with the other filters: a kind and a tag together light up only what is both', async () => {
     const { s } = await fresh()
     s().toggleTag('gamedev')
-    s().toggleBody('moon')
-    // The two notes tagged gamedev are moons; the picture, the folders and the untagged note are not lit.
+    s().toggleBody('satellite')
+    // The two notes tagged gamedev are satellites; the picture, the folders and the untagged note are not lit.
     expect(s().controller.highlight).toEqual(new Set(['Projects/Gate', 'Projects/Gate/Art/Study']))
-    s().toggleBody('moon')
+    s().toggleBody('satellite')
     s().clearFilters()
     expect(s().controller.highlight).toBeNull()
   })
@@ -127,18 +135,18 @@ describe('the legend draws them as chips', () => {
     const { s, html } = await fresh()
     const chip = (markup: string, word: string): string => markup.match(new RegExp(`<button[^>]*class="chip[^"]*"[^>]*>[^]*?${word}[^]*?</button>`))?.[0] ?? ''
     const before = await html('Legend', 'Legend')
-    for (const word of ['galaxy · drive', 'star · folder', 'planet · big file', 'moon · small file', 'picture · 2']) {
+    for (const word of ['galaxy · drive', 'star · folder', 'planet · sub-folder', 'moon · deeper folder', 'satellite · file', 'picture · 2']) {
       expect(chip(before, word), word).toContain('aria-pressed="false"')
     }
     // No board in this vault, so no sun chip.
     expect(before).not.toContain('sun · board')
-    // None of the six is a bare span with a tooltip any more.
+    // None of the kinds is a bare span with a tooltip any more.
     expect(before).not.toMatch(/<span title="(A drive|A folder|A picture|Any small file)/)
 
     s().toggleBody('star')
     const after = await html('Legend', 'Legend')
     expect(chip(after, 'star · folder')).toContain('aria-pressed="true"')
-    expect(chip(after, 'moon · small file')).toContain('aria-pressed="false"')
+    expect(chip(after, 'satellite · file')).toContain('aria-pressed="false"')
     expect(after).toContain('star · dimming everything else')
   })
 })

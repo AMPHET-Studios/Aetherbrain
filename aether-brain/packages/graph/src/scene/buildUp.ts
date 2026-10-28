@@ -7,7 +7,7 @@
  * order among themselves: a new folder, then what is in it). Nothing that was already in the sky is held, so an edit never makes the
  * rest of it flicker.
  */
-import { isGalaxyNode, isPlanetNode, type GraphData, type GraphNode } from '@aether/core'
+import { FB_MOON, FB_NONE, FB_PLANET, folderBodies, isGalaxyNode, type GraphData, type GraphNode } from '@aether/core'
 
 /** The order things appear in. */
 export const BUILD_GALAXY = 0
@@ -21,19 +21,25 @@ export const BUILD_STAGE_SECONDS = 0.8
 /** Within a stage the bodies do not all come at once: each waits up to this much of a stage, by its own number. */
 export const BUILD_SPREAD = 0.55
 
-/** Which stage a node belongs to. */
-export function stageOf(n: GraphNode): number {
-  if (n.folder !== undefined) return isGalaxyNode(n) ? BUILD_GALAXY : BUILD_STAR
+/**
+ * Which stage a node belongs to. A folder comes with its body (`folderBody`: a galaxy, a star, a planet or a moon, from `folderBodies`);
+ * every file is a satellite and comes last, whatever its size.
+ */
+export function stageOf(n: GraphNode, folderBody: number = FB_NONE): number {
+  if (n.folder !== undefined) {
+    if (folderBody === FB_PLANET) return BUILD_PLANET
+    if (folderBody === FB_MOON) return BUILD_MOON
+    return isGalaxyNode(n) ? BUILD_GALAXY : BUILD_STAR
+  }
   if (n.board !== undefined || n.kind === 'today') return BUILD_STAR
-  if (n.kind === 'image' && n.image?.file !== undefined) return BUILD_FILE
-  if (n.ghost) return BUILD_MOON
-  return isPlanetNode(n) ? BUILD_PLANET : BUILD_MOON
+  return BUILD_FILE
 }
 
 /** The stage of every node, by index. */
 export function bodyStages(graph: GraphData): Uint8Array {
   const out = new Uint8Array(graph.nodes.length)
-  for (let i = 0; i < out.length; i++) out[i] = stageOf(graph.nodes[i]!)
+  const bodies = folderBodies(graph)
+  for (let i = 0; i < out.length; i++) out[i] = stageOf(graph.nodes[i]!, bodies[i]!)
   return out
 }
 

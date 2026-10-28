@@ -53,9 +53,9 @@ const idx = (g: GraphData, id: string): number => {
 const node = (g: GraphData, id: string): GraphNode => g.nodes[idx(g, id)]!
 
 describe('the levels', () => {
-  it('are closed, planets, and planets with moons, in that order', () => {
+  it('are closed, the folders under a body, and those with its files, in that order', () => {
     expect(SUN_LEVELS).toEqual([0, 1, 2])
-    expect(SUN_LEVEL_NAMES).toEqual({ 0: 'Closed', 1: 'Planets', 2: 'Planets + moons' })
+    expect(SUN_LEVEL_NAMES).toEqual({ 0: 'Closed', 1: 'Folders', 2: 'Folders + files' })
   })
 })
 
@@ -95,8 +95,8 @@ describe('the tier of a body: what its sun must show for it to show', () => {
     expect(tier(folderKey('Projects/Alpha/Sub'))).toBe(1)
   })
 
-  it('is 1 for a long note (a planet) and 2 for a small one (a moon) and for an unresolved link', () => {
-    expect(tier('Projects/Alpha/Big')).toBe(1)
+  it('is 2 for every file, long or short (a satellite), and for an unresolved link', () => {
+    expect(tier('Projects/Alpha/Big')).toBe(2)
     expect(tier('Projects/Alpha/Plan')).toBe(2)
     expect(tier('Home')).toBe(2)
     expect(tier('ghost:Nowhere')).toBe(2)
@@ -212,8 +212,8 @@ describe('what a sun holds', () => {
   const g = build()
   const counts = sunCounts(g)
 
-  it('counts planets, sub-folder suns and moons apart (the sun bar’s buttons are enabled by them)', () => {
-    expect(counts.get(folderKey('Projects/Alpha'))).toEqual({ planets: 1, systems: 1, moons: 1 })
+  it('counts boards, sub-folders and files apart (the sun bar’s buttons are enabled by them)', () => {
+    expect(counts.get(folderKey('Projects/Alpha'))).toEqual({ planets: 0, systems: 1, moons: 2 })
     expect(counts.get(folderKey('Projects/Alpha/Sub'))).toEqual({ planets: 0, systems: 0, moons: 1 })
   })
 
@@ -243,7 +243,7 @@ describe('what a sun holds', () => {
     expect(sunCounts(hub).get(folderKey(''))).toEqual({ planets: 0, systems: 0, moons: 1 })
   })
 
-  it('counts a picture as a planet when it is big (or nobody has sized it) and as a moon when it is small', () => {
+  it('counts a picture as a file whatever its size: big ones are drawn bigger, none is a planet', () => {
     const p = build()
     const pic = (id: string, size: number | null): GraphNode => ({
       ...node(p, 'Home'),
@@ -257,7 +257,7 @@ describe('what a sun holds', () => {
       p.nodes.push(pic(`image:Work/p${i}.png`, size))
       p.index.set(`image:Work/p${i}.png`, p.nodes.length - 1)
     }
-    // A big one, one nobody sized: planets. A small one: a moon (on top of the two it had).
-    expect(sunCounts(p).get(folderKey('Work'))).toEqual({ planets: 2, systems: 0, moons: 3 })
+    // All three are files, on top of the two it had.
+    expect(sunCounts(p).get(folderKey('Work'))).toEqual({ planets: 0, systems: 0, moons: 5 })
   })
 })

@@ -85,14 +85,17 @@ export function Legend() {
               <KindChip kind="galaxy" title="A drive (or the whole vault), or a folder you marked as a galaxy (✦): the folders on it lie on its disc">
                 <span style={{ color: SUN_COLOR, textShadow: `0 0 8px ${SUN_COLOR}` }}>◉</span> galaxy · drive
               </KindChip>
-              <KindChip kind="star" title="A folder. The brighter the star, the more you open and save in it lately; a project is the biggest">
+              <KindChip kind="star" title="A folder directly in a galaxy. The brighter the star, the more you open and save in it lately; a project is the biggest">
                 <span style={{ color: STAR_COLOR, textShadow: `0 0 8px ${STAR_COLOR}` }}>★</span> star · folder
               </KindChip>
-              <KindChip kind="planet" title="A picture, video or big note, as an extra-large thumbnail. A faster orbit is more urgent">
-                <span style={{ color: IMAGE_COLOR }}>●</span> planet · big file
+              <KindChip kind="planet" title="A folder directly in a star">
+                <span style={{ color: IMAGE_COLOR }}>●</span> planet · sub-folder
               </KindChip>
-              <KindChip kind="moon" title="Any small file">
-                <span className="text-ink">·</span> moon · small file
+              <KindChip kind="moon" title="A folder in a planet, or in another moon: moons nest as deep as your folders go. Files orbit moons">
+                <span className="text-ink">◦</span> moon · deeper folder
+              </KindChip>
+              <KindChip kind="satellite" title="A file. A bigger one (a picture, video, model or long note) is drawn bigger. A faster orbit is more urgent">
+                <span className="text-ink">·</span> satellite · file
               </KindChip>
               {boards > 0 && (
                 <KindChip kind="sun" title="A reference board with pictures on it is a sun: the pictures orbit it instead of their folders (open it from the Boards view, 8)">

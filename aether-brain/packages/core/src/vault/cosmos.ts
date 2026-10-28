@@ -1,16 +1,14 @@
 /**
- * The cosmology of the system layout, in the words of the vault:
+ * The cosmology of the system layout, in the words of the vault (docs/COSMOLOGY.md, which is also the contract the Unreal version
+ * is built to). Space nests the way folders do:
  *
- *   a drive            a galaxy   (a vault folder that is the whole vault is one too)
- *   a folder           a star     (every folder; a project folder is a brighter, bigger one)
- *   a picture, video or 3D model, big enough to matter
- *                      a planet   (an extra-large thumbnail orbiting its folder's star)
- *   a note that is a document in its own right (thousands of words)
- *                      a planet   (a solid body, no thumbnail)
- *   every small file   a moon     (a small body on a close orbit)
+ *   a drive                       a galaxy      (a vault folder that is the whole vault is one too)
+ *   a folder directly in a galaxy a star        (a project folder is a brighter, bigger one)
+ *   a folder directly in a star   a planet
+ *   a folder in a planet          a moon        (and a folder in a moon is a moon of that moon, without limit)
+ *   every file                    a satellite   (it orbits a moon, never a star or a planet; a big one is drawn bigger)
  *
- * Everything orbits what is above it. Urgency (`markdown/urgency.ts`) is the orbit's speed and the star's
- * brightness. See docs/COSMOLOGY.md, which is also the contract the Unreal version is built to.
+ * Everything orbits what is above it. Urgency (`markdown/urgency.ts`) is the orbit's speed and the star's brightness.
  */
 import type { GraphData, GraphNode, NoteId } from '../types'
 
@@ -19,7 +17,15 @@ export const PLANET_MIN_BYTES = 48 * 1024
 /** A note of at least this many words is a planet (a document); shorter ones are moons. */
 export const PLANET_MIN_WORDS = 3000
 
-/** True for a leaf that is drawn as a planet; folders, ghosts and the Today hub never are. */
+/**
+ * True for a file big enough to matter (a picture, video or model of 48 KB or more or one nobody sized, a note of 3,000 words or
+ * more): it is drawn bigger (an extra-large thumbnail, a solid sphere). It is still a satellite: no file is a planet.
+ */
+export function isBigFile(n: GraphNode): boolean {
+  return isPlanetNode(n)
+}
+
+/** The old name of `isBigFile` (a big file used to be a planet; a planet is a folder now). */
 export function isPlanetNode(n: GraphNode): boolean {
   if (n.kind === 'image') {
     const size = n.image?.size
@@ -41,32 +47,86 @@ export function isGalaxyNode(n: GraphNode): boolean {
 }
 
 /** The kinds of body the legend names, and lets you light up (docs/COSMOLOGY.md). */
-export type LegendBody = 'galaxy' | 'star' | 'planet' | 'moon' | 'sun' | 'picture'
-export const LEGEND_BODIES: readonly LegendBody[] = ['galaxy', 'star', 'planet', 'moon', 'sun', 'picture']
+export type LegendBody = 'galaxy' | 'star' | 'planet' | 'moon' | 'satellite' | 'sun' | 'picture'
+export const LEGEND_BODIES: readonly LegendBody[] = ['galaxy', 'star', 'planet', 'moon', 'satellite', 'sun', 'picture']
 
 /**
- * Which of the legend's kinds a node is. A drive (or a one-folder vault) is a galaxy, every other folder a star, a board with
- * pictures orbiting it a sun, a big file a planet and a small one a moon. A picture is also a picture: a big one is a planet and a
- * picture, a small one a moon and a picture. The Today hub is none of them.
+ * Which of the legend's kinds a node is. A drive (or a one-folder vault) is a galaxy; a folder is a star, a planet or a moon by
+ * how deep it sits (`folderBodies`, which needs the graph, so a lone node is judged by its own depth: `legendBodiesIn` is the
+ * exact one); a board with pictures orbiting it a sun; every file a satellite. A picture is also a picture. The Today hub is none.
  */
-export function legendBodies(n: GraphNode): LegendBody[] {
+export function legendBodies(n: GraphNode, folderBody?: FolderBody): LegendBody[] {
   if (n.kind === 'today') return []
-  if (n.folder) return [isGalaxyNode(n) ? 'galaxy' : 'star']
+  if (n.folder) {
+    if (isGalaxyNode(n)) return ['galaxy']
+    return [folderBody === 'planet' ? 'planet' : folderBody === 'moon' ? 'moon' : 'star']
+  }
   if (n.board) return ['sun']
-  if (n.kind === 'image') return isPlanetNode(n) ? ['planet', 'picture'] : ['moon', 'picture']
-  return [isPlanetNode(n) ? 'planet' : 'moon']
+  if (n.kind === 'image') return ['satellite', 'picture']
+  return ['satellite']
+}
+
+/** `legendBodies` for node `i` of a graph, with the folder's exact body. */
+export function legendBodiesIn(graph: GraphData, i: number, bodies: Uint8Array = folderBodies(graph)): LegendBody[] {
+  return legendBodies(graph.nodes[i]!, FOLDER_BODY_NAMES[bodies[i]!])
+}
+
+/* ---- star, planet, moon: what depth makes a folder ---- */
+
+/** What a folder is by where it sits: a star directly in a galaxy, a planet in a star, a moon in a planet or in another moon. */
+export type FolderBody = 'galaxy' | 'star' | 'planet' | 'moon'
+/** The codes `folderBodies` writes; 0 is a node that is not a folder. */
+export const FB_NONE = 0
+export const FB_GALAXY = 1
+export const FB_STAR = 2
+export const FB_PLANET = 3
+export const FB_MOON = 4
+export const FOLDER_BODY_NAMES: readonly (FolderBody | undefined)[] = [undefined, 'galaxy', 'star', 'planet', 'moon']
+
+/** The body of every folder node, by node index (FB_NONE for anything that is not a folder). A moon's folder is a moon without limit of depth. */
+export function folderBodies(graph: GraphData): Uint8Array {
+  const nodes = graph.nodes
+  const out = new Uint8Array(nodes.length)
+  const done = new Uint8Array(nodes.length)
+  const walk = (start: number): void => {
+    // The chain of folders up to one that is known (capped, so an owner cycle a sane graph never has cannot hang it).
+    const chain: number[] = []
+    let cur = start
+    while (cur >= 0 && !done[cur] && chain.length < 64) {
+      chain.push(cur)
+      const n = nodes[cur]!
+      const p = n.parent === null ? -1 : (graph.index.get(n.parent) ?? -1)
+      if (n.folder === undefined || isGalaxyRole(n)) break
+      cur = p
+    }
+    for (let k = chain.length - 1; k >= 0; k--) {
+      const i = chain[k]!
+      const n = nodes[i]!
+      done[i] = 1
+      if (n.folder === undefined) continue
+      if (isGalaxyRole(n)) {
+        out[i] = FB_GALAXY
+        continue
+      }
+      const pi = n.parent === null ? -1 : (graph.index.get(n.parent) ?? -1)
+      const above = pi >= 0 && nodes[pi]!.folder !== undefined ? out[pi]! : FB_NONE
+      out[i] = above === FB_STAR ? FB_PLANET : above === FB_PLANET || above === FB_MOON ? FB_MOON : FB_STAR
+    }
+  }
+  for (let i = 0; i < nodes.length; i++) if (!done[i]) walk(i)
+  return out
 }
 
 /* ---- suns open into planets, then moons ---- */
 
 /**
- * How much of a sun's system is shown: 0 closed (only the sun itself), 1 its planets (the big files and the long
- * notes) and the suns of its sub-folders, 2 those and its moons (every small file). A sun opens when it is clicked. The folders
+ * How much of a sun's system is shown: 0 closed (only the sun itself), 1 the bodies of its sub-folders (a star's planets, a
+ * planet's moons, a moon's moons), 2 those and its files (its satellites). A sun opens when it is clicked. The folders
  * directly under a galaxy (a drive, the vault) are always shown, so a closed vault is a field of suns, not one point.
  */
 export type SunLevel = 0 | 1 | 2
 export const SUN_LEVELS: readonly SunLevel[] = [0, 1, 2]
-export const SUN_LEVEL_NAMES: Record<SunLevel, string> = { 0: 'Closed', 1: 'Planets', 2: 'Planets + moons' }
+export const SUN_LEVEL_NAMES: Record<SunLevel, string> = { 0: 'Closed', 1: 'Folders', 2: 'Folders + files' }
 
 /**
  * True for a body that can open: a folder (a galaxy or a star) or a reference board with pictures orbiting it (a sun). The Bio
@@ -86,8 +146,7 @@ function isGalaxyRole(n: GraphNode | undefined): boolean {
 
 /**
  * What a sun must show for this body to show: 0 always (a galaxy, the Today hub, a folder directly under a galaxy),
- * 1 once planets show (a big file, a long note, a reference board, a sub-folder's sun), 2 once moons show (every small file and
- * every unresolved link).
+ * 1 once its sub-folders show (a sub-folder, a reference board), 2 once its files show (every file, and every unresolved link).
  */
 export type BodyTier = 0 | 1 | 2
 
@@ -102,8 +161,7 @@ export function bodyTiers(graph: GraphData): Uint8Array {
       const parent = n.parent === null ? undefined : nodes[graph.index.get(n.parent) ?? -1]
       out[i] = isGalaxyRole(n) || isGalaxyRole(parent) || parent === undefined ? 0 : 1
     } else if (n.board !== undefined) out[i] = 1
-    else if (n.ghost) out[i] = 2
-    else out[i] = isPlanetNode(n) ? 1 : 2
+    else out[i] = 2
   }
   return out
 }
@@ -152,11 +210,11 @@ export function bodyOrder(owner: Int32Array): Int32Array {
 }
 
 export interface SunCounts {
-  /** Planets the sun shows from level 1. */
+  /** Reference boards it shows from level 1 (a board with pictures is a sun of its own). */
   planets: number
-  /** Suns of its sub-folders, shown with the planets (a board with pictures counts as a planet). */
+  /** Its sub-folders (a star's planets, a planet's moons, a moon's moons), shown from level 1. */
   systems: number
-  /** Moons it shows from level 2. */
+  /** Its files (satellites), shown from level 2. */
   moons: number
 }
 
@@ -177,7 +235,7 @@ export function sunCounts(graph: GraphData): Map<NoteId, SunCounts> {
       c = { planets: 0, systems: 0, moons: 0 }
       out.set(id, c)
     }
-    // A sub-folder's sun comes out with the planets.
+    // A sub-folder's body comes out with level 1.
     if (node.folder !== undefined) c.systems++
     else if (tier === 2) c.moons++
     else c.planets++
