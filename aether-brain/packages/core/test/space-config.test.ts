@@ -5,12 +5,18 @@ import {
   FB_NONE,
   FB_PLANET,
   FB_STAR,
+  bodyOwners,
   bodyTiers,
   buildGraph,
   folderBodies,
   folderKey,
+  homeKey,
+  isHomeId,
+  isVirtualId,
   legendBodiesIn,
+  levelId,
   parseNote,
+  sunCounts,
   type GraphData,
   type NoteId,
   type ParsedNote,
@@ -104,5 +110,51 @@ describe('what a file is', () => {
     expect(legendBodiesIn(g, at(g, folderKey('Projects/Alpha')), bodies)).toEqual(['planet'])
     expect(legendBodiesIn(g, at(g, folderKey('Projects/Alpha/Art')), bodies)).toEqual(['moon'])
     expect(legendBodiesIn(g, at(g, folderKey('')), bodies)).toEqual(['galaxy'])
+  })
+})
+
+describe('the home moon: files orbit moons, never a star or a planet', () => {
+  const g = build()
+  const node = (id: string) => g.nodes[at(g, id)]!
+
+  it('is made for a galaxy, a star or a planet that holds files, and the files orbit it', () => {
+    expect(node(homeKey('')).folder).toMatchObject({ home: true, path: '' })
+    expect(node('Home').orbit).toBe(homeKey(''))
+    expect(node(homeKey('Projects/Alpha')).folder?.home).toBe(true)
+    expect(node('Projects/Alpha/Plan').orbit).toBe(homeKey('Projects/Alpha'))
+  })
+
+  it('orbits its folder, is always a moon, and leaves the file’s parent alone (the folder, for roll-ups and breadcrumbs)', () => {
+    expect(node(homeKey('Projects/Alpha')).parent).toBe(folderKey('Projects/Alpha'))
+    expect(folderBodies(g)[at(g, homeKey('Projects/Alpha'))]).toBe(FB_MOON)
+    expect(node('Projects/Alpha/Plan').parent).toBe(folderKey('Projects/Alpha'))
+  })
+
+  it('is not made for a folder that is a moon already, nor for one with no files', () => {
+    expect(g.index.has(homeKey('Projects/Alpha/Art/Weapons/Rifles'))).toBe(false)
+    expect(node('Projects/Alpha/Art/Weapons/Rifles/Skin').orbit).toBeUndefined()
+    expect(g.index.has(homeKey('Work'))).toBe(false)
+    expect(g.index.has(homeKey('Projects'))).toBe(false)
+  })
+
+  it('gives the sun a file belongs to as its home moon, and counts the files for the folder', () => {
+    const owners = bodyOwners(g)
+    expect(owners[at(g, 'Projects/Alpha/Plan')]).toBe(at(g, homeKey('Projects/Alpha')))
+    expect(owners[at(g, homeKey('Projects/Alpha'))]).toBe(at(g, folderKey('Projects/Alpha')))
+    expect(sunCounts(g).get(folderKey('Projects/Alpha'))).toMatchObject({ systems: 1, moons: 1 })
+    expect(sunCounts(g).has(homeKey('Projects/Alpha'))).toBe(false)
+  })
+
+  it('opens and closes with its folder', () => {
+    expect(levelId(homeKey('Projects/Alpha'))).toBe(folderKey('Projects/Alpha'))
+    expect(levelId('Home')).toBe('Home')
+    expect(isHomeId(homeKey('x'))).toBe(true)
+    expect(isVirtualId(homeKey('x'))).toBe(true)
+  })
+
+  it('is not made in a graph without folders', () => {
+    const flat = buildGraph(notesOf(FILES))
+    expect(flat.nodes.some((n) => n.folder?.home)).toBe(false)
+    expect(flat.nodes.every((n) => n.orbit === undefined)).toBe(true)
   })
 })

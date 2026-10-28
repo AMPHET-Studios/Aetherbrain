@@ -108,6 +108,11 @@ export function folderBodies(graph: GraphData): Uint8Array {
         out[i] = FB_GALAXY
         continue
       }
+      // A home moon is a moon wherever its folder sits (a star holds its own files on one).
+      if (n.folder.home === true) {
+        out[i] = FB_MOON
+        continue
+      }
       const pi = n.parent === null ? -1 : (graph.index.get(n.parent) ?? -1)
       const above = pi >= 0 && nodes[pi]!.folder !== undefined ? out[pi]! : FB_NONE
       out[i] = above === FB_STAR ? FB_PLANET : above === FB_PLANET || above === FB_MOON ? FB_MOON : FB_STAR
@@ -174,7 +179,7 @@ export function bodyOwners(graph: GraphData): Int32Array {
   const nodes = graph.nodes
   const owner = new Int32Array(nodes.length).fill(-1)
   const parentOf = (i: number): number => {
-    const p = nodes[i]!.parent
+    const p = nodes[i]!.orbit ?? nodes[i]!.parent
     return p === null ? -1 : (graph.index.get(p) ?? -1)
   }
   for (let i = 0; i < nodes.length; i++) {
@@ -224,8 +229,11 @@ export function sunCounts(graph: GraphData): Map<NoteId, SunCounts> {
   const tiers = bodyTiers(graph)
   const out = new Map<NoteId, SunCounts>()
   for (let i = 0; i < graph.nodes.length; i++) {
-    const o = owners[i]!
+    let o = owners[i]!
     const tier = tiers[i]!
+    // A home moon is its folder's files, not a folder of its own: it is not counted, and its files count for the folder.
+    if (graph.nodes[i]!.folder?.home === true) continue
+    if (o >= 0 && graph.nodes[o]!.folder?.home === true) o = graph.index.get(graph.nodes[o]!.parent ?? '') ?? -1
     // What is always shown (the folders directly under a galaxy, the Today hub) is not the sun's to hold back: not counted, no entry made.
     if (o < 0 || tier === 0) continue
     const node = graph.nodes[i]!

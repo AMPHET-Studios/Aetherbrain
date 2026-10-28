@@ -337,7 +337,8 @@ function FolderInspector({ node }: { node: GraphNode }) {
       // A galaxy that left this folder for the galaxy above it is still one of its folders on disk: it is listed here too (a click flies to it).
       const left = n.parent !== node.id && n.folder?.galaxyLevel !== undefined && folderOf(n.folder.path) === info.path
       // Cards of an open star gallery belong to the gallery, not to the folder's own moons.
-      if ((n.parent !== node.id && !left) || n.image?.gallery?.only) continue
+      // A home moon is this folder's own files drawn as a moon, not a folder inside it.
+      if ((n.parent !== node.id && !left) || n.image?.gallery?.only || n.folder?.home) continue
       if (n.kind === 'folder') planets.push(n)
       else if (n.kind === 'note') moons.push(n)
       else if (n.kind === 'image') pictures.push(n)

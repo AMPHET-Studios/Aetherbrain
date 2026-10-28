@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { assetMap, buildGraph, imageKey, isPlanetNode, parseNote, type GraphData, type GraphNode, type NoteId, type ParsedNote } from '@aether/core'
+import { assetMap, buildGraph, homeKey, imageKey, isPlanetNode, parseNote, type GraphData, type GraphNode, type NoteId, type ParsedNote } from '@aether/core'
 import { computeSystemLayout, systemPositions, type SystemInput } from '../src/layout/system'
 import type { LayoutNodeInput, MainToWorker } from '../src/layout/protocol'
 import { BOARD_SUN_COLOR, STAR_COLOR, SUN_COLOR, TODAY_COLOR, nodeBaseColor, nodeRadius, type ColorMode } from '../src/theme'
@@ -145,7 +145,9 @@ describe('the pictures of a board orbit it in space', () => {
     const layout = computeSystemLayout(input)
     const art = graph.index.get(folderId('Art'))!
     const free = graph.index.get(imageKey('Art/free1.png'))!
-    expect(layout.parent[free]).toBe(art)
+    // Files orbit moons: Art holds its pictures on its home moon.
+    expect(layout.parent[free]).toBe(graph.index.get(homeKey('Art'))!)
+    expect(layout.parent[graph.index.get(homeKey('Art'))!]).toBe(art)
     expect(isPlanetNode(graph.nodes[free]!)).toBe(true)
   })
 

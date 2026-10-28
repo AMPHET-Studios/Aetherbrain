@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildGraph, folderKey, parseNote, type GraphData, type NoteId, type ParsedNote } from '@aether/core'
+import { buildGraph, folderKey, homeKey, parseNote, type GraphData, type NoteId, type ParsedNote } from '@aether/core'
 import { blackHoleOf, orbitParents } from '../src/layout/orbitParents'
 
 /**
@@ -63,14 +63,16 @@ describe('who orbits whom with a black hole in the sky', () => {
     expect(idOf(g, p, folderKey('Lab/Core/Sub'))).toBe(folderKey('Lab/Core'))
     for (const n of g.nodes) {
       if (n.folder !== undefined) continue
-      expect(p[at(g, n.id)], n.id).toBe(n.parent === null ? -1 : at(g, n.parent))
+      expect(p[at(g, n.id)], n.id).toBe(n.orbit !== undefined ? at(g, n.orbit) : n.parent === null ? -1 : at(g, n.parent))
     }
   })
 
   it('keeps the Bio’s own pages orbiting the Bio', () => {
-    const pages = g.nodes.filter((n) => n.parent === folderKey('Bio'))
+    // Files orbit moons: the Bio's own pages orbit its home moon, which orbits the Bio.
+    const pages = g.nodes.filter((n) => n.parent === folderKey('Bio') && n.folder === undefined)
     expect(pages.length).toBeGreaterThanOrEqual(2)
-    for (const n of pages) expect(idOf(g, p, n.id)).toBe(folderKey('Bio'))
+    for (const n of pages) expect(idOf(g, p, n.id)).toBe(homeKey('Bio'))
+    expect(idOf(g, p, homeKey('Bio'))).toBe(folderKey('Bio'))
   })
 
   it('has no cycle: every body reaches the Bio by the bodies it orbits', () => {
@@ -89,7 +91,7 @@ describe('without a black hole in the sky', () => {
     const g = graphOf(FILES, FOLDERS)
     expect(blackHoleOf(g)).toBe(-1)
     const p = orbitParents(g)
-    g.nodes.forEach((n, i) => expect(p[i], n.id).toBe(n.parent === null ? -1 : at(g, n.parent)))
+    g.nodes.forEach((n, i) => expect(p[i], n.id).toBe(n.orbit !== undefined ? at(g, n.orbit) : n.parent === null ? -1 : at(g, n.parent)))
   })
 })
 

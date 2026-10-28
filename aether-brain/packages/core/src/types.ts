@@ -197,6 +197,12 @@ export interface FolderNodeInfo {
    * where the folder will be, that the inspector's button makes real. It has no folder on disk to reveal, leave out or open.
    */
   placeholder?: boolean
+  /**
+   * True for a **home moon**: the one moon a star, a planet or a galaxy holds for its own files (docs/COSMOLOGY.md, *Galaxy, star,
+   * planet, moon, satellite*). Files orbit moons, never a star or a planet, so the files directly in such a folder orbit this node, and
+   * this node orbits the folder. It shares the folder's `path`, has the id `home:<path>` (`homeKey`) and is always a moon.
+   */
+  home?: boolean
   /** Project note bound to this folder (the star's note), if any. */
   projectId: NoteId | null
   /** True when some ancestor folder is a project folder (its planets and moons). */
@@ -302,6 +308,12 @@ export interface GraphNode {
    * on (the vault, a drive or another galaxy), not the folder it is in.
    */
   parent: NoteId | null
+  /**
+   * The body this one circles in the sky when that is not its `parent` (the folder it lives in): a file directly in a star, a planet or
+   * a galaxy orbits that folder's **home moon** (`folder.home`), because files orbit moons. Absent for everything else; the roll-ups,
+   * breadcrumbs and the AI link keep using `parent`.
+   */
+  orbit?: NoteId
   /** Present on folder nodes only. */
   folder?: FolderNodeInfo
   /** Present on image nodes only. */

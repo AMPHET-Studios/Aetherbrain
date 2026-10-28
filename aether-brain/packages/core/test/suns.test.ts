@@ -7,6 +7,7 @@ import {
   bodyTiers,
   buildGraph,
   folderKey,
+  homeKey,
   isSunNode,
   parseNote,
   sunCounts,
@@ -128,15 +129,18 @@ describe('the sun a body belongs to', () => {
   }
 
   it('is its folder for a note, and its parent folder for a folder', () => {
-    expect(ownerOf('Projects/Alpha/Plan')).toBe(folderKey('Projects/Alpha'))
+    // Files orbit moons: a note directly in a star or a planet orbits that folder's home moon, which orbits the folder.
+    expect(ownerOf('Projects/Alpha/Plan')).toBe(homeKey('Projects/Alpha'))
+    expect(ownerOf(homeKey('Projects/Alpha'))).toBe(folderKey('Projects/Alpha'))
+    // A folder that is a moon already keeps its files: Sub is a moon (a folder in a planet).
     expect(ownerOf('Projects/Alpha/Sub/Deep')).toBe(folderKey('Projects/Alpha/Sub'))
     expect(ownerOf(folderKey('Projects/Alpha/Sub'))).toBe(folderKey('Projects/Alpha'))
     expect(ownerOf(folderKey('Projects/Alpha'))).toBe(folderKey('Projects'))
-    expect(ownerOf('Home')).toBe(folderKey(''))
+    expect(ownerOf('Home')).toBe(homeKey(''))
   })
 
   it('is the folder of the note that links to it, for an unresolved link', () => {
-    expect(ownerOf('ghost:Nowhere')).toBe(folderKey('Work'))
+    expect(ownerOf('ghost:Nowhere')).toBe(homeKey('Work'))
   })
 
   it('is nothing for the galaxy itself, and nothing for a drive of a vault with several roots: a drive is a galaxy too', () => {
@@ -155,6 +159,7 @@ describe('the sun a body belongs to', () => {
     const b = build()
     node(b, 'Home').board = { pictures: 1 }
     node(b, 'Projects/Alpha/Plan').parent = 'Home'
+    delete node(b, 'Projects/Alpha/Plan').orbit
     const o = bodyOwners(b)
     expect(o[idx(b, 'Projects/Alpha/Plan')]).toBe(idx(b, 'Home'))
   })
@@ -248,6 +253,7 @@ describe('what a sun holds', () => {
     const pic = (id: string, size: number | null): GraphNode => ({
       ...node(p, 'Home'),
       id,
+      orbit: undefined,
       kind: 'image',
       title: id,
       parent: folderKey('Work'),

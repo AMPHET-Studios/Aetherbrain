@@ -53,6 +53,7 @@ import {
   isVirtualId,
   isVideoPath,
   folderBodies,
+  levelId,
   legendBodiesIn,
   loadVault,
   mountOf,
@@ -2710,9 +2711,11 @@ export const useAether = create<AetherState>()((set, get) => {
     },
 
     sunLevelOf(id) {
+      id = levelId(id)
       return get().sunOwn[id] ?? get().sunDefault
     },
     setSunLevel(id, level) {
+      id = levelId(id)
       const { sunOwn, sunDefault, adapter } = get()
       const own = { ...sunOwn }
       if (level === sunDefault) delete own[id]

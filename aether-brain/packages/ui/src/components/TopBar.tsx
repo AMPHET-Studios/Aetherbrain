@@ -68,7 +68,7 @@ export function TopBar({ onPickVault }: { onPickVault?: (() => void) | undefined
   for (const n of graph?.nodes ?? []) {
     if (n.kind === 'note') nodes++
     else if (n.kind === 'ghost') ghosts++
-    else if (n.kind === 'folder') folders++
+    else if (n.kind === 'folder' && !n.folder?.home) folders++
     else if (n.kind === 'image') pictures++
   }
   const edges = graph?.edges.length ?? 0

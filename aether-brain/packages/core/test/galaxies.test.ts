@@ -8,6 +8,7 @@ import {
   buildGraph,
   dataWeight,
   folderKey,
+  homeKey,
   galaxyChildren,
   isGalaxyNode,
   legendBodies,
@@ -274,7 +275,7 @@ describe('in the folder graph', () => {
   it('does not change a vault with no mark: nothing is lifted and nothing is a galaxy but the vault', () => {
     const plain = build(Object.fromEntries(Object.entries(FILES).map(([p, c]) => [p, c.replace(/scale: \w+\n/g, '')])))
     for (const n of plain.nodes) {
-      if (!n.folder) continue
+      if (!n.folder || n.folder.home) continue
       expect(n.folder.galaxyLevel).toBeUndefined()
       expect(n.folder.markIgnored).toBeUndefined()
       if (n.id !== folderKey('')) expect(n.parent).toBe(folderKey(n.folder.path.includes('/') ? n.folder.path.slice(0, n.folder.path.lastIndexOf('/')) : ''))
@@ -300,7 +301,8 @@ describe('in the folder graph', () => {
     // A folder deeper in a star waits for its star to open.
     expect(tiers[at(folderKey('Games/Darktide/Mods/Deep'))]).toBe(1)
     // A note of a galaxy's folder belongs to the galaxy.
-    expect(owners[at('Games/Darktide/Mods/Plan')]).toBe(at(ids.mods))
+    expect(owners[at('Games/Darktide/Mods/Plan')]).toBe(at(homeKey('Games/Darktide/Mods')))
+    expect(owners[at(homeKey('Games/Darktide/Mods'))]).toBe(at(ids.mods))
   })
 
   it('counts what a folder holds without the galaxies that left it', () => {
