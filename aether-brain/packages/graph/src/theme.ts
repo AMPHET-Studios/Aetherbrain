@@ -196,6 +196,14 @@ export const MOON_PICTURE_RADIUS = 1.0
 /** A star with nothing in it, and the biggest a plain star gets: the ceiling every other body is measured against (a board sun, a drive). */
 export const STAR_MIN_RADIUS = 3.4
 export const STAR_MAX_RADIUS = 8
+/** A planet (a folder in a star) with nothing in it, and the biggest one gets. */
+export const PLANET_MIN_RADIUS = 2.4
+export const PLANET_MAX_RADIUS = 5.2
+/** A moon that is a folder (in a planet or in another moon), likewise. */
+export const MOON_FOLDER_MIN_RADIUS = 1.5
+export const MOON_FOLDER_MAX_RADIUS = 3.2
+/** The home moon of a folder: the one moon its own files orbit. */
+export const HOME_MOON_RADIUS = 1.7
 /** A folder you marked as a galaxy: a little smaller than a drive's 16 when empty, nearly as big when full, and always bigger than any star. */
 export const GALAXY_MIN_RADIUS = 12
 export const GALAXY_MAX_RADIUS = 15
@@ -250,6 +258,11 @@ export function nodeRadius(n: GraphNode, pictures: PictureSize = 'medium'): numb
     if (f.galaxyLevel !== undefined) return GALAXY_MIN_RADIUS + (GALAXY_MAX_RADIUS - GALAXY_MIN_RADIUS) * fullness(weightOf(f))
     // The Bio black hole: 22 even when empty, a little more for each doubling of what it holds, at most 28.
     if (f.bio) return Math.min(BLACK_HOLE_MAX_RADIUS, BLACK_HOLE_MIN_RADIUS + 0.9 * Math.log2(1 + f.totalNotes + f.childFolders + 0.25 * f.images))
+    // A home moon (a folder's files drawn as one moon) is small and steady; a planet and a moon grow with what they hold, within their own
+    // band, so a star is always the biggest of its system (docs/COSMOLOGY.md).
+    if (f.home) return HOME_MOON_RADIUS
+    if (f.body === 'planet') return PLANET_MIN_RADIUS + (PLANET_MAX_RADIUS - PLANET_MIN_RADIUS) * fullness(weightOf(f))
+    if (f.body === 'moon') return MOON_FOLDER_MIN_RADIUS + (MOON_FOLDER_MAX_RADIUS - MOON_FOLDER_MIN_RADIUS) * fullness(weightOf(f))
     const star = STAR_MIN_RADIUS + (STAR_MAX_RADIUS - STAR_MIN_RADIUS) * fullness(weightOf(f))
     return f.role === 'project' ? star + 1.2 : star
   }

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { FB_MOON, FB_PLANET, FB_STAR, MemoryVaultAdapter, folderBodies, folderKey, isGalaxyNode } from '@aether/core'
+import { FB_MOON, FB_PLANET, FB_STAR, MemoryVaultAdapter, folderBodies, folderKey, homeKey, isGalaxyNode } from '@aether/core'
 
 /**
  * Icons that do something. The legend's six kinds of body (◉ galaxy, ★ star, ● planet, ◦ moon, · satellite, ▣ sun, 🖼 picture) are chips that light
@@ -90,11 +90,15 @@ describe('the legend’s kinds light up what they name', () => {
     expect(s().controller.highlight).toEqual(idsOf(FB_STAR))
     s().toggleBody('star')
     s().toggleBody('planet')
-    expect(idsOf(FB_PLANET).has(folderKey('Projects/Gate'))).toBe(true)
+    // Gate is a project, so a star wherever it sits; the folder in it is a planet.
+    expect(idsOf(FB_STAR).has(folderKey('Projects/Gate'))).toBe(true)
+    expect(idsOf(FB_PLANET).has(folderKey('Projects/Gate/Art'))).toBe(true)
     expect(s().controller.highlight).toEqual(idsOf(FB_PLANET))
     s().toggleBody('planet')
     s().toggleBody('moon')
-    expect(idsOf(FB_MOON).has(folderKey('Projects/Gate/Art'))).toBe(true)
+    // The moons of this vault are the home moons: the one moon each folder's own files orbit.
+    expect(idsOf(FB_MOON).size).toBeGreaterThan(0)
+    expect(idsOf(FB_MOON).has(homeKey('Projects/Gate/Art'))).toBe(true)
     expect(s().controller.highlight).toEqual(idsOf(FB_MOON))
     s().toggleBody('moon')
     s().toggleBody('galaxy')

@@ -29,12 +29,14 @@ Space nests the way folders do (decided 2026-10-28 with Dominic: *a folder is a 
 | moon | a folder in a planet; a folder in a moon is a moon of that moon, without limit |
 | satellite | a file |
 
-- **The depth is counted below the galaxy.** A folder you mark as a galaxy starts the count again: the folders directly on it are its stars.
+- **The depth is counted below the galaxy.** A folder you mark as a galaxy starts the count again: the folders directly on it are its stars. A **project folder** and the **Bio** are stars wherever they sit (a project usually lives in `Studio/Projects/Name`), and the count starts again inside them.
 - **Files are satellites and orbit moons.** A big file (a picture, video or model of 48 KB or more, a note of 3,000 words or more: `isBigFile`) is the same satellite drawn bigger. No file is a planet any more.
 - **A level opens what is under it.** *Folders* shows the bodies of the sub-folders (a star's planets, a planet's moons, a moon's moons), *Folders + files* adds its files (`bodyTiers`: a sub-folder 1, a file 2).
 - **The sky builds itself** in this order: galaxies, stars, planets, moons, satellites (`scene/buildUp.ts`, with `folderBodies`).
 - **Code:** `folderBodies` and `legendBodiesIn` in `packages/core/src/vault/cosmos.ts`; the legend has a chip for each (galaxy, star, planet, moon, satellite).
-- **Not built yet (said plainly):** the home moon (a planet or star that holds files of its own gets one moon for them, so no file orbits a planet), the layout and sizes by body (a planet is still drawn and placed like a star), the sound of a planet or moon folder, the companion link and the Unreal viewer (they are still sent the old classes). Until the home moon exists a file still orbits the folder it is in.
+- **The home moon.** A galaxy, a star or a planet that holds files of its own gets **one moon for them** (`home:<path>`, `FolderNodeInfo.home`, named *<folder> files*): the files directly in the folder orbit it (`GraphNode.orbit`), it orbits the folder, and a folder that is a moon already keeps its files. A file's `parent` stays the folder, which the roll-ups, breadcrumbs and the AI link use. The home moon opens and closes with its folder (`levelId`), its files count for the folder in the sun bar, and the inspector and top bar do not count it as a folder. A board's pictures still orbit the board.
+- **Sizes** (`nodeRadius`, `FolderNodeInfo.body`): a star 3.4 to 8 (a project 1.2 more), a **planet 2.4 to 5.2**, a **moon that is a folder 1.5 to 3.2**, a **home moon 1.7**, each growing with what it holds inside its own band, so a star is the biggest body of its system.
+- **Not built yet (said plainly):** the sound of a planet or moon folder, the companion link and the Unreal viewer (they are still sent the old classes and the home moons as folders), the file icons around moons (png, jpeg, glb, fbx, psd, pdf, and a video's frame from partway through).
 
 ## A galaxy is a folder you mark
 

@@ -3,7 +3,7 @@
  * is built to). Space nests the way folders do:
  *
  *   a drive                       a galaxy      (a vault folder that is the whole vault is one too)
- *   a folder directly in a galaxy a star        (a project folder is a brighter, bigger one)
+ *   a folder directly in a galaxy a star        (a project folder is a brighter, bigger one, and a star wherever it sits)
  *   a folder directly in a star   a planet
  *   a folder in a planet          a moon        (and a folder in a moon is a moon of that moon, without limit)
  *   every file                    a satellite   (it orbits a moon, never a star or a planet; a big one is drawn bigger)
@@ -106,6 +106,12 @@ export function folderBodies(graph: GraphData): Uint8Array {
       if (n.folder === undefined) continue
       if (isGalaxyRole(n)) {
         out[i] = FB_GALAXY
+        continue
+      }
+      // A project folder and the Bio are stars wherever they sit (a project lives in Studio/Projects/Name, three folders deep); what is
+      // inside them counts from there.
+      if (n.folder.role === 'project' || n.folder.bio === true) {
+        out[i] = FB_STAR
         continue
       }
       // A home moon is a moon wherever its folder sits (a star holds its own files on one).

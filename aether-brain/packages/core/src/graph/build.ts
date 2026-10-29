@@ -8,7 +8,7 @@ import { AssetResolver, TODAY_ID, imageKey, imageTitle, isAssetPath, isImageId, 
 import { FILE_MOONS_PER_FOLDER, FILE_MOONS_TOTAL, fileKindOf, isFileMoonPath } from '../vault/files'
 import { folderUniverse, selectFolders, type FolderSelectOptions } from '../vault/folders'
 import { ancestorsOf, areaFromFolder, folderDepth, folderKey, folderOf, homeKey, isFolderId, normalizeFolderPath } from '../vault/paths'
-import { FB_MOON, FB_NONE, folderBodies } from '../vault/cosmos'
+import { FB_MOON, FB_NONE, FOLDER_BODY_NAMES, folderBodies } from '../vault/cosmos'
 
 export interface FolderGraphOptions extends FolderSelectOptions {
   /** Every folder known on disk (vault paths). */
@@ -840,6 +840,11 @@ function addFolderSystem(
  */
 function addHomeMoons(nodes: GraphNode[], index: Map<NoteId, number>): void {
   const bodies = folderBodies({ nodes, index } as unknown as GraphData)
+  for (let i = 0; i < nodes.length; i++) {
+    const f = nodes[i]!.folder
+    const body = FOLDER_BODY_NAMES[bodies[i]!]
+    if (f !== undefined && (body === 'star' || body === 'planet' || body === 'moon')) f.body = body
+  }
   const filesOf = new Map<NoteId, number[]>()
   for (let i = 0; i < nodes.length; i++) {
     const n = nodes[i]!
@@ -873,6 +878,7 @@ function addHomeMoons(nodes: GraphNode[], index: Map<NoteId, number>): void {
         role: 'folder',
         depth: f.depth + 1,
         home: true,
+        body: 'moon',
         projectId: null,
         inProject: f.inProject || f.projectId !== null,
         data: { ...EMPTY_FOLDER_DATA },

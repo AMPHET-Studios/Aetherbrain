@@ -158,3 +158,20 @@ describe('the home moon: files orbit moons, never a star or a planet', () => {
     expect(flat.nodes.every((n) => n.orbit === undefined)).toBe(true)
   })
 })
+
+describe('a project folder and the Bio are stars wherever they sit', () => {
+  it('counts a project folder as a star even three folders deep, and its sub-folders as planets', () => {
+    const g = buildGraph(
+      notesOf({
+        'Studio/Projects/Gate.md': '---\ntype: project\n---\n# Gate\n',
+        'Studio/Projects/Gate/Art/Study.md': '# Study\n',
+      }),
+      { folders: { all: new Set(['Studio', 'Studio/Projects', 'Studio/Projects/Gate', 'Studio/Projects/Gate/Art']), rootTitle: 'Vault', multiRoot: false, maxDepth: 8 } },
+    )
+    const b = folderBodies(g)
+    expect(b[at(g, folderKey('Studio/Projects'))]).toBe(FB_PLANET)
+    expect(g.nodes[at(g, folderKey('Studio/Projects/Gate'))]!.folder?.role).toBe('project')
+    expect(b[at(g, folderKey('Studio/Projects/Gate'))]).toBe(FB_STAR)
+    expect(b[at(g, folderKey('Studio/Projects/Gate/Art'))]).toBe(FB_PLANET)
+  })
+})

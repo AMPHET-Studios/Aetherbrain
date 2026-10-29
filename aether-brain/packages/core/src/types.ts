@@ -203,6 +203,11 @@ export interface FolderNodeInfo {
    * this node orbits the folder. It shares the folder's `path`, has the id `home:<path>` (`homeKey`) and is always a moon.
    */
   home?: boolean
+  /**
+   * What depth below its galaxy makes this folder (`folderBodies`), set by the graph build in the system layout: a star directly in a
+   * galaxy, a planet in a star, a moon in a planet or another moon. Absent for a galaxy and in the other layouts (the size is a star's).
+   */
+  body?: 'star' | 'planet' | 'moon'
   /** Project note bound to this folder (the star's note), if any. */
   projectId: NoteId | null
   /** True when some ancestor folder is a project folder (its planets and moons). */
