@@ -252,7 +252,7 @@ export interface ImageNodeInfo {
   /** Present for any other file (an mp3, a pdf, a zip, a script: `isFileMoonPath`): its kind, for its colour. Opened in the OS. */
   file?: 'audio' | 'document' | 'archive' | 'data' | 'code' | 'design' | 'other'
   /** Present for a file that has a picture the app can make of it (`previewKindOf`): its card shows that picture, like a picture's. */
-  preview?: 'psd' | 'pdf' | 'fbx'
+  preview?: 'psd' | 'pdf' | 'fbx' | 'audio'
   /** Present while the picture is a card of the open star gallery. */
   gallery?: GalleryCardInfo
 }

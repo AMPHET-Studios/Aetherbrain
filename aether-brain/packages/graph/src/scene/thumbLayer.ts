@@ -24,6 +24,7 @@ import {
   THUMB_SIZE,
   THUMB_TICK_MS,
   ThumbScheduler,
+  WIDE_ASPECT,
   cardFade,
   coverRect,
   rankThumbCandidates,
@@ -46,6 +47,8 @@ export interface ThumbTargets {
   paths: string[]
   /** 1 per entry of `nodes` that is a video (its card wears a play badge). */
   video: Uint8Array
+  /** 1 per entry of `nodes` that is a song: its card is a long horizontal waveform, `WIDE_ASPECT` times as wide as it is tall. */
+  wide: Uint8Array
   /** Per graph node: 1 while its picture is drawn (the scene shrinks its core and drops its halo). */
   shown: Uint8Array
 }
@@ -55,6 +58,7 @@ export function thumbTargets(graph: GraphData): ThumbTargets {
   const keys: string[] = []
   const paths: string[] = []
   const video: number[] = []
+  const wide: number[] = []
   graph.nodes.forEach((n, i) => {
     // Any other file (an mp3, a zip) has no picture to show: it stays the rock it is. One that has a preview (a Photoshop document) shows it.
     if (n.kind !== 'image' || !n.image || (n.image.file && !n.image.preview)) return
@@ -62,8 +66,9 @@ export function thumbTargets(graph: GraphData): ThumbTargets {
     keys.push(thumbKey(n.image))
     paths.push(n.image.path)
     video.push(n.image.video ? 1 : 0)
+    wide.push(n.image.preview === 'audio' ? 1 : 0)
   })
-  return { nodes: Int32Array.from(idx), keys, paths, video: Uint8Array.from(video), shown: new Uint8Array(graph.nodes.length) }
+  return { nodes: Int32Array.from(idx), keys, paths, video: Uint8Array.from(video), wide: Uint8Array.from(wide), shown: new Uint8Array(graph.nodes.length) }
 }
 
 /** What the layer reads from the scene's per-graph buffers each frame. */
@@ -101,6 +106,8 @@ export class ThumbLayer {
   private readonly fade: InstancedBufferAttribute
   /** 1 per instance showing a video's still (a play badge). */
   private readonly video: InstancedBufferAttribute
+  /** How many times wider than tall each instance is: 1, or `WIDE_ASPECT` for a song's waveform. */
+  private readonly wide: InstancedBufferAttribute
   private readonly scheduler: ThumbScheduler<Uint8ClampedArray>
   private texture: DataArrayTexture | null = null
   private ctx: Ctx2D | null = null
@@ -135,12 +142,14 @@ export class ThumbLayer {
     this.alpha = attr(1, true)
     this.fade = attr(1, true)
     this.video = attr(1, false)
+    this.wide = attr(1, false)
     this.geometry.setAttribute('iCenter', this.center)
     this.geometry.setAttribute('iSize', this.size)
     this.geometry.setAttribute('iLayer', this.layer)
     this.geometry.setAttribute('iAlpha', this.alpha)
     this.geometry.setAttribute('iFade', this.fade)
     this.geometry.setAttribute('iVideo', this.video)
+    this.geometry.setAttribute('iWide', this.wide)
     this.geometry.instanceCount = 0
     this.material = createThumbMaterial()
     this.mesh = new Mesh(this.geometry, this.material)
@@ -272,6 +281,7 @@ export class ThumbLayer {
   private remap(t: ThumbTargets): void {
     const layers = this.layer.array as Float32Array
     const video = this.video.array as Float32Array
+    const wide = this.wide.array as Float32Array
     let n = 0
     for (let k = 0; k < t.nodes.length; k++) {
       const i = t.nodes[k]!
@@ -282,6 +292,7 @@ export class ThumbLayer {
       this.instNode[n] = i
       layers[n] = l
       video[n] = t.video[k] ?? 0
+      wide[n] = t.wide[k] ? WIDE_ASPECT : 1
       n++
     }
     this.count = n
@@ -289,6 +300,7 @@ export class ThumbLayer {
     if (n > 0) {
       this.layer.needsUpdate = true
       this.video.needsUpdate = true
+      this.wide.needsUpdate = true
     }
     this.mapped = this.scheduler.version
   }
@@ -307,7 +319,9 @@ export class ThumbLayer {
       if (!ctx || side <= 0) return null
       ctx.fillStyle = BACKDROP
       ctx.fillRect(0, 0, THUMB_SIZE, THUMB_SIZE)
-      ctx.drawImage(bitmap, sx, sy, side, side, 0, 0, THUMB_SIZE, THUMB_SIZE)
+      // A long picture (a song's waveform) is kept whole: squeezed into the square here, and drawn back at its own shape by a card that wide.
+      if (bitmap.width >= bitmap.height * (WIDE_ASPECT - 0.5)) ctx.drawImage(bitmap, 0, 0, bitmap.width, bitmap.height, 0, 0, THUMB_SIZE, THUMB_SIZE)
+      else ctx.drawImage(bitmap, sx, sy, side, side, 0, 0, THUMB_SIZE, THUMB_SIZE)
       return ctx.getImageData(0, 0, THUMB_SIZE, THUMB_SIZE).data
     } finally {
       bitmap.close()

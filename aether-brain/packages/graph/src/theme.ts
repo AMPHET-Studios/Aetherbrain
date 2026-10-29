@@ -190,6 +190,9 @@ export function isPictureSize(v: unknown): v is PictureSize {
   return v === 'medium' || v === 'large' || v === 'xl'
 }
 
+/** The radius of a song's card (its height; it is `WIDE_ASPECT` times as wide). */
+export const AUDIO_CARD_RADIUS = 1.8
+
 /** A small picture's radius (an icon, a sprite): it is a moon, not a planet. */
 export const MOON_PICTURE_RADIUS = 1.0
 
@@ -248,6 +251,8 @@ function weightOf(f: FolderNodeInfo): number {
  */
 export function nodeRadius(n: GraphNode, pictures: PictureSize = 'medium'): number {
   if (n.kind === 'today') return 4.6
+  // A song's waveform is a long card: this is its height (its width is three times as much), whatever the file's size.
+  if (n.kind === 'image' && n.image?.preview === 'audio') return AUDIO_CARD_RADIUS
   if (n.kind === 'image') return isPlanetNode(n) ? (PICTURE_RADIUS[pictures] ?? PICTURE_RADIUS.xl) : MOON_PICTURE_RADIUS
   if (n.board) return Math.min(9, 4 + 0.9 * Math.log2(1 + n.board.pictures))
   if (n.folder) {

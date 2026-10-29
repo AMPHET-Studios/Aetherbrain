@@ -338,6 +338,7 @@ describe('a document in the graph', () => {
     const psdNode = g.nodes.find((n) => n.id === 'image:Art/gate.psd')
     const mp3 = g.nodes.find((n) => n.id === 'image:Art/song.mp3')
     expect(psdNode?.image).toMatchObject({ file: 'design', preview: 'psd' })
-    expect(mp3?.image?.preview).toBeUndefined()
+    // A song has a preview of its own kind (its waveform); a plain file has none.
+    expect(mp3?.image?.preview).toBe('audio')
   })
 })

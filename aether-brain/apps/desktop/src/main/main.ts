@@ -33,7 +33,7 @@ import {
   type VaultProgressDto,
 } from '../shared/ipc.js'
 import type { ChatPatch } from '../shared/chat.js'
-import { FsVault, isAssetName, isModelName, isFbxName, isOpenableFileName, isPdfName, isPsdName, isVideoName, within } from './fsvault.js'
+import { FsVault, isAssetName, isModelName, isAudioName, isFbxName, isOpenableFileName, isPdfName, isPsdName, isVideoName, within } from './fsvault.js'
 import { VaultWatcher } from './watcher.js'
 import { findProjects } from './projects.js'
 import { FilePager, type FilePage } from './pages.js'
@@ -42,6 +42,7 @@ import { BRAIN_WINDOW_NAME, MemoryTrail, type MemorySample, crashMessage, crashR
 import {
   FBX_HEAD_BYTES,
   GLB_HEAD_BYTES,
+  MAX_AUDIO_BYTES,
   MAX_FBX_BYTES,
   MAX_MODEL_BYTES,
   MAX_PDF_BYTES,
@@ -595,13 +596,14 @@ async function thumbnail(p: unknown, size: unknown): Promise<Uint8Array | null> 
   const psd = isPsdName(path.basename(abs))
   const pdf = isPdfName(path.basename(abs))
   const fbx = isFbxName(path.basename(abs))
-  if (!st?.isFile() || st.size === 0 || (!video && !psd && !pdf && st.size > MAX_THUMB_FILE_BYTES)) return null
+  const audio = isAudioName(path.basename(abs))
+  if (!st?.isFile() || st.size === 0 || (!video && !psd && !pdf && !audio && st.size > MAX_THUMB_FILE_BYTES)) return null
   const key = ThumbCache.key(abs, st.mtimeMs, st.size, px)
   const hit = thumbs.get(key)
   if (hit !== undefined) return hit
   let job = thumbsInFlight.get(key)
   if (!job) {
-    job = (video ? renderVideoThumb(abs, px) : model ? renderModelThumb(abs, px) : psd ? renderPsdThumb(abs, px) : pdf ? renderPdfThumb(abs, px) : fbx ? renderFbxThumb(abs, px) : renderThumb(abs, px))
+    job = (video ? renderVideoThumb(abs, px) : model ? renderModelThumb(abs, px) : psd ? renderPsdThumb(abs, px) : pdf ? renderPdfThumb(abs, px) : fbx ? renderFbxThumb(abs, px) : audio ? renderAudioThumb(abs, px) : renderThumb(abs, px))
       .then(
         (png) => {
           // A picture that cannot be decoded is an answer too (null, cached for this version of the
@@ -650,6 +652,15 @@ async function renderModelThumb(abs: string, px: number): Promise<Uint8Array | n
 async function renderPsdThumb(abs: string, px: number): Promise<Uint8Array | null> {
   const bytes = await readPsdComposite(abs)
   return bytes ? thumbnailer.renderPsd(bytes, px) : null
+}
+
+/**
+ * A song's waveform, drawn by the thumbnail helper: main reads the file here (asynchronously, at most `MAX_AUDIO_BYTES`) and sends the
+ * bytes; the helper decodes them with Chromium's own decoder and draws the peaks. A file Chromium cannot decode gets no picture.
+ */
+async function renderAudioThumb(abs: string, px: number): Promise<Uint8Array | null> {
+  const bytes = await readUpTo(abs, MAX_AUDIO_BYTES)
+  return bytes ? thumbnailer.renderAudio(bytes, px) : null
 }
 
 /**

@@ -395,6 +395,14 @@ export function videoKindOf(b: Uint8Array): VideoKind | null {
   return null
 }
 
+/* ---- Songs ---- */
+
+/**
+ * Largest song file sent to the helper whole. The helper decodes it to raw samples to find the peaks (a few minutes of stereo is
+ * tens of megabytes of them), so this is smaller than what a picture is allowed.
+ */
+export const MAX_AUDIO_BYTES = 48 * 1024 * 1024
+
 /* ---- FBX models ---- */
 
 /** Largest FBX sent to the helper whole (what a glb is allowed too). */

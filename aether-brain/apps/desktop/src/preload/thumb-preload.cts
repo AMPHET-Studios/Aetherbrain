@@ -26,6 +26,7 @@ const IPC = {
   psd: 'thumbs:psd',
   pdf: 'thumbs:pdf',
   fbx: 'thumbs:fbx',
+  audio: 'thumbs:audio',
 } as const
 
 /** Addresses main hands out for videos (VIDEO_URL_PREFIX in src/main/thumbnailer.ts). */
@@ -817,6 +818,121 @@ async function modelStill(bytes: Uint8Array, side: number): Promise<Uint8Array |
   ctx.putImageData(new ImageData(pixels as Uint8ClampedArray<ArrayBuffer>, side, side), 0, 0)
   return pngBytes(canvas)
 }
+
+/* ------------------------------------------------------------------ */
+/* Songs                                                              */
+/* ------------------------------------------------------------------ */
+
+/** The bars of a waveform, and how many times wider than tall its picture is (the scene draws the card at the same shape). */
+export const WAVE_COLUMNS = 256
+export const WAVE_ASPECT = 3
+
+/**
+ * How loud each of `columns` equal slices of a song is, two ways, each 0 to 1 over the whole song: `peak` is the largest sample of the slice
+ * over every channel (what a recording that is mastered loud nearly always fills), `energy` is the root mean square (the loudness the ear
+ * hears, which still moves in a loud recording), the loudest slice being 1 and a quiet one lifted a little so that it shows. Silence is all
+ * zeros, and a sample that is not a number counts as silence. Pure.
+ */
+export function waveformLevels(channels: readonly Float32Array[], columns: number): { peak: Float32Array; energy: Float32Array } {
+  const peak = new Float32Array(Math.max(0, columns))
+  const energy = new Float32Array(Math.max(0, columns))
+  const longest = channels.reduce((n, c) => Math.max(n, c.length), 0)
+  if (longest === 0 || columns < 1) return { peak, energy }
+  const squares = new Float64Array(columns)
+  const counts = new Float64Array(columns)
+  for (const channel of channels) {
+    for (let c = 0; c < columns; c++) {
+      const from = Math.floor((c * channel.length) / columns)
+      const to = Math.max(from + 1, Math.floor(((c + 1) * channel.length) / columns))
+      for (let i = from; i < to && i < channel.length; i++) {
+        const raw = channel[i]!
+        const v = Number.isFinite(raw) ? Math.abs(raw) : 0
+        if (v > peak[c]!) peak[c] = v
+        squares[c] = squares[c]! + v * v
+        counts[c] = counts[c]! + 1
+      }
+    }
+  }
+  let loudestPeak = 0
+  let loudestEnergy = 0
+  for (let c = 0; c < columns; c++) {
+    energy[c] = counts[c]! > 0 ? Math.sqrt(squares[c]! / counts[c]!) : 0
+    if (peak[c]! > loudestPeak) loudestPeak = peak[c]!
+    if (energy[c]! > loudestEnergy) loudestEnergy = energy[c]!
+  }
+  for (let c = 0; c < columns; c++) {
+    peak[c] = loudestPeak > 0 ? Math.min(1, peak[c]! / loudestPeak) : 0
+    energy[c] = loudestEnergy > 0 ? Math.pow(Math.min(1, energy[c]! / loudestEnergy), 0.8) : 0
+  }
+  return { peak, energy }
+}
+
+/**
+ * The waveform as RGBA pixels, `WAVE_ASPECT` times as wide as `height`: a dark card with one bar per slice, mirrored about the middle: the
+ * peak as a dim outline and the energy inside it, bright and warmer the louder it is. Pure: the same levels and height give the same pixels.
+ */
+export function waveformImage(levels: { peak: Float32Array; energy: Float32Array }, height: number): { width: number; height: number; data: Uint8ClampedArray } {
+  const width = height * WAVE_ASPECT
+  const data = new Uint8ClampedArray(width * height * 4)
+  const columns = Math.max(1, levels.peak.length)
+  const slot = width / columns
+  const mid = (height - 1) / 2
+  for (let y = 0; y < height; y++) {
+    const t = y / Math.max(1, height - 1)
+    for (let x = 0; x < width; x++) {
+      const o = (y * width + x) * 4
+      data[o] = 23 - 9 * t
+      data[o + 1] = 26 - 9 * t
+      data[o + 2] = 44 - 14 * t
+      data[o + 3] = 255
+    }
+  }
+  const bar = (x0: number, x1: number, half: number, r: number, g: number, b: number): void => {
+    for (let y = Math.max(0, Math.round(mid - half)); y <= Math.min(height - 1, Math.round(mid + half)); y++) {
+      for (let x = x0; x < x1 && x < width; x++) {
+        const o = (y * width + x) * 4
+        data[o] = r
+        data[o + 1] = g
+        data[o + 2] = b
+      }
+    }
+  }
+  for (let c = 0; c < levels.peak.length; c++) {
+    // A bar is two thirds of its slot; even silence leaves a hairline, so the card reads as a waveform.
+    const x0 = Math.floor(c * slot + slot / 6)
+    const x1 = Math.max(x0 + 1, Math.floor(c * slot + (slot * 5) / 6))
+    const p = levels.peak[c]!
+    const e = Math.min(p, levels.energy[c] ?? 0)
+    bar(x0, x1, Math.max(1, Math.round(p * (height * 0.46))), 62 + 40 * p, 92 + 40 * p, 120 + 20 * p)
+    bar(x0, x1, Math.max(1, Math.round(e * (height * 0.46))), 70 + 185 * e, 205 - 15 * e, 190 - 100 * e)
+  }
+  return { width, height, data }
+}
+
+/** PNG bytes of the waveform of the song in `bytes`, at most `side` px tall, or null when Chromium cannot decode it or it has no sound. */
+async function audioStill(bytes: Uint8Array, side: number): Promise<Uint8Array | null> {
+  // A context only for its decoder: it plays nothing and reads nothing but these bytes. Decoded at its own rate, whatever the file was.
+  const context = new OfflineAudioContext(1, 1, 44100)
+  const copy = bytes.slice().buffer
+  const decoded = await context.decodeAudioData(copy)
+  const channels: Float32Array[] = []
+  for (let c = 0; c < Math.min(decoded.numberOfChannels, 2); c++) channels.push(decoded.getChannelData(c))
+  const height = Math.min(256, side)
+  const image = waveformImage(waveformLevels(channels, WAVE_COLUMNS), height)
+  const canvas = canvasOf(image.width, image.height)
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return null
+  ctx.putImageData(new ImageData(image.data as Uint8ClampedArray<ArrayBuffer>, image.width, image.height), 0, 0)
+  return pngBytes(canvas)
+}
+
+ipcRenderer.on(IPC.audio, (_e, id: unknown, bytes: unknown, px: unknown) => {
+  const job = bytes instanceof Uint8Array && side(px) ? audioStill(bytes, px) : Promise.resolve(null)
+  void job.then(
+    (png) => ipcRenderer.send(IPC.done, id, png),
+    () => ipcRenderer.send(IPC.done, id, null),
+  )
+})
 
 /* ------------------------------------------------------------------ */
 /* FBX models                                                         */

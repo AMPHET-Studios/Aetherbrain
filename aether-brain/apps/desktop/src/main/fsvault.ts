@@ -102,6 +102,11 @@ export function isFbxName(name: string, platform: string = process.platform): bo
   return /\.fbx$/i.test(name) && safeAssetName(name, platform)
 }
 
+/** True for a song the helper can draw the waveform of (`.mp3`, `.wav`, `.flac`, `.ogg`, `.oga`, `.m4a`, `.aac`, `.opus`), with isImageName's other rules. */
+export function isAudioName(name: string, platform: string = process.platform): boolean {
+  return /\.(mp3|wav|flac|ogg|oga|m4a|aac|opus)$/i.test(name) && safeAssetName(name, platform)
+}
+
 /** A picture, a video or a model (isMediaName, isModelName): what the vault lists and watches. */
 export function isAssetName(name: string, platform: string = process.platform): boolean {
   return (IMAGE_RE.test(name) || VIDEO_RE.test(name) || MODEL_RE.test(name)) && safeAssetName(name, platform)
@@ -803,11 +808,11 @@ export class FsVault {
   }
 
   /**
-   * Absolute path of a file the app makes a picture of that is not a picture (a Photoshop document, a PDF, an FBX model), with every check `assetAbs` makes.
+   * Absolute path of a file the app makes a picture of that is not a picture (a Photoshop document, a PDF, an FBX model, a song), with every check `assetAbs` makes.
    * A door of its own, like `modelAbs`: read by the thumbnail helper's queue only, never by the board window.
    */
   async previewAbs(p: string): Promise<string | null> {
-    return this.shownAbs(p, (name) => isPsdName(name) || isPdfName(name) || isFbxName(name))
+    return this.shownAbs(p, (name) => isPsdName(name) || isPdfName(name) || isFbxName(name) || isAudioName(name))
   }
 
   /**

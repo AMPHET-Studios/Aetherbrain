@@ -50,6 +50,8 @@ export const THUMB_IPC = {
   pdf: 'thumbs:pdf',
   /** main → helper: (id, a binary FBX's bytes, side): the model drawn lit from one side, a square of that side. */
   fbx: 'thumbs:fbx',
+  /** main → helper: (id, a song's bytes, side): its waveform as a picture three times as wide as it is tall (at most `side` tall). */
+  audio: 'thumbs:audio',
 } as const
 
 /**
@@ -118,7 +120,13 @@ export interface FbxJob {
   px: number
 }
 
-export type ThumbJob = PictureJob | VideoJob | ModelJob | PsdJob | PdfJob | FbxJob
+/** One song to draw the waveform of: its whole file and the most the picture may be tall. */
+export interface AudioJob {
+  audio: Uint8Array
+  px: number
+}
+
+export type ThumbJob = PictureJob | VideoJob | ModelJob | PsdJob | PdfJob | FbxJob | AudioJob
 
 /**
  * A job that got no answer through no fault of its picture (the helper could
@@ -245,6 +253,14 @@ export class Thumbnailer {
     return this.queue.render({ pdf: bytes, px })
   }
 
+  /**
+   * PNG bytes of a song's waveform (`bytes`: the whole file), three times as wide as it is tall and at most `px` tall, or null when the helper's
+   * decoder cannot read it. The helper decodes it; nothing is decoded here.
+   */
+  renderAudio(bytes: Uint8Array, px: number): Promise<Uint8Array | null> {
+    return this.queue.render({ audio: bytes, px })
+  }
+
   /** PNG bytes of a binary FBX model drawn as a square of `px` (`bytes`: the whole file, checked by `fbxKindOf`), or null when there is nothing the helper can draw. */
   renderFbx(bytes: Uint8Array, px: number): Promise<Uint8Array | null> {
     return this.queue.render({ fbx: bytes, px })
@@ -328,6 +344,7 @@ export class Thumbnailer {
         else if ('psd' in job) wc.send(THUMB_IPC.psd, jobId, job.psd, job.px)
         else if ('pdf' in job) wc.send(THUMB_IPC.pdf, jobId, job.pdf, job.px)
         else if ('fbx' in job) wc.send(THUMB_IPC.fbx, jobId, job.fbx, job.px)
+        else if ('audio' in job) wc.send(THUMB_IPC.audio, jobId, job.audio, job.px)
         else wc.send(THUMB_IPC.job, jobId, job.bytes, job.type, job.width, job.height)
       },
       destroy: (hung) => {
