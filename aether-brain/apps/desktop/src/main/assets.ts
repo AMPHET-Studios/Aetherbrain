@@ -395,6 +395,49 @@ export function videoKindOf(b: Uint8Array): VideoKind | null {
   return null
 }
 
+/* ---- Photoshop documents ---- */
+
+/** Bytes of the fixed header of a Photoshop document: the signature, the version, the size, the depth and the colour mode. */
+export const PSD_HEADER_BYTES = 26
+/** Largest merged picture sent to the helper: 36 million pixels at four channels of 8 bits is 144 MB raw; run-length coding is far less. */
+export const MAX_PSD_COMPOSITE_BYTES = 128 * 1024 * 1024
+
+/**
+ * The header and the merged (flattened) picture of a Photoshop document, with the colour table, the image resources and the layers
+ * left out (their three lengths written as zero): a layered file is mostly layers, and only the merged picture is drawn. Reads the
+ * header and three lengths from the start, then the picture from where they say it begins to the end of the file, never past
+ * `MAX_PSD_COMPOSITE_BYTES`. Null for a file that is not a version 1 document (`8BPS`), is cut short or has a merged picture too big.
+ * It only reads and joins bytes: the helper decodes them.
+ */
+export async function readPsdComposite(abs: string): Promise<Uint8Array | null> {
+  const handle = await fs.open(abs, 'r')
+  try {
+    const { size } = await handle.stat()
+    const head = new Uint8Array(PSD_HEADER_BYTES)
+    if (size < PSD_HEADER_BYTES + 12 + 2 || (await handle.read(head, 0, head.length, 0)).bytesRead !== head.length) return null
+    if (u32be(head, 0) !== 0x38425053 || ((head[4] ?? 0) << 8 | (head[5] ?? 0)) !== 1) return null
+    let at = PSD_HEADER_BYTES
+    const four = new Uint8Array(4)
+    for (let i = 0; i < 3; i++) {
+      if (at + 4 > size || (await handle.read(four, 0, 4, at)).bytesRead !== 4) return null
+      at += 4 + u32be(four, 0)
+    }
+    const merged = size - at
+    if (merged < 2 || merged > MAX_PSD_COMPOSITE_BYTES) return null
+    const out = new Uint8Array(PSD_HEADER_BYTES + 12 + merged)
+    out.set(head, 0)
+    let got = 0
+    while (got < merged) {
+      const { bytesRead } = await handle.read(out, PSD_HEADER_BYTES + 12 + got, merged - got, at + got)
+      if (!bytesRead) return null
+      got += bytesRead
+    }
+    return out
+  } finally {
+    await handle.close()
+  }
+}
+
 /* ---- 3D models ---- */
 
 export type ModelKind = 'glb'

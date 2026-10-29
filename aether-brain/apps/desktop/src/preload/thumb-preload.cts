@@ -23,6 +23,7 @@ const IPC = {
   done: 'thumbs:done',
   video: 'thumbs:video',
   model: 'thumbs:model',
+  psd: 'thumbs:psd',
 } as const
 
 /** Addresses main hands out for videos (VIDEO_URL_PREFIX in src/main/thumbnailer.ts). */
@@ -814,6 +815,158 @@ async function modelStill(bytes: Uint8Array, side: number): Promise<Uint8Array |
   ctx.putImageData(new ImageData(pixels as Uint8ClampedArray<ArrayBuffer>, side, side), 0, 0)
   return pngBytes(canvas)
 }
+
+/* ------------------------------------------------------------------ */
+/* Photoshop documents                                                */
+/* ------------------------------------------------------------------ */
+
+/** Most pixels of a Photoshop picture read whole: each channel is a byte a pixel, kept at full size while it is read. */
+export const PSD_MAX_PIXELS = 36_000_000
+
+/**
+ * The flattened picture of a Photoshop document (its "merged image", which Photoshop keeps for programs that do not read layers when
+ * Maximize Compatibility is on) fitted to `px` on its longer side, as RGBA. Main sends a document with its colour table, resources and
+ * layers cut out (their three lengths are zero) so that only the merged picture crosses over: a layered file is mostly layers. RGB,
+ * greyscale and CMYK at 8 or 16 bits, stored raw or run-length coded; anything else (indexed, Lab, zip-coded, the big PSB format, a
+ * picture over `PSD_MAX_PIXELS`) is null, and so is a file that ends early. Reads only inside `bytes`.
+ */
+export function decodePsd(bytes: Uint8Array, px: number): { width: number; height: number; data: Uint8ClampedArray } | null {
+  if (bytes.length < 26 + 12 + 2) return null
+  const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  if (v.getUint32(0) !== 0x38425053 || v.getUint16(4) !== 1) return null
+  const channels = v.getUint16(12)
+  const height = v.getUint32(14)
+  const width = v.getUint32(18)
+  const depth = v.getUint16(22)
+  const mode = v.getUint16(24)
+  if (width < 1 || height < 1 || width > 30_000 || height > 30_000 || width * height > PSD_MAX_PIXELS) return null
+  if (depth !== 8 && depth !== 16) return null
+  // Colour mode: 1 greyscale, 3 RGB, 4 CMYK; the colour channels first, then an optional alpha.
+  const colours = mode === 1 ? 1 : mode === 3 ? 3 : mode === 4 ? 4 : 0
+  if (colours === 0 || channels < colours || channels > 56) return null
+  // Colour table, image resources and layers: main sent them empty, but a whole file works too.
+  let at = 26
+  for (let i = 0; i < 3; i++) {
+    if (at + 4 > bytes.length) return null
+    at += 4 + v.getUint32(at)
+  }
+  if (at + 2 > bytes.length) return null
+  const compression = v.getUint16(at)
+  at += 2
+  const bpp = depth / 8
+  const rowBytes = width * bpp
+  const used = Math.min(channels, colours + 1)
+  // One plane of 8-bit samples per channel used (a 16-bit sample keeps its high byte).
+  const planes: Uint8Array[] = []
+  const rowOf = (row: Uint8Array, plane: Uint8Array, y: number): void => {
+    if (bpp === 1) plane.set(row.subarray(0, width), y * width)
+    else for (let x = 0; x < width; x++) plane[y * width + x] = row[x * 2] ?? 0
+  }
+  if (compression === 0) {
+    if (at + channels * height * rowBytes > bytes.length) return null
+    for (let c = 0; c < used; c++) {
+      const plane = new Uint8Array(width * height)
+      for (let y = 0; y < height; y++) rowOf(bytes.subarray(at + (c * height + y) * rowBytes, at + (c * height + y + 1) * rowBytes), plane, y)
+      planes.push(plane)
+    }
+  } else if (compression === 1) {
+    // Run-length: a table of 16-bit byte counts, one per row of every channel, then the rows (PackBits).
+    const table = at
+    let data = table + channels * height * 2
+    if (data > bytes.length) return null
+    const row = new Uint8Array(rowBytes)
+    for (let c = 0; c < channels; c++) {
+      const plane = c < used ? new Uint8Array(width * height) : null
+      for (let y = 0; y < height; y++) {
+        const count = v.getUint16(table + (c * height + y) * 2)
+        const end = data + count
+        if (end > bytes.length) return null
+        if (plane) {
+          let o = 0
+          let i = data
+          while (i < end && o < rowBytes) {
+            const n = (bytes[i++] ?? 0) << 24 >> 24
+            if (n >= 0) {
+              const len = Math.min(n + 1, end - i, rowBytes - o)
+              row.set(bytes.subarray(i, i + len), o)
+              i += n + 1
+              o += len
+            } else if (n !== -128) {
+              const len = Math.min(1 - n, rowBytes - o)
+              row.fill(bytes[i++] ?? 0, o, o + len)
+              o += len
+            }
+          }
+          if (o < rowBytes) row.fill(0, o)
+          rowOf(row, plane, y)
+        }
+        data = end
+      }
+      if (plane) planes.push(plane)
+    }
+  } else return null
+  const alpha = channels > colours ? planes[colours] : undefined
+  const scale = Math.min(1, px / Math.max(width, height))
+  const tw = Math.max(1, Math.round(width * scale))
+  const th = Math.max(1, Math.round(height * scale))
+  const out = new Uint8ClampedArray(tw * th * 4)
+  // Each output pixel is the mean of up to 3 x 3 samples spread over the source pixels it covers.
+  const sx = width / tw
+  const sy = height / th
+  const taps = Math.max(1, Math.min(3, Math.floor(Math.min(sx, sy))))
+  const sample = (plane: Uint8Array, x0: number, y0: number): number => {
+    let sum = 0
+    for (let j = 0; j < taps; j++) {
+      const y = Math.min(height - 1, Math.floor(y0 + ((j + 0.5) / taps) * sy))
+      for (let i = 0; i < taps; i++) sum += plane[y * width + Math.min(width - 1, Math.floor(x0 + ((i + 0.5) / taps) * sx))] ?? 0
+    }
+    return sum / (taps * taps)
+  }
+  for (let y = 0; y < th; y++) {
+    for (let x = 0; x < tw; x++) {
+      const o = (y * tw + x) * 4
+      const x0 = x * sx
+      const y0 = y * sy
+      if (colours === 3) {
+        out[o] = sample(planes[0]!, x0, y0)
+        out[o + 1] = sample(planes[1]!, x0, y0)
+        out[o + 2] = sample(planes[2]!, x0, y0)
+      } else if (colours === 1) {
+        const g = sample(planes[0]!, x0, y0)
+        out[o] = g
+        out[o + 1] = g
+        out[o + 2] = g
+      } else {
+        // Photoshop stores CMYK inverted (255 is no ink): the ink left is the stored value, so red = C x K / 255 and so on.
+        const k = sample(planes[3]!, x0, y0)
+        out[o] = (sample(planes[0]!, x0, y0) * k) / 255
+        out[o + 1] = (sample(planes[1]!, x0, y0) * k) / 255
+        out[o + 2] = (sample(planes[2]!, x0, y0) * k) / 255
+      }
+      out[o + 3] = alpha ? sample(alpha, x0, y0) : 255
+    }
+  }
+  return { width: tw, height: th, data: out }
+}
+
+/** PNG bytes of the flattened picture in a Photoshop document, at most `side` px on its longer side, or null when it cannot be read. */
+async function psdStill(bytes: Uint8Array, side: number): Promise<Uint8Array | null> {
+  const still = decodePsd(bytes, side)
+  if (!still) return null
+  const canvas = canvasOf(still.width, still.height)
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return null
+  ctx.putImageData(new ImageData(still.data as Uint8ClampedArray<ArrayBuffer>, still.width, still.height), 0, 0)
+  return pngBytes(canvas)
+}
+
+ipcRenderer.on(IPC.psd, (_e, id: unknown, bytes: unknown, px: unknown) => {
+  const job = bytes instanceof Uint8Array && side(px) ? psdStill(bytes, px) : Promise.resolve(null)
+  void job.then(
+    (png) => ipcRenderer.send(IPC.done, id, png),
+    () => ipcRenderer.send(IPC.done, id, null),
+  )
+})
 
 ipcRenderer.on(IPC.model, (_e, id: unknown, bytes: unknown, px: unknown) => {
   const job = bytes instanceof Uint8Array && side(px) ? modelStill(bytes, px) : Promise.resolve(null)

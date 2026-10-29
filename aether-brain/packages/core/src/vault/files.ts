@@ -63,6 +63,11 @@ const JUNK_NAME = new Set(FILE_JUNK_NAME)
 const JUNK_DIR = new Set(FILE_JUNK_DIR)
 
 /** The extensions of one kind (lower case, no dot). */
+/** What kinds of file the app can make a picture of (the flattened picture of a Photoshop document). Anything else has no preview. */
+export function previewKindOf(path: string): 'psd' | undefined {
+  return /\.psd$/i.test(path) ? 'psd' : undefined
+}
+
 export function fileExtensionsOf(kind: FileKind): string[] {
   return Object.keys(KIND_OF).filter((e) => KIND_OF[e] === kind)
 }

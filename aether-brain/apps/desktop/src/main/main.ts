@@ -33,7 +33,7 @@ import {
   type VaultProgressDto,
 } from '../shared/ipc.js'
 import type { ChatPatch } from '../shared/chat.js'
-import { FsVault, isAssetName, isModelName, isOpenableFileName, isVideoName, within } from './fsvault.js'
+import { FsVault, isAssetName, isModelName, isOpenableFileName, isPsdName, isVideoName, within } from './fsvault.js'
 import { VaultWatcher } from './watcher.js'
 import { findProjects } from './projects.js'
 import { FilePager, type FilePage } from './pages.js'
@@ -50,6 +50,7 @@ import {
   assetPath,
   modelKindOf,
   readHead,
+  readPsdComposite,
   readUpTo,
   thumbPx,
   thumbTarget,
@@ -575,18 +576,20 @@ async function thumbnail(p: unknown, size: unknown): Promise<Uint8Array | null> 
   const px = thumbPx(size)
   const rel = String(p)
   // A model comes in by its own door (`modelAbs`): the one pictures and boards use never opens one.
-  const abs = (await v.assetAbs(rel)) ?? (await v.modelAbs(rel))
+  const abs = (await v.assetAbs(rel)) ?? (await v.modelAbs(rel)) ?? (await v.previewAbs(rel))
   if (!abs) return null
   const st = await fs.stat(abs).catch(() => null)
   const video = isVideoName(path.basename(abs))
   const model = isModelName(path.basename(abs))
-  if (!st?.isFile() || st.size === 0 || (!video && st.size > MAX_THUMB_FILE_BYTES)) return null
+  // A Photoshop document is read for its merged picture only, however many layers it holds (`readPsdComposite` has its own limit).
+  const psd = isPsdName(path.basename(abs))
+  if (!st?.isFile() || st.size === 0 || (!video && !psd && st.size > MAX_THUMB_FILE_BYTES)) return null
   const key = ThumbCache.key(abs, st.mtimeMs, st.size, px)
   const hit = thumbs.get(key)
   if (hit !== undefined) return hit
   let job = thumbsInFlight.get(key)
   if (!job) {
-    job = (video ? renderVideoThumb(abs, px) : model ? renderModelThumb(abs, px) : renderThumb(abs, px))
+    job = (video ? renderVideoThumb(abs, px) : model ? renderModelThumb(abs, px) : psd ? renderPsdThumb(abs, px) : renderThumb(abs, px))
       .then(
         (png) => {
           // A picture that cannot be decoded is an answer too (null, cached for this version of the
@@ -626,6 +629,15 @@ async function renderModelThumb(abs: string, px: number): Promise<Uint8Array | n
   const bytes = await readUpTo(abs, MAX_MODEL_BYTES)
   if (!bytes || !modelKindOf(bytes)) return null
   return thumbnailer.renderModel(bytes, px)
+}
+
+/**
+ * The flattened picture of a Photoshop document, drawn by the thumbnail helper: main reads only the header and the merged picture (the
+ * layers, usually most of the file, are never read) and sends those bytes; it decodes nothing itself.
+ */
+async function renderPsdThumb(abs: string, px: number): Promise<Uint8Array | null> {
+  const bytes = await readPsdComposite(abs)
+  return bytes ? thumbnailer.renderPsd(bytes, px) : null
 }
 
 /**

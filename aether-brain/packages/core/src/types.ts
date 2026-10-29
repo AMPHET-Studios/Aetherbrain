@@ -249,8 +249,10 @@ export interface ImageNodeInfo {
   video?: boolean
   /** True for a 3D model (`isModelPath`): shown as one lit still the thumbnail helper draws, opened in the OS's 3D app. */
   model?: boolean
-  /** Present for any other file (an mp3, a pdf, a zip, a script: `isFileMoonPath`): its kind, for its colour. Never thumbnailed, opened in the OS. */
+  /** Present for any other file (an mp3, a pdf, a zip, a script: `isFileMoonPath`): its kind, for its colour. Opened in the OS. */
   file?: 'audio' | 'document' | 'archive' | 'data' | 'code' | 'design' | 'other'
+  /** Present for a file that has a picture the app can make of it (`previewKindOf`): its card shows that picture, like a picture's. */
+  preview?: 'psd'
   /** Present while the picture is a card of the open star gallery. */
   gallery?: GalleryCardInfo
 }

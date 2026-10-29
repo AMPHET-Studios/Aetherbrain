@@ -5,7 +5,7 @@ import type { DailyBrief } from '../markdown/brief'
 import { bindProjects } from '../markdown/projects'
 import { noteUrgency, systemUrgency } from '../markdown/urgency'
 import { AssetResolver, TODAY_ID, imageKey, imageTitle, isAssetPath, isImageId, isModelPath, isVideoPath } from '../vault/assets'
-import { FILE_MOONS_PER_FOLDER, FILE_MOONS_TOTAL, fileKindOf, isFileMoonPath } from '../vault/files'
+import { FILE_MOONS_PER_FOLDER, FILE_MOONS_TOTAL, fileKindOf, isFileMoonPath, previewKindOf } from '../vault/files'
 import { folderUniverse, selectFolders, type FolderSelectOptions } from '../vault/folders'
 import { ancestorsOf, areaFromFolder, folderDepth, folderKey, folderOf, homeKey, isFolderId, normalizeFolderPath } from '../vault/paths'
 import { FB_MOON, FB_NONE, FOLDER_BODY_NAMES, folderBodies } from '../vault/cosmos'
@@ -359,7 +359,11 @@ function addImageNode(
   const image: ImageNodeInfo = { path, mtime, size: asset?.size ?? null, embeddedBy: 0 }
   if (isVideoPath(path)) image.video = true
   else if (isModelPath(path)) image.model = true
-  else if (!isAssetPath(path) && isFileMoonPath(path)) image.file = fileKindOf(path)
+  else if (!isAssetPath(path) && isFileMoonPath(path)) {
+    image.file = fileKindOf(path)
+    const preview = previewKindOf(path)
+    if (preview) image.preview = preview
+  }
   const node: GraphNode = {
     id,
     title: imageTitle(path),

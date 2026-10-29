@@ -87,6 +87,11 @@ export function isModelName(name: string, platform: string = process.platform): 
   return MODEL_RE.test(name) && safeAssetName(name, platform)
 }
 
+/** True for a Photoshop document (`.psd`), with isImageName's other rules: a file the app can draw the flattened picture of. */
+export function isPsdName(name: string, platform: string = process.platform): boolean {
+  return /\.psd$/i.test(name) && safeAssetName(name, platform)
+}
+
 /** A picture, a video or a model (isMediaName, isModelName): what the vault lists and watches. */
 export function isAssetName(name: string, platform: string = process.platform): boolean {
   return (IMAGE_RE.test(name) || VIDEO_RE.test(name) || MODEL_RE.test(name)) && safeAssetName(name, platform)
@@ -785,6 +790,14 @@ export class FsVault {
    */
   async modelAbs(p: string): Promise<string | null> {
     return this.shownAbs(p, isModelName)
+  }
+
+  /**
+   * Absolute path of a file the app makes a picture of that is not a picture (a Photoshop document), with every check `assetAbs` makes.
+   * A door of its own, like `modelAbs`: read by the thumbnail helper's queue only, never by the board window.
+   */
+  async previewAbs(p: string): Promise<string | null> {
+    return this.shownAbs(p, isPsdName)
   }
 
   /**

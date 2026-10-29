@@ -42,6 +42,8 @@ export const THUMB_IPC = {
   video: 'thumbs:video',
   /** main → helper: (id, binary glTF bytes, side): a 3D model drawn lit from one side, a square of that side. */
   model: 'thumbs:model',
+  /** main → helper: (id, a Photoshop document's header and merged picture, side): the flattened picture, fitted to the side. */
+  psd: 'thumbs:psd',
 } as const
 
 /**
@@ -82,7 +84,13 @@ export interface ModelJob {
   px: number
 }
 
-export type ThumbJob = PictureJob | VideoJob | ModelJob
+/** One Photoshop document to flatten: its header and merged picture only (`readPsdComposite`) and the longest side of the still. */
+export interface PsdJob {
+  psd: Uint8Array
+  px: number
+}
+
+export type ThumbJob = PictureJob | VideoJob | ModelJob | PsdJob
 
 /**
  * A job that got no answer through no fault of its picture (the helper could
@@ -190,6 +198,14 @@ export class Thumbnailer {
     return this.queue.render({ model: bytes, px })
   }
 
+  /**
+   * PNG bytes of the flattened picture of a Photoshop document (`bytes`: its header and merged picture, from `readPsdComposite`), at most
+   * `px` on its longer side, or null when the helper cannot read it. Nothing is decoded here.
+   */
+  renderPsd(bytes: Uint8Array, px: number): Promise<Uint8Array | null> {
+    return this.queue.render({ psd: bytes, px })
+  }
+
   /** One request of the helper's session for a video address: the file of a job running now, else 404. */
   serve(url: string, range: string | null): Promise<Response> {
     const video = url.startsWith(VIDEO_URL_PREFIX) ? this.videos.get(url.slice(VIDEO_URL_PREFIX.length)) : undefined
@@ -248,6 +264,7 @@ export class Thumbnailer {
       send: (jobId, job) => {
         if ('url' in job) wc.send(THUMB_IPC.video, jobId, job.url, job.px)
         else if ('model' in job) wc.send(THUMB_IPC.model, jobId, job.model, job.px)
+        else if ('psd' in job) wc.send(THUMB_IPC.psd, jobId, job.psd, job.px)
         else wc.send(THUMB_IPC.job, jobId, job.bytes, job.type, job.width, job.height)
       },
       destroy: (hung) => {
