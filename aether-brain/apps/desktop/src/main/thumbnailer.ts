@@ -26,6 +26,8 @@
  * runtime (types only), main.ts hands in the modules.
  */
 import { randomUUID } from 'node:crypto'
+import { readFile } from 'node:fs/promises'
+import path from 'node:path'
 import type { BrowserWindow, BrowserWindowConstructorOptions, Session } from 'electron'
 import { serveVideo, type ThumbTarget } from './assets.js'
 import { HelperQueue, type QueueHelper } from './helper-queue.js'
@@ -44,6 +46,8 @@ export const THUMB_IPC = {
   model: 'thumbs:model',
   /** main → helper: (id, a Photoshop document's header and merged picture, side): the flattened picture, fitted to the side. */
   psd: 'thumbs:psd',
+  /** main → helper: (id, a PDF's bytes, side): its first page drawn white, fitted to the side. */
+  pdf: 'thumbs:pdf',
 } as const
 
 /**
@@ -53,6 +57,16 @@ export const THUMB_IPC = {
 export const VIDEO_SCHEME = 'aether-video'
 /** Addresses of videos handed to the helper: `aether-video://clip/<token>`. */
 export const VIDEO_URL_PREFIX = `${VIDEO_SCHEME}://clip/`
+
+/**
+ * The scheme the helper's session serves pdf.js on (registered as privileged in main.ts before the app is ready: standard and secure, so the
+ * helper page can load it as modules, and CORS-enabled, since that page has no origin of its own). It serves exactly `PDF_FILES`, from the
+ * folder `copy-pdfjs.mjs` fills, and nothing else.
+ */
+export const PDF_SCHEME = 'aether-pdf'
+export const PDF_URL_PREFIX = `${PDF_SCHEME}://app/`
+/** The three files of the PDF page: our host module, pdf.js and its worker. */
+export const PDF_FILES: readonly string[] = ['host.mjs', 'pdf.mjs', 'pdf.worker.mjs']
 
 /** The helper's session: in memory only (no `persist:`), so nothing of it is written to disk. */
 export const THUMB_PARTITION = 'aether-thumbs'
@@ -90,7 +104,13 @@ export interface PsdJob {
   px: number
 }
 
-export type ThumbJob = PictureJob | VideoJob | ModelJob | PsdJob
+/** One PDF to draw the first page of: its bytes (checked by `pdfKindOf`) and the longest side of the still. */
+export interface PdfJob {
+  pdf: Uint8Array
+  px: number
+}
+
+export type ThumbJob = PictureJob | VideoJob | ModelJob | PsdJob | PdfJob
 
 /**
  * A job that got no answer through no fault of its picture (the helper could
@@ -145,6 +165,8 @@ export interface ThumbnailerOptions {
   electron: ThumbElectron
   /** Absolute path of the built thumb-preload.cjs. */
   preload: string
+  /** Absolute path of the folder with the PDF page's files (`PDF_FILES`, copied there at build time); without it no PDF is drawn. */
+  pdfDir?: string
   timeoutMs?: number
 }
 
@@ -206,11 +228,37 @@ export class Thumbnailer {
     return this.queue.render({ psd: bytes, px })
   }
 
+  /**
+   * PNG bytes of the first page of a PDF (`bytes`: the whole file, already checked by `pdfKindOf`) drawn on white as a picture of at most
+   * `px` on its longer side, or null when the helper cannot draw it. The helper parses it with pdf.js in its page: no scripts run, and the page
+   * can load nothing but its own three files.
+   */
+  renderPdf(bytes: Uint8Array, px: number): Promise<Uint8Array | null> {
+    return this.queue.render({ pdf: bytes, px })
+  }
+
+  /** One request of the helper's session for a PDF page file: one of `PDF_FILES` from the folder main was given, else 404. */
+  async servePdf(url: string): Promise<Response> {
+    const name = url.startsWith(PDF_URL_PREFIX) ? (url.slice(PDF_URL_PREFIX.length).split(/[?#]/)[0] ?? '') : ''
+    if (!this.opts.pdfDir || !PDF_FILES.includes(name)) return new Response(null, { status: 404 })
+    try {
+      const body = await readFile(path.join(this.opts.pdfDir, name))
+      return new Response(body, { headers: { 'content-type': 'text/javascript', 'access-control-allow-origin': '*', 'cache-control': 'no-store' } })
+    } catch {
+      return new Response(null, { status: 404 })
+    }
+  }
+
   /** One request of the helper's session for a video address: the file of a job running now, else 404. */
   serve(url: string, range: string | null): Promise<Response> {
     const video = url.startsWith(VIDEO_URL_PREFIX) ? this.videos.get(url.slice(VIDEO_URL_PREFIX.length)) : undefined
     if (!video) return Promise.resolve(new Response(null, { status: 404 }))
     return serveVideo(video.abs, video.mime, range, video.end.signal)
+  }
+
+  /** True for the address of one of the PDF page's three files (what the session lets load besides its own page and the videos of jobs running). */
+  private isPdfFile(url: string): boolean {
+    return url.startsWith(PDF_URL_PREFIX) && PDF_FILES.includes(url.slice(PDF_URL_PREFIX.length).split(/[?#]/)[0] ?? '')
   }
 
   /** `thumbs:ready`: only the current helper counts. */
@@ -265,6 +313,7 @@ export class Thumbnailer {
         if ('url' in job) wc.send(THUMB_IPC.video, jobId, job.url, job.px)
         else if ('model' in job) wc.send(THUMB_IPC.model, jobId, job.model, job.px)
         else if ('psd' in job) wc.send(THUMB_IPC.psd, jobId, job.psd, job.px)
+        else if ('pdf' in job) wc.send(THUMB_IPC.pdf, jobId, job.pdf, job.px)
         else wc.send(THUMB_IPC.job, jobId, job.bytes, job.type, job.width, job.height)
       },
       destroy: (hung) => {
@@ -285,8 +334,11 @@ export class Thumbnailer {
     if (this.sessionReady) return
     this.sessionReady = true
     const ses = this.opts.electron.session.fromPartition(THUMB_PARTITION)
-    ses.webRequest.onBeforeRequest((details, cb) => cb({ cancel: details.url !== THUMB_PAGE && !details.url.startsWith(VIDEO_URL_PREFIX) }))
+    ses.webRequest.onBeforeRequest((details, cb) =>
+      cb({ cancel: details.url !== THUMB_PAGE && !details.url.startsWith(VIDEO_URL_PREFIX) && !this.isPdfFile(details.url) }),
+    )
     ses.protocol.handle(VIDEO_SCHEME, (req) => this.serve(req.url, req.headers.get('range')))
+    ses.protocol.handle(PDF_SCHEME, (req) => this.servePdf(req.url))
     ses.setPermissionRequestHandler((_wc, _permission, cb) => cb(false))
     ses.setPermissionCheckHandler(() => false)
   }

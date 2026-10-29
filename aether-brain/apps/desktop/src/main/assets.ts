@@ -395,6 +395,22 @@ export function videoKindOf(b: Uint8Array): VideoKind | null {
   return null
 }
 
+/* ---- PDF ---- */
+
+/** Largest PDF sent to the helper whole: pdf.js reads the whole file to find the first page (its page tree can be anywhere in it). */
+export const MAX_PDF_BYTES = 64 * 1024 * 1024
+/** `%PDF-` must start within the first 1,024 bytes (the PDF standard allows some bytes before it). */
+export const PDF_HEAD_BYTES = 1024
+
+/** True when `head` (the first `PDF_HEAD_BYTES` of a file, or all of it) holds the `%PDF-` marker a PDF starts with: a file only named .pdf is not drawn. */
+export function pdfKindOf(head: Uint8Array): boolean {
+  const end = Math.min(head.length, PDF_HEAD_BYTES) - 4
+  for (let i = 0; i < end; i++) {
+    if (head[i] === 0x25 && head[i + 1] === 0x50 && head[i + 2] === 0x44 && head[i + 3] === 0x46 && head[i + 4] === 0x2d) return true
+  }
+  return false
+}
+
 /* ---- Photoshop documents ---- */
 
 /** Bytes of the fixed header of a Photoshop document: the signature, the version, the size, the depth and the colour mode. */

@@ -321,7 +321,8 @@ describe('the helper page for a document', () => {
 describe('a document in the graph', () => {
   it('is a file moon with a preview, and a plain file is not', () => {
     expect(previewKindOf('Art/gate.PSD')).toBe('psd')
-    expect(previewKindOf('Art/gate.pdf')).toBeUndefined()
+    expect(previewKindOf('Art/gate.pdf')).toBe('pdf')
+    expect(previewKindOf('Art/gate.zip')).toBeUndefined()
     const notes = new Map([[parseNote({ path: 'Home.md', content: '# Home\n' }).meta.id, parseNote({ path: 'Home.md', content: '# Home\n' })]])
     const g = buildGraph(notes, {
       images: {

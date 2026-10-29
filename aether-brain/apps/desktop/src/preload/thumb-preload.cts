@@ -24,6 +24,7 @@ const IPC = {
   video: 'thumbs:video',
   model: 'thumbs:model',
   psd: 'thumbs:psd',
+  pdf: 'thumbs:pdf',
 } as const
 
 /** Addresses main hands out for videos (VIDEO_URL_PREFIX in src/main/thumbnailer.ts). */
@@ -959,6 +960,90 @@ async function psdStill(bytes: Uint8Array, side: number): Promise<Uint8Array | n
   ctx.putImageData(new ImageData(still.data as Uint8ClampedArray<ArrayBuffer>, still.width, still.height), 0, 0)
   return pngBytes(canvas)
 }
+
+/* ------------------------------------------------------------------ */
+/* PDF                                                                */
+/* ------------------------------------------------------------------ */
+
+/** The page module that runs pdf.js (src/pdf-host/host.mjs), served by the helper session's `aether-pdf` scheme. */
+const PDF_HOST = 'aether-pdf://app/host.mjs'
+/** Longest the page module may take to load, and a page to draw: main's own limit for a job ends the helper first. */
+const PDF_LOAD_MS = 10_000
+
+let pdfHost: Promise<boolean> | null = null
+let pdfSeq = 0
+const pdfWaiting = new Map<number, (page: { width: number; height: number; buffer: ArrayBuffer } | null) => void>()
+
+interface PdfMessage {
+  aether?: string
+  id?: number
+  width?: number
+  height?: number
+  buffer?: ArrayBuffer | null
+}
+
+/** The page module's answers: listened for from the first PDF on (a helper that never gets one never touches `window`). */
+function onPdfDone(e: MessageEvent<PdfMessage>): void {
+  const m = e.data
+  if (e.source !== window || !m || m.aether !== 'pdf-done' || typeof m.id !== 'number') return
+  const wait = pdfWaiting.get(m.id)
+  pdfWaiting.delete(m.id)
+  wait?.(m.buffer instanceof ArrayBuffer && typeof m.width === 'number' && typeof m.height === 'number' ? { width: m.width, height: m.height, buffer: m.buffer } : null)
+}
+
+/** Loads the page module once (it posts `pdf-ready` when it listens); false when it could not load, and the next job tries again. */
+function loadPdfHost(): Promise<boolean> {
+  if (pdfHost) return pdfHost
+  window.addEventListener('message', onPdfDone)
+  const loading = new Promise<boolean>((resolve) => {
+    const finish = (ok: boolean): void => {
+      window.removeEventListener('message', onReady)
+      clearTimeout(timer)
+      if (!ok) window.removeEventListener('message', onPdfDone)
+      resolve(ok)
+    }
+    const onReady = (e: MessageEvent<PdfMessage>): void => {
+      if (e.source === window && e.data?.aether === 'pdf-ready') finish(true)
+    }
+    const timer = setTimeout(() => finish(false), PDF_LOAD_MS)
+    window.addEventListener('message', onReady)
+    const script = document.createElement('script')
+    script.type = 'module'
+    script.src = PDF_HOST
+    script.onerror = () => finish(false)
+    document.documentElement.appendChild(script)
+  })
+  pdfHost = loading
+  void loading.then((ok) => {
+    if (!ok) pdfHost = null
+  })
+  return loading
+}
+
+/** PNG bytes of the first page of the PDF in `bytes`, drawn on white and at most `side` px on its longer side, or null when it cannot be drawn. */
+async function pdfStill(bytes: Uint8Array, side: number): Promise<Uint8Array | null> {
+  if (!(await loadPdfHost())) return null
+  const id = ++pdfSeq
+  const copy = bytes.slice().buffer
+  const page = await new Promise<{ width: number; height: number; buffer: ArrayBuffer } | null>((resolve) => {
+    pdfWaiting.set(id, resolve)
+    window.postMessage({ aether: 'pdf', id, bytes: copy, px: side }, '*', [copy])
+  })
+  if (!page || page.width < 1 || page.height < 1 || page.buffer.byteLength !== page.width * page.height * 4) return null
+  const canvas = canvasOf(page.width, page.height)
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return null
+  ctx.putImageData(new ImageData(new Uint8ClampedArray(page.buffer), page.width, page.height), 0, 0)
+  return pngBytes(canvas)
+}
+
+ipcRenderer.on(IPC.pdf, (_e, id: unknown, bytes: unknown, px: unknown) => {
+  const job = bytes instanceof Uint8Array && side(px) ? pdfStill(bytes, px) : Promise.resolve(null)
+  void job.then(
+    (png) => ipcRenderer.send(IPC.done, id, png),
+    () => ipcRenderer.send(IPC.done, id, null),
+  )
+})
 
 ipcRenderer.on(IPC.psd, (_e, id: unknown, bytes: unknown, px: unknown) => {
   const job = bytes instanceof Uint8Array && side(px) ? psdStill(bytes, px) : Promise.resolve(null)

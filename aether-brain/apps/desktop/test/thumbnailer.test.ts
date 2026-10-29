@@ -371,12 +371,14 @@ describe('Thumbnailer (the helper window)', () => {
     }
     expect(e.ses.partitions).toEqual([THUMB_PARTITION])
     expect(cancel(THUMB_PAGE)).toBe(false)
-    for (const url of ['https://example.com/', 'http://127.0.0.1:7457/', 'file:///etc/passwd', 'ws://127.0.0.1/', 'data:text/html,<p>other</p>', `${VIDEO_SCHEME}://other/x`]) {
+    for (const url of ['https://example.com/', 'http://127.0.0.1:7457/', 'file:///etc/passwd', 'ws://127.0.0.1/', 'data:text/html,<p>other</p>', `${VIDEO_SCHEME}://other/x`, 'aether-pdf://app/secret.txt', 'aether-pdf://app/../host.mjs', 'aether-pdf://other/host.mjs']) {
       expect(cancel(url), url).toBe(true)
     }
     // Video addresses pass the filter; the session's own handler serves only the jobs running now.
     expect(cancel(`${VIDEO_URL_PREFIX}anything`)).toBe(false)
-    expect(Object.keys(e.ses.protocols)).toEqual([VIDEO_SCHEME])
+    // The PDF page's three files pass too, and nothing else of that scheme.
+    for (const name of ['host.mjs', 'pdf.mjs', 'pdf.worker.mjs']) expect(cancel(`aether-pdf://app/${name}`), name).toBe(false)
+    expect(Object.keys(e.ses.protocols)).toEqual([VIDEO_SCHEME, 'aether-pdf'])
     let granted: boolean | undefined
     e.ses.permission!(null, 'media', (ok) => (granted = ok))
     expect(granted).toBe(false)
