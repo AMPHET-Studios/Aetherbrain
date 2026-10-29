@@ -395,6 +395,22 @@ export function videoKindOf(b: Uint8Array): VideoKind | null {
   return null
 }
 
+/* ---- FBX models ---- */
+
+/** Largest FBX sent to the helper whole (what a glb is allowed too). */
+export const MAX_FBX_BYTES = MAX_THUMB_FILE_BYTES
+/** Bytes read from the start of an FBX to tell it: the 21-byte signature, two bytes and the version. */
+export const FBX_HEAD_BYTES = 27
+
+/** True when `head` starts like a binary FBX file of version 7100 to 8000 (the ASCII form of FBX is not drawn). */
+export function fbxKindOf(head: Uint8Array): boolean {
+  const magic = 'Kaydara FBX Binary  \0'
+  if (head.length < FBX_HEAD_BYTES) return false
+  for (let i = 0; i < magic.length; i++) if (head[i] !== magic.charCodeAt(i)) return false
+  const version = u32le(head, 23)
+  return version >= 7100 && version <= 8000
+}
+
 /* ---- PDF ---- */
 
 /** Largest PDF sent to the helper whole: pdf.js reads the whole file to find the first page (its page tree can be anywhere in it). */

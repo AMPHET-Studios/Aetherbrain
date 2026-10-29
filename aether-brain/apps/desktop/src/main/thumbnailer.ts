@@ -48,6 +48,8 @@ export const THUMB_IPC = {
   psd: 'thumbs:psd',
   /** main → helper: (id, a PDF's bytes, side): its first page drawn white, fitted to the side. */
   pdf: 'thumbs:pdf',
+  /** main → helper: (id, a binary FBX's bytes, side): the model drawn lit from one side, a square of that side. */
+  fbx: 'thumbs:fbx',
 } as const
 
 /**
@@ -110,7 +112,13 @@ export interface PdfJob {
   px: number
 }
 
-export type ThumbJob = PictureJob | VideoJob | ModelJob | PsdJob | PdfJob
+/** One FBX model to draw: its whole file (checked by `fbxKindOf`) and the side of the square still. */
+export interface FbxJob {
+  fbx: Uint8Array
+  px: number
+}
+
+export type ThumbJob = PictureJob | VideoJob | ModelJob | PsdJob | PdfJob | FbxJob
 
 /**
  * A job that got no answer through no fault of its picture (the helper could
@@ -237,6 +245,11 @@ export class Thumbnailer {
     return this.queue.render({ pdf: bytes, px })
   }
 
+  /** PNG bytes of a binary FBX model drawn as a square of `px` (`bytes`: the whole file, checked by `fbxKindOf`), or null when there is nothing the helper can draw. */
+  renderFbx(bytes: Uint8Array, px: number): Promise<Uint8Array | null> {
+    return this.queue.render({ fbx: bytes, px })
+  }
+
   /** One request of the helper's session for a PDF page file: one of `PDF_FILES` from the folder main was given, else 404. */
   async servePdf(url: string): Promise<Response> {
     const name = url.startsWith(PDF_URL_PREFIX) ? (url.slice(PDF_URL_PREFIX.length).split(/[?#]/)[0] ?? '') : ''
@@ -314,6 +327,7 @@ export class Thumbnailer {
         else if ('model' in job) wc.send(THUMB_IPC.model, jobId, job.model, job.px)
         else if ('psd' in job) wc.send(THUMB_IPC.psd, jobId, job.psd, job.px)
         else if ('pdf' in job) wc.send(THUMB_IPC.pdf, jobId, job.pdf, job.px)
+        else if ('fbx' in job) wc.send(THUMB_IPC.fbx, jobId, job.fbx, job.px)
         else wc.send(THUMB_IPC.job, jobId, job.bytes, job.type, job.width, job.height)
       },
       destroy: (hung) => {

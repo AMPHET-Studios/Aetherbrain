@@ -97,6 +97,11 @@ export function isPdfName(name: string, platform: string = process.platform): bo
   return /\.pdf$/i.test(name) && safeAssetName(name, platform)
 }
 
+/** True for an FBX model (`.fbx`), with isImageName's other rules: a file the app can draw a still of. */
+export function isFbxName(name: string, platform: string = process.platform): boolean {
+  return /\.fbx$/i.test(name) && safeAssetName(name, platform)
+}
+
 /** A picture, a video or a model (isMediaName, isModelName): what the vault lists and watches. */
 export function isAssetName(name: string, platform: string = process.platform): boolean {
   return (IMAGE_RE.test(name) || VIDEO_RE.test(name) || MODEL_RE.test(name)) && safeAssetName(name, platform)
@@ -798,11 +803,11 @@ export class FsVault {
   }
 
   /**
-   * Absolute path of a file the app makes a picture of that is not a picture (a Photoshop document, a PDF), with every check `assetAbs` makes.
+   * Absolute path of a file the app makes a picture of that is not a picture (a Photoshop document, a PDF, an FBX model), with every check `assetAbs` makes.
    * A door of its own, like `modelAbs`: read by the thumbnail helper's queue only, never by the board window.
    */
   async previewAbs(p: string): Promise<string | null> {
-    return this.shownAbs(p, (name) => isPsdName(name) || isPdfName(name))
+    return this.shownAbs(p, (name) => isPsdName(name) || isPdfName(name) || isFbxName(name))
   }
 
   /**

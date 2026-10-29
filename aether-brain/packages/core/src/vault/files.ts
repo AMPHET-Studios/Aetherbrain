@@ -63,9 +63,9 @@ const JUNK_NAME = new Set(FILE_JUNK_NAME)
 const JUNK_DIR = new Set(FILE_JUNK_DIR)
 
 /** The extensions of one kind (lower case, no dot). */
-/** What kinds of file the app can make a picture of (a Photoshop document's flattened picture, a PDF's first page). Anything else has no preview. */
-export function previewKindOf(path: string): 'psd' | 'pdf' | undefined {
-  return /\.psd$/i.test(path) ? 'psd' : /\.pdf$/i.test(path) ? 'pdf' : undefined
+/** What kinds of file the app can make a picture of (a Photoshop document's flattened picture, a PDF's first page, an FBX model drawn lit). Anything else has no preview. */
+export function previewKindOf(path: string): 'psd' | 'pdf' | 'fbx' | undefined {
+  return /\.psd$/i.test(path) ? 'psd' : /\.pdf$/i.test(path) ? 'pdf' : /\.fbx$/i.test(path) ? 'fbx' : undefined
 }
 
 export function fileExtensionsOf(kind: FileKind): string[] {

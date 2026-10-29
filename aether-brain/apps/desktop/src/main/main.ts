@@ -33,14 +33,16 @@ import {
   type VaultProgressDto,
 } from '../shared/ipc.js'
 import type { ChatPatch } from '../shared/chat.js'
-import { FsVault, isAssetName, isModelName, isOpenableFileName, isPdfName, isPsdName, isVideoName, within } from './fsvault.js'
+import { FsVault, isAssetName, isModelName, isFbxName, isOpenableFileName, isPdfName, isPsdName, isVideoName, within } from './fsvault.js'
 import { VaultWatcher } from './watcher.js'
 import { findProjects } from './projects.js'
 import { FilePager, type FilePage } from './pages.js'
 import { StartupGuard, latestCrash } from './startup-guard.js'
 import { BRAIN_WINDOW_NAME, MemoryTrail, type MemorySample, crashMessage, crashReport, crashReportName, describeTrail, shouldReload } from './crash.js'
 import {
+  FBX_HEAD_BYTES,
   GLB_HEAD_BYTES,
+  MAX_FBX_BYTES,
   MAX_MODEL_BYTES,
   MAX_PDF_BYTES,
   MAX_THUMB_FILE_BYTES,
@@ -49,6 +51,7 @@ import {
   VIDEO_MIME,
   assetBytes,
   assetPath,
+  fbxKindOf,
   modelKindOf,
   PDF_HEAD_BYTES,
   pdfKindOf,
@@ -591,13 +594,14 @@ async function thumbnail(p: unknown, size: unknown): Promise<Uint8Array | null> 
   // A Photoshop document is read for its merged picture only, however many layers it holds (`readPsdComposite` has its own limit).
   const psd = isPsdName(path.basename(abs))
   const pdf = isPdfName(path.basename(abs))
+  const fbx = isFbxName(path.basename(abs))
   if (!st?.isFile() || st.size === 0 || (!video && !psd && !pdf && st.size > MAX_THUMB_FILE_BYTES)) return null
   const key = ThumbCache.key(abs, st.mtimeMs, st.size, px)
   const hit = thumbs.get(key)
   if (hit !== undefined) return hit
   let job = thumbsInFlight.get(key)
   if (!job) {
-    job = (video ? renderVideoThumb(abs, px) : model ? renderModelThumb(abs, px) : psd ? renderPsdThumb(abs, px) : pdf ? renderPdfThumb(abs, px) : renderThumb(abs, px))
+    job = (video ? renderVideoThumb(abs, px) : model ? renderModelThumb(abs, px) : psd ? renderPsdThumb(abs, px) : pdf ? renderPdfThumb(abs, px) : fbx ? renderFbxThumb(abs, px) : renderThumb(abs, px))
       .then(
         (png) => {
           // A picture that cannot be decoded is an answer too (null, cached for this version of the
@@ -646,6 +650,16 @@ async function renderModelThumb(abs: string, px: number): Promise<Uint8Array | n
 async function renderPsdThumb(abs: string, px: number): Promise<Uint8Array | null> {
   const bytes = await readPsdComposite(abs)
   return bytes ? thumbnailer.renderPsd(bytes, px) : null
+}
+
+/**
+ * An FBX model's still, drawn by the thumbnail helper like a glb: main reads the file here (asynchronously, at most `MAX_FBX_BYTES`), checks
+ * that it starts like a binary FBX and sends the bytes; it parses and draws nothing itself.
+ */
+async function renderFbxThumb(abs: string, px: number): Promise<Uint8Array | null> {
+  const bytes = await readUpTo(abs, MAX_FBX_BYTES)
+  if (!bytes || !fbxKindOf(bytes.subarray(0, FBX_HEAD_BYTES))) return null
+  return thumbnailer.renderFbx(bytes, px)
 }
 
 /**
