@@ -1,4 +1,4 @@
-import type { GraphData, GraphNode, NoteId, Reminder, SunLevel } from '@aether/core'
+import { levelId, type GraphData, type GraphNode, type NoteId, type Reminder, type SunLevel } from '@aether/core'
 import { GALLERY_DWELL_MS, GALLERY_FOLD_MS, GALLERY_FRAMING_MS, GALLERY_REACH_MS, nearestStar as starNearCamera } from './gallery'
 import { LayoutEngine } from './layout/LayoutEngine'
 import type { LayoutMode } from './layout/protocol'
@@ -226,6 +226,7 @@ export class BrainController {
 
   /** How open a sun is (a folder's star, a board's sun, a galaxy). */
   sunLevel(id: NoteId): SunLevel {
+    id = levelId(id)
     return this.sunOwn.get(id) ?? this.sunDefault
   }
 
@@ -236,6 +237,7 @@ export class BrainController {
 
   /** Open or close one sun. */
   setSunLevel(id: NoteId, level: SunLevel): void {
+    id = levelId(id)
     if (this.sunLevel(id) === level) return
     if (level === this.sunDefault) this.sunOwn.delete(id)
     else this.sunOwn.set(id, level)

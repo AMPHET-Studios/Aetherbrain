@@ -30,6 +30,8 @@ export const THUMB_TICK_MS = 250
 export const THUMB_RETRY_MS = 60_000
 /** Billboard width over the node's radius. */
 export const THUMB_SCALE = 2.4
+/** How many times wider than tall a song's waveform card is (the helper draws its picture at the same shape). */
+export const WIDE_ASPECT = 3
 /** Hovered and selected pictures grow like the cores do. */
 export const THUMB_HOVER_SCALE = 1.15
 export const THUMB_SELECTED_SCALE = 1.3

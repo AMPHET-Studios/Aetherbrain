@@ -63,6 +63,14 @@ const JUNK_NAME = new Set(FILE_JUNK_NAME)
 const JUNK_DIR = new Set(FILE_JUNK_DIR)
 
 /** The extensions of one kind (lower case, no dot). */
+/** What kinds of file the app can make a picture of (a Photoshop document's flattened picture, a PDF's first page, an FBX model drawn lit, a song's waveform as a long horizontal card). Anything else has no preview. */
+export function previewKindOf(path: string): 'psd' | 'pdf' | 'fbx' | 'audio' | undefined {
+  return /\.psd$/i.test(path) ? 'psd' : /\.pdf$/i.test(path) ? 'pdf' : /\.fbx$/i.test(path) ? 'fbx' : AUDIO_PREVIEW_RE.test(path) ? 'audio' : undefined
+}
+
+/** The songs whose waveform is drawn: what Chromium's own decoder reads (an mp3, wav, flac, ogg, opus, m4a or aac file). */
+const AUDIO_PREVIEW_RE = /\.(mp3|wav|flac|ogg|oga|m4a|aac|opus)$/i
+
 export function fileExtensionsOf(kind: FileKind): string[] {
   return Object.keys(KIND_OF).filter((e) => KIND_OF[e] === kind)
 }

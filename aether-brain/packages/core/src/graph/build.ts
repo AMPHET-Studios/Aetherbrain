@@ -5,9 +5,10 @@ import type { DailyBrief } from '../markdown/brief'
 import { bindProjects } from '../markdown/projects'
 import { noteUrgency, systemUrgency } from '../markdown/urgency'
 import { AssetResolver, TODAY_ID, imageKey, imageTitle, isAssetPath, isImageId, isModelPath, isVideoPath } from '../vault/assets'
-import { FILE_MOONS_PER_FOLDER, FILE_MOONS_TOTAL, fileKindOf, isFileMoonPath } from '../vault/files'
+import { FILE_MOONS_PER_FOLDER, FILE_MOONS_TOTAL, fileKindOf, isFileMoonPath, previewKindOf } from '../vault/files'
 import { folderUniverse, selectFolders, type FolderSelectOptions } from '../vault/folders'
-import { ancestorsOf, areaFromFolder, folderDepth, folderKey, folderOf, isFolderId, normalizeFolderPath } from '../vault/paths'
+import { ancestorsOf, areaFromFolder, folderDepth, folderKey, folderOf, homeKey, isFolderId, normalizeFolderPath } from '../vault/paths'
+import { FB_MOON, FB_NONE, FOLDER_BODY_NAMES, folderBodies } from '../vault/cosmos'
 
 export interface FolderGraphOptions extends FolderSelectOptions {
   /** Every folder known on disk (vault paths). */
@@ -358,7 +359,11 @@ function addImageNode(
   const image: ImageNodeInfo = { path, mtime, size: asset?.size ?? null, embeddedBy: 0 }
   if (isVideoPath(path)) image.video = true
   else if (isModelPath(path)) image.model = true
-  else if (!isAssetPath(path) && isFileMoonPath(path)) image.file = fileKindOf(path)
+  else if (!isAssetPath(path) && isFileMoonPath(path)) {
+    image.file = fileKindOf(path)
+    const preview = previewKindOf(path)
+    if (preview) image.preview = preview
+  }
   const node: GraphNode = {
     id,
     title: imageTitle(path),
@@ -827,7 +832,77 @@ function addFolderSystem(
       })
     }
   }
+  addHomeMoons(nodes, index)
   return { selection, gallery }
+}
+
+/**
+ * Files orbit moons, never a star or a planet (docs/COSMOLOGY.md): a star, a planet or a galaxy that holds files of its own gets one
+ * **home moon** (`home:<path>`, `folder.home`), which orbits the folder, and the files directly in the folder orbit it instead. A
+ * folder that is already a moon keeps its files. The files keep their `parent` (the folder, for the roll-ups); `orbit` is the moon. A card that is in the graph only for a star gallery stays on its star. Runs when
+ * the graph has folders, so only in the system layout.
+ */
+function addHomeMoons(nodes: GraphNode[], index: Map<NoteId, number>): void {
+  const bodies = folderBodies({ nodes, index } as unknown as GraphData)
+  for (let i = 0; i < nodes.length; i++) {
+    const f = nodes[i]!.folder
+    const body = FOLDER_BODY_NAMES[bodies[i]!]
+    if (f !== undefined && (body === 'star' || body === 'planet' || body === 'moon')) f.body = body
+  }
+  const filesOf = new Map<NoteId, number[]>()
+  for (let i = 0; i < nodes.length; i++) {
+    const n = nodes[i]!
+    if (n.folder !== undefined || n.parent === null || n.ghost || n.image?.gallery?.only === true) continue
+    if (n.kind !== 'note' && n.kind !== 'image') continue
+    const at = index.get(n.parent)
+    if (at === undefined) continue
+    const owner = nodes[at]!
+    if (owner.folder === undefined || owner.folder.placeholder === true || bodies[at] === FB_MOON || bodies[at] === FB_NONE) continue
+    let list = filesOf.get(owner.id)
+    if (!list) filesOf.set(owner.id, (list = []))
+    list.push(i)
+  }
+  for (const [ownerId, files] of filesOf) {
+    const owner = nodes[index.get(ownerId)!]!
+    const f = owner.folder!
+    const id = homeKey(f.path)
+    if (index.has(id)) continue
+    index.set(id, nodes.length)
+    nodes.push({
+      id,
+      title: owner.title + ' files',
+      area: owner.area,
+      type: 'moc',
+      tags: [],
+      kind: 'folder',
+      ghost: false,
+      parent: ownerId,
+      folder: {
+        path: f.path,
+        role: 'folder',
+        depth: f.depth + 1,
+        home: true,
+        body: 'moon',
+        projectId: null,
+        inProject: f.inProject || f.projectId !== null,
+        data: { ...EMPTY_FOLDER_DATA },
+        weight: files.length,
+        childFolders: 0,
+        hiddenFolders: 0,
+        notes: files.length,
+        totalNotes: files.length,
+        images: 0,
+        shownImages: 0,
+      },
+      inDegree: 0,
+      outDegree: 0,
+      degree: 0,
+      created: null,
+      updated: null,
+      wordCount: 0,
+    })
+    for (const i of files) nodes[i]!.orbit = id
+  }
 }
 
 /**
@@ -847,6 +922,7 @@ function assignBoardSuns(nodes: GraphNode[], index: Map<NoteId, number>, outlink
       if (!picture || picture.kind !== 'image') continue
       taken.add(target)
       picture.parent = board.id
+      delete picture.orbit
       pictures++
     }
     if (pictures > 0) board.board = { pictures }

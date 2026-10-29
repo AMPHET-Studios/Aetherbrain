@@ -52,7 +52,9 @@ import {
   isTodayId,
   isVirtualId,
   isVideoPath,
-  legendBodies,
+  folderBodies,
+  levelId,
+  legendBodiesIn,
   loadVault,
   mountOf,
   neighborhood,
@@ -244,7 +246,7 @@ const LAYOUTS: LayoutMode[] = ['constellation', 'orbit', 'system']
 const LAYOUT_TOASTS: Record<LayoutMode, string> = {
   constellation: 'Constellation layout — clustered by area',
   orbit: 'Orbit layout — time as rings, newest at the core',
-  system: 'System layout — drives are galaxies, folders are stars, big files are planets, small files are moons',
+  system: 'System layout — drives are galaxies, folders are stars, planets and moons by depth, files are satellites',
 }
 const DEFAULT_SETTINGS: Settings = {
   colorMode: 'area',
@@ -1174,8 +1176,10 @@ export const useAether = create<AetherState>()((set, get) => {
       // The legend's kinds light up every node of the kind (a folder, a picture, a board, a note), whatever it is. The other filters,
       // when they are on too, still have to be passed: by notes, which are the only nodes with an area, a type or tags.
       const others = filters.areas.size > 0 || filters.tags.size > 0 || filters.types.size > 0 || ids !== null
-      for (const node of graph.nodes) {
-        if (!legendBodies(node).some((b) => filters.bodies.has(b))) continue
+      const folderKinds = folderBodies(graph)
+      for (let i = 0; i < graph.nodes.length; i++) {
+        const node = graph.nodes[i]!
+        if (!legendBodiesIn(graph, i, folderKinds).some((b) => filters.bodies.has(b))) continue
         if (others) {
           const note = notes.get(node.id)
           if (!note || !passes(note.meta)) continue
@@ -2707,9 +2711,11 @@ export const useAether = create<AetherState>()((set, get) => {
     },
 
     sunLevelOf(id) {
+      id = levelId(id)
       return get().sunOwn[id] ?? get().sunDefault
     },
     setSunLevel(id, level) {
+      id = levelId(id)
       const { sunOwn, sunDefault, adapter } = get()
       const own = { ...sunOwn }
       if (level === sunDefault) delete own[id]
@@ -2750,7 +2756,7 @@ export const useAether = create<AetherState>()((set, get) => {
       set({ sunOwn: {}, sunDefault: level })
       controller.setSunLevels(level, null)
       if (adapter) saveJson(SUNS_KEY + adapter.location, { def: level, own: {} })
-      get().toast(level === 0 ? 'Every sun closed' : level === 1 ? 'Every sun open: planets' : 'Every sun open: planets and moons')
+      get().toast(level === 0 ? 'Every sun closed' : level === 1 ? 'Every sun open: folders' : 'Every sun open: folders and files')
     },
     toggleAllSuns() {
       const { sunDefault, sunOwn } = get()
@@ -2760,7 +2766,7 @@ export const useAether = create<AetherState>()((set, get) => {
     toggleSuns() {
       const suns = !get().settings.suns
       get().setSettings({ suns })
-      get().toast(suns ? 'Suns open and close: click one to see its planets, then its moons' : 'Every planet and moon shows, always')
+      get().toast(suns ? 'Suns open and close: click one to see its folders, then its files' : 'Every body shows, always')
     },
     pickBody(id) {
       const g = get().graph

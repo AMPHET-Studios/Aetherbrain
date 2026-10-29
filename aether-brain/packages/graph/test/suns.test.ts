@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildGraph, folderKey, parseNote, type GraphData, type NoteId, type ParsedNote } from '@aether/core'
+import { buildGraph, folderKey, homeKey, parseNote, type GraphData, type NoteId, type ParsedNote } from '@aether/core'
 import { BrainController, type CameraLike } from '../src/BrainController'
 import { nodeRadius } from '../src/theme'
 
@@ -164,7 +164,7 @@ describe('flying to a sun', () => {
     const { c, cam } = placed(g, star.id, 300)
     c.flyTo(star.id)
     const d = cam.flights[0]![3]!
-    const moon = g.nodes.find((n) => n.id === 'Work/A')!
+    const moon = g.nodes.find((n) => n.id === homeKey('Work'))!
     expect(d).toBeCloseTo((300 + nodeRadius(moon) * 3) * 2.3, 3)
     expect(d).toBeGreaterThan(nodeRadius(star) * 13)
     c.dispose()

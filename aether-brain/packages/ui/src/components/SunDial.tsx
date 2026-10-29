@@ -5,8 +5,8 @@ import { cx } from '../util'
 
 /**
  * The control on a sun: while a sun (a folder's star, a galaxy, a reference board with pictures) is selected, a bar at the bottom of
- * the 3D view says how open it is and lets the user choose: closed (only the star and what is urgent), its planets, or its planets
- * and its moons. A click on a closed sun opens its planets; `s` steps through the same levels.
+ * the 3D view says how open it is and lets the user choose: closed (only the body and what is urgent), the folders under it (a star's planets, a planet's moons), or those
+ * and its files (its satellites). A click on a closed sun opens its folders; `s` steps through the same levels.
  */
 export function SunDial() {
   const selectedId = useAether((s) => s.selectedId)
@@ -22,9 +22,9 @@ export function SunDial() {
   const has: Record<SunLevel, boolean> = { 0: true, 1: counts.planets + counts.systems > 0, 2: counts.moons > 0 }
   const nothing = counts.planets + counts.systems + counts.moons === 0
   const parts = [
-    counts.planets > 0 ? `${counts.planets} planet${counts.planets === 1 ? '' : 's'}` : '',
+    counts.planets > 0 ? `${counts.planets} board${counts.planets === 1 ? '' : 's'}` : '',
     counts.systems > 0 ? `${counts.systems} folder${counts.systems === 1 ? '' : 's'}` : '',
-    counts.moons > 0 ? `${counts.moons} moon${counts.moons === 1 ? '' : 's'}` : '',
+    counts.moons > 0 ? `${counts.moons} file${counts.moons === 1 ? '' : 's'}` : '',
   ].filter(Boolean)
   return (
     <div className="panel flex flex-wrap items-center gap-x-3 gap-y-1.5 px-3 py-2 text-[11.5px]" role="group" aria-label={`How open ${node.title} is`}>
@@ -42,7 +42,7 @@ export function SunDial() {
               aria-pressed={level === l}
               disabled={!has[l]}
               onClick={() => chooseSun(node.id, l)}
-              title={l === 0 ? 'Close it: only the star shows (s steps through the levels)' : l === 1 ? 'Show its planets (the big files and long notes) and its folders' : 'Show its planets and its moons: every small file'}
+              title={l === 0 ? 'Close it: only the body shows (s steps through the levels)' : l === 1 ? 'Show the folders under it: the planets of a star, the moons of a planet' : 'Show its folders and its files (satellites)'}
             >
               {SUN_LEVEL_NAMES[l]}
             </button>

@@ -36,13 +36,16 @@ export interface RevealInput {
   lit: ((i: number) => boolean) | null
   /** Show everything (the sun levels are off, or this is not the system layout). */
   all: boolean
+  /** 1 per body that is not due yet while the sky builds itself (`buildUp.ts`): hidden whatever the rest says, the selected one apart. */
+  hold?: Uint8Array | null
 }
 
 /** Fill `out` with each body's target: 1 shown, 0 hidden. */
 export function revealTargets(input: RevealInput, out: Uint8Array): void {
-  const { count, tier, owner, order, level, card, selected, lit, all } = input
+  const { count, tier, owner, order, level, card, selected, lit, all, hold } = input
   if (all) {
-    out.fill(1, 0, count)
+    if (hold) for (let i = 0; i < count; i++) out[i] = hold[i] === 1 && i !== selected ? 0 : 1
+    else out.fill(1, 0, count)
     return
   }
   for (let q = 0; q < count; q++) {
@@ -54,6 +57,7 @@ export function revealTargets(input: RevealInput, out: Uint8Array): void {
     if (!on) on = o < 0 || level[o]! >= t || (lit !== null && lit(i))
     // A body cannot float around a sun that is itself folded away: it needs its sun shown (the selected one is shown wherever it is).
     if (on && o >= 0 && i !== selected && out[o] === 0) on = false
+    if (on && hold && hold[i] === 1 && i !== selected) on = false
     out[i] = on ? 1 : 0
   }
 }

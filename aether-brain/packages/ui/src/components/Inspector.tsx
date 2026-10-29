@@ -337,7 +337,8 @@ function FolderInspector({ node }: { node: GraphNode }) {
       // A galaxy that left this folder for the galaxy above it is still one of its folders on disk: it is listed here too (a click flies to it).
       const left = n.parent !== node.id && n.folder?.galaxyLevel !== undefined && folderOf(n.folder.path) === info.path
       // Cards of an open star gallery belong to the gallery, not to the folder's own moons.
-      if ((n.parent !== node.id && !left) || n.image?.gallery?.only) continue
+      // A home moon is this folder's own files drawn as a moon, not a folder inside it.
+      if ((n.parent !== node.id && !left) || n.image?.gallery?.only || n.folder?.home) continue
       if (n.kind === 'folder') planets.push(n)
       else if (n.kind === 'note') moons.push(n)
       else if (n.kind === 'image') pictures.push(n)
@@ -378,9 +379,15 @@ function FolderInspector({ node }: { node: GraphNode }) {
       : '✚ Bio star'
     : isMarkedGalaxy
       ? `✦ Galaxy · level ${info.galaxyLevel}`
-      : info.role === 'folder' && info.inProject
-        ? 'Planet of a project'
-        : ROLE_LABEL[info.role]
+      : info.role === 'folder' && info.body === 'moon'
+        ? 'Moon'
+        : info.role === 'folder' && info.body === 'planet'
+          ? info.inProject
+            ? 'Planet of a project'
+            : 'Planet'
+          : ROLE_LABEL[info.role]
+  /** What the folders inside this one are: a galaxy's are stars, a star's are planets, a planet's and a moon's are moons. */
+  const kidsWord = isMarkedGalaxy || info.role === 'root' || info.role === 'mount' ? 'Stars' : info.body === 'planet' || info.body === 'moon' ? 'Moons' : 'Planets'
   const color = info.bio ? BIO_STAR_LABEL_COLOR : isMarkedGalaxy ? SUN_COLOR : info.role === 'project' ? STAR_COLOR : info.role === 'folder' ? starColor(info.path) : SUN_COLOR
   /** The galaxy it sits on (a marked galaxy hangs from the galaxy above it, not from the folder it is in). */
   const sitsOn = isMarkedGalaxy && node.parent ? graph?.nodes[graph.index.get(node.parent) ?? -1] : undefined
@@ -420,8 +427,8 @@ function FolderInspector({ node }: { node: GraphNode }) {
         </div>
         {!dormant && (
           <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11.5px] text-dim">
-            <JumpStat title="Notes directly in this folder" anchor="moons" count={children.moons.length}>
-              · {plural(info.notes, 'moon')}
+            <JumpStat title="Notes directly in this folder: they orbit its home moon" anchor="moons" count={children.moons.length}>
+              · {plural(info.notes, 'file')}
             </JumpStat>
             <span title="Notes anywhere under this folder">{plural(info.totalNotes, 'note')} in all</span>
             <JumpStat title="Subfolders on disk" anchor="planets" count={children.planets.length}>
@@ -429,7 +436,7 @@ function FolderInspector({ node }: { node: GraphNode }) {
             </JumpStat>
             {info.hiddenFolders > 0 && <span className="text-inbox">+{info.hiddenFolders} hidden</span>}
             {info.images > 0 && (
-              <JumpStat title="Pictures directly in this folder · how many orbit it as moons (the newest)" anchor="pictures" count={children.pictures.length}>
+              <JumpStat title="Pictures directly in this folder · how many orbit it as satellites (the newest)" anchor="pictures" count={children.pictures.length}>
                 🖼 {plural(info.images, 'picture')} · {info.shownImages} shown
               </JumpStat>
             )}
@@ -586,7 +593,7 @@ function FolderInspector({ node }: { node: GraphNode }) {
 
       <div className="scroll flex-1 border-t border-[var(--line)] px-4 py-3">
         {children.planets.length > 0 && (
-          <Section title={`Planets · ${children.planets.length}`} anchor="planets">
+          <Section title={`${kidsWord} · ${children.planets.length}`} anchor="planets">
             {children.planets.map((p) => (
               <div key={p.id} className="flex items-center gap-2 py-0.5">
                 <span
@@ -611,7 +618,7 @@ function FolderInspector({ node }: { node: GraphNode }) {
             ))}
           </Section>
         )}
-        {children.moons.length > 0 && <LinkList title="Moons" anchor="moons" ids={children.moons.map((n) => n.id)} onOpen={openNote} onSelect={select} />}
+        {children.moons.length > 0 && <LinkList title="Files" anchor="moons" ids={children.moons.map((n) => n.id)} onOpen={openNote} onSelect={select} />}
         {children.pictures.length > 0 && <LinkList title="Pictures" anchor="pictures" ids={children.pictures.map((n) => n.id)} onOpen={openNote} onSelect={select} />}
         {children.planets.length === 0 && children.moons.length === 0 && children.pictures.length === 0 && (
           <div className="text-[12px] text-faint">Empty so far. Add a note or a folder above.</div>

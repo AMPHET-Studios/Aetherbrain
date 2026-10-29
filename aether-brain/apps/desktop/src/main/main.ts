@@ -33,29 +33,37 @@ import {
   type VaultProgressDto,
 } from '../shared/ipc.js'
 import type { ChatPatch } from '../shared/chat.js'
-import { FsVault, isAssetName, isModelName, isOpenableFileName, isVideoName, within } from './fsvault.js'
+import { FsVault, isAssetName, isModelName, isAudioName, isFbxName, isOpenableFileName, isPdfName, isPsdName, isVideoName, within } from './fsvault.js'
 import { VaultWatcher } from './watcher.js'
 import { findProjects } from './projects.js'
 import { FilePager, type FilePage } from './pages.js'
 import { StartupGuard, latestCrash } from './startup-guard.js'
 import { BRAIN_WINDOW_NAME, MemoryTrail, type MemorySample, crashMessage, crashReport, crashReportName, describeTrail, shouldReload } from './crash.js'
 import {
+  FBX_HEAD_BYTES,
   GLB_HEAD_BYTES,
+  MAX_AUDIO_BYTES,
+  MAX_FBX_BYTES,
   MAX_MODEL_BYTES,
+  MAX_PDF_BYTES,
   MAX_THUMB_FILE_BYTES,
   ThumbCache,
   VIDEO_HEAD_BYTES,
   VIDEO_MIME,
   assetBytes,
   assetPath,
+  fbxKindOf,
   modelKindOf,
+  PDF_HEAD_BYTES,
+  pdfKindOf,
   readHead,
+  readPsdComposite,
   readUpTo,
   thumbPx,
   thumbTarget,
   videoKindOf,
 } from './assets.js'
-import { THUMB_IPC, Thumbnailer, VIDEO_SCHEME } from './thumbnailer.js'
+import { PDF_SCHEME, THUMB_IPC, Thumbnailer, VIDEO_SCHEME } from './thumbnailer.js'
 import { AiLinkHost, aiSettings, cleanPatch, type AiLinkSettings, type LinkVault } from './ai-link.js'
 import { makePictureHost } from './ai-pictures.js'
 import { TunnelHost } from './tunnel.js'
@@ -79,6 +87,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 // isolated (threads) and fetch from itself.
 protocol.registerSchemesAsPrivileged([
   { scheme: VIDEO_SCHEME, privileges: { standard: true, secure: true, stream: true, supportFetchAPI: true, corsEnabled: true } },
+  // The thumbnail helper draws a PDF with pdf.js, served to its page on this scheme (its three files only: see thumbnailer.ts).
+  { scheme: PDF_SCHEME, privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true } },
   { scheme: VISION_SCHEME, privileges: { standard: true, secure: true, stream: true, supportFetchAPI: true, corsEnabled: true } },
 ])
 const isDev = !!process.env['VITE_DEV_SERVER_URL']
@@ -544,6 +554,8 @@ const thumbsInFlight = new Map<string, Promise<Uint8Array | null>>()
 const thumbnailer = new Thumbnailer({
   electron: { BrowserWindow, session },
   preload: path.join(__dirname, '..', 'preload', 'thumb-preload.cjs'),
+  // pdf.js and its page module, copied there by scripts/copy-pdfjs.mjs when main is built.
+  pdfDir: path.join(__dirname, '..', 'pdfjs'),
 })
 /**
  * Longest wait for one thumbnail: a share that stopped answering must not hold
@@ -575,18 +587,23 @@ async function thumbnail(p: unknown, size: unknown): Promise<Uint8Array | null> 
   const px = thumbPx(size)
   const rel = String(p)
   // A model comes in by its own door (`modelAbs`): the one pictures and boards use never opens one.
-  const abs = (await v.assetAbs(rel)) ?? (await v.modelAbs(rel))
+  const abs = (await v.assetAbs(rel)) ?? (await v.modelAbs(rel)) ?? (await v.previewAbs(rel))
   if (!abs) return null
   const st = await fs.stat(abs).catch(() => null)
   const video = isVideoName(path.basename(abs))
   const model = isModelName(path.basename(abs))
-  if (!st?.isFile() || st.size === 0 || (!video && st.size > MAX_THUMB_FILE_BYTES)) return null
+  // A Photoshop document is read for its merged picture only, however many layers it holds (`readPsdComposite` has its own limit).
+  const psd = isPsdName(path.basename(abs))
+  const pdf = isPdfName(path.basename(abs))
+  const fbx = isFbxName(path.basename(abs))
+  const audio = isAudioName(path.basename(abs))
+  if (!st?.isFile() || st.size === 0 || (!video && !psd && !pdf && !audio && st.size > MAX_THUMB_FILE_BYTES)) return null
   const key = ThumbCache.key(abs, st.mtimeMs, st.size, px)
   const hit = thumbs.get(key)
   if (hit !== undefined) return hit
   let job = thumbsInFlight.get(key)
   if (!job) {
-    job = (video ? renderVideoThumb(abs, px) : model ? renderModelThumb(abs, px) : renderThumb(abs, px))
+    job = (video ? renderVideoThumb(abs, px) : model ? renderModelThumb(abs, px) : psd ? renderPsdThumb(abs, px) : pdf ? renderPdfThumb(abs, px) : fbx ? renderFbxThumb(abs, px) : audio ? renderAudioThumb(abs, px) : renderThumb(abs, px))
       .then(
         (png) => {
           // A picture that cannot be decoded is an answer too (null, cached for this version of the
@@ -626,6 +643,44 @@ async function renderModelThumb(abs: string, px: number): Promise<Uint8Array | n
   const bytes = await readUpTo(abs, MAX_MODEL_BYTES)
   if (!bytes || !modelKindOf(bytes)) return null
   return thumbnailer.renderModel(bytes, px)
+}
+
+/**
+ * The flattened picture of a Photoshop document, drawn by the thumbnail helper: main reads only the header and the merged picture (the
+ * layers, usually most of the file, are never read) and sends those bytes; it decodes nothing itself.
+ */
+async function renderPsdThumb(abs: string, px: number): Promise<Uint8Array | null> {
+  const bytes = await readPsdComposite(abs)
+  return bytes ? thumbnailer.renderPsd(bytes, px) : null
+}
+
+/**
+ * A song's waveform, drawn by the thumbnail helper: main reads the file here (asynchronously, at most `MAX_AUDIO_BYTES`) and sends the
+ * bytes; the helper decodes them with Chromium's own decoder and draws the peaks. A file Chromium cannot decode gets no picture.
+ */
+async function renderAudioThumb(abs: string, px: number): Promise<Uint8Array | null> {
+  const bytes = await readUpTo(abs, MAX_AUDIO_BYTES)
+  return bytes ? thumbnailer.renderAudio(bytes, px) : null
+}
+
+/**
+ * An FBX model's still, drawn by the thumbnail helper like a glb: main reads the file here (asynchronously, at most `MAX_FBX_BYTES`), checks
+ * that it starts like a binary FBX and sends the bytes; it parses and draws nothing itself.
+ */
+async function renderFbxThumb(abs: string, px: number): Promise<Uint8Array | null> {
+  const bytes = await readUpTo(abs, MAX_FBX_BYTES)
+  if (!bytes || !fbxKindOf(bytes.subarray(0, FBX_HEAD_BYTES))) return null
+  return thumbnailer.renderFbx(bytes, px)
+}
+
+/**
+ * The first page of a PDF, drawn by the thumbnail helper's page with pdf.js: main reads the file here (asynchronously, at most
+ * `MAX_PDF_BYTES`), checks that it holds `%PDF-` near its start and sends the bytes; it parses nothing itself.
+ */
+async function renderPdfThumb(abs: string, px: number): Promise<Uint8Array | null> {
+  const bytes = await readUpTo(abs, MAX_PDF_BYTES)
+  if (!bytes || !pdfKindOf(bytes.subarray(0, PDF_HEAD_BYTES))) return null
+  return thumbnailer.renderPdf(bytes, px)
 }
 
 /**

@@ -61,6 +61,7 @@ import { shiftTarget } from './follow'
 import { bakeSky, createSkyDome, createSkyStars, type BakedSky } from './sky'
 import { LABEL_PRIORITY, LabelPlacer } from './labelPlace'
 import { applyReveal, easeReveal, revealTargets, ringReps, ringReveal, stepReveal } from './reveal'
+import { bodyStages, buildDelays, holdBodies } from './buildUp'
 import { buildDiscs, fitDiscs, placeDiscs, type DiscSet } from './galaxyDisc'
 import { buildBlackHole, feedOf, fitBlackHole, placeBlackHole, type BlackHole } from './blackHole'
 import { FLARE_MIN_URGENCY, FlareField, type FlareInput } from './flares'
@@ -385,6 +386,13 @@ interface Buffers {
   sunSeen: number
   /** False until the first frame has put every body where it belongs: a fresh scene does not unfold. */
   revealReady: boolean
+  /** The sky builds itself in order (`buildUp.ts`): each body's stage, when it is due, whether it is held now, and the clock. */
+  stage: Uint8Array
+  delay: Float32Array
+  hold: Uint8Array
+  holding: boolean
+  buildClock: number
+  buildLatest: number
   /** Root, mounts, project stars and the Today hub: always labelled. */
   landmarks: number[]
   /** 1 per landmark node. */
@@ -683,6 +691,12 @@ function buildBuffers(graph: GraphData, pictures: PictureSize): Buffers {
     ringRepsOk: false,
     sunSeen: -1,
     revealReady: false,
+    stage: bodyStages(graph),
+    delay: new Float32Array(count),
+    hold: new Uint8Array(count),
+    holding: false,
+    buildClock: 0,
+    buildLatest: 0,
     landmarks,
     landmark,
     edgeBeam,
@@ -1012,7 +1026,13 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
       const before = st.buffers
       buffers.flares.adoptFrom(before.flares, (i) => before.graph.nodes[i]?.id, (id) => buffers.graph.index.get(id))
     }
-    if (fresh) st.buffers = buffers
+    if (fresh) {
+      // Galaxies, then stars, then planets, then moons, then files: what is new in this graph (all of it for a vault just opened) waits its turn.
+      const seen = st.buffers?.graph.index
+      buffers.buildLatest = buildDelays(buffers.stage, seen ? (i) => !seen.has(buffers.graph.nodes[i]!.id) : () => true, buffers.count, buffers.delay)
+      buffers.buildClock = 0
+      st.buffers = buffers
+    }
     const versionChanged = fresh || controller.version !== st.lastVersion
     const positionsChanged = fresh || eng.frame !== st.lastFrame
     const ringsChanged = eng.ringsVersion !== buffers.ringsVersion
@@ -1039,14 +1059,21 @@ function Brain({ controller, overlayRef }: { controller: BrainController; overla
     // Suns open into planets, then moons: which bodies are shown, and how far out of their sun each one is. Targets follow the
     // selection, a search and the suns' levels (all of which touch the controller); the unfolding itself runs every frame it moves.
     const sunsOn = controller.layoutMode === 'system' && controller.suns
-    if (fresh || versionChanged || buffers.sunSeen !== controller.sunVersion) {
+    const building = controller.layoutMode === 'system' && buffers.buildClock < buffers.buildLatest
+    if (building) {
+      buffers.buildClock += Math.min(dt, 0.1)
+      holdBodies(buffers.delay, buffers.buildClock, n, buffers.hold)
+    }
+    const holdChanged = building || buffers.holding
+    buffers.holding = building
+    if (fresh || versionChanged || holdChanged || buffers.sunSeen !== controller.sunVersion) {
       if (fresh || buffers.sunSeen !== controller.sunVersion) {
         for (let i = 0; i < n; i++) if (g.nodes[i]!.folder !== undefined || g.nodes[i]!.board !== undefined) buffers.level[i] = controller.sunLevel(g.nodes[i]!.id)
         buffers.sunSeen = controller.sunVersion
       }
       const lit = controller.highlight
       revealTargets(
-        { count: n, tier: buffers.tier, owner: buffers.owner, order: buffers.order, level: buffers.level, card: buffers.isCard, selected: selI, lit: lit ? (i) => lit.has(g.nodes[i]!.id) : null, all: !sunsOn },
+        { count: n, tier: buffers.tier, owner: buffers.owner, order: buffers.order, level: buffers.level, card: buffers.isCard, selected: selI, lit: lit ? (i) => lit.has(g.nodes[i]!.id) : null, all: !sunsOn, hold: building ? buffers.hold : null },
         buffers.target,
       )
     }

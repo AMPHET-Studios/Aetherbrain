@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { TODAY_ID, assetMap, buildGraph, dailyBrief, imageKey, parseNote, type GraphData, type NoteId, type ParsedNote } from '@aether/core'
+import { TODAY_ID, assetMap, buildGraph, dailyBrief, homeKey, imageKey, parseNote, type GraphData, type NoteId, type ParsedNote } from '@aether/core'
 import { BrainController, type CameraLike } from '../src/BrainController'
 import type { MainToWorker } from '../src/layout/protocol'
 import { computeSystemLayout, systemPositions } from '../src/layout/system'
@@ -135,7 +135,10 @@ describe('Today hub and picture moons: system layout through the engine', () => 
     const artI = g.index.get('folder:Projects/PORTALz/Art')!
     const gateI = g.index.get(imageKey('Projects/PORTALz/Art/gate.png'))!
     expect(nodes[hubI]).toMatchObject({ kind: 3, parent: rootI, radius: 4.6 })
-    expect(nodes[gateI]).toMatchObject({ kind: 4, parent: artI, radius: 1.4 })
+    // A picture orbits its folder's home moon (files orbit moons), which orbits the folder.
+    const homeI = g.index.get(homeKey('Projects/PORTALz/Art'))!
+    expect(nodes[gateI]).toMatchObject({ kind: 4, parent: homeI, radius: 1.4 })
+    expect(nodes[homeI]!.parent).toBe(artI)
 
     const layout = computeSystemLayout({
       parent: Int32Array.from(nodes.map((n) => n.parent)),
@@ -152,7 +155,7 @@ describe('Today hub and picture moons: system layout through the engine', () => 
       expect(nodes[rootI]!.radius).toBe(16)
       expect(pos[hubI * 3 + 1]! - pos[rootI * 3 + 1]!).toBeCloseTo(nodes[rootI]!.radius * 2.4 + 30, 4)
       expect(pos[hubI * 3 + 2]! - pos[rootI * 3 + 2]!).toBeCloseTo(0, 4)
-      const d = Math.hypot(pos[gateI * 3]! - pos[artI * 3]!, pos[gateI * 3 + 1]! - pos[artI * 3 + 1]!, pos[gateI * 3 + 2]! - pos[artI * 3 + 2]!)
+      const d = Math.hypot(pos[gateI * 3]! - pos[homeI * 3]!, pos[gateI * 3 + 1]! - pos[homeI * 3 + 1]!, pos[gateI * 3 + 2]! - pos[homeI * 3 + 2]!)
       expect(d).toBeCloseTo(layout.orbitRadius[gateI]!, 3)
     }
     expect(layout.speed[gateI]).not.toBe(0)

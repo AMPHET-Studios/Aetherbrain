@@ -197,6 +197,17 @@ export interface FolderNodeInfo {
    * where the folder will be, that the inspector's button makes real. It has no folder on disk to reveal, leave out or open.
    */
   placeholder?: boolean
+  /**
+   * True for a **home moon**: the one moon a star, a planet or a galaxy holds for its own files (docs/COSMOLOGY.md, *Galaxy, star,
+   * planet, moon, satellite*). Files orbit moons, never a star or a planet, so the files directly in such a folder orbit this node, and
+   * this node orbits the folder. It shares the folder's `path`, has the id `home:<path>` (`homeKey`) and is always a moon.
+   */
+  home?: boolean
+  /**
+   * What depth below its galaxy makes this folder (`folderBodies`), set by the graph build in the system layout: a star directly in a
+   * galaxy, a planet in a star, a moon in a planet or another moon. Absent for a galaxy and in the other layouts (the size is a star's).
+   */
+  body?: 'star' | 'planet' | 'moon'
   /** Project note bound to this folder (the star's note), if any. */
   projectId: NoteId | null
   /** True when some ancestor folder is a project folder (its planets and moons). */
@@ -238,8 +249,10 @@ export interface ImageNodeInfo {
   video?: boolean
   /** True for a 3D model (`isModelPath`): shown as one lit still the thumbnail helper draws, opened in the OS's 3D app. */
   model?: boolean
-  /** Present for any other file (an mp3, a pdf, a zip, a script: `isFileMoonPath`): its kind, for its colour. Never thumbnailed, opened in the OS. */
+  /** Present for any other file (an mp3, a pdf, a zip, a script: `isFileMoonPath`): its kind, for its colour. Opened in the OS. */
   file?: 'audio' | 'document' | 'archive' | 'data' | 'code' | 'design' | 'other'
+  /** Present for a file that has a picture the app can make of it (`previewKindOf`): its card shows that picture, like a picture's. */
+  preview?: 'psd' | 'pdf' | 'fbx' | 'audio'
   /** Present while the picture is a card of the open star gallery. */
   gallery?: GalleryCardInfo
 }
@@ -302,6 +315,12 @@ export interface GraphNode {
    * on (the vault, a drive or another galaxy), not the folder it is in.
    */
   parent: NoteId | null
+  /**
+   * The body this one circles in the sky when that is not its `parent` (the folder it lives in): a file directly in a star, a planet or
+   * a galaxy orbits that folder's **home moon** (`folder.home`), because files orbit moons. Absent for everything else; the roll-ups,
+   * breadcrumbs and the AI link keep using `parent`.
+   */
+  orbit?: NoteId
   /** Present on folder nodes only. */
   folder?: FolderNodeInfo
   /** Present on image nodes only. */

@@ -91,7 +91,7 @@ export function isTodayId(id: NoteId): boolean {
  * Today hub. Anything that takes a note id (open, rename, tasks…) guards with it.
  */
 export function isVirtualId(id: NoteId): boolean {
-  return id.startsWith('folder:') || id.startsWith('ghost:') || id.startsWith('image:') || id === TODAY_ID
+  return id.startsWith('folder:') || id.startsWith('home:') || id.startsWith('ghost:') || id.startsWith('image:') || id === TODAY_ID
 }
 
 /** The file name of an image path (`Art/gate.png` → `gate.png`). */

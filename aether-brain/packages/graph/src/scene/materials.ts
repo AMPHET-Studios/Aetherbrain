@@ -299,7 +299,7 @@ export function createRingMaterial(): ShaderMaterial {
 /**
  * Picture thumbnails: one instanced camera-facing quad per image moon that
  * has a picture, all sampling one texture array. Per instance: `iCenter` (the
- * node's live position), `iSize` (quad width), `iLayer` (texture layer) and
+ * node's live position), `iSize` (quad height, and width when `iWide` is 1; `iWide` is how many times wider it is), `iLayer` (texture layer) and
  * `iAlpha` (the node's dim state, so filters and focus dim pictures too). A
  * dimmed picture darkens the way the cores do instead of turning see-through:
  * the node's shrunken core sits right behind it and would show through. The
@@ -320,8 +320,10 @@ export function createThumbMaterial(): ShaderMaterial {
       attribute float iAlpha;
       attribute float iFade;
       attribute float iVideo;
+      attribute float iWide;
       varying vec2 vUv;
       varying float vLayer;
+      varying float vWide;
       varying float vAlpha;
       varying float vFade;
       varying float vVideo;
@@ -331,8 +333,9 @@ export function createThumbMaterial(): ShaderMaterial {
         vAlpha = iAlpha;
         vFade = iFade;
         vVideo = iVideo;
+        vWide = iWide;
         vec4 viewCenter = viewMatrix * modelMatrix * vec4(iCenter, 1.0);
-        viewCenter.xy += position.xy * iSize;
+        viewCenter.xy += position.xy * vec2(iSize * iWide, iSize);
         viewCenter.z += iSize * 0.2;
         gl_Position = projectionMatrix * viewCenter;
       }
@@ -344,6 +347,7 @@ export function createThumbMaterial(): ShaderMaterial {
       varying float vAlpha;
       varying float vFade;
       varying float vVideo;
+      varying float vWide;
       // 4×4 ordered dither threshold in (0, 1) for this pixel.
       float bayer4(vec2 p) {
         vec2 q = mod(floor(p), 4.0);
@@ -355,12 +359,13 @@ export function createThumbMaterial(): ShaderMaterial {
         return (fine * 4.0 + coarse + 0.5) / 16.0;
       }
       // Signed distance to a rounded square of half-size b, corner radius r (negative inside).
-      float roundedBox(vec2 p, float b, float r) {
-        vec2 q = abs(p) - vec2(b - r);
+      float roundedBox(vec2 p, vec2 b, float r) {
+        vec2 q = abs(p) - (b - vec2(r));
         return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
       }
       void main() {
-        float d = roundedBox(vUv - 0.5, 0.5, 0.12);
+        // A wide card (a song's waveform) keeps its corners round in the same units as a square one.
+        float d = roundedBox((vUv - 0.5) * vec2(vWide, 1.0), vec2(0.5 * vWide, 0.5), 0.12);
         float aa = max(fwidth(d), 1e-4);
         float mask = 1.0 - smoothstep(-aa, 0.0, d);
         // A card the camera is passing fades by dropping pixels, not by blending: the pixels kept

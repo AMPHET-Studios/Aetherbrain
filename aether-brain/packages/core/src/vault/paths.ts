@@ -54,6 +54,23 @@ export function folderKey(path: string): NoteId {
   return `folder:${normalizeFolderPath(path)}`
 }
 
+/** Id of the home moon of a folder: the moon the files directly in a star, a planet or a galaxy orbit. */
+export function homeKey(path: string): NoteId {
+  return `home:${normalizeFolderPath(path)}`
+}
+
+export function isHomeId(id: NoteId): boolean {
+  return id.startsWith('home:')
+}
+
+/**
+ * The id whose sun level a body follows: a home moon opens and closes with its folder (it is that folder's files, not a sun to open
+ * on its own), everything else has its own.
+ */
+export function levelId(id: NoteId): NoteId {
+  return isHomeId(id) ? `folder:${id.slice('home:'.length)}` : id
+}
+
 export function isFolderId(id: NoteId): boolean {
   return id.startsWith('folder:')
 }

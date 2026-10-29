@@ -24,7 +24,7 @@ export function orbitParents(graph: GraphData): Int32Array {
   const nodes = graph.nodes
   const parent = new Int32Array(nodes.length)
   for (let i = 0; i < nodes.length; i++) {
-    const p = nodes[i]!.parent
+    const p = nodes[i]!.orbit ?? nodes[i]!.parent
     parent[i] = p === null ? -1 : (graph.index.get(p) ?? -1)
   }
   const hole = blackHoleOf(graph)

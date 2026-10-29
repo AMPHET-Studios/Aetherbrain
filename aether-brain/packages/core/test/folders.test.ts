@@ -70,7 +70,7 @@ describe('selectFolders', () => {
       folders: { multiRoot: true, all: ['D', 'F', ...chain], rootTitle: 'Drives', maxDepth: 3, maxFolders: 0 },
     })
     expect(node(g, `${chain[chain.length - 1]}/README`).parent).toBe('folder:D/f0/f1')
-    expect(g.nodes.filter((n) => n.kind === 'folder').map((n) => n.id)).toEqual(['folder:', 'folder:D', 'folder:D/f0', 'folder:D/f0/f1', 'folder:F'])
+    expect(g.nodes.filter((n) => n.kind === 'folder' && !n.folder?.home).map((n) => n.id)).toEqual(['folder:', 'folder:D', 'folder:D/f0', 'folder:D/f0/f1', 'folder:F'])
     expect(node(g, 'folder:D/f0/f1').folder).toMatchObject({ hiddenFolders: 1, notes: 0, totalNotes: 1 })
   })
 
@@ -262,7 +262,7 @@ describe('buildGraph with folders', () => {
     expect(classic.nodes.filter((n) => n.kind === 'ghost').map((n) => n.id)).toEqual(['ghost:Missing Thing', 'ghost:Nowhere'])
     expect(classic.nodes.every((n) => n.ghost === (n.kind === 'ghost'))).toBe(true)
     // Same notes, ghosts, edges and counts with folders on.
-    const strip = ({ parent: _p, ...rest }: GraphNode) => rest
+    const strip = ({ parent: _p, orbit: _o, ...rest }: GraphNode) => rest
     expect(graph.nodes.filter((n) => n.kind !== 'folder').map(strip)).toEqual(classic.nodes.map(strip))
     expect(graph.edges).toEqual(classic.edges)
     expect(graph.orphans).toEqual(classic.orphans)
@@ -277,7 +277,11 @@ describe('buildGraph with folders', () => {
     const kinds = graph.nodes.map((n) => n.kind)
     expect(kinds.indexOf('folder')).toBe(classic.nodes.length)
     expect(kinds.slice(classic.nodes.length).every((k) => k === 'folder')).toBe(true)
-    const folders = graph.nodes.filter((n) => n.kind === 'folder').map((n) => n.id)
+    // The home moons (a folder's files, drawn as a moon) come after the folders.
+    const homes = graph.nodes.filter((n) => n.folder?.home)
+    expect(homes.length).toBeGreaterThan(0)
+    expect(graph.nodes.slice(-homes.length)).toEqual(homes)
+    const folders = graph.nodes.filter((n) => n.kind === 'folder' && !n.folder?.home).map((n) => n.id)
     expect(folders).toEqual([
       'folder:',
       'folder:Empty',
@@ -464,7 +468,7 @@ describe('demo vault as a solar system', () => {
       folders: { multiRoot: false, all: folders, rootTitle: 'Demo vault' },
       images: { all: assets },
     }))
-    const planets = (star: string) => graph.nodes.filter((n) => n.parent === `folder:${star}` && n.kind === 'folder').map((n) => n.title)
+    const planets = (star: string) => graph.nodes.filter((n) => n.parent === `folder:${star}` && n.kind === 'folder' && !n.folder?.home).map((n) => n.title)
     expect(node(graph, 'folder:Projects/PORTALz').folder).toMatchObject({ role: 'project', projectId: 'Projects/PORTALz' })
     expect(planets('Projects/PORTALz')).toEqual(['Art', 'Design', 'Tech'])
     expect(node(graph, 'folder:Projects/ConceptForge').folder).toMatchObject({ role: 'project', projectId: 'Projects/ConceptForge' })

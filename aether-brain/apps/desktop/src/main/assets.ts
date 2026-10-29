@@ -395,6 +395,89 @@ export function videoKindOf(b: Uint8Array): VideoKind | null {
   return null
 }
 
+/* ---- Songs ---- */
+
+/**
+ * Largest song file sent to the helper whole. The helper decodes it to raw samples to find the peaks (a few minutes of stereo is
+ * tens of megabytes of them), so this is smaller than what a picture is allowed.
+ */
+export const MAX_AUDIO_BYTES = 48 * 1024 * 1024
+
+/* ---- FBX models ---- */
+
+/** Largest FBX sent to the helper whole (what a glb is allowed too). */
+export const MAX_FBX_BYTES = MAX_THUMB_FILE_BYTES
+/** Bytes read from the start of an FBX to tell it: the 21-byte signature, two bytes and the version. */
+export const FBX_HEAD_BYTES = 27
+
+/** True when `head` starts like a binary FBX file of version 7100 to 8000 (the ASCII form of FBX is not drawn). */
+export function fbxKindOf(head: Uint8Array): boolean {
+  const magic = 'Kaydara FBX Binary  \0'
+  if (head.length < FBX_HEAD_BYTES) return false
+  for (let i = 0; i < magic.length; i++) if (head[i] !== magic.charCodeAt(i)) return false
+  const version = u32le(head, 23)
+  return version >= 7100 && version <= 8000
+}
+
+/* ---- PDF ---- */
+
+/** Largest PDF sent to the helper whole: pdf.js reads the whole file to find the first page (its page tree can be anywhere in it). */
+export const MAX_PDF_BYTES = 64 * 1024 * 1024
+/** `%PDF-` must start within the first 1,024 bytes (the PDF standard allows some bytes before it). */
+export const PDF_HEAD_BYTES = 1024
+
+/** True when `head` (the first `PDF_HEAD_BYTES` of a file, or all of it) holds the `%PDF-` marker a PDF starts with: a file only named .pdf is not drawn. */
+export function pdfKindOf(head: Uint8Array): boolean {
+  const end = Math.min(head.length, PDF_HEAD_BYTES) - 4
+  for (let i = 0; i < end; i++) {
+    if (head[i] === 0x25 && head[i + 1] === 0x50 && head[i + 2] === 0x44 && head[i + 3] === 0x46 && head[i + 4] === 0x2d) return true
+  }
+  return false
+}
+
+/* ---- Photoshop documents ---- */
+
+/** Bytes of the fixed header of a Photoshop document: the signature, the version, the size, the depth and the colour mode. */
+export const PSD_HEADER_BYTES = 26
+/** Largest merged picture sent to the helper: 36 million pixels at four channels of 8 bits is 144 MB raw; run-length coding is far less. */
+export const MAX_PSD_COMPOSITE_BYTES = 128 * 1024 * 1024
+
+/**
+ * The header and the merged (flattened) picture of a Photoshop document, with the colour table, the image resources and the layers
+ * left out (their three lengths written as zero): a layered file is mostly layers, and only the merged picture is drawn. Reads the
+ * header and three lengths from the start, then the picture from where they say it begins to the end of the file, never past
+ * `MAX_PSD_COMPOSITE_BYTES`. Null for a file that is not a version 1 document (`8BPS`), is cut short or has a merged picture too big.
+ * It only reads and joins bytes: the helper decodes them.
+ */
+export async function readPsdComposite(abs: string): Promise<Uint8Array | null> {
+  const handle = await fs.open(abs, 'r')
+  try {
+    const { size } = await handle.stat()
+    const head = new Uint8Array(PSD_HEADER_BYTES)
+    if (size < PSD_HEADER_BYTES + 12 + 2 || (await handle.read(head, 0, head.length, 0)).bytesRead !== head.length) return null
+    if (u32be(head, 0) !== 0x38425053 || ((head[4] ?? 0) << 8 | (head[5] ?? 0)) !== 1) return null
+    let at = PSD_HEADER_BYTES
+    const four = new Uint8Array(4)
+    for (let i = 0; i < 3; i++) {
+      if (at + 4 > size || (await handle.read(four, 0, 4, at)).bytesRead !== 4) return null
+      at += 4 + u32be(four, 0)
+    }
+    const merged = size - at
+    if (merged < 2 || merged > MAX_PSD_COMPOSITE_BYTES) return null
+    const out = new Uint8Array(PSD_HEADER_BYTES + 12 + merged)
+    out.set(head, 0)
+    let got = 0
+    while (got < merged) {
+      const { bytesRead } = await handle.read(out, PSD_HEADER_BYTES + 12 + got, merged - got, at + got)
+      if (!bytesRead) return null
+      got += bytesRead
+    }
+    return out
+  } finally {
+    await handle.close()
+  }
+}
+
 /* ---- 3D models ---- */
 
 export type ModelKind = 'glb'

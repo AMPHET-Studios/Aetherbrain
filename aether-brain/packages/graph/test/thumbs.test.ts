@@ -409,6 +409,7 @@ describe('ThumbLayer', () => {
       keys: [targets.keys[1]!, targets.keys[0]!],
       paths: [targets.paths[1]!, targets.paths[0]!],
       video: new Uint8Array(2),
+      wide: new Uint8Array(2),
       shown: new Uint8Array(nodes),
     }
     const movedScreen = screenOf([

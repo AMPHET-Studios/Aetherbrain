@@ -89,7 +89,7 @@ describe('what each sun holds', () => {
   it('counts planets, folders and moons for the bar, and has nothing for a sun it does not know', async () => {
     const { s } = await freshStore()
     await s().openVault(vault())
-    expect(s().sunCountsOf(ALPHA)).toEqual({ planets: 1, systems: 1, moons: 1 })
+    expect(s().sunCountsOf(ALPHA)).toEqual({ planets: 0, systems: 1, moons: 2 })
     expect(s().sunCountsOf(WORK)).toEqual({ planets: 0, systems: 0, moons: 1 })
     expect(s().sunCountsOf('folder:Nowhere')).toEqual({ planets: 0, systems: 0, moons: 0 })
   })
@@ -119,7 +119,7 @@ describe('how open each sun is', () => {
     expect(JSON.parse(storage.getItem('aether:suns:memory://one')!)).toEqual({ def: 0, own: {} })
   })
 
-  it('steps through the levels a sun has something for: closed, planets, planets and moons, closed', async () => {
+  it('steps through the levels a sun has something for: closed, folders, folders and files, closed', async () => {
     const { s } = await freshStore()
     await s().openVault(vault())
     const seen: number[] = []
@@ -221,14 +221,14 @@ describe('how open each sun is', () => {
 })
 
 describe('every sun at once', () => {
-  it('opens every sun to planets and moons, and the next press closes them all', async () => {
+  it('opens every sun to folders and files, and the next press closes them all', async () => {
     const { s } = await freshStore()
     await s().openVault(vault())
     s().toggleAllSuns()
     expect(s().sunDefault).toBe(2)
     expect(s().sunLevelOf(WORK)).toBe(2)
     expect(s().controller.sunLevel(WORK)).toBe(2)
-    expect(s().toasts.at(-1)?.text).toBe('Every sun open: planets and moons')
+    expect(s().toasts.at(-1)?.text).toBe('Every sun open: folders and files')
     s().toggleAllSuns()
     expect(s().sunDefault).toBe(0)
     expect(s().sunLevelOf(WORK)).toBe(0)
@@ -251,7 +251,7 @@ describe('every sun at once', () => {
     s().setAllSuns(1)
     expect(s().sunLevelOf(ALPHA)).toBe(1)
     expect(s().sunOwn).toEqual({})
-    expect(s().toasts.at(-1)?.text).toBe('Every sun open: planets')
+    expect(s().toasts.at(-1)?.text).toBe('Every sun open: folders')
     expect(JSON.parse(storage.getItem('aether:suns:memory://all')!)).toEqual({ def: 1, own: {} })
   })
 })
@@ -262,10 +262,10 @@ describe('suns on and off', () => {
     await s().openVault(vault())
     s().toggleSuns()
     expect(s().settings.suns).toBe(false)
-    expect(s().toasts.at(-1)?.text).toBe('Every planet and moon shows, always')
+    expect(s().toasts.at(-1)?.text).toBe('Every body shows, always')
     s().toggleSuns()
     expect(s().settings.suns).toBe(true)
-    expect(s().toasts.at(-1)?.text).toBe('Suns open and close: click one to see its planets, then its moons')
+    expect(s().toasts.at(-1)?.text).toBe('Suns open and close: click one to see its folders, then its files')
   })
 
   it('leaves the levels as they were while it is off, so switching it on again finds them', async () => {
@@ -371,11 +371,11 @@ describe('selecting a body a closed sun is holding back', () => {
     expect(s().controller.sunLevel(ALPHA)).toBe(2)
   })
 
-  it('opens just the planets for a planet', async () => {
+  it('opens the files for a long note: a file is a satellite whatever its size', async () => {
     const { s } = await freshStore()
     await s().openVault(vault())
     s().select('Projects/Alpha/Big')
-    expect(s().sunLevelOf(ALPHA)).toBe(1)
+    expect(s().sunLevelOf(ALPHA)).toBe(2)
   })
 
   it('opens every sun on the way up for a body deep inside', async () => {
@@ -459,10 +459,10 @@ describe('the sun bar', () => {
     const out = await sunBar()
     expect(out).toContain('aria-label="How open Alpha is"')
     expect(out).toContain('☀ Alpha')
-    expect(out).toContain('1 planet · 1 folder · 1 moon')
-    for (const name of ['Closed', 'Planets', 'Planets + moons']) expect(out).toContain(`>${name}</button>`)
+    expect(out).toContain('1 folder · 2 files')
+    for (const name of ['Closed', 'Folders', 'Folders + files']) expect(out).toContain(`>${name}</button>`)
     expect(out.match(/aria-pressed="true"/g)).toHaveLength(1)
-    expect(out).toMatch(/aria-pressed="true"[^>]*>Planets</)
+    expect(out).toMatch(/aria-pressed="true"[^>]*>Folders</)
     expect(out).not.toContain('disabled')
   })
 
@@ -471,9 +471,9 @@ describe('the sun bar', () => {
     await s().openVault(vault())
     s().select(WORK)
     const out = await sunBar()
-    expect(out).toContain('1 moon')
-    expect(out).toMatch(/disabled=""[^>]*>Planets</)
-    expect(out).not.toMatch(/disabled=""[^>]*>Planets \+ moons</)
+    expect(out).toContain('1 file')
+    expect(out).toMatch(/disabled=""[^>]*>Folders</)
+    expect(out).not.toMatch(/disabled=""[^>]*>Folders \+ files</)
   })
 
   it('says there is nothing to open for an empty sun, with no buttons', async () => {
@@ -582,6 +582,6 @@ describe('the guides', () => {
     expect(keys).toContain('`⇧ M`')
     const cosmology = doc('COSMOLOGY.md')
     expect(cosmology).toContain('## Suns open')
-    expect(cosmology).toContain('Planets + moons')
+    expect(cosmology).toContain('Folders + files')
   })
 })

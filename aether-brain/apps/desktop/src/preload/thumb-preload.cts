@@ -23,6 +23,10 @@ const IPC = {
   done: 'thumbs:done',
   video: 'thumbs:video',
   model: 'thumbs:model',
+  psd: 'thumbs:psd',
+  pdf: 'thumbs:pdf',
+  fbx: 'thumbs:fbx',
+  audio: 'thumbs:audio',
 } as const
 
 /** Addresses main hands out for videos (VIDEO_URL_PREFIX in src/main/thumbnailer.ts). */
@@ -814,6 +818,711 @@ async function modelStill(bytes: Uint8Array, side: number): Promise<Uint8Array |
   ctx.putImageData(new ImageData(pixels as Uint8ClampedArray<ArrayBuffer>, side, side), 0, 0)
   return pngBytes(canvas)
 }
+
+/* ------------------------------------------------------------------ */
+/* Songs                                                              */
+/* ------------------------------------------------------------------ */
+
+/** The bars of a waveform, and how many times wider than tall its picture is (the scene draws the card at the same shape). */
+export const WAVE_COLUMNS = 256
+export const WAVE_ASPECT = 3
+
+/**
+ * How loud each of `columns` equal slices of a song is, two ways, each 0 to 1 over the whole song: `peak` is the largest sample of the slice
+ * over every channel (what a recording that is mastered loud nearly always fills), `energy` is the root mean square (the loudness the ear
+ * hears, which still moves in a loud recording), the loudest slice being 1 and a quiet one lifted a little so that it shows. Silence is all
+ * zeros, and a sample that is not a number counts as silence. Pure.
+ */
+export function waveformLevels(channels: readonly Float32Array[], columns: number): { peak: Float32Array; energy: Float32Array } {
+  const peak = new Float32Array(Math.max(0, columns))
+  const energy = new Float32Array(Math.max(0, columns))
+  const longest = channels.reduce((n, c) => Math.max(n, c.length), 0)
+  if (longest === 0 || columns < 1) return { peak, energy }
+  const squares = new Float64Array(columns)
+  const counts = new Float64Array(columns)
+  for (const channel of channels) {
+    for (let c = 0; c < columns; c++) {
+      const from = Math.floor((c * channel.length) / columns)
+      const to = Math.max(from + 1, Math.floor(((c + 1) * channel.length) / columns))
+      for (let i = from; i < to && i < channel.length; i++) {
+        const raw = channel[i]!
+        const v = Number.isFinite(raw) ? Math.abs(raw) : 0
+        if (v > peak[c]!) peak[c] = v
+        squares[c] = squares[c]! + v * v
+        counts[c] = counts[c]! + 1
+      }
+    }
+  }
+  let loudestPeak = 0
+  let loudestEnergy = 0
+  for (let c = 0; c < columns; c++) {
+    energy[c] = counts[c]! > 0 ? Math.sqrt(squares[c]! / counts[c]!) : 0
+    if (peak[c]! > loudestPeak) loudestPeak = peak[c]!
+    if (energy[c]! > loudestEnergy) loudestEnergy = energy[c]!
+  }
+  for (let c = 0; c < columns; c++) {
+    peak[c] = loudestPeak > 0 ? Math.min(1, peak[c]! / loudestPeak) : 0
+    energy[c] = loudestEnergy > 0 ? Math.pow(Math.min(1, energy[c]! / loudestEnergy), 0.8) : 0
+  }
+  return { peak, energy }
+}
+
+/**
+ * The waveform as RGBA pixels, `WAVE_ASPECT` times as wide as `height`: a dark card with one bar per slice, mirrored about the middle: the
+ * peak as a dim outline and the energy inside it, bright and warmer the louder it is. Pure: the same levels and height give the same pixels.
+ */
+export function waveformImage(levels: { peak: Float32Array; energy: Float32Array }, height: number): { width: number; height: number; data: Uint8ClampedArray } {
+  const width = height * WAVE_ASPECT
+  const data = new Uint8ClampedArray(width * height * 4)
+  const columns = Math.max(1, levels.peak.length)
+  const slot = width / columns
+  const mid = (height - 1) / 2
+  for (let y = 0; y < height; y++) {
+    const t = y / Math.max(1, height - 1)
+    for (let x = 0; x < width; x++) {
+      const o = (y * width + x) * 4
+      data[o] = 23 - 9 * t
+      data[o + 1] = 26 - 9 * t
+      data[o + 2] = 44 - 14 * t
+      data[o + 3] = 255
+    }
+  }
+  const bar = (x0: number, x1: number, half: number, r: number, g: number, b: number): void => {
+    for (let y = Math.max(0, Math.round(mid - half)); y <= Math.min(height - 1, Math.round(mid + half)); y++) {
+      for (let x = x0; x < x1 && x < width; x++) {
+        const o = (y * width + x) * 4
+        data[o] = r
+        data[o + 1] = g
+        data[o + 2] = b
+      }
+    }
+  }
+  for (let c = 0; c < levels.peak.length; c++) {
+    // A bar is two thirds of its slot; even silence leaves a hairline, so the card reads as a waveform.
+    const x0 = Math.floor(c * slot + slot / 6)
+    const x1 = Math.max(x0 + 1, Math.floor(c * slot + (slot * 5) / 6))
+    const p = levels.peak[c]!
+    const e = Math.min(p, levels.energy[c] ?? 0)
+    bar(x0, x1, Math.max(1, Math.round(p * (height * 0.46))), 62 + 40 * p, 92 + 40 * p, 120 + 20 * p)
+    bar(x0, x1, Math.max(1, Math.round(e * (height * 0.46))), 70 + 185 * e, 205 - 15 * e, 190 - 100 * e)
+  }
+  return { width, height, data }
+}
+
+/** PNG bytes of the waveform of the song in `bytes`, at most `side` px tall, or null when Chromium cannot decode it or it has no sound. */
+async function audioStill(bytes: Uint8Array, side: number): Promise<Uint8Array | null> {
+  // A context only for its decoder: it plays nothing and reads nothing but these bytes. Decoded at its own rate, whatever the file was.
+  const context = new OfflineAudioContext(1, 1, 44100)
+  const copy = bytes.slice().buffer
+  const decoded = await context.decodeAudioData(copy)
+  const channels: Float32Array[] = []
+  for (let c = 0; c < Math.min(decoded.numberOfChannels, 2); c++) channels.push(decoded.getChannelData(c))
+  const height = Math.min(256, side)
+  const image = waveformImage(waveformLevels(channels, WAVE_COLUMNS), height)
+  const canvas = canvasOf(image.width, image.height)
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return null
+  ctx.putImageData(new ImageData(image.data as Uint8ClampedArray<ArrayBuffer>, image.width, image.height), 0, 0)
+  return pngBytes(canvas)
+}
+
+ipcRenderer.on(IPC.audio, (_e, id: unknown, bytes: unknown, px: unknown) => {
+  const job = bytes instanceof Uint8Array && side(px) ? audioStill(bytes, px) : Promise.resolve(null)
+  void job.then(
+    (png) => ipcRenderer.send(IPC.done, id, png),
+    () => ipcRenderer.send(IPC.done, id, null),
+  )
+})
+
+/* ------------------------------------------------------------------ */
+/* FBX models                                                         */
+/* ------------------------------------------------------------------ */
+
+/**
+ * A binary FBX file read as the same thing a glTF is to the rasterizer above: its geometry placed by its models. The file is untrusted
+ * like any other: every offset and count is checked, the nodes, arrays and bytes it may cost are bounded, and a file that is too much is
+ * not drawn. Read: the meshes (`Geometry`), the models that place them (`Model`: translation, rotation, scaling) and their `Connections`,
+ * and the file's up axis. Not read: the ASCII form of FBX, textures and materials (a model is a light grey), normals (shaded flat),
+ * pivots, pre-rotations, skins, animation and blend shapes.
+ */
+export const FBX_LIMITS = {
+  /** Nodes read from the file, and how deep they may nest. */
+  nodes: 400_000,
+  depth: 32,
+  /** Bytes one array may expand to when it is decompressed, and all of them together. */
+  arrayBytes: 128 * 1024 * 1024,
+  totalBytes: 384 * 1024 * 1024,
+  /** Models placed. */
+  models: 20_000,
+}
+
+const FBX_MAGIC = 'Kaydara FBX Binary  \0'
+
+/** One array property of a node, not decoded until it is asked for: where it is and how it is stored. */
+interface FbxArray {
+  array: 'f' | 'd' | 'l' | 'i' | 'b'
+  length: number
+  encoding: number
+  at: number
+  size: number
+}
+
+type FbxValue = number | string | FbxArray
+
+interface FbxNode {
+  name: string
+  props: FbxValue[]
+  children: FbxNode[]
+}
+
+const FBX_ELEMENT: Record<string, number> = { f: 4, d: 8, l: 8, i: 4, b: 1 }
+
+/** The node tree of a binary FBX file (version 7100 and later), or null for anything else, a file cut short or one past the limits. */
+function fbxTree(bytes: Uint8Array): FbxNode[] | null {
+  if (bytes.length < 27 + 13) return null
+  for (let i = 0; i < FBX_MAGIC.length; i++) if (bytes[i] !== FBX_MAGIC.charCodeAt(i)) return null
+  const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  const version = v.getUint32(23, true)
+  if (version < 7100 || version > 8000) return null
+  const wide = version >= 7500
+  const head = wide ? 25 : 13
+  let seen = 0
+  const decoder = new TextDecoder()
+  /** One node record at `pos` and what follows it; null for the all-zero record that ends a list, undefined for a broken file. */
+  const record = (pos: number, depth: number): { node: FbxNode; next: number } | null | undefined => {
+    if (pos + head > bytes.length || depth > FBX_LIMITS.depth || ++seen > FBX_LIMITS.nodes) return undefined
+    const end = wide ? Number(v.getBigUint64(pos, true)) : v.getUint32(pos, true)
+    const count = wide ? Number(v.getBigUint64(pos + 8, true)) : v.getUint32(pos + 4, true)
+    const listLength = wide ? Number(v.getBigUint64(pos + 16, true)) : v.getUint32(pos + 8, true)
+    const nameLength = bytes[pos + head - 1] ?? 0
+    if (end === 0) return null
+    if (!Number.isSafeInteger(end) || end > bytes.length || end < pos + head + nameLength + listLength) return undefined
+    const name = decoder.decode(bytes.subarray(pos + head, pos + head + nameLength))
+    const props: FbxValue[] = []
+    let at = pos + head + nameLength
+    const listEnd = at + listLength
+    if (count > listLength) return undefined
+    for (let p = 0; p < count; p++) {
+      if (at >= listEnd) return undefined
+      const type = String.fromCharCode(bytes[at++] ?? 0)
+      if (type === 'Y') {
+        props.push(v.getInt16(at, true))
+        at += 2
+      } else if (type === 'C') {
+        props.push(bytes[at] ?? 0)
+        at += 1
+      } else if (type === 'I') {
+        props.push(v.getInt32(at, true))
+        at += 4
+      } else if (type === 'F') {
+        props.push(v.getFloat32(at, true))
+        at += 4
+      } else if (type === 'D') {
+        props.push(v.getFloat64(at, true))
+        at += 8
+      } else if (type === 'L') {
+        props.push(Number(v.getBigInt64(at, true)))
+        at += 8
+      } else if (type === 'S' || type === 'R') {
+        const length = v.getUint32(at, true)
+        at += 4
+        if (length > listEnd - at) return undefined
+        props.push(type === 'S' ? decoder.decode(bytes.subarray(at, at + length)) : '')
+        at += length
+      } else if (type in FBX_ELEMENT) {
+        const length = v.getUint32(at, true)
+        const encoding = v.getUint32(at + 4, true)
+        const size = v.getUint32(at + 8, true)
+        at += 12
+        if (encoding > 1 || size > listEnd - at || (encoding === 0 && size !== length * FBX_ELEMENT[type]!) || length * FBX_ELEMENT[type]! > FBX_LIMITS.arrayBytes) return undefined
+        props.push({ array: type as FbxArray['array'], length, encoding, at, size })
+        at += size
+      } else return undefined
+      if (at > listEnd) return undefined
+    }
+    const children: FbxNode[] = []
+    let next = listEnd
+    // A node with nested nodes ends with an all-zero record; one without ends where its properties do.
+    if (next < end) {
+      for (;;) {
+        if (next >= end) return undefined
+        const child = record(next, depth + 1)
+        if (child === undefined) return undefined
+        if (child === null) {
+          next += head
+          break
+        }
+        children.push(child.node)
+        next = child.next
+      }
+    }
+    if (next !== end) return undefined
+    return { node: { name, props, children }, next: end }
+  }
+  const roots: FbxNode[] = []
+  let pos = 27
+  for (;;) {
+    const r = record(pos, 0)
+    if (r === undefined) return null
+    if (r === null) break
+    roots.push(r.node)
+    pos = r.next
+    if (pos + head > bytes.length) break
+  }
+  return roots
+}
+
+/** The bytes of a zlib stream inflated, or null when it is not one or would expand to more than `size` (nothing bigger is ever held). */
+async function inflate(zipped: Uint8Array, size: number): Promise<Uint8Array | null> {
+  try {
+    const reader = new Blob([zipped as Uint8Array<ArrayBuffer>]).stream().pipeThrough(new DecompressionStream('deflate')).getReader()
+    const out = new Uint8Array(size)
+    let got = 0
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      if (got + value.length > size) {
+        void reader.cancel()
+        return null
+      }
+      out.set(value, got)
+      got += value.length
+    }
+    return got === size ? out : null
+  } catch {
+    return null
+  }
+}
+
+/** The numbers of an array property, whether stored raw or deflated; null when it is not an array, cannot be read or is over what is left to spend. */
+async function fbxNumbers(bytes: Uint8Array, value: FbxValue | undefined, spend: { left: number }): Promise<Float64Array | Int32Array | null> {
+  if (typeof value !== 'object') return null
+  const bytesNeeded = value.length * FBX_ELEMENT[value.array]!
+  if (bytesNeeded > spend.left) return null
+  spend.left -= bytesNeeded
+  const raw = value.encoding === 1 ? await inflate(bytes.subarray(value.at, value.at + value.size), bytesNeeded) : bytes.subarray(value.at, value.at + value.size)
+  if (!raw || raw.length !== bytesNeeded) return null
+  const v = new DataView(raw.buffer, raw.byteOffset, raw.byteLength)
+  if (value.array === 'd') {
+    const out = new Float64Array(value.length)
+    for (let i = 0; i < out.length; i++) out[i] = v.getFloat64(i * 8, true)
+    return out
+  }
+  if (value.array === 'i') {
+    const out = new Int32Array(value.length)
+    for (let i = 0; i < out.length; i++) out[i] = v.getInt32(i * 4, true)
+    return out
+  }
+  if (value.array === 'f') {
+    const out = new Float64Array(value.length)
+    for (let i = 0; i < out.length; i++) out[i] = v.getFloat32(i * 4, true)
+    return out
+  }
+  return null
+}
+
+const child = (n: FbxNode, name: string): FbxNode | undefined => n.children.find((c) => c.name === name)
+
+/** A column-major matrix of a translation, an Euler rotation in degrees (x, then y, then z: FBX's default order) and a scale. */
+function fbxLocal(t: readonly number[], r: readonly number[], s: readonly number[]): number[] {
+  const [rx, ry, rz] = r.map((d) => (d * Math.PI) / 180) as [number, number, number]
+  const [cx, sx, cy, sy, cz, sz] = [Math.cos(rx), Math.sin(rx), Math.cos(ry), Math.sin(ry), Math.cos(rz), Math.sin(rz)]
+  const X = [1, 0, 0, 0, 0, cx, sx, 0, 0, -sx, cx, 0, 0, 0, 0, 1]
+  const Y = [cy, 0, -sy, 0, 0, 1, 0, 0, sy, 0, cy, 0, 0, 0, 0, 1]
+  const Z = [cz, sz, 0, 0, -sz, cz, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
+  const rot = mul(Z, mul(Y, X))
+  for (let c = 0; c < 3; c++) for (let row = 0; row < 3; row++) rot[c * 4 + row] = rot[c * 4 + row]! * s[c]!
+  rot[12] = t[0]!
+  rot[13] = t[1]!
+  rot[14] = t[2]!
+  return rot
+}
+
+/** A Properties70 vector (`Lcl Translation` and the like): its three numbers, or `fallback`. */
+function fbxVector(model: FbxNode, name: string, fallback: readonly number[]): readonly number[] {
+  const p = child(model, 'Properties70')?.children.find((c) => c.name === 'P' && c.props[0] === name)
+  const vec = p ? p.props.slice(4, 7) : []
+  return vec.length === 3 && vec.every((x) => typeof x === 'number' && Number.isFinite(x)) ? (vec as number[]) : fallback
+}
+
+/**
+ * An FBX file as a `Glb` with every mesh of it placed by its model's transform, so that `rasterGlb` draws it exactly as it draws a model
+ * that was a glTF to begin with. Null for anything that is not a binary FBX with a mesh in it, or is past the limits.
+ */
+export async function parseFbx(bytes: Uint8Array): Promise<Glb | null> {
+  const roots = fbxTree(bytes)
+  if (!roots) return null
+  const objects = roots.find((n) => n.name === 'Objects')
+  const connections = roots.find((n) => n.name === 'Connections')
+  if (!objects) return null
+  const geometries = new Map<number, FbxNode>()
+  const models = new Map<number, FbxNode>()
+  for (const o of objects.children) {
+    const id = o.props[0]
+    if (typeof id !== 'number') continue
+    if (o.name === 'Geometry' && o.props[2] === 'Mesh') geometries.set(id, o)
+    else if (o.name === 'Model' && models.size < FBX_LIMITS.models) models.set(id, o)
+  }
+  const parentOf = new Map<number, number>()
+  const meshesOf = new Map<number, number[]>()
+  for (const c of connections?.children ?? []) {
+    if (c.name !== 'C' || c.props[0] !== 'OO') continue
+    const from = c.props[1]
+    const to = c.props[2]
+    if (typeof from !== 'number' || typeof to !== 'number') continue
+    if (models.has(from) && (models.has(to) || to === 0)) parentOf.set(from, to)
+    else if (geometries.has(from) && models.has(to)) meshesOf.set(to, [...(meshesOf.get(to) ?? []), from])
+  }
+  // The file's up axis: a Z-up file is turned so that its Z is the camera's up (Y).
+  const settings = roots.find((n) => n.name === 'GlobalSettings')?.children.find((c) => c.name === 'Properties70')
+  const up = settings?.children.find((c) => c.name === 'P' && c.props[0] === 'UpAxis')?.props[4]
+  const base: number[] = up === 2 ? [1, 0, 0, 0, 0, 0, -1, 0, 0, 1, 0, 0, 0, 0, 0, 1] : [...IDENTITY]
+  const worlds = new Map<number, number[]>()
+  const worldOf = (id: number, depth: number): number[] => {
+    const known = worlds.get(id)
+    if (known) return known
+    const model = models.get(id)
+    if (!model || depth > FBX_LIMITS.depth) return base
+    const local = fbxLocal(fbxVector(model, 'Lcl Translation', [0, 0, 0]), fbxVector(model, 'Lcl Rotation', [0, 0, 0]), fbxVector(model, 'Lcl Scaling', [1, 1, 1]))
+    const parent = parentOf.get(id)
+    const world = mul(parent !== undefined && parent !== 0 && parent !== id ? worldOf(parent, depth + 1) : base, local)
+    worlds.set(id, world)
+    return world
+  }
+  const spend = { left: FBX_LIMITS.totalBytes }
+  const parts: Uint8Array[] = []
+  const views: { buffer: number; byteOffset: number; byteLength: number }[] = []
+  const accessors: { bufferView: number; componentType: number; count: number; type: string }[] = []
+  const meshes: { primitives: { attributes: { POSITION: number }; indices: number }[] }[] = []
+  const meshOfGeometry = new Map<number, number>()
+  let offset = 0
+  let vertices = 0
+  const add = (data: Uint8Array, componentType: number, count: number, type: string): number => {
+    views.push({ buffer: 0, byteOffset: offset, byteLength: data.length })
+    accessors.push({ bufferView: views.length - 1, componentType, count, type })
+    parts.push(data)
+    offset += data.length
+    return accessors.length - 1
+  }
+  const meshFor = async (id: number): Promise<number> => {
+    const known = meshOfGeometry.get(id)
+    if (known !== undefined) return known
+    meshOfGeometry.set(id, -1)
+    const g = geometries.get(id)!
+    const xyz = await fbxNumbers(bytes, child(g, 'Vertices')?.props[0], spend)
+    const poly = await fbxNumbers(bytes, child(g, 'PolygonVertexIndex')?.props[0], spend)
+    if (!xyz || !poly || xyz.length < 9 || vertices + xyz.length / 3 > GLB_LIMITS.vertices) return -1
+    const count = xyz.length / 3
+    const positions = new Float32Array(Math.floor(count) * 3)
+    for (let i = 0; i < positions.length; i++) positions[i] = xyz[i]!
+    // A polygon ends at the index stored as its bitwise complement; it is cut into a fan of triangles.
+    const tris: number[] = []
+    let first = -1
+    let previous = -1
+    let fan = 0
+    for (const raw of poly) {
+      const index = raw < 0 ? ~raw : raw
+      if (index >= count) {
+        first = -1
+        fan = 0
+      } else if (first < 0) {
+        first = index
+        fan = 1
+      } else {
+        if (fan >= 2) tris.push(first, previous, index)
+        previous = index
+        fan++
+      }
+      if (raw < 0) {
+        first = -1
+        fan = 0
+      }
+      if (tris.length > GLB_LIMITS.triangles * 3) break
+    }
+    if (!tris.length) return -1
+    vertices += count
+    const position = add(new Uint8Array(positions.buffer), 5126, positions.length / 3, 'VEC3')
+    const indices = add(new Uint8Array(Uint32Array.from(tris).buffer), 5125, tris.length, 'SCALAR')
+    meshes.push({ primitives: [{ attributes: { POSITION: position }, indices }] })
+    meshOfGeometry.set(id, meshes.length - 1)
+    return meshes.length - 1
+  }
+  const nodes: { mesh: number; matrix: number[] }[] = []
+  for (const [modelId, geometryIds] of meshesOf) {
+    for (const geometryId of geometryIds) {
+      const mesh = await meshFor(geometryId)
+      if (mesh >= 0 && nodes.length < GLB_LIMITS.instances) nodes.push({ mesh, matrix: worldOf(modelId, 0) })
+    }
+  }
+  if (!nodes.length) return null
+  const bin = new Uint8Array(offset)
+  let at = 0
+  for (const p of parts) {
+    bin.set(p, at)
+    at += p.length
+  }
+  return {
+    doc: { scene: 0, scenes: [{ nodes: nodes.map((_, i) => i) }], nodes, meshes, accessors, bufferViews: views, buffers: [{ byteLength: bin.length }] },
+    bin,
+  }
+}
+
+/** PNG bytes of the FBX model in `bytes` drawn as a square of `side` px (as a glTF is), or null when there is nothing to draw. */
+async function fbxStill(bytes: Uint8Array, side: number): Promise<Uint8Array | null> {
+  const glb = await parseFbx(bytes)
+  if (!glb) return null
+  const pixels = rasterGlb(glb, side)
+  if (!pixels) return null
+  const canvas = canvasOf(side, side)
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return null
+  ctx.putImageData(new ImageData(pixels as Uint8ClampedArray<ArrayBuffer>, side, side), 0, 0)
+  return pngBytes(canvas)
+}
+
+ipcRenderer.on(IPC.fbx, (_e, id: unknown, bytes: unknown, px: unknown) => {
+  const job = bytes instanceof Uint8Array && side(px) ? fbxStill(bytes, px) : Promise.resolve(null)
+  void job.then(
+    (png) => ipcRenderer.send(IPC.done, id, png),
+    () => ipcRenderer.send(IPC.done, id, null),
+  )
+})
+
+/* ------------------------------------------------------------------ */
+/* Photoshop documents                                                */
+/* ------------------------------------------------------------------ */
+
+/** Most pixels of a Photoshop picture read whole: each channel is a byte a pixel, kept at full size while it is read. */
+export const PSD_MAX_PIXELS = 36_000_000
+
+/**
+ * The flattened picture of a Photoshop document (its "merged image", which Photoshop keeps for programs that do not read layers when
+ * Maximize Compatibility is on) fitted to `px` on its longer side, as RGBA. Main sends a document with its colour table, resources and
+ * layers cut out (their three lengths are zero) so that only the merged picture crosses over: a layered file is mostly layers. RGB,
+ * greyscale and CMYK at 8 or 16 bits, stored raw or run-length coded; anything else (indexed, Lab, zip-coded, the big PSB format, a
+ * picture over `PSD_MAX_PIXELS`) is null, and so is a file that ends early. Reads only inside `bytes`.
+ */
+export function decodePsd(bytes: Uint8Array, px: number): { width: number; height: number; data: Uint8ClampedArray } | null {
+  if (bytes.length < 26 + 12 + 2) return null
+  const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  if (v.getUint32(0) !== 0x38425053 || v.getUint16(4) !== 1) return null
+  const channels = v.getUint16(12)
+  const height = v.getUint32(14)
+  const width = v.getUint32(18)
+  const depth = v.getUint16(22)
+  const mode = v.getUint16(24)
+  if (width < 1 || height < 1 || width > 30_000 || height > 30_000 || width * height > PSD_MAX_PIXELS) return null
+  if (depth !== 8 && depth !== 16) return null
+  // Colour mode: 1 greyscale, 3 RGB, 4 CMYK; the colour channels first, then an optional alpha.
+  const colours = mode === 1 ? 1 : mode === 3 ? 3 : mode === 4 ? 4 : 0
+  if (colours === 0 || channels < colours || channels > 56) return null
+  // Colour table, image resources and layers: main sent them empty, but a whole file works too.
+  let at = 26
+  for (let i = 0; i < 3; i++) {
+    if (at + 4 > bytes.length) return null
+    at += 4 + v.getUint32(at)
+  }
+  if (at + 2 > bytes.length) return null
+  const compression = v.getUint16(at)
+  at += 2
+  const bpp = depth / 8
+  const rowBytes = width * bpp
+  const used = Math.min(channels, colours + 1)
+  // One plane of 8-bit samples per channel used (a 16-bit sample keeps its high byte).
+  const planes: Uint8Array[] = []
+  const rowOf = (row: Uint8Array, plane: Uint8Array, y: number): void => {
+    if (bpp === 1) plane.set(row.subarray(0, width), y * width)
+    else for (let x = 0; x < width; x++) plane[y * width + x] = row[x * 2] ?? 0
+  }
+  if (compression === 0) {
+    if (at + channels * height * rowBytes > bytes.length) return null
+    for (let c = 0; c < used; c++) {
+      const plane = new Uint8Array(width * height)
+      for (let y = 0; y < height; y++) rowOf(bytes.subarray(at + (c * height + y) * rowBytes, at + (c * height + y + 1) * rowBytes), plane, y)
+      planes.push(plane)
+    }
+  } else if (compression === 1) {
+    // Run-length: a table of 16-bit byte counts, one per row of every channel, then the rows (PackBits).
+    const table = at
+    let data = table + channels * height * 2
+    if (data > bytes.length) return null
+    const row = new Uint8Array(rowBytes)
+    for (let c = 0; c < channels; c++) {
+      const plane = c < used ? new Uint8Array(width * height) : null
+      for (let y = 0; y < height; y++) {
+        const count = v.getUint16(table + (c * height + y) * 2)
+        const end = data + count
+        if (end > bytes.length) return null
+        if (plane) {
+          let o = 0
+          let i = data
+          while (i < end && o < rowBytes) {
+            const n = (bytes[i++] ?? 0) << 24 >> 24
+            if (n >= 0) {
+              const len = Math.min(n + 1, end - i, rowBytes - o)
+              row.set(bytes.subarray(i, i + len), o)
+              i += n + 1
+              o += len
+            } else if (n !== -128) {
+              const len = Math.min(1 - n, rowBytes - o)
+              row.fill(bytes[i++] ?? 0, o, o + len)
+              o += len
+            }
+          }
+          if (o < rowBytes) row.fill(0, o)
+          rowOf(row, plane, y)
+        }
+        data = end
+      }
+      if (plane) planes.push(plane)
+    }
+  } else return null
+  const alpha = channels > colours ? planes[colours] : undefined
+  const scale = Math.min(1, px / Math.max(width, height))
+  const tw = Math.max(1, Math.round(width * scale))
+  const th = Math.max(1, Math.round(height * scale))
+  const out = new Uint8ClampedArray(tw * th * 4)
+  // Each output pixel is the mean of up to 3 x 3 samples spread over the source pixels it covers.
+  const sx = width / tw
+  const sy = height / th
+  const taps = Math.max(1, Math.min(3, Math.floor(Math.min(sx, sy))))
+  const sample = (plane: Uint8Array, x0: number, y0: number): number => {
+    let sum = 0
+    for (let j = 0; j < taps; j++) {
+      const y = Math.min(height - 1, Math.floor(y0 + ((j + 0.5) / taps) * sy))
+      for (let i = 0; i < taps; i++) sum += plane[y * width + Math.min(width - 1, Math.floor(x0 + ((i + 0.5) / taps) * sx))] ?? 0
+    }
+    return sum / (taps * taps)
+  }
+  for (let y = 0; y < th; y++) {
+    for (let x = 0; x < tw; x++) {
+      const o = (y * tw + x) * 4
+      const x0 = x * sx
+      const y0 = y * sy
+      if (colours === 3) {
+        out[o] = sample(planes[0]!, x0, y0)
+        out[o + 1] = sample(planes[1]!, x0, y0)
+        out[o + 2] = sample(planes[2]!, x0, y0)
+      } else if (colours === 1) {
+        const g = sample(planes[0]!, x0, y0)
+        out[o] = g
+        out[o + 1] = g
+        out[o + 2] = g
+      } else {
+        // Photoshop stores CMYK inverted (255 is no ink): the ink left is the stored value, so red = C x K / 255 and so on.
+        const k = sample(planes[3]!, x0, y0)
+        out[o] = (sample(planes[0]!, x0, y0) * k) / 255
+        out[o + 1] = (sample(planes[1]!, x0, y0) * k) / 255
+        out[o + 2] = (sample(planes[2]!, x0, y0) * k) / 255
+      }
+      out[o + 3] = alpha ? sample(alpha, x0, y0) : 255
+    }
+  }
+  return { width: tw, height: th, data: out }
+}
+
+/** PNG bytes of the flattened picture in a Photoshop document, at most `side` px on its longer side, or null when it cannot be read. */
+async function psdStill(bytes: Uint8Array, side: number): Promise<Uint8Array | null> {
+  const still = decodePsd(bytes, side)
+  if (!still) return null
+  const canvas = canvasOf(still.width, still.height)
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return null
+  ctx.putImageData(new ImageData(still.data as Uint8ClampedArray<ArrayBuffer>, still.width, still.height), 0, 0)
+  return pngBytes(canvas)
+}
+
+/* ------------------------------------------------------------------ */
+/* PDF                                                                */
+/* ------------------------------------------------------------------ */
+
+/** The page module that runs pdf.js (src/pdf-host/host.mjs), served by the helper session's `aether-pdf` scheme. */
+const PDF_HOST = 'aether-pdf://app/host.mjs'
+/** Longest the page module may take to load, and a page to draw: main's own limit for a job ends the helper first. */
+const PDF_LOAD_MS = 10_000
+
+let pdfHost: Promise<boolean> | null = null
+let pdfSeq = 0
+const pdfWaiting = new Map<number, (page: { width: number; height: number; buffer: ArrayBuffer } | null) => void>()
+
+interface PdfMessage {
+  aether?: string
+  id?: number
+  width?: number
+  height?: number
+  buffer?: ArrayBuffer | null
+}
+
+/** The page module's answers: listened for from the first PDF on (a helper that never gets one never touches `window`). */
+function onPdfDone(e: MessageEvent<PdfMessage>): void {
+  const m = e.data
+  if (e.source !== window || !m || m.aether !== 'pdf-done' || typeof m.id !== 'number') return
+  const wait = pdfWaiting.get(m.id)
+  pdfWaiting.delete(m.id)
+  wait?.(m.buffer instanceof ArrayBuffer && typeof m.width === 'number' && typeof m.height === 'number' ? { width: m.width, height: m.height, buffer: m.buffer } : null)
+}
+
+/** Loads the page module once (it posts `pdf-ready` when it listens); false when it could not load, and the next job tries again. */
+function loadPdfHost(): Promise<boolean> {
+  if (pdfHost) return pdfHost
+  window.addEventListener('message', onPdfDone)
+  const loading = new Promise<boolean>((resolve) => {
+    const finish = (ok: boolean): void => {
+      window.removeEventListener('message', onReady)
+      clearTimeout(timer)
+      if (!ok) window.removeEventListener('message', onPdfDone)
+      resolve(ok)
+    }
+    const onReady = (e: MessageEvent<PdfMessage>): void => {
+      if (e.source === window && e.data?.aether === 'pdf-ready') finish(true)
+    }
+    const timer = setTimeout(() => finish(false), PDF_LOAD_MS)
+    window.addEventListener('message', onReady)
+    const script = document.createElement('script')
+    script.type = 'module'
+    script.src = PDF_HOST
+    script.onerror = () => finish(false)
+    document.documentElement.appendChild(script)
+  })
+  pdfHost = loading
+  void loading.then((ok) => {
+    if (!ok) pdfHost = null
+  })
+  return loading
+}
+
+/** PNG bytes of the first page of the PDF in `bytes`, drawn on white and at most `side` px on its longer side, or null when it cannot be drawn. */
+async function pdfStill(bytes: Uint8Array, side: number): Promise<Uint8Array | null> {
+  if (!(await loadPdfHost())) return null
+  const id = ++pdfSeq
+  const copy = bytes.slice().buffer
+  const page = await new Promise<{ width: number; height: number; buffer: ArrayBuffer } | null>((resolve) => {
+    pdfWaiting.set(id, resolve)
+    window.postMessage({ aether: 'pdf', id, bytes: copy, px: side }, '*', [copy])
+  })
+  if (!page || page.width < 1 || page.height < 1 || page.buffer.byteLength !== page.width * page.height * 4) return null
+  const canvas = canvasOf(page.width, page.height)
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return null
+  ctx.putImageData(new ImageData(new Uint8ClampedArray(page.buffer), page.width, page.height), 0, 0)
+  return pngBytes(canvas)
+}
+
+ipcRenderer.on(IPC.pdf, (_e, id: unknown, bytes: unknown, px: unknown) => {
+  const job = bytes instanceof Uint8Array && side(px) ? pdfStill(bytes, px) : Promise.resolve(null)
+  void job.then(
+    (png) => ipcRenderer.send(IPC.done, id, png),
+    () => ipcRenderer.send(IPC.done, id, null),
+  )
+})
+
+ipcRenderer.on(IPC.psd, (_e, id: unknown, bytes: unknown, px: unknown) => {
+  const job = bytes instanceof Uint8Array && side(px) ? psdStill(bytes, px) : Promise.resolve(null)
+  void job.then(
+    (png) => ipcRenderer.send(IPC.done, id, png),
+    () => ipcRenderer.send(IPC.done, id, null),
+  )
+})
 
 ipcRenderer.on(IPC.model, (_e, id: unknown, bytes: unknown, px: unknown) => {
   const job = bytes instanceof Uint8Array && side(px) ? modelStill(bytes, px) : Promise.resolve(null)
